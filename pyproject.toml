@@ -1,0 +1,102 @@
+[project]
+name = "pearss"
+version = "0.1.0"
+description = "Single-user, agent-first RSS+ system"
+readme = "README.md"
+# Python 3.13 is the floor and the CI target. The Nix flake pins the same
+# series, so the interpreter here and the one in `nix develop` agree.
+requires-python = ">=3.13,<3.14"
+
+# Per architecture section 10.1, uv owns the Python dependency graph and Nix
+# owns the interpreter and system libraries. Nothing here should be mirrored
+# into flake.nix, and nothing that flake.nix provides should be added here.
+#
+# Only dependencies the skeleton actually uses belong in this list. The rest of
+# the P1 stack (fastapi, fastmcp, httpx, feedparser, apscheduler, structlog)
+# arrives with the component that first needs it.
+dependencies = [
+  "alembic>=1.18",
+  "sqlalchemy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+  "import-linter>=2.1",
+  "mypy>=1.13",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = ["core", "adapters", "plugins", "app"]
+
+# --------------------------------------------------------------------------
+# ruff: formatter and linter. `S` (flake8-bandit) is enabled because the
+# OpenSSF checklist expects SAST in CI, not just style.
+# --------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately assert, and construct throwaway objects for fixtures.
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["core", "adapters", "plugins", "app"]
+
+# --------------------------------------------------------------------------
+# mypy: strict, because the domain invariants in docs/domain/ are only worth
+# their weight if the compiler enforces the enum and state types behind them.
+# --------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.13"
+strict = true
+# `tests` is listed only once it contains Python files: mypy exits 2 on an
+# empty directory, which would fail `just lint` for no real reason.
+files = ["src"]
+warn_unreachable = true
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+# --------------------------------------------------------------------------
+# pytest: warnings are errors so deprecations fail loudly, and markers are
+# declared so a typo in `-m` does not silently select zero tests.
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = ["error"]
+markers = [
+  "unit: pure domain logic, no I/O",
+  "fixture: recorded RSS/HTML snapshot parsing",
+  "integration: adapters against SQLite or temp services",
+  "contract: OpenAPI diff and MCP tool snapshots",
+  "e2e: full compose stack",
+]
+
+# --------------------------------------------------------------------------
+# import-linter: enforces the one-way dependency rule from AGENTS.md.
+#
+# Layers are listed highest-level first. A higher layer may import from a
+# lower one; the reverse is a contract violation. app sits at the top and core
+# at the bottom, which is what "core -> adapters -> plugins -> app" means.
+# --------------------------------------------------------------------------
+[tool.importlinter]
+root_packages = ["core", "adapters", "plugins", "app"]
+
+[[tool.importlinter.contracts]]
+name = "Four-layer architecture: app -> plugins -> adapters -> core"
+type = "layers"
+layers = ["app", "plugins", "adapters", "core"]
