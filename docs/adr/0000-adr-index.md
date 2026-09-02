@@ -51,5 +51,4 @@ docs/adr/
 | 编号 | 标题 | 状态 | 日期 |
 |---|---|---|---|
 | 0000 | 本索引与 ADR 约定 | accepted | 2026-09-02 |
-
-（尚无其它决策记录。P1 骨架落地过程中产生的取舍应在此登记。）
+| [0001](0001-flake-inputs-use-git-https.md) | Flake 输入使用 git+https 而非 github | accepted | 2026-09-02 |

@@ -1,0 +1,48 @@
+# Pearss — single-user, agent-first RSS+ system.
+# Rule of thumb: anything reproducible from a committed source is ignored.
+# flake.lock and uv.lock are NOT ignored — section 10.5 requires both in git.
+
+# --- Python (managed by uv, never committed) ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+
+# --- uv cache (flake.nix points UV_CACHE_DIR here) ---
+.cache/
+
+# --- Nix ---
+.direnv/
+.devenv/
+result
+result-*
+
+# --- Runtime data: SQLite, raw fetches, TTS artifacts (section 10.5) ---
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+var/
+
+# --- Secrets (never commit; see AGENTS.md security rules) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Alembic / tooling artifacts ---
+.alembic-cache
+
+# --- Editors and OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
