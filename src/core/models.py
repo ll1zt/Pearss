@@ -50,8 +50,11 @@ class ItemDraft:
                 "ItemDraft needs either an external_id or a derivation_note "
                 "explaining how it was derived"
             )
-        if self.published_at is not None and self.published_at.tzinfo is None:
-            raise ValueError("published_at must be timezone-aware")
+        # published_at is deliberately NOT required to carry a zone: a draft is
+        # the raw ingest boundary, and a great deal of real feed content omits
+        # it. docs/guides/collector-guide.md says to record that evidence
+        # rather than guess from local time — so the draft accepts the value as
+        # found and normalize() attaches UTC. That is the recorded evidence.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -104,13 +107,20 @@ class Item:
     url: str
     published_at: datetime | None
     publish_status: PublishStatus
+    tenant_id: str = "default"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
     content_ref: str | None = None
     published_to_feed_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if not self.tenant_id:
+            raise ValueError("tenant_id must not be empty")
         for name, value in (
             ("published_at", self.published_at),
             ("published_to_feed_at", self.published_to_feed_at),
+            ("created_at", self.created_at),
+            ("updated_at", self.updated_at),
         ):
             if value is not None and value.tzinfo is None:
                 raise ValueError(f"{name} must be timezone-aware")
