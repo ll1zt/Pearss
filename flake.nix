@@ -7,22 +7,11 @@
   # talks to the git protocol directly and has no such quota. See ADR 0001.
   inputs = {
     nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
-    devenv = {
-      url = "git+https://github.com/cachix/devenv?shallow=1";
-      # devenv's own nixpkgs pin is only used to build the devenv CLI. Following
-      # our nixpkgs keeps a single nixpkgs in the closure.
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     systems.url = "git+https://github.com/nix-systems/default?shallow=1";
   };
 
-  nixConfig = {
-    extra-trusted-public-keys = "devenv.cachix.org-1:w1cLUi8dv3hnoSPGAuibQv+f9TZLr6cv/Hm9XgU50cw=";
-    extra-substituters = "https://devenv.cachix.org";
-  };
-
   outputs =
-    { self, nixpkgs, devenv, systems, ... }@inputs:
+    { self, nixpkgs, systems, ... }:
     let
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
     in
@@ -33,11 +22,11 @@
           pkgs = nixpkgs.legacyPackages.${system};
           python = pkgs.python313;
 
-          # Section 10.1 draws the responsibility line: Nix owns the interpreter,
-          # system libraries, and CLI tooling; uv owns the Python dependency
-          # graph. Project runtime libraries (fastapi, sqlalchemy, ...) are
-          # deliberately absent here — they come from uv.lock, so the two
-          # lockfiles never disagree about who installs what.
+          # Section 10.1 draws the responsibility line: Nix owns the
+          # interpreter, system libraries and CLI tooling; uv owns the Python
+          # dependency graph. Project runtime libraries (fastapi, sqlalchemy,
+          # ...) are deliberately absent here — they come from uv.lock, so the
+          # two lockfiles never contend for the same package.
           basePackages = with pkgs; [
             python
             uv
@@ -54,25 +43,27 @@
 
           mkPearssShell =
             { name, packages, greeting }:
-            devenv.lib.mkShell {
-              inherit inputs pkgs;
-              modules = [
-                ./devenv.nix
-                {
-                  packages = packages;
+            pkgs.mkShell {
+              inherit name;
+              packages = packages;
 
-                  # Point uv at the Nix-provided interpreter and a project-local
-                  # cache, so the venv is reproducible and .cache/ stays ignored.
-                  env.UV_PYTHON = "${python}/bin/python3";
-                  env.UV_CACHE_DIR = ".cache/uv";
-                  env.PEARSS_SHELL = name;
+              # Secrets are never set here: a value in this file lands in the
+              # Nix store, which is world-readable (section 10.5). They come
+              # from a gitignored .env or the deploy platform.
+              env = {
+                PEARSS_ENV = "development";
+                # Point uv at the Nix interpreter and a project-local cache so
+                # the venv is reproducible from uv.lock alone.
+                UV_PYTHON = "${python}/bin/python3";
+                UV_CACHE_DIR = ".cache/uv";
+                PYTHONDONTWRITEBYTECODE = "1";
+                PYTHONUNBUFFERED = "1";
+              };
 
-                  enterShell = ''
-                    echo "pearss:${name} — python $(python3 --version | cut -d' ' -f2), uv $(uv --version | cut -d' ' -f2)"
-                    echo "${greeting}"
-                  '';
-                }
-              ];
+              shellHook = ''
+                echo "pearss:${name} — python $(python3 --version | cut -d' ' -f2), uv $(uv --version | cut -d' ' -f2)"
+                echo "${greeting}"
+              '';
             };
         in
         {
@@ -90,9 +81,8 @@
         }
       );
 
-      # `nix flake check` is the first CI gate (section 10.4). It stays cheap:
-      # the shells must evaluate and the Nix sources must be formatted, but we
-      # do not build the world here. The real gate is `just ci` inside the shell.
+      # `nix flake check` is the first CI gate (section 10.4). The shells must
+      # evaluate; the real gate is `just ci` inside them.
       formatter = forEachSystem (system: nixpkgs.legacyPackages.${system}.nixpkgs-fmt);
     };
 }
