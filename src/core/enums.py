@@ -1,0 +1,134 @@
+"""Domain enumerations.
+
+These are the single source of truth for their respective taxonomies. Per
+AGENTS.md, no part of the system may substitute bare strings: the database
+constraint, the OpenAPI schema and the MCP tool schema all derive from these
+enums. Adding a value here is a deliberate, reviewable act.
+"""
+
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class ErrorClass(StrEnum):
+    """The five mandatory acquisition failure categories (B5).
+
+    Members are ordered by the classification precedence defined in
+    docs/domain/error-taxonomy.md: when a single failure matches several
+    signals, the first match in this order wins.
+    """
+
+    BLOCKED = "blocked"
+    AUTH = "auth"
+    NETWORK = "network"
+    PARSE = "parse"
+    STRUCTURE_CHANGED = "structure_changed"
+
+    @property
+    def precedence(self) -> int:
+        """Rank in the classification precedence order; lower wins."""
+        return _ERROR_CLASS_PRECEDENCE[self]
+
+    @property
+    def allows_automatic_retry(self) -> bool:
+        """Whether the scheduler may retry this class without user action.
+
+        See the retry table in docs/domain/error-taxonomy.md. Retrying
+        `blocked` or `auth` would mean hammering a service that has already
+        refused us, so those wait for a human.
+        """
+        return _RETRY_POLICY[self]
+
+
+# Classification precedence: blocked > auth > network > parse >
+# structure_changed. Access is blocked before anything else can be inferred;
+# a credentials problem must not be misread as a structure change; and a
+# transport failure leaves no content to analyse.
+_ERROR_CLASS_PRECEDENCE: dict[ErrorClass, int] = {
+    ErrorClass.BLOCKED: 0,
+    ErrorClass.AUTH: 1,
+    ErrorClass.NETWORK: 2,
+    ErrorClass.PARSE: 3,
+    ErrorClass.STRUCTURE_CHANGED: 4,
+}
+
+_RETRY_POLICY: dict[ErrorClass, bool] = {
+    ErrorClass.NETWORK: True,
+    ErrorClass.PARSE: True,
+    ErrorClass.STRUCTURE_CHANGED: False,
+    ErrorClass.BLOCKED: False,
+    ErrorClass.AUTH: False,
+}
+
+
+class PublishStatus(StrEnum):
+    """Lifecycle of an Item with respect to external visibility (C5).
+
+    The gate is the point: because NetNewsWire caches whatever it fetched
+    first, an item must not appear in a feed until every processor in its
+    chain has succeeded. `published` is terminal for the item's content.
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    PUBLISHED = "published"
+
+
+class ItemEvent(StrEnum):
+    """Events that drive the Item publish state machine.
+
+    Defined in core rather than inferred from HTTP endpoints so that the
+    transition table is the only place that decides legality.
+    """
+
+    MARK_READY = "mark_ready"
+    ENRICHMENT_FAILED = "enrichment_failed"
+    TIMEOUT = "timeout"
+    FORCE_PUBLISH = "force_publish"
+    FIRST_PUBLISH = "first_publish"
+    WITHDRAW = "withdraw"
+    READ_STATE_CHANGED = "read_state_changed"
+
+
+class TimeoutPolicy(StrEnum):
+    """What a pending item does when its processing chain exceeds its budget."""
+
+    PUBLISH_ORIGINAL = "publish_original"
+    HOLD = "hold"
+
+
+class JobRunStatus(StrEnum):
+    """Lifecycle of a single job execution."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+
+
+class SourceStatus(StrEnum):
+    """Lifecycle of a content source."""
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+    DISABLED = "disabled"
+    DELETED = "deleted"
+
+
+class SourceType(StrEnum):
+    """How a source is acquired."""
+
+    RSS = "rss"
+    WEB = "web"
+    AGENT = "agent"
+
+
+class AuditOutcome(StrEnum):
+    """Result of an audited operation."""
+
+    SUCCEEDED = "succeeded"
+    REJECTED = "rejected"
+    FAILED = "failed"
