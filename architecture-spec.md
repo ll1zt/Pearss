@@ -326,6 +326,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 环境职责边界 | **Nix 管系统，uv 管 Python** | 可逆 | 可复现性与日常开发效率平衡 |
 | 重依赖隔离 | `.#crawler` named shell / profile | 可逆 | Playwright/浏览器不污染默认开发环境 |
 | 决策留痕 | docs/adr/，本表为索引 | — | 决策可回溯、可 supersede |
+| Flake 输入语法 | git+https + shallow=1，不用 github: shorthand | 可逆 | github: 解析 ref 走 api.github.com，未认证限流会 403（ADR 0001） |
 
 ## 9. 技术选型
 
