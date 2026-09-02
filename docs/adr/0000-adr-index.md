@@ -52,3 +52,4 @@ docs/adr/
 |---|---|---|---|
 | 0000 | 本索引与 ADR 约定 | accepted | 2026-09-02 |
 | [0001](0001-flake-inputs-use-git-https.md) | Flake 输入使用 git+https 而非 github | accepted | 2026-09-02 |
+| [0002](0002-no-devenv-use-mkshell.md) | 开发环境用 pkgs.mkShell，不引入 devenv | accepted | 2026-09-02 |

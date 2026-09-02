@@ -26,6 +26,8 @@ error: unable to download 'https://api.github.com/repos/.../commits/HEAD': HTTP 
 
 ## 决策
 
+> 注：本文的 devenv 部分已被 ADR 0002 取代（devenv 已移除）。`git+https` 决策仍然有效并继续适用。
+
 所有 GitHub 托管的 flake 输入统一声明为 `git+https`，并带 `?shallow=1`：
 
 ```nix
@@ -34,7 +36,7 @@ devenv.url  = "git+https://github.com/cachix/devenv?shallow=1";
 systems.url = "git+https://github.com/nix-systems/default?shallow=1";
 ```
 
-同时接受 devenv 的 binary cache 配置（`nixConfig.extra-substituters` / `extra-trusted-public-keys`），避免从源码构建 devenv CLI。
+（本 ADR 记录时开发环境还用 devenv，故文中出现 `inputs.devenv` 与 devenv 的 binary cache 配置。ADR 0002 之后 devenv 已移除，这两处不再适用；**`git+https` 这一决策依然有效**，nixpkgs 与 systems 两个输入仍然按此声明。）
 
 ## 理由
 
