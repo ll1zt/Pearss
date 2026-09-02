@@ -86,7 +86,7 @@ nix develop --command just ci
 | `architecture-spec.md` | 总体需求、架构、路线图、选型与决策 |
 | `AGENTS.md` | 编码 agent 的项目规则与完成标准 |
 | `docs/api/style-guide.md` | REST/OpenAPI 设计与演进规范 |
-| `docs/api/mcp-tool-guide.md` | MCP Tool/Resource 语义与安全规范 |
+| `docs/api/mcp-tool-guide.md` | MCP Tool/Resource 语义与安全规范（待编写，见 P1 路线） |
 | `docs/domain/data-model.md` | 领域实体、关系、保留与备份策略 |
 | `docs/domain/state-machines.md` | Item、JobRun、Plugin 等状态机 |
 | `docs/domain/error-taxonomy.md` | 错误分类、错误 envelope 与诊断语义 |
