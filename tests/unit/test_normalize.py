@@ -1,0 +1,280 @@
+"""Tests for draft normalisation and identity derivation.
+
+The values decided here — guid, id, content_hash — are frozen once an item is
+published, because an RSS client caches what it fetched and cannot be shown a
+correction. That irreversibility is why these tests pin determinism so
+precisely.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta, timezone
+
+import pytest
+
+from core.enums import PublishStatus
+from core.models import Item, ItemDraft
+from core.normalize import (
+    NormalizationResult,
+    content_hash,
+    derive_guid,
+    derive_item_id,
+    normalize,
+    plain_text,
+)
+
+TENANT = "default"
+SOURCE = "src-1"
+
+
+def draft(**overrides: object) -> ItemDraft:
+    """A valid draft, customised by keyword."""
+    defaults: dict[str, object] = {
+        "source_id": SOURCE,
+        "external_id": "entry-1",
+        "title": "A real headline",
+        "canonical_url": "https://example.com/2026/entry-1",
+        "published_at": datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+        "content": "<p>Body text of the article.</p>",
+    }
+    defaults.update(overrides)
+    return ItemDraft(**defaults)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_normalize_produces_a_pending_item() -> None:
+    result = normalize(draft(), tenant_id=TENANT)
+    # The gate is closed on arrival; advancing depends on the processing chain.
+    assert result.item.publish_status is PublishStatus.PENDING
+    assert result.item.published_to_feed_at is None
+
+
+@pytest.mark.unit
+def test_normalize_canonicalizes_the_url() -> None:
+    result = normalize(
+        draft(canonical_url="https://example.com/a?utm_source=x&id=1#f"),
+        tenant_id=TENANT,
+    )
+    assert result.item.url == "https://example.com/a?id=1"
+
+
+@pytest.mark.unit
+def test_identity_is_deterministic() -> None:
+    first = normalize(draft(), tenant_id=TENANT)
+    second = normalize(draft(), tenant_id=TENANT)
+    # Re-fetching must not mint a new identity, or the same article would be
+    # published twice.
+    assert first.item.id == second.item.id
+    assert first.item.guid == second.item.guid
+
+
+@pytest.mark.unit
+def test_identity_depends_on_external_id() -> None:
+    one = normalize(draft(external_id="a"), tenant_id=TENANT)
+    other = normalize(draft(external_id="b"), tenant_id=TENANT)
+    assert one.item.guid != other.item.guid
+
+
+@pytest.mark.unit
+def test_identity_is_scoped_to_tenant() -> None:
+    one = normalize(draft(), tenant_id="tenant-a")
+    other = normalize(draft(), tenant_id="tenant-b")
+    assert one.item.guid != other.item.guid
+
+
+@pytest.mark.unit
+def test_identity_is_scoped_to_source() -> None:
+    one = normalize(draft(source_id="src-1"), tenant_id=TENANT)
+    other = normalize(draft(source_id="src-2"), tenant_id=TENANT)
+    assert one.item.guid != other.item.guid
+
+
+@pytest.mark.unit
+def test_id_and_guid_are_distinct_namespaces() -> None:
+    # Same inputs, different derivations: sharing a value would couple the
+    # public GUID to internal row identity.
+    assert derive_item_id(
+        tenant_id=TENANT, source_id=SOURCE, external_id="x"
+    ) != derive_guid(tenant_id=TENANT, source_id=SOURCE, external_id="x")
+
+
+@pytest.mark.unit
+def test_guid_survives_a_database_rebuild() -> None:
+    # A randomly generated GUID would change, and NNW would show the reader a
+    # duplicate instead of an update.
+    guid = normalize(draft(), tenant_id=TENANT).item.guid
+    assert guid == normalize(draft(), tenant_id=TENANT).item.guid
+
+
+@pytest.mark.unit
+def test_content_hash_ignores_source_and_url() -> None:
+    # Cross-source dedupe (B2) only works if the hash covers just the article.
+    one = draft(source_id="src-1", canonical_url="https://a.example/1")
+    other = draft(source_id="src-2", canonical_url="https://b.example/2")
+    assert (
+        normalize(one, tenant_id=TENANT).item.content_hash
+        == normalize(other, tenant_id=TENANT).item.content_hash
+    )
+
+
+@pytest.mark.unit
+def test_content_hash_ignores_markup_differences() -> None:
+    plain = draft(content="Body text of the article.")
+    marked = draft(content="<p>Body <em>text</em> of the article.</p>")
+    assert (
+        normalize(plain, tenant_id=TENANT).item.content_hash
+        == normalize(marked, tenant_id=TENANT).item.content_hash
+    )
+
+
+@pytest.mark.unit
+def test_content_hash_ignores_case_and_whitespace() -> None:
+    lower = draft(title="headline", content="body")
+    noisy = draft(title="  HEADLINE  ", content="BODY\n\n")
+    assert (
+        normalize(lower, tenant_id=TENANT).item.content_hash
+        == normalize(noisy, tenant_id=TENANT).item.content_hash
+    )
+
+
+@pytest.mark.unit
+def test_content_hash_changes_with_the_body() -> None:
+    assert content_hash(title="t", content="a") != content_hash(title="t", content="b")
+
+
+@pytest.mark.unit
+def test_title_is_normalised() -> None:
+    result = normalize(draft(title="  Spaced   Out  "), tenant_id=TENANT)
+    assert result.item.title == "Spaced Out"
+    assert not result.title_derived
+
+
+@pytest.mark.unit
+def test_missing_title_is_derived_and_flagged() -> None:
+    # A derived title must be marked, not silently passed off as the source's.
+    result = normalize(draft(title=""), tenant_id=TENANT)
+    assert result.item.title
+    assert result.title_derived
+
+
+@pytest.mark.unit
+def test_derived_title_is_truncated() -> None:
+    result = normalize(draft(title="", content="word " * 100), tenant_id=TENANT)
+    assert len(result.item.title) <= 82
+    assert result.title_derived
+
+
+@pytest.mark.unit
+def test_untitled_when_there_is_nothing_to_derive_from() -> None:
+    result = normalize(draft(title="", content=""), tenant_id=TENANT)
+    assert result.item.title == "Untitled"
+    assert result.title_derived
+
+
+@pytest.mark.unit
+def test_body_is_flattened_from_markup() -> None:
+    result = normalize(draft(content="<p>One</p><p>Two</p>"), tenant_id=TENANT)
+    assert result.body == "One Two"
+
+
+@pytest.mark.unit
+def test_empty_content_is_distinguished_from_unrecoverable_content() -> None:
+    empty = normalize(draft(content=""), tenant_id=TENANT)
+    # Markup with no text means the body did not survive cleaning, which is a
+    # different problem from a source that legitimately has no body.
+    unrecoverable = normalize(draft(content="<img src='x.png'>"), tenant_id=TENANT)
+    assert not empty.content_missing
+    assert unrecoverable.content_missing
+
+
+@pytest.mark.unit
+def test_naive_published_at_is_treated_as_utc() -> None:
+    naive = datetime(2026, 6, 1, 10, 0)  # no zone
+    result = normalize(draft(published_at=naive), tenant_id=TENANT)
+    assert result.item.published_at is not None
+    assert result.item.published_at.tzinfo is not None
+    assert result.item.published_at == naive.replace(tzinfo=UTC)
+
+
+@pytest.mark.unit
+def test_naive_published_at_is_not_shifted_by_local_time() -> None:
+    # Regression: astimezone() on a naive datetime interprets it as *local*
+    # time and shifts it, so 10:00 stored on a UTC+8 host became 02:00. That
+    # misdates every article whose feed omits a zone, which is common.
+    naive = datetime(2026, 6, 1, 10, 0)
+    result = normalize(draft(published_at=naive), tenant_id=TENANT)
+    assert result.item.published_at == datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
+    assert result.item.published_at is not None
+    assert result.item.published_at.hour == 10
+
+
+@pytest.mark.unit
+def test_offset_published_at_is_converted_to_utc() -> None:
+    tokyo = datetime(2026, 6, 1, 10, 0, tzinfo=timezone(timedelta(hours=9)))
+    result = normalize(draft(published_at=tokyo), tenant_id=TENANT)
+    assert result.item.published_at == tokyo.astimezone(UTC)
+
+
+@pytest.mark.unit
+def test_missing_published_at_stays_none() -> None:
+    # Inventing a timestamp would reorder the feed and misdate the article.
+    assert (
+        normalize(draft(published_at=None), tenant_id=TENANT).item.published_at is None
+    )
+
+
+@pytest.mark.unit
+def test_content_ref_is_attached_when_supplied() -> None:
+    result = normalize(draft(), tenant_id=TENANT, content_ref="blob://abc")
+    assert result.item.content_ref == "blob://abc"
+
+
+@pytest.mark.unit
+def test_now_sets_both_timestamps() -> None:
+    stamp = datetime(2026, 3, 1, tzinfo=UTC)
+    result = normalize(draft(), tenant_id=TENANT, now=stamp)
+    assert result.item.created_at == stamp
+    assert result.item.updated_at == stamp
+
+
+@pytest.mark.unit
+def test_naive_now_is_rejected() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        normalize(draft(), tenant_id=TENANT, now=datetime(2026, 3, 1))
+
+
+@pytest.mark.unit
+def test_empty_tenant_is_rejected() -> None:
+    with pytest.raises(ValueError, match="tenant_id"):
+        normalize(draft(), tenant_id="")
+
+
+@pytest.mark.unit
+def test_plain_text_strips_control_and_zero_width_characters() -> None:
+    assert plain_text("a​b\x07c") == "abc"
+
+
+@pytest.mark.unit
+def test_result_carries_the_item_and_body(result: NormalizationResult) -> None:
+    assert result.item.title == "A real headline"
+    assert result.body
+
+
+@pytest.fixture
+def result() -> NormalizationResult:
+    return normalize(draft(), tenant_id=TENANT)
+
+
+@pytest.mark.unit
+def test_item_rejects_naive_timestamps() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        Item(
+            id="i",
+            source_id="s",
+            guid="g",
+            content_hash="h",
+            title="t",
+            url="u",
+            published_at=datetime(2026, 1, 1),
+            publish_status=PublishStatus.PENDING,
+        )
