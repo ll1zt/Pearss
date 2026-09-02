@@ -41,6 +41,29 @@ def alembic_config(tmp_path: Path) -> Config:
     return config
 
 
+@pytest.mark.integration
+def test_migrate_creates_a_missing_data_directory(tmp_path: Path) -> None:
+    """A fresh clone has no data/ directory, and SQLite will not create one.
+
+    Regression test: `git clone && just migrate` used to fail with "unable to
+    open database file" because the directory is gitignored and therefore
+    absent. Using a nested path here matters — tmp_path already exists, so a
+    database directly inside it would hide the bug.
+    """
+    missing_dir = tmp_path / "absent" / "nested"
+    db_path = missing_dir / "pearss.db"
+    assert not missing_dir.exists()
+
+    config = Config(str(MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
+
+    command.upgrade(config, "head")
+
+    assert db_path.exists()
+    assert _tables(db_path) == EXPECTED_TABLES
+
+
 def _tables(db_path: Path) -> set[str]:
     connection = sqlite3.connect(db_path)
     try:

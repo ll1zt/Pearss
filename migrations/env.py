@@ -36,7 +36,27 @@ def _database_url() -> str:
     )
 
 
-config.set_main_option("sqlalchemy.url", _database_url())
+def _ensure_parent_directory(url: str) -> None:
+    """Create the parent directory for a file-backed SQLite database.
+
+    SQLite will not create it, and `data/` is gitignored, so a fresh clone has
+    no such directory: `alembic upgrade head` would fail with "unable to open
+    database file" on the very first command the README tells you to run.
+    Other schemes are untouched, since a Postgres URL has no local directory.
+    """
+    if not url.startswith("sqlite"):
+        return
+    path = url.split("///", 1)[-1] if "///" in url else ""
+    if not path or path.startswith(":memory:"):
+        return
+    parent = pathlib.Path(path).expanduser().parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+
+
+url = _database_url()
+_ensure_parent_directory(url)
+config.set_main_option("sqlalchemy.url", url)
 
 
 def run_migrations_offline() -> None:
