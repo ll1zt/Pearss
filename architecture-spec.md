@@ -197,7 +197,7 @@ adaptive 算法（P1 内建）：按 RawFetch 历史计算源的平均更新间�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | FastAPI + SQLite + RSS 采集 + discover_feed + OPML + 准插件爬虫×2-3 + schedule_policy（含 adaptive）+ APScheduler + 单 FastMCP（elicitation）+ RSS feed + 发布闸门字段 + 错误分类法 + 审计中间件 + Swagger 兜底 + **Nix Flake/devenv/direnv + uv + Alembic + AGENTS.md + CI** | agent 完成“发现→加源→抓取→出 feed”；OPML 可用；五类错误落库；开发环境与 CI 均由 `nix develop --command just ci` 通过 |
+| P1 MVP | FastAPI + SQLite + RSS 采集 + discover_feed + OPML + 准插件爬虫×2-3 + schedule_policy（含 adaptive）+ APScheduler + 单 FastMCP（elicitation）+ RSS feed + 发布闸门字段 + 错误分类法 + 审计中间件 + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI** | agent 完成“发现→加源→抓取→出 feed”；OPML 可用；五类错误落库；开发环境与 CI 均由 `nix develop --command just ci` 通过 |
 | P2 可观测+插件化 | structlog + correlation_id + 快照/诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
 | P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + Reader API + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；NNW FreshRSS 账号已读同步 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
@@ -224,7 +224,7 @@ adaptive 算法（P1 内建）：按 RawFetch 历史计算源的平均更新间�
 | C5 发布闸门 | Item.publish_status | P1 字段 / P3 联动 | pending 条目不出现在 feed |
 | D1-D6 操作面 | MCP 工具组 | P1-P3 | 见 §2.3 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
-| F1 可复现环境 | Nix Flake + devenv + direnv + uv | P1 | 新机器 clone 后按 README/AGENTS.md 可进入相同环境并通过 CI |
+| F1 可复现环境 | Nix Flake + direnv + uv | P1 | 新机器 clone 后按 README/AGENTS.md 可进入相同环境并通过 CI |
 | F2 依赖供应链 | flake.lock + uv.lock | P1 | 锁文件在版本控制；依赖更新经完整 CI |
 
 ## 7. 可维护性设计（防腐）
@@ -273,10 +273,9 @@ CI 顺序：`nix flake check` → `nix develop --command just ci`，其中 `just
 repo/
   AGENTS.md
   README.md
-  flake.nix              # Nix 开发环境与 checks 定义
+  flake.nix              # Nix 开发环境（pkgs.mkShell，含 crawler profile）
   flake.lock             # 锁定 nixpkgs 与 Flake 输入
-  devenv.nix             # 开发环境：packages/services/tasks
-  .envrc                 # 仅 use flake，由 direnv 自动激活
+  .envrc                 # use flake，由 direnv 自动激活（见 ADR 0002）
   pyproject.toml         # Python 项目元数据与依赖声明
   uv.lock                # 锁定 Python 依赖图
   justfile               # 人机共用命令入口
@@ -321,12 +320,13 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 外部世界钉住 | 每源/爬虫 fixture 快照 | 可逆 | 网站改版是最大腐化源 |
 | Agent 协作 | AGENTS.md + justfile | 可逆 | agent 是主要编码协作者 |
 | 备份策略 | 事实源备份、派生物重建 | 可逆 | 重放即恢复，备份减负 |
-| 开发环境 | **Nix Flake + devenv + direnv** | 可逆 | 系统依赖、解释器与工具链可复现且自动激活 |
+| 开发环境 | **Nix Flake + direnv**（pkgs.mkShell，不用 devenv） | 可逆 | 系统依赖、解释器与工具链可复现且自动激活；不用 devenv 以保证纯求值（ADR 0002） |
 | Python 依赖 | **uv + uv.lock** | 可逆 | 快速、Python 原生依赖解析；避免为每个 PyPI 包维护 Nix derivation |
 | 环境职责边界 | **Nix 管系统，uv 管 Python** | 可逆 | 可复现性与日常开发效率平衡 |
 | 重依赖隔离 | `.#crawler` named shell / profile | 可逆 | Playwright/浏览器不污染默认开发环境 |
 | 决策留痕 | docs/adr/，本表为索引 | — | 决策可回溯、可 supersede |
 | Flake 输入语法 | git+https + shallow=1，不用 github: shorthand | 可逆 | github: 解析 ref 走 api.github.com，未认证限流会 403（ADR 0001） |
+| 开发 shell 实现 | pkgs.mkShell，不引入 devenv | 可逆 | devenv 的 root 取 $PWD，纯求值为空会迫使 CI 加 --impure（ADR 0002） |
 
 ## 9. 技术选型
 
@@ -334,7 +334,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 
 | 领域 | P1 选择 | 演进 | 要点 |
 |---|---|---|---|
-| 系统开发环境 | Nix Flake + devenv + direnv | named shells / profiles | flake.lock 锁定解释器、CLI、OS 动态库及工具链 |
+| 系统开发环境 | Nix Flake + direnv | named shells / profiles | flake.lock 锁定解释器、CLI、OS 动态库及工具链 |
 | Python 包管理 | uv + pyproject.toml + uv.lock | — | uv 锁定 PyPI 依赖；不在 P1 全量 Nix 化 Python 包 |
 | 语言/框架 | Python 3.12+ / FastAPI | — | OpenAPI 自动生成是地基 |
 | MCP | FastMCP 3.x，Streamable HTTP | P3 拆子模块 + Gateway | 官方 SDK 上层封装 |
@@ -356,35 +356,45 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 工具 | 职责 | 版本锁定文件 | 禁止承担的职责 |
 |---|---|---|---|
 | Nix Flake | Python 解释器、uv、just、Git、lint/test CLI、系统动态库、SQLite/Postgres/Redis/MinIO 客户端、Docker CLI | `flake.lock` | 日常解析 PyPI 业务依赖 |
-| devenv + direnv | 开发 shell 自动激活、服务进程、任务和环境变量 | `devenv.nix`、`.envrc` | 代替项目包管理器 |
+| Nix Flake + direnv | 开发 shell 定义与自动激活、环境变量 | `flake.nix`、`flake.lock`、`.envrc` | 代替项目包管理器；承载服务进程编排（P3 另行评估，见 ADR 0002） |
 | uv | FastAPI/FastMCP/SQLAlchemy/pytest 等 Python 依赖与 virtualenv | `pyproject.toml`、`uv.lock` | 安装 OS 库、替代 Nix |
 | just | 人和 agent 统一命令 | `justfile` | 自行隐式安装依赖 |
 | Docker Compose | 集成测试与生产运行编排 | `compose.yaml` | 默认本地 Python 开发环境 |
 
 ### 10.2 推荐 Flake 形态
 
-采用 **`flake.nix + devenv.nix + .envrc`**，不维护第二份 `devenv.yaml`，避免环境配置双源。
+采用 **`flake.nix + .envrc`**，用 nixpkgs 原生 `pkgs.mkShell` 定义开发 shell，不引入 devenv。
+
+理由见 ADR 0002：devenv 2.2.1 的 `devenv.root` 取 `builtins.getEnv "PWD"`，纯求值为空，会断言失败并迫使整条 CI 加 `--impure`，与 §10.4 的命令契约冲突。P1 不需要 devenv 的 services/processes/tasks 能力（SQLite 是文件、APScheduler 进程内），为其付出「命令不一致 + 求值不纯 + 多两个 flake 输入」的代价不成立。P3 若确实需要多个后台服务，应以新 ADR 重新评估。
 
 - 默认开发 shell：Python、uv、just、Git、ruff、mypy、SQLite 与项目基础工具，必须保持轻量
 - `.#crawler` named shell/profile：额外提供 Playwright/Chromium 及其系统依赖；仅爬虫开发或渲染测试使用
 - 未来可按实际需要增加 `.#tts` profile（模型运行依赖）和 `.#ops` profile（Postgres/Redis/MinIO 运维 CLI），但不预先创建
-- `.envrc` 保持唯一一行：`use flake`；首次 clone 后执行一次 `direnv allow`
+- `.envrc` 只做 `use flake .`（外加 nix-direnv 缓存与 `watch_file`），不需要 `--no-pure-eval` 或 `--impure`；首次 clone 后执行一次 `direnv allow`
+- 密钥绝不写进 `flake.nix`：那会落进全局可读的 Nix store（§10.5）
 
 ### 10.3 标准命令
 
 所有命令必须由 `justfile` 声明；README、AGENTS.md 与 CI 只引用这些命令：
 
 ```text
-just shell        # 验证/进入 Nix 开发环境
-just sync         # uv sync
-just run          # 启动 FastAPI + MCP
-just test         # 单元 + fixture 测试
-just lint         # ruff + mypy + import-linter
-just contract     # OpenAPI diff + MCP snapshot
-just migrate      # alembic upgrade head
-just e2e          # compose 全链路测试
-just ci           # lint + test + migrate-check + contract + e2e
+just shell            # 打印环境解析到的工具链版本
+just sync             # uv sync
+just run              # 启动 FastAPI + MCP
+just test             # 单元 + fixture 测试
+just test-integration # SQLite / 临时服务集成测试
+just lint             # ruff + mypy + import-linter
+just fix              # 自动修复可修复的 lint 与格式问题
+just contract         # OpenAPI diff + MCP snapshot
+just migrate          # alembic upgrade head
+just migrate-check    # 验证 upgrade / downgrade / upgrade 往返
+just revision "msg"   # 生成新 migration
+just e2e              # compose 全链路测试
+just ci               # lint + test + test-integration + migrate-check + contract
+just ci-nix           # CI 实际执行的命令，含 nix flake check
 ```
+
+尚未接线的命令（`run`、`contract`、`e2e`）在 `justfile` 中是显式占位，运行会说明缺少什么，而不是报“无此命令”。
 
 ### 10.4 CI 的唯一环境入口
 
