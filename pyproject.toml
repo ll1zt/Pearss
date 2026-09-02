@@ -63,9 +63,7 @@ known-first-party = ["core", "adapters", "plugins", "app"]
 [tool.mypy]
 python_version = "3.13"
 strict = true
-# `tests` is listed only once it contains Python files: mypy exits 2 on an
-# empty directory, which would fail `just lint` for no real reason.
-files = ["src"]
+files = ["src", "tests"]
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 
