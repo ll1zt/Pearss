@@ -22,8 +22,8 @@
 core -> adapters -> plugins -> app
 ```
 
-- `core/`：纯领域模型、状态机、normalize、去重、调度统计。不得导入 FastAPI、SQLAlchemy、feedparser、httpx、FastMCP、Pydantic settings 或任何 I/O/框架依赖
-- `adapters/`：数据库、HTTP、RSS、MCP、文件存储等外部适配器；实现 core 定义的 ports/protocols
+- `src/core/`：纯领域模型、状态机、normalize、去重、调度统计。不得导入 FastAPI、SQLAlchemy、feedparser、httpx、FastMCP、Pydantic settings 或任何 I/O/框架依赖
+- `src/adapters/`：数据库、HTTP、RSS、MCP、文件存储等外部适配器；实现 core 定义的 ports/protocols
 - `plugins/`：采集器和处理器。P1 的准插件也在这里；不得绕过 core 状态机直接写数据库
 - `app/`：依赖注入、FastAPI 路由注册、启动配置、任务组装。不得承载领域规则
 
@@ -50,24 +50,39 @@ nix develop --command just ci
 标准命令：
 
 ```text
-just sync       # 安装/同步 Python 依赖
-just run        # 本地启动
-just test       # unit + fixture
-just lint       # ruff + mypy + import-linter
-just contract   # OpenAPI diff + MCP snapshot
-just migrate    # Alembic upgrade head
-just e2e        # Compose 全链路
-just ci         # 完整门禁
+just sync             # 安装/同步 Python 依赖
+just run              # 本地启动（尚未接线）
+just test             # unit + fixture
+just test-integration # SQLite / 临时服务集成测试
+just lint             # ruff + mypy + import-linter
+just fix              # 自动修复可修复的 lint 与格式问题
+just contract         # OpenAPI diff + MCP snapshot（尚未接线）
+just migrate          # Alembic upgrade head
+just migrate-check    # upgrade / downgrade / upgrade 往返
+just revision "msg"   # 生成新 migration
+just e2e              # Compose 全链路（尚未接线）
+just ci               # 完整门禁
+just ci-nix           # CI 实际执行的命令，含 nix flake check
 ```
 
 不要自行执行 `pip install`、`apt install`；Nix 提供系统环境，uv 解析 Python 依赖。
 
+依赖改动一律用 `uv add` / `uv remove`，不手工编辑 `dependencies`。
+
 ## 改动清单
+
+### 分层与依赖方向
+
+- 新增 import 时确认方向：`app -> plugins -> adapters -> core`，下层不得 import 上层
+- import-linter 在 `just lint` 中强制；破坏契约的改动 CI 会直接失败
+- `src/core/` 新增模块不得引入任何 I/O 或框架依赖；持久化放 `src/adapters/`
 
 ### 数据库与迁移
 
 - 修改持久化 schema 必须新增 Alembic migration，不得编辑历史 migration
 - migration 必须可 upgrade 和 downgrade；更新相应测试
+- SQLite 上 autogenerate 会漏掉 enum CHECK 约束与外键 ondelete，生成后必须 `alembic check` 并人工核对
+- migration 内联 enum 取值，不 import `core.enums`：migration 是历史记录，不能随枚举演进而改变含义
 - 事实源表与派生表的保留/备份语义见 `docs/domain/data-model.md`
 
 ### API 与 MCP
