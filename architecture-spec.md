@@ -327,6 +327,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 决策留痕 | docs/adr/，本表为索引 | — | 决策可回溯、可 supersede |
 | Flake 输入语法 | git+https + shallow=1，不用 github: shorthand | 可逆 | github: 解析 ref 走 api.github.com，未认证限流会 403（ADR 0001） |
 | 开发 shell 实现 | pkgs.mkShell，不引入 devenv | 可逆 | devenv 的 root 取 $PWD，纯求值为空会迫使 CI 加 --impure（ADR 0002） |
+| RSS 正文转义 | CDATA 原样透传 + lxml 生成 | 可逆 | 保留阅读体验；依赖 lxml 的 .text 转义防注入（ADR 0003） |
 
 ## 9. 技术选型
 

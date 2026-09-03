@@ -53,3 +53,4 @@ docs/adr/
 | 0000 | 本索引与 ADR 约定 | accepted | 2026-09-02 |
 | [0001](0001-flake-inputs-use-git-https.md) | Flake 输入使用 git+https 而非 github | accepted | 2026-09-02 |
 | [0002](0002-no-devenv-use-mkshell.md) | 开发环境用 pkgs.mkShell，不引入 devenv | accepted | 2026-09-02 |
+| [0003](0003-rss-cdata-passthrough-and-lxml.md) | RSS 正文以 CDATA 原样透传，并用 lxml 生成 | accepted | 2026-09-03 |
