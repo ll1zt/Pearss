@@ -30,6 +30,8 @@ from adapters.repository import (
     store_item,
 )
 from adapters.rss_out import FeedMeta, render_feed
+from app.reader_routes import ReaderAuth, configure_reader_credentials
+from app.reader_routes import router as reader_router
 from core.models import ItemDraft
 from core.normalize import normalize
 
@@ -95,6 +97,14 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.session_factory = session_factory or create_session_factory()
+
+    # The Reader API is a compatibility surface with its own authentication,
+    # mounted separately per docs/api/style-guide.md rather than mixed into
+    # /v1. Credentials come from the environment, so this is a no-op when they
+    # are unset and the endpoints simply reject every login.
+    app.state.reader_auth = ReaderAuth(app.state.session_factory)
+    configure_reader_credentials(app.state.session_factory)
+    app.include_router(reader_router)
 
     @app.get("/healthz", tags=["ops"])
     def healthz() -> dict[str, str]:

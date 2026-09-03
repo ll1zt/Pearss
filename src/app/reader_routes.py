@@ -1,0 +1,530 @@
+"""Reader API HTTP routes.
+
+Mounted under /api/greader.php so NetNewsWire's "FreshRSS account" type can
+log in. All Google-Reader-shaped concerns are delegated to
+adapters/reader_api.py; this module only does HTTP.
+
+Authentication asymmetry is deliberate and load-bearing — get this wrong and
+no client can authenticate:
+
+    GET  -> Authorization: GoogleLogin auth=<token>
+    POST -> form field T=<token>
+
+Clients do not mix them: a GET ignores a query token and a POST ignores the
+header. Documented in ADR 0005.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from sqlalchemy.orm import Session, sessionmaker
+
+from adapters import reader_api
+from adapters.db_models import Item as ItemRow
+from core.reader_state import (
+    TagChange,
+    derive_auth_token,
+    hash_password,
+    merge_state,
+    verify_password,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+TENANT = "default"
+DEFAULT_USERNAME = "reader"
+
+router = APIRouter(prefix="/api/greader.php", tags=["reader-api"])
+
+_UNAUTHORIZED_HEADERS = {"X-Reader-Google-Bad-Token": "true"}
+
+
+def _unauthorized() -> HTTPException:
+    """The exact shape clients expect on an auth failure under /reader/api/0."""
+    return HTTPException(
+        status_code=401, detail="Unauthorized", headers=_UNAUTHORIZED_HEADERS
+    )
+
+
+class ReaderAuth:
+    """Resolves and validates Reader API tokens."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        self._session_factory = session_factory
+
+    def token_for(self, session: Session, username: str) -> str | None:
+        from adapters.repository import reader_credential
+
+        stored = reader_credential(session, username)
+        if stored is None:
+            return None
+        return derive_auth_token(username=username, password_hash=stored)
+
+    def valid(self, session: Session, token: str | None) -> bool:
+        """Constant-time comparison against every configured credential."""
+        from adapters.repository import reader_credential
+
+        if not token:
+            return False
+        from secrets import compare_digest
+
+        matched = False
+        for username in _configured_usernames(session):
+            stored = reader_credential(session, username)
+            if stored is None:
+                continue
+            expected = derive_auth_token(username=username, password_hash=stored)
+            # No early return: comparing against every credential keeps the
+            # timing from revealing which username was valid.
+            if compare_digest(token, expected):
+                matched = True
+        return matched
+
+
+def _configured_usernames(session: Session) -> list[str]:
+    """Usernames with a stored credential, plus the environment default."""
+    from adapters.db_models import ReaderCredential
+
+    rows = session.execute(
+        ReaderCredential.__table__.select().with_only_columns(
+            ReaderCredential.__table__.c.username
+        )
+    ).scalars()
+    names = {str(row) for row in rows}
+    names.add(os.environ.get("PEARSS_READER_USERNAME", DEFAULT_USERNAME))
+    return sorted(names)
+
+
+# --------------------------------------------------------------------------
+# Dependencies
+# --------------------------------------------------------------------------
+
+
+def _auth_from_header(
+    request: Request, authorization: str | None = Header(default=None)
+) -> str:
+    """Authenticate a GET: token comes from the Authorization header only."""
+    auth: ReaderAuth = request.app.state.reader_auth
+    token = _parse_google_login(authorization)
+    with auth._session_factory() as session:
+        if not auth.valid(session, token):
+            raise _unauthorized()
+    return token or ""
+
+
+def _parse_google_login(header: str | None) -> str | None:
+    """Extract the token from `GoogleLogin auth=<token>`."""
+    if not header:
+        return None
+    scheme, _, remainder = header.partition(" ")
+    if scheme != "GoogleLogin":
+        return None
+    field, _, value = remainder.partition("=")
+    if field != "auth":
+        return None
+    return value.strip() or None
+
+
+def _auth_from_form(
+    request: Request, token: str | None = Form(default=None, alias="T")
+) -> str:
+    """Authenticate a POST: token comes from the form field T only."""
+    auth: ReaderAuth = request.app.state.reader_auth
+    with auth._session_factory() as session:
+        if not auth.valid(session, token):
+            raise _unauthorized()
+    return token or ""
+
+
+# --------------------------------------------------------------------------
+# Authentication
+# --------------------------------------------------------------------------
+
+
+@router.post("/accounts/ClientLogin", response_model=None)
+def client_login(
+    request: Request,
+    # Google Reader sends capitalised field names, and FastAPI form fields
+    # are case-sensitive, so lowercase parameter names would silently receive
+    # empty strings and reject every login.
+    email: str = Form(default="", alias="Email"),
+    passwd: str = Form(default="", alias="Passwd"),
+    output: str = Query(default=""),
+) -> Response:
+    """Exchange credentials for an auth token.
+
+    Returns the auth token in the three-field form clients expect. Never
+    reveals whether the username or the password was the wrong part.
+    """
+    from adapters.repository import reader_credential
+
+    # Sync from the environment on demand. Startup alone is not enough: a
+    # database migrated after this process began would otherwise never pick
+    # the credential up without a restart.
+    configure_reader_credentials(request.app.state.session_factory)
+
+    with request.app.state.reader_auth._session_factory() as session:
+        stored = reader_credential(session, email)
+        ok = (
+            bool(email)
+            and bool(passwd)
+            and stored is not None
+            and verify_password(passwd, stored)
+        )
+        if not ok:
+            LOGGER.info("reader login failed for user %r", email)
+            if output == "json":
+                raise HTTPException(
+                    status_code=401, detail={"error_message": "access unauthorized"}
+                )
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        token = derive_auth_token(username=email, password_hash=stored or "")
+
+    payload = {"SID": token, "LSID": token, "Auth": token}
+    if output == "json":
+        return JSONResponse(payload)
+    return PlainTextResponse(
+        "\n".join(f"{key}={value}" for key, value in payload.items())
+    )
+
+
+@router.get("/reader/api/0/token")
+def get_token(
+    request: Request, _: str = Depends(_auth_from_header)
+) -> PlainTextResponse:
+    """Return the caller's own token, used by clients as an edit token."""
+    token = _parse_google_login(request.headers.get("authorization")) or ""
+    return PlainTextResponse(token)
+
+
+# --------------------------------------------------------------------------
+# Account and subscription reads
+# --------------------------------------------------------------------------
+
+
+@router.get("/reader/api/0/user-info")
+def user_info(_: str = Depends(_auth_from_header)) -> dict[str, str]:
+    return {
+        "userId": TENANT,
+        "userName": TENANT,
+        "userProfileId": TENANT,
+        "userEmail": TENANT,
+    }
+
+
+@router.get("/reader/api/0/subscription/list")
+def subscription_list(
+    request: Request, _: str = Depends(_auth_from_header)
+) -> dict[str, list[dict[str, object]]]:
+    from adapters.db_models import Source
+
+    with request.app.state.session_factory() as session:
+        rows = session.query(Source).all()
+
+    subscriptions = [
+        {
+            "id": reader_api.feed_stream_id(row.id),
+            "title": row.id,
+            "categories": [
+                {"id": "user/-/label/All", "label": "All", "type": "folder"}
+            ],
+            "url": row.url or "",
+            "htmlUrl": row.canonical_url or row.url or "",
+            "iconUrl": "",
+        }
+        for row in rows
+    ]
+    return {"subscriptions": subscriptions}
+
+
+@router.get("/reader/api/0/tag/list")
+def tag_list(_: str = Depends(_auth_from_header)) -> dict[str, list[dict[str, str]]]:
+    """Starred state and labels.
+
+    Only the starred state exists today; labels arrive with FeedOut grouping.
+    """
+    return {"tags": [{"id": reader_api.STARRED_TAG}]}
+
+
+# --------------------------------------------------------------------------
+# Item streams
+# --------------------------------------------------------------------------
+
+
+@router.get("/reader/api/0/stream/items/ids")
+def stream_items_ids(
+    request: Request,
+    _: str = Depends(_auth_from_header),
+    s: str = Query(default=reader_api.READING_LIST),
+    n: int = Query(default=10000),
+    xt: list[str] = Query(default=[]),
+    c: str | None = Query(default=None),
+) -> dict[str, object]:
+    """Item ids for a stream.
+
+    Supports `xt` to exclude the read state, which is how a client fetches
+    only unread items. Pending items are always excluded: the gate applies to
+    the Reader API just as it does to RSS.
+    """
+    from adapters.repository import read_states_for, visible_ids_for_stream
+
+    with request.app.state.session_factory() as session:
+        ids = visible_ids_for_stream(
+            session,
+            stream_id=s,
+            tenant_id=TENANT,
+            limit=max(1, min(n, 10000)),
+            offset=_offset(c),
+        )
+        if not ids:
+            return {"itemRefs": []}
+
+        exclude_read = any(reader_api.is_state_stream(t, state="read") for t in xt)
+        if exclude_read:
+            states = read_states_for(session, ids, tenant_id=TENANT)
+            ids = [i for i in ids if not (states.get(i) and states[i].is_read)]
+
+    return {"itemRefs": [{"id": item_id} for item_id in ids], "continuation": None}
+
+
+def _offset(cursor: str | None) -> int:
+    if not cursor:
+        return 0
+    try:
+        return max(0, int(cursor))
+    except ValueError:
+        return 0
+
+
+@router.post("/reader/api/0/stream/items/contents")
+def stream_items_contents(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    i: list[str] = Form(default=[]),
+) -> dict[str, object]:
+    """Content for specific items."""
+    from adapters.db_models import Item as ItemRow
+    from adapters.repository import read_states_for
+
+    with request.app.state.session_factory() as session:
+        wanted = [
+            item_id
+            for item_id in (reader_api.decode_item_id(raw) for raw in i)
+            if item_id
+        ]
+        if not wanted:
+            return _empty_contents()
+
+        rows = session.query(ItemRow).filter(ItemRow.id.in_(wanted)).all()
+        # The gate: a pending item is not served to any client, including this
+        # one. netnewswire.md acceptance criterion 7.
+        rows = [row for row in rows if row.publish_status != "pending"]
+        states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
+
+    items = []
+    for row in rows:
+        state = states.get(row.id)
+        items.append(
+            _render_item(
+                row,
+                is_read=bool(state and state.is_read),
+                is_starred=bool(state and state.is_starred),
+            )
+        )
+    return _contents_payload(items)
+
+
+def _render_item(row: ItemRow, *, is_read: bool, is_starred: bool) -> dict[str, object]:
+    categories = [reader_api.READING_LIST]
+    if is_read:
+        categories.append(reader_api.READ_TAG)
+    if is_starred:
+        categories.append(reader_api.STARRED_TAG)
+
+    published = _epoch(row.published_at) if row.published_at else 0
+    return {
+        "id": reader_api.encode_item_id(row.id),
+        "categories": categories,
+        "title": row.title,
+        "crawlTimeMsec": str(published * 1000),
+        "timestampUsec": str(published * 1000000),
+        "published": published,
+        "updated": published,
+        "author": "",
+        "alternate": [{"href": row.url, "type": "text/html"}],
+        "summary": {"direction": "ltr", "content": ""},
+        "content": {"direction": "ltr", "content": ""},
+        "origin": {
+            "streamId": reader_api.feed_stream_id(row.source_id),
+            "title": row.source_id,
+            "htmlUrl": row.url,
+        },
+        "enclosure": [],
+        "canonical": [{"href": row.url}],
+    }
+
+
+def _epoch(value: str) -> int:
+    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+
+
+def _empty_contents() -> dict[str, object]:
+    return _contents_payload([])
+
+
+def _contents_payload(items: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "direction": "ltr",
+        "id": reader_api.READING_LIST,
+        "title": "Reading List",
+        "self": [{"href": "/api/greader.php/reader/api/0/stream/items/contents"}],
+        "updated": int(datetime.now(UTC).timestamp()),
+        "author": TENANT,
+        "items": items,
+    }
+
+
+# --------------------------------------------------------------------------
+# State writes
+# --------------------------------------------------------------------------
+
+
+@router.post("/reader/api/0/edit-tag")
+def edit_tag(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    i: list[str] = Form(default=[]),
+    a: list[str] = Form(default=[]),
+    r: list[str] = Form(default=[]),
+) -> PlainTextResponse:
+    """Mark items read/unread and starred/unstarred.
+
+    Idempotent by construction: the same request replayed produces the same
+    state, because every write is last-write-wins on a fixed pair of flags.
+    """
+    try:
+        is_read, is_starred = reader_api.classify_tags(added=a, removed=r)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if is_read is None and is_starred is None:
+        return PlainTextResponse("OK")
+
+    from adapters.db_models import Item as ItemRow
+    from adapters.repository import read_states_for, upsert_read_state
+
+    item_ids = [
+        item_id for item_id in (reader_api.decode_item_id(raw) for raw in i) if item_id
+    ]
+    if not item_ids:
+        return PlainTextResponse("OK")
+
+    now = datetime.now(UTC)
+    with request.app.state.session_factory() as session:
+        # Only touch items that exist and are visible; a client may still hold
+        # ids for items that were withdrawn.
+        rows = session.query(ItemRow).filter(ItemRow.id.in_(item_ids)).all()
+        known = {row.id for row in rows}
+        states = read_states_for(session, list(known), tenant_id=TENANT)
+
+        for item_id in sorted(known):
+            merged = merge_state(
+                item_id=item_id,
+                current=states.get(item_id),
+                change=TagChange(is_read=is_read, is_starred=is_starred),
+                at=now,
+            )
+            upsert_read_state(session, merged, tenant_id=TENANT)
+        session.commit()
+
+    LOGGER.info(
+        "reader edit-tag: %d item(s), read=%s starred=%s",
+        len(known),
+        is_read,
+        is_starred,
+    )
+    return PlainTextResponse("OK")
+
+
+@router.post("/reader/api/0/mark-all-as-read")
+def mark_all_as_read(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    s: str = Form(default=reader_api.READING_LIST),
+    ts: str | None = Form(default=None),
+) -> PlainTextResponse:
+    """Mark everything in a stream read up to a timestamp."""
+    from adapters.repository import mark_all_read
+
+    when = _parse_ts(ts) or datetime.now(UTC)
+    source_id = reader_api.parse_feed_stream_id(s)
+    with request.app.state.session_factory() as session:
+        changed = mark_all_read(
+            session, tenant_id=TENANT, before=when, source_id=source_id
+        )
+        session.commit()
+    LOGGER.info("reader mark-all-as-read: %d item(s)", changed)
+    return PlainTextResponse("OK")
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Reader timestamps are seconds, or microseconds when very long."""
+    if not value or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        number = int(raw)
+    except ValueError:
+        return None
+    if len(raw) >= 16:
+        number //= 1_000_000
+    return datetime.fromtimestamp(number, tz=UTC)
+
+
+def configure_reader_credentials(
+    session_factory: sessionmaker[Session], *, at: datetime | None = None
+) -> bool:
+    """Sync the environment credential into the database.
+
+    Returns True if a credential was stored. The plaintext password is read
+    from the environment and never persisted.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    from adapters.repository import upsert_reader_credential
+
+    username = os.environ.get("PEARSS_READER_USERNAME", DEFAULT_USERNAME)
+    password = os.environ.get("PEARSS_READER_PASSWORD", "")
+    if not password:
+        LOGGER.warning("PEARSS_READER_PASSWORD unset; Reader API login disabled")
+        return False
+
+    try:
+        with session_factory() as session:
+            # Starting up must not depend on the schema being current: a fresh
+            # clone has credentials set but an unmigrated database, and failing
+            # the boot there is unrecoverable without manual intervention.
+            bind = session.get_bind()
+            if "reader_credential" not in inspect(bind).get_table_names():
+                LOGGER.warning(
+                    "reader_credential table missing; run 'just migrate' "
+                    "before using the Reader API"
+                )
+                return False
+            upsert_reader_credential(
+                session,
+                username=username,
+                password_hash=hash_password(password),
+                at=at or datetime.now(UTC),
+            )
+            session.commit()
+    except (OperationalError, ProgrammingError) as exc:
+        LOGGER.warning("could not sync reader credential at startup: %s", exc)
+        return False
+    return True
