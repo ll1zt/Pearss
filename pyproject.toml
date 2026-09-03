@@ -16,16 +16,21 @@ requires-python = ">=3.13,<3.14"
 # arrives with the component that first needs it.
 dependencies = [
   "alembic>=1.18",
+  "fastapi>=0.141.1",
   "feedparser>=6.0.14",
   "httpx>=0.28.1",
+  "lxml>=6.1.3",
   "sqlalchemy>=2.0",
+  "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]
 dev = [
   "import-linter>=2.1",
+  "lxml-stubs>=0.5.1",
   "mypy>=1.13",
   "pytest>=8.3",
+  "pytest-asyncio>=1.4.0",
   "pytest-cov>=6.0",
   "ruff>=0.8",
 ]
@@ -86,6 +91,10 @@ ignore_missing_imports = true
 # --------------------------------------------------------------------------
 [tool.pytest.ini_options]
 minversion = "8.0"
+# strict mode: every async test must opt in with a marker, so a test silently
+# skipped for want of a plugin cannot pass unnoticed.
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 # src/ is included because fixture tests live beside their collector: the
 # snapshot and the parser it pins belong together, and a parser moved without
 # its fixtures is a parser that stops being verified.
