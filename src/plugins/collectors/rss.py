@@ -1,0 +1,280 @@
+"""RSS/Atom collector.
+
+A P1 quasi-plugin: it follows the collector interface from
+docs/guides/collector-guide.md but is registered explicitly rather than
+discovered. It produces ItemDraft and nothing else — no database access, no
+RSS output, no scheduling. Every entry, whatever its origin, converges on
+ItemDraft -> normalize -> Item.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import UTC, datetime
+from time import struct_time
+from typing import Any
+
+import feedparser
+
+from adapters.raw_payload import RawPayload
+from core.enums import ErrorClass
+from core.models import ItemDraft
+
+LOGGER = logging.getLogger(__name__)
+
+# feedparser's parsed result is a feedparser.FeedParserDict, which is typed
+# loosely; this alias documents that we treat it as an opaque mapping.
+FeedData = Any
+
+# Date fields feedparser may populate, in the order we trust them.
+_DATE_FIELDS = ("published_parsed", "updated_parsed", "created_parsed")
+
+
+class CollectorError(Exception):
+    """A parse that failed, carrying its ErrorClass."""
+
+    def __init__(self, error_class: ErrorClass, detail: str) -> None:
+        super().__init__(f"{error_class.value}: {detail}")
+        self.error_class = error_class
+        self.detail = detail
+
+
+def match_url(url: str) -> bool:
+    """Whether this collector should handle `url`.
+
+    URL-matching only: no network access and no database lookups, because it
+    runs during source selection and discovery.
+    """
+    lowered = url.lower()
+    return any(
+        token in lowered
+        for token in ("/feed", "/rss", "/atom", "feed.xml", "rss.xml", "atom.xml")
+    )
+
+
+def parse(raw: RawPayload) -> list[ItemDraft]:
+    """Turn a fetched feed into drafts.
+
+    Raises CollectorError with a classified reason rather than returning an
+    empty list: "the feed changed shape" and "the feed has no entries" are very
+    different situations, and collapsing them into an empty list is how a
+    broken selector goes unnoticed.
+    """
+    if not raw.body:
+        raise CollectorError(ErrorClass.PARSE, "empty payload")
+
+    parsed = feedparser.parse(raw.body)
+
+    # feedparser is deliberately lenient: it salvages partial entries from
+    # truncated documents, so `bozo` is set even when entries exist. Keying
+    # only on "bozo and no entries" would therefore publish half-parsed
+    # content from a corrupt feed as if it were a real article.
+    #
+    # The distinguishing signal is whether the XML is well-formed at all. A
+    # truncated document leaves the parser inside an unclosed element, which
+    # is what we test for; salvageable feeds with minor issues parse cleanly.
+    if parsed.get("bozo") and _is_truncated(raw.body):
+        detail = str(parsed.get("bozo_exception", "malformed feed"))
+        raise CollectorError(ErrorClass.PARSE, f"malformed feed: {detail}")
+
+    if parsed.get("bozo") and not parsed.get("entries"):
+        detail = str(parsed.get("bozo_exception", "malformed feed"))
+        raise CollectorError(ErrorClass.PARSE, f"malformed feed: {detail}")
+
+    version = parsed.get("version", "")
+    if not version:
+        # Recognisable XML that is not a feed: the structure contract failed.
+        raise CollectorError(
+            ErrorClass.STRUCTURE_CHANGED,
+            "document parsed but has no recognised feed version",
+        )
+
+    entries = parsed.get("entries") or []
+    if not entries:
+        # A structurally valid feed with zero entries is legitimate — a new
+        # feed before its first post. Not an error.
+        LOGGER.info("feed has no entries: %s", raw.url.split("?", 1)[0])
+        return []
+
+    feed_title = _text(parsed.get("feed", {}).get("title"))
+    drafts: list[ItemDraft] = []
+    skipped = 0
+
+    for entry in entries:
+        link = _entry_link(entry)
+        if not link:
+            # Without a canonical URL an item cannot be identified or linked
+            # from a feed, and the model forbids an empty canonical_url.
+            skipped += 1
+            continue
+
+        title = _text(entry.get("title"))
+        content = _entry_content(entry)
+        external_id = _external_id(entry, fallback=link)
+
+        drafts.append(
+            ItemDraft(
+                source_id=raw.source_id,
+                external_id=external_id,
+                title=title,
+                canonical_url=link,
+                published_at=_entry_published(entry),
+                content=content,
+                raw_fetch_id=raw.raw_fetch_id,
+                metadata=_metadata(entry, feed_title=feed_title),
+            )
+        )
+
+    if not drafts and skipped:
+        # Every entry failed the structure contract. That is a changed shape,
+        # not an empty feed.
+        raise CollectorError(
+            ErrorClass.STRUCTURE_CHANGED,
+            f"all {skipped} entries lacked a usable link",
+        )
+
+    return drafts
+
+
+# --------------------------------------------------------------------------
+# Field extraction
+# --------------------------------------------------------------------------
+
+
+def _is_truncated(body: bytes) -> bool:
+    """Whether the XML has unbalanced tags, i.e. the document is cut short.
+
+    feedparser recovers what it can from a truncated feed, which is useful for
+    reading but dangerous for ingestion: the recovered entries look complete
+    enough to publish. Counting tag balance is the cheapest way to tell a
+    corrupt document from a valid one that merely has quirks.
+    """
+    text = body.decode("utf-8", errors="replace")
+    # Strip the constructs that do not affect tag balance.
+    text = re.sub(r"<\?.*?\?>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    text = re.sub(r"<!\[CDATA\[.*?\]\]>", "", text, flags=re.DOTALL)
+
+    # Split on tag boundaries: every remaining "<...>" is one element. This
+    # avoids trying to model attribute quoting inside a regex, which is where
+    # the obvious one-liner breaks down.
+    tags = re.findall(r"<[^>]*>", text)
+    depth = 0
+    for tag in tags:
+        stripped = tag[1:-1].strip()
+        if not stripped:
+            continue
+        if stripped.startswith("/"):
+            depth -= 1
+        elif stripped.endswith("/"):
+            continue  # self-closing: opens and closes at once
+        elif stripped.startswith(("!", "?")):
+            continue  # doctype or processing instruction
+        else:
+            depth += 1
+    # A well-formed document returns to zero. Truncation leaves depth > 0.
+    return depth != 0
+
+
+def _entry_link(entry: FeedData) -> str | None:
+    """The entry's canonical link, or None if no HTTP(S) link exists.
+
+    Only http/https are accepted. A `urn:uuid:` or `tag:` guid is a perfectly
+    valid *identifier* but is not a fetchable URL, and accepting one here would
+    let a non-URL become an item's canonical_url — which then reaches a feed
+    as a dead <link>.
+    """
+    link = entry.get("link")
+    if not link:
+        # Atom puts the primary link in links[] with rel="alternate".
+        for candidate in entry.get("links") or []:
+            if candidate.get("rel") == "alternate" and candidate.get("href"):
+                link = candidate["href"]
+                break
+    if not link and entry.get("guid"):
+        # Only a self-describing permalink guid is usable as a link. Checking
+        # isPermaLink alone is not enough: feedparser reports it as False for
+        # a plain URL in some feeds, and True for non-URLs in others. Testing
+        # the scheme is what actually matters.
+        guid = str(entry["guid"]).strip()
+        if guid.startswith(("http://", "https://")):
+            link = guid
+    if not link:
+        return None
+    candidate = str(link).strip()
+    if not candidate.startswith(("http://", "https://")):
+        return None
+    return candidate
+
+
+def _external_id(entry: FeedData, *, fallback: str) -> str:
+    """A stable id from the origin, or one derived from the link.
+
+    The guid is preferred because it survives a URL change at the origin. When
+    it is absent the link stands in, which is stable for a given source even
+    though it is not proof against a permalink change.
+    """
+    guid = entry.get("guid") or entry.get("id")
+    if guid:
+        return str(guid).strip()
+    return f"link:{fallback}"
+
+
+def _entry_published(entry: FeedData) -> datetime | None:
+    """The entry's publication time, or None if the feed does not say.
+
+    Returns a naive-or-aware datetime exactly as the feed expressed it,
+    leaving the UTC decision to normalize(): the collector guide requires
+    recording the evidence rather than guessing a zone.
+    """
+    for field in _DATE_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, struct_time):
+            return datetime(*value[:6]).replace(tzinfo=UTC)
+    return None
+
+
+def _entry_content(entry: FeedData) -> str:
+    """The richest body available for an entry."""
+    if entry.get("content"):
+        # Atom content[] and RSS content:encoded both land here.
+        for part in entry["content"]:
+            value = part.get("value")
+            if value:
+                return str(value)
+    summary = entry.get("summary")
+    if summary:
+        return str(summary)
+    description = entry.get("description")
+    return str(description) if description else ""
+
+
+def _metadata(entry: FeedData, *, feed_title: str) -> dict[str, str]:
+    """Structured, safe-to-store metadata.
+
+    Only fields we deliberately keep, and all values are strings: this ends up
+    in a JSON column and later in fixtures, so nothing untrusted and no
+    arbitrary nesting should get through.
+    """
+    metadata: dict[str, str] = {}
+    if feed_title:
+        metadata["feed_title"] = feed_title
+    author = _text(entry.get("author"))
+    if author:
+        metadata["author"] = author
+    tags = [
+        str(tag.get("term", "")).strip()
+        for tag in (entry.get("tags") or [])
+        if tag.get("term")
+    ]
+    if tags:
+        metadata["tags"] = ",".join(tags)
+    return metadata
+
+
+def _text(value: object) -> str:
+    """Coerce a feed field to a trimmed string."""
+    if value is None:
+        return ""
+    return str(value).strip()

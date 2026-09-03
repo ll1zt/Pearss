@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Malformed fixture: truncated XML.
+
+  feedparser sets bozo and produces no entries, which must be classified as
+  parse, distinguishing it from structure_changed where the document parses
+  but no longer matches the expected shape.
+-->
+<rss version="2.0">
+  <channel>
+    <title>Truncated Feed</title>
+    <link>https://blog.example.com/</link>
+    <description>This feed was cut off mid-element.</description>
+    <item>
+      <title>Interrupted Post</title>
+      <link>https://blog.example.com/2026/01/interrupted</link>
+      <description>The XML ends abruptly here.

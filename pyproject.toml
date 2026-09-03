@@ -16,6 +16,8 @@ requires-python = ">=3.13,<3.14"
 # arrives with the component that first needs it.
 dependencies = [
   "alembic>=1.18",
+  "feedparser>=6.0.14",
+  "httpx>=0.28.1",
   "sqlalchemy>=2.0",
 ]
 
@@ -50,8 +52,12 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "S"]
 ignore = []
 
 [tool.ruff.lint.per-file-ignores]
-# Tests legitimately assert, and construct throwaway objects for fixtures.
+# assert is the correct tool in tests (ruff's S101 flags it because asserts
+# vanish under -O, which is a real concern in production code and not in a
+# test). Applies to tests/ and to the collector fixture tests that live
+# beside their fixtures under src/.
 "tests/**" = ["S101"]
+"**/test_*.py" = ["S101"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]
@@ -67,13 +73,23 @@ files = ["src", "tests"]
 warn_unreachable = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 
+# feedparser ships no type information and none exists on PyPI. Scoped to this
+# one module rather than disabling import checks globally, so a genuinely
+# untyped dependency elsewhere still gets flagged.
+[[tool.mypy.overrides]]
+module = "feedparser"
+ignore_missing_imports = true
+
 # --------------------------------------------------------------------------
 # pytest: warnings are errors so deprecations fail loudly, and markers are
 # declared so a typo in `-m` does not silently select zero tests.
 # --------------------------------------------------------------------------
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["tests"]
+# src/ is included because fixture tests live beside their collector: the
+# snapshot and the parser it pins belong together, and a parser moved without
+# its fixtures is a parser that stops being verified.
+testpaths = ["tests", "src"]
 addopts = "-ra --strict-markers --strict-config"
 filterwarnings = ["error"]
 markers = [
