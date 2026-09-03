@@ -407,6 +407,31 @@ async def test_mark_all_as_read(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_mark_all_as_read_leaves_item_content_untouched(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    # Same invariant as the edit-tag case, but for the bulk path, which takes a
+    # different route through the repository and so needs its own assertion.
+    token = await login(client)
+    with app.state.session_factory() as session:
+        before = session.execute(
+            sa.text("select title, guid, publish_status, content_hash from item")
+        ).fetchall()
+
+    await client.post(
+        "/api/greader.php/reader/api/0/mark-all-as-read",
+        data={"T": token, "s": READING_LIST},
+    )
+
+    with app.state.session_factory() as session:
+        after = session.execute(
+            sa.text("select title, guid, publish_status, content_hash from item")
+        ).fetchall()
+    assert before == after
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_write_state_never_touches_item_content(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
