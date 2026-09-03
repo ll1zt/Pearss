@@ -99,9 +99,11 @@ revision message:
 # Application
 # ---------------------------------------------------------------------------
 
-# Start the API server. Not yet wired: no ASGI app exists in the skeleton.
-run:
-    @echo "run: not yet wired — the FastAPI app arrives with the core API work"
+# Start the API server on 127.0.0.1 by default: this is a single-user
+# service, so it should not be reachable from the network without an explicit
+# decision to expose it.
+run host="127.0.0.1" port="8000":
+    uv run uvicorn app.main:app --host {{host}} --port {{port}}
 
 # ---------------------------------------------------------------------------
 # Aggregate

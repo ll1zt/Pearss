@@ -1,0 +1,173 @@
+"""FastAPI application assembly.
+
+The top layer wires components together and carries no domain rules: what may
+appear in a feed is decided in core and applied by the adapters, not here.
+
+One notable constraint: this is P1, so there is no processor chain yet. Items
+become `ready` as soon as they are stored, because with an empty pipeline the
+gate has nothing to wait for. The gate itself stays in the query path, so
+introducing a chain in P3 changes only the promotion step, not the output.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+from fastapi import FastAPI, HTTPException, Response
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from adapters.repository import (
+    items_ready_for_feed,
+    mark_published,
+    promote_to_ready,
+    store_item,
+)
+from adapters.rss_out import FeedMeta, render_feed
+from core.models import ItemDraft
+from core.normalize import normalize
+
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_DATABASE_URL = "sqlite+pysqlite:///./data/pearss.db"
+TENANT = "default"
+
+
+def database_url() -> str:
+    """Resolved from the environment, never hardcoded with credentials."""
+    return os.environ.get("PEARSS_DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def _ensure_parent_directory(url: str) -> None:
+    """Create the directory for a file-backed SQLite database if missing."""
+    if not url.startswith("sqlite"):
+        return
+    _, _, path = url.partition("///")
+    if not path or path.startswith(":memory:"):
+        return
+    parent = Path(path).expanduser().parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
+
+
+def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
+    """Build the session factory, creating the database directory if needed."""
+    resolved = url or database_url()
+    _ensure_parent_directory(resolved)
+    engine = create_engine(resolved)
+    return sessionmaker(engine, expire_on_commit=False)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Own the shared httpx client for the process lifetime.
+
+    A client per request would re-do the TLS handshake and discard the
+    connection pool on every fetch.
+    """
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        app.state.http_client = client
+        yield
+    # Exiting the context manager closes the client.
+
+
+def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
+    """Build the application.
+
+    The session factory is injected so tests can point at a temporary database
+    without touching the environment.
+    """
+    app = FastAPI(
+        title="Pearss",
+        description="Single-user, agent-first RSS+ system.",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
+    app.state.session_factory = session_factory or create_session_factory()
+
+    @app.get("/healthz", tags=["ops"])
+    def healthz() -> dict[str, str]:
+        """Liveness probe with no dependency on the database."""
+        return {"status": "ok"}
+
+    # Declared `def`, not `async def`, on purpose. The work is synchronous
+    # (SQLAlchemy and lxml), so FastAPI runs it in a threadpool and the event
+    # loop stays free. Marking it `async def` would make every request block
+    # the loop and serialise the server — verified by
+    # test_concurrent_feed_requests_do_not_serialise, which fails with a
+    # blocking call under `async def` and passes under `def`.
+    @app.get("/feeds/{feed_id}.xml", tags=["feeds"])
+    def read_feed(feed_id: str) -> Response:
+        """Render one RSS feed.
+
+        Only items the gate permits are included. Rendering also records
+        first publication, which freezes those items' content — so this
+        endpoint is not side-effect free, and a client's first poll is the
+        moment an item becomes permanent.
+        """
+        if feed_id != "default":
+            raise HTTPException(status_code=404, detail="unknown feed")
+
+        with app.state.session_factory() as session:
+            items = items_ready_for_feed(session)
+            now = datetime.now(UTC)
+            published = mark_published(session, items, at=now)
+            session.commit()
+
+            if published:
+                LOGGER.info("first publication recorded for %d item(s)", published)
+
+            body = render_feed(
+                FeedMeta(
+                    title="Pearss",
+                    link="/",
+                    description="All collected items.",
+                ),
+                items,
+                # P1 stores bodies in memory only; the file-backed store that
+                # supplies these arrives with the RawFetch persistence work.
+                {},
+            )
+
+        return Response(
+            content=body,
+            media_type="application/rss+xml; charset=utf-8",
+        )
+
+    @app.post("/internal/items", tags=["internal"])
+    def ingest_draft(draft: ItemDraft) -> dict[str, str]:
+        """Normalise and store a draft.
+
+        Internal and unauthenticated for now: authentication and the audit
+        middleware are part of the P1 control-plane work, and this endpoint
+        exists so the pipeline can be exercised end to end before then.
+        """
+        with app.state.session_factory() as session:
+            item = normalize(draft, tenant_id=TENANT).item
+            outcome = store_item(session, item)
+            if outcome.action.value in ("insert", "insert_related"):
+                # P1 has no processor chain, so the gate has nothing to wait
+                # for and the item is promoted straight away. When P3 adds a
+                # chain, promotion moves to completion of that chain and this
+                # line disappears — the gate itself needs no change.
+                promote_to_ready(session, [item])
+            session.commit()
+
+        return {
+            "id": item.id,
+            "guid": item.guid,
+            "action": outcome.action.value,
+            "reason": outcome.reason,
+        }
+
+    return app
+
+
+app = create_app()
