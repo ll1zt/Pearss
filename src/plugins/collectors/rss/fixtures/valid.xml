@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example Blog</title>
+    <link>https://blog.example.com/</link>
+    <description>A blog used as a collector fixture.</description>
+    <language>en</language>
+    <item>
+      <title>First Post About Widgets</title>
+      <link>https://blog.example.com/2026/01/first-post</link>
+      <guid isPermaLink="false">urn:uuid:1a2b3c4d-0001-4000-8000-000000000001</guid>
+      <pubDate>Mon, 05 Jan 2026 10:00:00 +0000</pubDate>
+      <description>A short summary of the first post.</description>
+      <author>author@example.com (Ada Example)</author>
+      <category>widgets</category>
+      <category>opinion</category>
+    </item>
+    <item>
+      <title>Second Post: Content Encoded</title>
+      <link>https://blog.example.com/2026/01/second-post?utm_source=feed</link>
+      <guid isPermaLink="false">urn:uuid:1a2b3c4d-0002-4000-8000-000000000002</guid>
+      <pubDate>Wed, 07 Jan 2026 08:30:00 +0000</pubDate>
+      <content:encoded xmlns:content="http://purl.org/rss/1.0/modules/content/">
+        &lt;p&gt;A longer body for the second post.&lt;/p&gt;
+      </content:encoded>
+    </item>
+    <item>
+      <title>Third Post Without A Date</title>
+      <link>https://blog.example.com/2026/01/third-post</link>
+      <guid>https://blog.example.com/2026/01/third-post</guid>
+      <description>No publication date on this one.</description>
+    </item>
+  </channel>
+</rss>

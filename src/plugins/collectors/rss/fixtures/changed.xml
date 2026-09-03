@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Structure-change fixture.
+
+  Stands in for the common real-world break: the feed still parses as valid
+  RSS, but entries no longer carry a <link>, so the collector cannot build a
+  canonical URL. This must be classified as structure_changed, not as an
+  empty feed and not as a parse error.
+-->
+<rss version="2.0">
+  <channel>
+    <title>Example Blog</title>
+    <link>https://blog.example.com/</link>
+    <description>Redesigned: entries now omit their links.</description>
+    <item>
+      <title>Post Without A Link</title>
+      <guid>urn:uuid:changed-0001</guid>
+      <pubDate>Mon, 05 Jan 2026 10:00:00 +0000</pubDate>
+      <description>This entry has a guid and a date but no link element.</description>
+    </item>
+    <item>
+      <title>Another Post Without A Link</title>
+      <guid>urn:uuid:changed-0002</guid>
+      <pubDate>Tue, 06 Jan 2026 10:00:00 +0000</pubDate>
+      <description>Also missing its link.</description>
+    </item>
+  </channel>
+</rss>
