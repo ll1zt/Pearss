@@ -78,7 +78,7 @@
 - 多用户的完整实现（仅预留 tenant_id）
 - Web 管理 UI（Swagger 兜底）
 - 全文搜索引擎
-- P1/P2 阶段的已读状态同步（C4 属 P3）
+- P1/P2 阶段的已读状态同步（C4 原定 P3，**已提前到 P1**，见 ADR 0004）
 - 推送通知、移动端专属能力
 - P1 阶段将全部 Python 第三方包写成 Nix derivation（以 uv 管理为准）
 
@@ -111,7 +111,7 @@ flowchart TB
         PB[发布服务
 RSS feed + enclosure]
         RA[Reader API
-/api/greader.php P3]
+/api/greader.php P1]
         OB[观测性
 structlog+correlation_id]
     end
@@ -143,7 +143,7 @@ structlog+correlation_id]
 | RawFetch | id, source_id, payload_ref, status, fetched_at, correlation_id | P1 | 可重建 | adaptive 调度的数据源 |
 | Item | id, source_id, guid, content_hash, title, url, published_at, **publish_status**, tenant_id | P1 | 事实源 | 发布闸门字段 P1 就位 |
 | ItemEnrichment | id, item_id, plugin_id, kind, lang, payload_ref, status | P3 | 可重建 | 重放 pipeline 即恢复，不纳入备份 |
-| ReadState | item_id, is_read, is_starred, updated_at, tenant_id | P3 | 事实源 | Reader API 状态写回 |
+| ReadState | item_id, is_read, is_starred, updated_at, tenant_id | P1（原 P3） | 事实源 | Reader API 状态写回；随 C4 提前（ADR 0004） |
 | Plugin | id, type, version, manifest, checksum, status, trust | P2 | 事实源 | |
 | Job | id, type, schedule, priority, status, config | P1 | 事实源 | 触发器实现可换 |
 | JobRun | id, job_id, status, **error_class**, metrics, correlation_id | P1 | 可重建 | 近期保留排障 |
@@ -199,7 +199,7 @@ adaptive 算法（P1 内建）：按 RawFetch 历史计算源的平均更新间�
 |---|---|---|
 | P1 MVP | FastAPI + SQLite + RSS 采集 + discover_feed + OPML + 准插件爬虫×2-3 + schedule_policy（含 adaptive）+ APScheduler + 单 FastMCP（elicitation）+ RSS feed + 发布闸门字段 + 错误分类法 + 审计中间件 + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI** | agent 完成“发现→加源→抓取→出 feed”；OPML 可用；五类错误落库；开发环境与 CI 均由 `nix develop --command just ci` 通过 |
 | P2 可观测+插件化 | structlog + correlation_id + 快照/诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
-| P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + Reader API + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；NNW FreshRSS 账号已读同步 |
+| P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
 
 ## 6. 需求追踪矩阵
@@ -220,7 +220,7 @@ adaptive 算法（P1 内建）：按 RawFetch 历史计算源的平均更新间�
 | C1 RSS 输出 | 发布服务 | P1 | NNW 订阅成功，GUID 稳定 |
 | C2 查询 API | search_items + Resource | P1 | 紧凑返回 |
 | C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
-| C4 Reader API | /api/greader.php | P3 | NNW FreshRSS 登录，已读同步 |
+| C4 Reader API | /api/greader.php | P1（原 P3） | NNW FreshRSS 登录，已读同步；ADR 0004 提前 |
 | C5 发布闸门 | Item.publish_status | P1 字段 / P3 联动 | pending 条目不出现在 feed |
 | D1-D6 操作面 | MCP 工具组 | P1-P3 | 见 §2.3 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
@@ -312,7 +312,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 插件隔离 | L1 进程内 / L2 子进程 / L3 WASM 观望 | 可逆 | 信任分级 |
 | 处理产物 | ItemEnrichment 独立存储 | 难逆 | 可重放、多版本共存 |
 | 发布语义 | 每条目只发布一次 + 发布闸门 | 难逆 | 客户端缓存不可撤回 |
-| 已读同步 | Reader API（FreshRSS 协议），P3 | 难逆 | NNW 原生支持 |
+| 已读同步 | Reader API（FreshRSS 协议），P1（原 P3） | 难逆 | NNW 原生支持；提前理由见 ADR 0004 |
 | 处理器顺序 | 翻译 > 摘要 > TTS | 可逆 | 可达性 > 消费形式 |
 | 多用户准备 | 预留 tenant_id | 难逆 | 迁移痛点在数据模型 |
 | 架构边界 | 四层包 + import-linter CI 强制 | 可逆 | 约定靠工具不靠自觉 |
@@ -328,6 +328,8 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | Flake 输入语法 | git+https + shallow=1，不用 github: shorthand | 可逆 | github: 解析 ref 走 api.github.com，未认证限流会 403（ADR 0001） |
 | 开发 shell 实现 | pkgs.mkShell，不引入 devenv | 可逆 | devenv 的 root 取 $PWD，纯求值为空会迫使 CI 加 --impure（ADR 0002） |
 | RSS 正文转义 | CDATA 原样透传 + lxml 生成 | 可逆 | 保留阅读体验；依赖 lxml 的 .text 转义防注入（ADR 0003） |
+| Reader API 时机 | C4 从 P3 提前到 P1 | 难逆 | 标准 RSS 无已读回写通道，缺了它多设备不可用（ADR 0004） |
+| Reader item ID | 对外发完整 32 字符，不截断为 16 | 不可逆 | 截断会碰撞，且使客户端已存 ID 失效（ADR 0005） |
 
 ## 9. 技术选型
 

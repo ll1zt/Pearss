@@ -97,7 +97,9 @@ discovered -> imported -> enabled -> disabled -> removed
 | `disabled` | enable | `enabled` | 用户确认 |
 | `disabled` / `rejected` | remove | `removed` | 用户确认；保留 AuditLog，禁止删除历史产物关联 |
 
-## ReadState 状态模型（P3）
+## ReadState 状态模型（P1，原 P3）
+
+> 原定 P3，随 C4（Reader API）一起提前到 P1，见 ADR 0004。
 
 ReadState 不需要复杂生命周期；它是 Item 的可变消费侧事实：
 

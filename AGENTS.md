@@ -92,6 +92,14 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 - 写工具：默认需要用户确认；返回审计 ID 与 correlation ID
 - 大正文、HTML、音频不得塞进 Tool 返回值；返回 item/enrichment ID 或 Resource URI
 
+### Reader API（兼容层）
+
+- Google Reader 的一切形态（stream id、`tag:google.com,2005:reader/item/...`、com.google 状态标签）只出现在 `src/adapters/reader_api.py`，不得渗入 `src/core/`
+- 认证不对称是硬约束：GET 只认 `Authorization: GoogleLogin auth=<token>`，POST 只认表单 `T=<token>`，两者不可互换
+- 新增端点以 NNW 实际调用为准，不盲目复刻整个 FreshRSS API
+- 已读/星标写入不得改动 Item 主体内容、`publish_status`、`guid` 或 `content_hash`；`pending` 条目对 Reader API 同样不可见
+- 凭据只从环境变量读取，库内只存 scrypt 哈希；明文密码永不落库
+
 ### 采集器与插件
 
 - 新爬虫优先使用官方 RSS/Atom；只有 feed 不存在或内容不完整时才实现网页采集
