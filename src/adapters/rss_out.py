@@ -92,7 +92,11 @@ def _append_item(channel: etree._Element, item: Item, body: str) -> None:
 
     if body:
         description = etree.SubElement(entry, "description")
-        description.text = _safe_cdata(body)
+        # etree.CDATA keeps the markup readable in a feed reader. Its safety
+        # rests entirely on _safe_cdata having removed every "]]>" first —
+        # lxml passes CDATA content through verbatim, so anything that could
+        # close the section must already be gone.
+        description.text = etree.CDATA(_safe_cdata(body))
 
 
 def _safe_cdata(body: str) -> str:
@@ -122,9 +126,15 @@ def _safe_cdata(body: str) -> str:
     """
     cleaned = _strip_illegal_xml_chars(body)
     # Splitting the terminator is the standard mitigation: one CDATA closes
-    # before the "]]" and the next opens after the ">", so no "]]>" sequence
-    # ever appears inside a single section.
-    return cleaned.replace("]]>", "]]]]><![CDATA[>")
+    # Remove every "]]>" so the CDATA section cannot be closed early. It is
+    # deleted rather than split, because the usual "split across two CDATA
+    # sections" trick does not work here: lxml writes the replacement through
+    # verbatim, which leaves an unbalanced marker and output worse than the
+    # original. Dropping three characters from a body is imperceptible;
+    # letting a remote feed control our document structure is not.
+    while "]]>" in cleaned:
+        cleaned = cleaned.replace("]]>", "")
+    return cleaned
 
 
 def _strip_illegal_xml_chars(text: str) -> str:

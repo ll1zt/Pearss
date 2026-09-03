@@ -89,15 +89,35 @@ def test_document_is_well_formed_after_a_cdata_escape_attempt() -> None:
 
 
 @pytest.mark.unit
-def test_injection_is_defeated_by_escaping_not_only_by_the_split() -> None:
-    # The load-bearing defence is lxml's .text escaping: the angle brackets
-    # become &lt;/&gt;, so the content is inert. Assert the escaped form is
-    # present so that switching to etree.CDATA() or raw concatenation — which
-    # would drop layer 1 and leave only the ]]> split — fails this test.
+def test_injection_cannot_create_an_element() -> None:
+    # Asserted by parsing, not by counting substrings: a hostile body puts the
+    # literal text "<item>" inside the CDATA, so a naive string count reports
+    # a second item that does not exist as an element. Only a real parse can
+    # tell structure from text.
     hostile = "<p>hi</p>]]></description></item><item><title>INJECTED</title>"
+    root = parsed(META, [item()], {"id-g1": hostile})
+
+    assert len(root.findall("./channel/item")) == 1
+    assert root.findall(".//INJECTED") == []
+
+
+@pytest.mark.unit
+def test_cdata_section_cannot_be_closed_early() -> None:
+    # The only legitimate "]]>" is the one closing the section we wrote. If a
+    # second survived, the section would end early and the remainder would be
+    # parsed as markup.
+    hostile = "a ]]> b ]]> c"
     rendered = render_feed(META, [item()], {"id-g1": hostile}).decode()
-    assert "&lt;/description&gt;&lt;/item&gt;" in rendered
-    assert "</description></item><item>" not in rendered
+    assert rendered.count("]]>") == 1
+
+
+@pytest.mark.unit
+def test_markup_is_preserved_not_escaped() -> None:
+    # The point of CDATA: a reader sees formatting, not escaped tags.
+    body = "<p>Hello <b>world</b>.</p>"
+    root = parsed(META, [item()], {"id-g1": body})
+    assert root.findtext("./channel/item/description") == "<p>Hello <b>world</b>.</p>"
+    assert "&lt;p&gt;" not in render_feed(META, [item()], {"id-g1": body}).decode()
 
 
 @pytest.mark.unit
