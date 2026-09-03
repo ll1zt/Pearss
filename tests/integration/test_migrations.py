@@ -20,7 +20,10 @@ from alembic import command
 from alembic.config import Config
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent
-EXPECTED_TABLES = {
+# Everything migration 0001 creates. Kept as the P1 set so this test fails
+# loudly if 0001's contents change; the Reader API tables added by 0002 are
+# asserted separately below.
+P1_TABLES = {
     "source",
     "raw_fetch",
     "item",
@@ -29,6 +32,11 @@ EXPECTED_TABLES = {
     "feed_out",
     "audit_log",
 }
+
+# Added by migration 0002 when the Reader API was promoted to P1 (ADR 0004).
+READER_TABLES = {"read_state", "reader_credential"}
+
+EXPECTED_TABLES = P1_TABLES | READER_TABLES
 
 
 @pytest.fixture
@@ -107,16 +115,27 @@ def test_upgrade_downgrade_upgrade_round_trip(alembic_config: Config) -> None:
 
 
 @pytest.mark.integration
-def test_p3_tables_are_absent(alembic_config: Config) -> None:
+def test_p2_p3_tables_are_absent(alembic_config: Config) -> None:
     command.upgrade(alembic_config, "head")
     url = alembic_config.get_main_option("sqlalchemy.url") or ""
     db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
     tables = _tables(db_path)
     # These arrive with their own migration in P2/P3 rather than being
-    # pre-created empty and altered later.
+    # pre-created empty and altered later. read_state used to be here, but the
+    # Reader API moved to P1 (ADR 0004), so it is now expected to exist.
     assert "item_enrichment" not in tables
-    assert "read_state" not in tables
     assert "plugin" not in tables
+    assert tables >= READER_TABLES
+
+
+@pytest.mark.integration
+def test_first_migration_creates_only_the_p1_tables(alembic_config: Config) -> None:
+    # Pins migration 0001 specifically: running it alone must not leak the
+    # Reader API tables, so the two migrations stay independently meaningful.
+    command.upgrade(alembic_config, "0001")
+    url = alembic_config.get_main_option("sqlalchemy.url") or ""
+    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
+    assert _tables(db_path) == P1_TABLES
 
 
 # Table and column names are looked up from this mapping rather than being

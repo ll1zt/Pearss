@@ -280,6 +280,60 @@ class FeedOut(Base):
     updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
 
 
+class ReadState(Base):
+    """Per-item consumption state written back by the Reader API.
+
+    Fact source: backed up. There is one row per (item, tenant) once a client
+    reports any state; the absence of a row means unread and unstarred rather
+    than being stored as an explicit false.
+
+    Deliberately separate from Item: consumption state is mutable and
+    client-owned, while a published Item's content is frozen. Keeping them
+    apart is what lets a reader mark something read without touching content.
+    """
+
+    __tablename__ = "read_state"
+
+    # One row per item per tenant, so the primary key doubles as the
+    # uniqueness constraint and an upsert is a genuine upsert.
+    item_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("item.id", ondelete="CASCADE"), primary_key=True
+    )
+    is_read: sa.orm.Mapped[bool] = sa.orm.mapped_column(
+        sa.Boolean, nullable=False, default=False
+    )
+    is_starred: sa.orm.Mapped[bool] = sa.orm.mapped_column(
+        sa.Boolean, nullable=False, default=False
+    )
+    # Server receipt time, not client time: last-write-wins is resolved here,
+    # and a client clock cannot be trusted to order events.
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(64), primary_key=True
+    )
+
+
+class ReaderCredential(Base):
+    """The Reader API login, stored as a password hash.
+
+    Single-user, so this holds one row. The plaintext password lives only in
+    the environment (PEARSS_READER_PASSWORD); what is stored here is a scrypt
+    hash, which is also the input the auth token is derived from — see
+    ADR 0005 for why stdlib scrypt rather than bcrypt.
+    """
+
+    __tablename__ = "reader_credential"
+
+    username: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(128), primary_key=True
+    )
+    # scrypt output, stored as "<n>$<r>$<p>$<salt-hex>$<hash-hex>" so the
+    # parameters travel with the hash and can be changed later.
+    password_hash: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+
 class AuditLog(Base):
     """An immutable record of one meaningful operation."""
 

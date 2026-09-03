@@ -1,13 +1,13 @@
 # NetNewsWire 集成说明
 
-本项目提供两条面向 NetNewsWire（NNW）的集成路径：P1 的标准 RSS 输出，以及 P3 的 FreshRSS/Google Reader 兼容 API。两条路径服务不同目标，不能混淆。
+本项目提供两条面向 NetNewsWire（NNW）的集成路径：**P1 的标准 RSS 输出**，以及**P1 的 FreshRSS/Google Reader 兼容 API**（原定 P3，已提前，见 ADR 0004）。两条路径服务不同目标，不能混淆：RSS 负责内容投递，Reader API 负责已读/星标的多端同步。
 
 ## 集成阶段
 
 | 阶段 | 集成方式 | 支持能力 | 不支持能力 |
 |---|---|---|---|
 | P1/P2 | 标准 RSS/Atom feed URL | 内容阅读、feed 更新、RSS enclosure | 已读/星标的服务器多端同步 |
-| P3 | FreshRSS 账号方式，Reader API 兼容端点 | 内容、已读、星标、多端状态同步 | 不承诺 FreshRSS 的每一个非 NNW 专有行为 |
+| P1（原 P3） | FreshRSS 账号方式，Reader API 兼容端点 | 内容、已读、星标、多端状态同步 | 不承诺 FreshRSS 的每一个非 NNW 专有行为 |
 
 NNW 可作为 RSS 阅读器订阅普通 feed；其 FreshRSS 账号方式使用 Google Reader 风格兼容 API 完成账户同步。Reader API 端点由 `adapters/reader_api/` 实现，不能将兼容格式渗入 core 领域模型。
 
@@ -48,15 +48,45 @@ TTS 音频通过 RSS `<enclosure>` 输出：
 
 音频文件必须有稳定 URL、正确 MIME type 和 length。NNW 不应被视作完整播客播放器；若音频消费是主要需求，应同时用播客客户端做集成测试。
 
-## P3：Reader API / FreshRSS 账号同步
+## P1：Reader API / FreshRSS 账号同步
 
-P3 提供 Google Reader API 兼容入口：
+> 原定 P3，已提前到 P1（ADR 0004）：标准 RSS 没有已读状态的回写通道，
+> 缺了它 P1 的交付物在多设备下不可用。
+
+提供 Google Reader API 兼容入口：
 
 ```text
 /api/greader.php
 ```
 
 目标是使 NNW 可以通过“FreshRSS”账号类型登录并同步内容与状态。最低兼容范围应从 NNW 实际调用的 endpoint 出发，以受控集成测试逐个确认，而不是盲目复刻整个 FreshRSS API。
+
+### 已实现端点
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/accounts/ClientLogin` | POST | 凭据换 token（`Email` / `Passwd` 表单字段） |
+| `/reader/api/0/token` | GET | 返回同一 token |
+| `/reader/api/0/user-info` | GET | 账号校验 |
+| `/reader/api/0/subscription/list` | GET | 订阅列表 |
+| `/reader/api/0/tag/list` | GET | 星标状态 |
+| `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，支持 `xt` 排除已读 |
+| `/reader/api/0/stream/items/contents` | POST | 条目正文 |
+| `/reader/api/0/edit-tag` | POST | 已读 / 星标回写 |
+| `/reader/api/0/mark-all-as-read` | POST | 批量标记已读 |
+
+### 认证（关键约束）
+
+```text
+GET  -> Authorization: GoogleLogin auth=<token>
+POST -> 表单字段 T=<token>
+```
+
+两者**不可互换**：GET 不接受 query 中的 token，POST 不接受 header。scheme 必须严格为 `GoogleLogin`，字段名必须小写 `auth`。代码与测试见 `src/app/reader_routes.py`，依据记录在 ADR 0005。
+
+凭据由环境变量注入（`PEARSS_READER_USERNAME` / `PEARSS_READER_PASSWORD`），库内只存 scrypt 哈希。**改密码会使 token 失效**，所有已登录客户端需重新登录。
+
+item ID 对外发送完整的 32 字符（128-bit），不截断为 Reader 传统的 16 字符——理由见 ADR 0005。
 
 ### 状态写回
 
@@ -68,7 +98,7 @@ P3 提供 Google Reader API 兼容入口：
 
 ### 兼容测试清单
 
-在 P3 建立一个真实或受控的 NNW 测试账户，验收至少包括：
+建立一个真实或受控的 NNW 测试账户，验收至少包括：
 
 1. 能添加 FreshRSS 类型账户并通过认证
 2. 能列出订阅/分类与未读条目
@@ -85,7 +115,7 @@ P3 提供 Google Reader API 兼容入口：
 | 新条目不出现 | Item publish_status、FeedOut filter、RSS 可访问性 | 未发布则排查 processing；已发布再检查 GUID/客户端刷新 |
 | 原文而非译文出现 | 发布闸门事件、首次输出时间 | 不改已发布 Item；修正未来条目的链配置 |
 | 同一条目重复 | GUID、canonical URL、content_hash、排序 | 修复生成规则；不得删除已发布 GUID 后复用 |
-| NNW 无法登录 P3 账户 | Reader API 请求日志、认证、端点兼容性 | 根据 NNW 实际调用补 adapter；不污染 core |
+| NNW 无法登录 Reader 账户 | Reader API 请求日志、认证、端点兼容性 | 根据 NNW 实际调用补 adapter；不污染 core |
 | 已读不同步 | ReadState、同步事件审计、时间戳 | 重放幂等事件并检查状态写回 |
 
 ## 相关文档

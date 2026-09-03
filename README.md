@@ -23,19 +23,24 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 - 可复现开发环境：Nix Flake + direnv（`pkgs.mkShell`），默认 shell 与 `.#crawler` profile
 - `justfile` 命令入口与本地质量门禁（`just ci`）
-- 四层包结构（`core` / `adapters` / `plugins` / `app`）与 import-linter 分层契约
-- core 领域层：`ErrorClass` 分类法与优先级、Item 发布状态机、adaptive 调度纯函数
-- P1 数据库 schema 与首版 Alembic migration（7 张表，含 enum CHECK 约束）
+- 四层包结构（`src/core` / `src/adapters` / `src/plugins` / `src/app`）与 import-linter 分层契约
+- core 领域层：`ErrorClass` 分类法与优先级、Item 发布状态机、adaptive 调度纯函数、normalize 与去重规则
+- P1 数据库 schema 与 Alembic migration（0001 七张表，含 enum CHECK 约束）
+- RSS/Atom 采集：HTTP 抓取（超时/大小上限/ETag 条件请求）+ 五套 fixture 回归
+- RSS 2.0 输出与发布闸门（`pending` 不可见）；FastAPI 应用，`just run` 可启动
+- **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 `docs/adr/0004`）
+
+### 尚未接线
 
 ### 尚未接线
 
 以下 `just` 命令是显式占位，运行会说明缺少什么而不是报“无此命令”：
 
-- `just run`：FastAPI 应用尚未创建
-- `just contract`：尚无 API 表面，OpenAPI diff 与 MCP snapshot 未接线
+- `just contract`：OpenAPI diff 与 MCP tool snapshot 未接线
 - `just e2e`：需要 `compose.yaml` 与 P1 服务镜像
 
-采集器、MCP 工具面、RSS 输出与调度器均待实现，见 `architecture-spec.md` §5 的 P1 验收标准。
+MCP 工具面、网页采集器、OPML、`discover_feed` 与调度器接线均待实现，见
+`architecture-spec.md` §5 的 P1 验收标准。
 
 ## 快速开始
 
@@ -95,6 +100,27 @@ just ci-nix           # CI 实际执行的命令，含 Nix 环境入口
 ```bash
 nix develop --command just ci
 ```
+
+## NetNewsWire 接入
+
+RSS 输出与 Reader API 都已可用，两条路径用途不同：
+
+| 路径 | 地址 | 用途 |
+|---|---|---|
+| RSS 输出 | `http://<host>:8000/feeds/default.xml` | 内容投递 |
+| Reader API | `http://<host>:8000/api/greader.php` | 已读/星标多端同步 |
+
+Reader API 需要设置凭据（写入未提交的 `.env`）：
+
+```bash
+PEARSS_READER_USERNAME=reader
+PEARSS_READER_PASSWORD=<your-password>
+```
+
+然后在 NNW 中添加 **FreshRSS** 类型账号，服务器地址填 `http://<host>:8000/api/greader.php`，
+用户名与密码填上面的值。库内只保存 scrypt 哈希，明文密码只存在于环境变量。
+
+> **改密码会让 token 失效**，所有已登录客户端需要重新登录——token 由哈希派生，见 ADR 0005。
 
 ## 数据与密钥
 

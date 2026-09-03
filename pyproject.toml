@@ -20,6 +20,7 @@ dependencies = [
   "feedparser>=6.0.14",
   "httpx>=0.28.1",
   "lxml>=6.1.3",
+  "python-multipart>=0.0.32",
   "sqlalchemy>=2.0",
   "uvicorn>=0.52.4",
 ]
@@ -63,6 +64,14 @@ ignore = []
 # beside their fixtures under src/.
 "tests/**" = ["S101"]
 "**/test_*.py" = ["S101"]
+# FastAPI resolves Form(...) and Query(...) defaults at import time by
+# design; they are not mutable defaults in the usual sense. Scoped to the
+# route modules rather than disabled project-wide.
+"src/app/reader_routes.py" = ["B008"]
+# S105/S106 key on names containing "password", so a test fixture credential
+# trips them no matter how it is named. The credential is generated per test
+# and injected via monkeypatch; it is never a real secret.
+"tests/integration/test_reader_api.py" = ["S105", "S106"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]

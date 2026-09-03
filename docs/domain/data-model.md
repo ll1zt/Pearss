@@ -119,9 +119,10 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 | `token_hash` | 保护私有 feed 的认证 token 哈希，禁止明文保存 |
 | `tenant_id` | 租户预留 |
 
-### ReadState（P3）
+### ReadState（P1，原 P3）
 
-由 Reader API 写回的消费状态。
+由 Reader API 写回的消费状态。原定 P3，随 C4（Reader API）一起提前到 P1，
+见 ADR 0004。
 
 | 字段 | 说明 |
 |---|---|
