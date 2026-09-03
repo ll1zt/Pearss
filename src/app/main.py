@@ -71,7 +71,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     A client per request would re-do the TLS handshake and discard the
     connection pool on every fetch.
     """
-    timeout = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=5.0)
+    # pool is the wait for a free connection, not the time to establish one:
+    # tying it to the connect timeout made the first request give up mid-TLS-
+    # handshake on a slow origin. It gets the total budget, matching
+    # adapters/http.py.
+    timeout = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         app.state.http_client = client
         yield

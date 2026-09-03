@@ -23,6 +23,7 @@ LOGGER = logging.getLogger(__name__)
 # read is the classic way a single slow origin exhausts a worker pool.
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_READ_TIMEOUT = 15.0
+DEFAULT_WRITE_TIMEOUT = 15.0
 DEFAULT_TOTAL_TIMEOUT = 30.0
 
 # 5 MB. Feeds are small; this is a guard against a misconfigured origin or a
@@ -53,6 +54,7 @@ class FetchPolicy:
 
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     read_timeout: float = DEFAULT_READ_TIMEOUT
+    write_timeout: float = DEFAULT_WRITE_TIMEOUT
     total_timeout: float = DEFAULT_TOTAL_TIMEOUT
     max_bytes: int = DEFAULT_MAX_BYTES
     user_agent: str = DEFAULT_USER_AGENT
@@ -86,8 +88,14 @@ def fetch(
     timeout = httpx.Timeout(
         connect=limits.connect_timeout,
         read=limits.read_timeout,
-        write=limits.read_timeout,
-        pool=limits.connect_timeout,
+        write=limits.write_timeout,
+        # pool is how long a request waits for a free connection, not how long
+        # a connection takes to establish: reusing connect_timeout meant the
+        # very first request (empty pool) gave up mid-TLS-handshake on a slow
+        # origin, and concurrent fetches past the pool limit failed after 5s
+        # even though nothing was broken. It gets the total budget instead, so
+        # a busy pool queues rather than erroring.
+        pool=limits.total_timeout,
     )
 
     headers = {"user-agent": limits.user_agent, "accept": _accept_header()}
