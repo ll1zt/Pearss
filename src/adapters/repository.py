@@ -97,7 +97,7 @@ def existing_items_for_source(session: Session, source_id: str) -> list[Item]:
     rows = session.execute(
         select(ItemRow).where(ItemRow.source_id == source_id)
     ).scalars()
-    return [_to_domain(row) for row in rows]
+    return [row_to_item(row) for row in rows]
 
 
 def find_by_content_hash(session: Session, content_hash: str) -> list[Item]:
@@ -105,7 +105,7 @@ def find_by_content_hash(session: Session, content_hash: str) -> list[Item]:
     rows = session.execute(
         select(ItemRow).where(ItemRow.content_hash == content_hash)
     ).scalars()
-    return [_to_domain(row) for row in rows]
+    return [row_to_item(row) for row in rows]
 
 
 def store_item(session: Session, candidate: Item) -> StoreOutcome:
@@ -177,7 +177,7 @@ def items_ready_for_feed(session: Session) -> list[Item]:
         .where(ItemRow.publish_status != PublishStatus.PENDING.value)
         .order_by(ItemRow.published_at.desc().nullslast(), ItemRow.guid)
     ).scalars()
-    return [_to_domain(row) for row in rows]
+    return [row_to_item(row) for row in rows]
 
 
 def mark_published(session: Session, items: list[Item], *, at: datetime) -> int:
@@ -454,7 +454,7 @@ def count_items(session: Session) -> int:
     return int(session.execute(select(func.count()).select_from(ItemRow)).scalar() or 0)
 
 
-def _to_domain(row: ItemRow) -> Item:
+def row_to_item(row: ItemRow) -> Item:
     """Rebuild a domain Item from a row.
 
     Stored timestamps are parsed back to aware datetimes so the domain object

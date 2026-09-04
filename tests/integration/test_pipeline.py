@@ -172,6 +172,52 @@ def test_same_article_from_two_sources_is_related(session: Session) -> None:
 
 
 @pytest.mark.integration
+def test_pipeline_stores_bodies_and_serves_them(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The body must survive the whole path, not just the title.
+
+    A regression that actually shipped: items were stored with a null
+    content_ref, so NetNewsWire listed every article with no body and the RSS
+    feed emitted no description at all.
+    """
+    from app.pipeline import bodies_for, normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+
+    drafts = collect(SOURCE, "valid.xml")
+    normalise_and_store(session, drafts)
+
+    stored = items_ready_for_feed(session)
+    assert stored, "items should be visible once the chain completes"
+    assert all(item.content_ref for item in stored), (
+        "every item should reference a body"
+    )
+
+    bodies = bodies_for(session, stored)
+    assert len(bodies) == len(stored)
+    assert any("short summary" in body for body in bodies.values())
+
+
+@pytest.mark.integration
+def test_rss_output_includes_descriptions(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.pipeline import bodies_for, normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    normalise_and_store(session, collect(SOURCE, "valid.xml"))
+
+    rendered = render_feed(
+        FeedMeta(title="T", link="https://e.com"),
+        items_ready_for_feed(session),
+        bodies_for(session, items_ready_for_feed(session)),
+    ).decode()
+    assert "<![CDATA[" in rendered
+    assert "short summary" in rendered
+
+
+@pytest.mark.integration
 def test_raw_fetch_is_recorded(session: Session) -> None:
     record_raw_fetch(
         session,

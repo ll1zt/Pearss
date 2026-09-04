@@ -26,14 +26,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters.repository import (
     items_ready_for_feed,
     mark_published,
-    promote_to_ready,
-    store_item,
 )
 from adapters.rss_out import FeedMeta, render_feed
+from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
 from core.models import ItemDraft
-from core.normalize import normalize
 
 LOGGER = logging.getLogger(__name__)
 
@@ -147,9 +145,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
                     description="All collected items.",
                 ),
                 items,
-                # P1 stores bodies in memory only; the file-backed store that
-                # supplies these arrives with the RawFetch persistence work.
-                {},
+                bodies_for(session, items),
             )
 
         return Response(
@@ -166,16 +162,10 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         exists so the pipeline can be exercised end to end before then.
         """
         with app.state.session_factory() as session:
-            item = normalize(draft, tenant_id=TENANT).item
-            outcome = store_item(session, item)
-            if outcome.action.value in ("insert", "insert_related"):
-                # P1 has no processor chain, so the gate has nothing to wait
-                # for and the item is promoted straight away. When P3 adds a
-                # chain, promotion moves to completion of that chain and this
-                # line disappears — the gate itself needs no change.
-                promote_to_ready(session, [item])
-            session.commit()
+            ingested = normalise_and_store(session, [draft])[0]
 
+        item = ingested.result.item
+        outcome = ingested.outcome
         return {
             "id": item.id,
             "guid": item.guid,

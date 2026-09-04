@@ -314,7 +314,8 @@ def stream_items_contents(
 ) -> dict[str, object]:
     """Content for specific items."""
     from adapters.db_models import Item as ItemRow
-    from adapters.repository import read_states_for, resolve_reader_ids
+    from adapters.repository import read_states_for, resolve_reader_ids, row_to_item
+    from app.pipeline import bodies_for
 
     with request.app.state.session_factory() as session:
         external = [
@@ -334,6 +335,7 @@ def stream_items_contents(
         # one. netnewswire.md acceptance criterion 7.
         rows = [row for row in rows if row.publish_status != "pending"]
         states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
+        bodies = bodies_for(session, [row_to_item(row) for row in rows])
 
     items = []
     for row in rows:
@@ -343,12 +345,15 @@ def stream_items_contents(
                 row,
                 is_read=bool(state and state.is_read),
                 is_starred=bool(state and state.is_starred),
+                body=bodies.get(row.id, ""),
             )
         )
     return _contents_payload(items)
 
 
-def _render_item(row: ItemRow, *, is_read: bool, is_starred: bool) -> dict[str, object]:
+def _render_item(
+    row: ItemRow, *, is_read: bool, is_starred: bool, body: str = ""
+) -> dict[str, object]:
     categories = [reader_api.READING_LIST]
     if is_read:
         categories.append(reader_api.READ_TAG)
@@ -366,8 +371,11 @@ def _render_item(row: ItemRow, *, is_read: bool, is_starred: bool) -> dict[str, 
         "updated": published,
         "author": "",
         "alternate": [{"href": row.url, "type": "text/html"}],
-        "summary": {"direction": "ltr", "content": ""},
-        "content": {"direction": "ltr", "content": ""},
+        # The body is untrusted remote HTML, same trust decision as the RSS
+        # path (ADR 0003). Here it is a JSON string, so there is no XML escape
+        # or injection surface; the reader applies its own sanitising rules.
+        "summary": {"direction": "ltr", "content": body},
+        "content": {"direction": "ltr", "content": body},
         "origin": {
             "streamId": reader_api.feed_stream_id(row.source_id),
             "title": row.source_id,
