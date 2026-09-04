@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -33,6 +35,8 @@ from core.reader_state import (
     merge_state,
     verify_password,
 )
+
+CallableT = TypeVar("CallableT", bound=Callable[..., Any])
 
 LOGGER = logging.getLogger(__name__)
 
@@ -133,12 +137,63 @@ def _parse_google_login(header: str | None) -> str | None:
 def _auth_from_form(
     request: Request, token: str | None = Form(default=None, alias="T")
 ) -> str:
-    """Authenticate a POST: token comes from the form field T only."""
+    """Authenticate a write POST: token comes from the form field T only."""
     auth: ReaderAuth = request.app.state.reader_auth
     with auth._session_factory() as session:
         if not auth.valid(session, token):
             raise _unauthorized()
     return token or ""
+
+
+async def authenticate_any(request: Request) -> str:
+    """Accept the token from the Authorization header or the form body.
+
+    Used by the read endpoints. NetNewsWire sends them as POST with the token
+    in the Authorization header and every parameter in the query string, not the
+    form-body `T` the Google Reader convention describes. Serving those as
+    GET-only produced a wall of 405s and no articles, so the asymmetry is
+    enforced where clients depend on it (writes) and relaxed where the real
+    client disagrees with the documentation (reads).
+
+    The query string is deliberately not consulted. A token in a URL is
+    captured by access logs, proxies and browser history, so accepting it there
+    would trade a credential for a convenience no client in fact needs.
+    """
+    auth: ReaderAuth = request.app.state.reader_auth
+    token = _parse_google_login(request.headers.get("authorization"))
+    if not token and request.method in {"POST", "PUT", "PATCH"}:
+        # Only parse a body when one was actually sent, and never consume it on
+        # a GET, where there is nothing to read.
+        form = await request.form()
+        supplied = form.get("T")
+        if isinstance(supplied, str) and supplied.strip():
+            token = supplied.strip()
+    with auth._session_factory() as session:
+        if not auth.valid(session, token):
+            raise _unauthorized()
+    return token or ""
+
+
+def reader_read(
+    router: APIRouter, path: str, **kwargs: Any
+) -> Callable[[CallableT], CallableT]:
+    """Register a Reader API read under both GET and POST.
+
+    Google Reader clients are split on this verb: some GET, some POST with all
+    parameters in the query string. FreshRSS, which NetNewsWire is speaking
+    to, accepts both, so a GET-only implementation failed a third of the
+    refresh traffic with 405 Method Not Allowed.
+
+    Typed as identity on the callable so the endpoint's own signature survives
+    for FastAPI's introspection and for mypy.
+    """
+
+    def decorator(func: CallableT) -> CallableT:
+        router.get(path, **kwargs)(func)
+        router.post(path, **kwargs)(func)
+        return func
+
+    return decorator
 
 
 # --------------------------------------------------------------------------
@@ -193,9 +248,9 @@ def client_login(
     )
 
 
-@router.get("/reader/api/0/token")
+@reader_read(router, "/reader/api/0/token")
 def get_token(
-    request: Request, _: str = Depends(_auth_from_header)
+    request: Request, _: str = Depends(authenticate_any)
 ) -> PlainTextResponse:
     """Return the caller's own token, used by clients as an edit token."""
     token = _parse_google_login(request.headers.get("authorization")) or ""
@@ -207,8 +262,8 @@ def get_token(
 # --------------------------------------------------------------------------
 
 
-@router.get("/reader/api/0/user-info")
-def user_info(_: str = Depends(_auth_from_header)) -> dict[str, str]:
+@reader_read(router, "/reader/api/0/user-info")
+def user_info(_: str = Depends(authenticate_any)) -> dict[str, str]:
     return {
         "userId": TENANT,
         "userName": TENANT,
@@ -217,9 +272,9 @@ def user_info(_: str = Depends(_auth_from_header)) -> dict[str, str]:
     }
 
 
-@router.get("/reader/api/0/subscription/list")
+@reader_read(router, "/reader/api/0/subscription/list")
 def subscription_list(
-    request: Request, _: str = Depends(_auth_from_header)
+    request: Request, _: str = Depends(authenticate_any)
 ) -> dict[str, list[dict[str, object]]]:
     from adapters.db_models import Source
 
@@ -242,8 +297,8 @@ def subscription_list(
     return {"subscriptions": subscriptions}
 
 
-@router.get("/reader/api/0/tag/list")
-def tag_list(_: str = Depends(_auth_from_header)) -> dict[str, list[dict[str, str]]]:
+@reader_read(router, "/reader/api/0/tag/list")
+def tag_list(_: str = Depends(authenticate_any)) -> dict[str, list[dict[str, str]]]:
     """Starred state and labels.
 
     Only the starred state exists today; labels arrive with FeedOut grouping.
@@ -256,10 +311,10 @@ def tag_list(_: str = Depends(_auth_from_header)) -> dict[str, list[dict[str, st
 # --------------------------------------------------------------------------
 
 
-@router.get("/reader/api/0/stream/items/ids")
+@reader_read(router, "/reader/api/0/stream/items/ids")
 def stream_items_ids(
     request: Request,
-    _: str = Depends(_auth_from_header),
+    _: str = Depends(authenticate_any),
     s: str = Query(default=reader_api.READING_LIST),
     n: int = Query(default=10000),
     xt: list[str] = Query(default=[]),

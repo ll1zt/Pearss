@@ -470,3 +470,113 @@ async def test_environment_credential_is_never_stored_in_plaintext(
     for (stored,) in rows:
         assert TEST_PASSWORD not in stored
         assert stored.startswith("scrypt$")
+
+
+# --------------------------------------------------------------------------
+# Verb tolerance on the read endpoints
+# --------------------------------------------------------------------------
+#
+# NetNewsWire POSTs these with every parameter in the query string, while the
+# Google Reader convention and the reference docs describe them as GET. Serving
+# only GET produced 405 Method Not Allowed on the unread and starred refreshes
+# and the client showed no articles. The lesson is recorded in ADR 0006: for an
+# outward contract, the client's actual traffic is the specification.
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/greader.php/reader/api/0/user-info",
+        "/api/greader.php/reader/api/0/subscription/list",
+        "/api/greader.php/reader/api/0/tag/list",
+        "/api/greader.php/reader/api/0/token",
+    ],
+)
+async def test_read_endpoints_accept_both_verbs(
+    client: httpx.AsyncClient, path: str
+) -> None:
+    token = await login(client)
+    header = {"Authorization": f"GoogleLogin auth={token}"}
+    get = await client.get(path, headers=header)
+    post = await client.post(path, headers=header)
+    assert get.status_code == 200
+    assert post.status_code == 200, f"{path} rejected POST"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_items_ids_accepts_post_with_query_parameters(
+    client: httpx.AsyncClient,
+) -> None:
+    """The exact shape NetNewsWire sends."""
+    token = await login(client)
+    header = {"Authorization": f"GoogleLogin auth={token}"}
+    params: dict[str, str | int] = {
+        "n": 1000,
+        "output": "json",
+        "s": "user/-/state/com.google/reading-list",
+        "xt": READ_TAG,
+    }
+    got = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=header,
+        params=params,
+    )
+    posted = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=header,
+        params=params,
+    )
+    assert got.status_code == 200
+    assert posted.status_code == 200
+    assert posted.json() == got.json()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_read_post_may_authenticate_with_a_form_body_token(
+    app: FastAPI,
+) -> None:
+    """Other clients send T in the body rather than the header.
+
+    The query string is still refused for reads, because a token in a URL is
+    captured by access logs and proxies.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as opened:
+        token = await login(opened)
+        response = await opened.post(
+            "/api/greader.php/reader/api/0/user-info", data={"T": token}
+        )
+        assert response.status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unauthenticated_post_to_a_read_is_still_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.post("/api/greader.php/reader/api/0/user-info")
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_writes_still_require_the_form_token(
+    client: httpx.AsyncClient,
+) -> None:
+    """The asymmetry is kept where clients depend on it.
+
+    Relaxing reads must not quietly relax writes: a write authenticated by
+    header alone would let a token land in server logs and referrers.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/edit-tag",
+        headers=auth_header(token),
+        data={"i": [ids[0]], "a": [READ_TAG]},
+    )
+    assert response.status_code == 401
