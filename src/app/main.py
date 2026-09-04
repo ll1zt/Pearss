@@ -32,6 +32,7 @@ from adapters.repository import (
 )
 from adapters.rss_out import FeedMeta, render_feed
 from app.auth import Principal, auth_configured, write_required
+from app.items_routes import router as items_router
 from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
@@ -149,6 +150,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     configure_reader_credentials(app.state.session_factory)
     app.include_router(reader_router)
     app.include_router(sources_router)
+    app.include_router(items_router)
 
     @app.exception_handler(RequestValidationError)
     def on_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
