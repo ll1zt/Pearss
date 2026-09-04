@@ -37,6 +37,7 @@ ENUM_LENGTHS = {
     "source_status": 16,
     "source_type": 16,
     "audit_outcome": 16,
+    "trust_level": 16,
 }
 
 
@@ -93,6 +94,11 @@ class Source(Base):
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.String(ENUM_LENGTHS["source_status"]), nullable=False
     )
+    # Recorded intent about the source. Never makes fetched content trusted —
+    # see core.enums.TrustLevel for why that distinction is load-bearing.
+    trust_level: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["trust_level"]), nullable=False
+    )
     # Single-user today; carried from the outset because retrofitting tenancy
     # into tables that lack it is far more painful than carrying a column.
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
@@ -105,6 +111,11 @@ class Source(Base):
             "sourcestatus",
             "status",
             ("active", "paused", "disabled", "deleted"),
+        ),
+        enum_check(
+            "trustlevel",
+            "trust_level",
+            ("standard", "trusted", "restricted"),
         ),
         # One source per canonical URL and type within a tenant.
         sa.UniqueConstraint("tenant_id", "canonical_url", "type", name="uq_source_url"),
@@ -332,6 +343,31 @@ class ReaderCredential(Base):
     password_hash: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+
+class IdempotencyRecord(Base):
+    """A replayed write's stored result.
+
+    AGENTS.md requires every API write to be idempotent, and the style guide
+    defines the identity as actor + endpoint + key with the first result reused
+    within a reasonable window. That needs somewhere to keep the first result:
+    checking for a duplicate without a stored response would mean replaying the
+    side effect and hoping it is harmless.
+
+    Rows expire. Keeping them forever would grow the table without bound while
+    the guarantee it serves only needs to cover a client's retry window.
+    """
+
+    __tablename__ = "idempotency_record"
+
+    actor: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, primary_key=True)
+    endpoint: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, primary_key=True)
+    key: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(128), primary_key=True)
+    # Enough to rebuild the response: status plus the body.
+    status_code: sa.orm.Mapped[int] = sa.orm.mapped_column(sa.Integer, nullable=False)
+    response_body: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    expires_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
 
 
 class AuditLog(Base):

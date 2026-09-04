@@ -15,11 +15,20 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+import httpx
 from sqlalchemy.orm import Session
 
 from adapters import filestore
-from adapters.repository import StoreOutcome, promote_to_ready, store_item
+from adapters.db_models import Source as SourceRow
+from adapters.http import FetchError, fetch
+from adapters.repository import (
+    StoreOutcome,
+    last_conditional_state,
+    promote_to_ready,
+    store_item,
+)
 from adapters.sanitize import sanitize_html
+from core.enums import ErrorClass
 from core.models import Item, ItemDraft
 from core.normalize import (
     DedupeAction,
@@ -27,6 +36,7 @@ from core.normalize import (
     normalize,
     with_content_ref,
 )
+from plugins.collectors import rss
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +94,76 @@ def normalise_and_store(
     session.commit()
     LOGGER.info("stored %d draft(s)", len(results))
     return results
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollectionResult:
+    """Outcome of one collection run."""
+
+    succeeded: bool
+    error_class: str | None = None
+    detail: str | None = None
+    drafts: int = 0
+    inserted: int = 0
+    skipped: int = 0
+    not_modified: bool = False
+
+
+def collect_source(
+    session: Session,
+    *,
+    source: SourceRow,
+    client: httpx.Client,
+    tenant_id: str = TENANT,
+) -> CollectionResult:
+    """Fetch, parse, normalise and store one source.
+
+    Failures are returned rather than raised: a failed collection is a normal
+    outcome that has to be recorded on the JobRun with its ErrorClass, and an
+    exception would force every caller to reconstruct that classification.
+    """
+    url = source.url or source.canonical_url
+    if not url:
+        return CollectionResult(
+            succeeded=False,
+            error_class=ErrorClass.PARSE.value,
+            detail="source has no url",
+        )
+
+    try:
+        payload = fetch(
+            url,
+            client=client,
+            source_id=source.id,
+            conditional=last_conditional_state(session, source_id=source.id),
+        )
+    except FetchError as exc:
+        return CollectionResult(
+            succeeded=False, error_class=exc.error_class.value, detail=exc.detail
+        )
+
+    if payload.not_modified:
+        return CollectionResult(succeeded=True, not_modified=True)
+
+    try:
+        drafts = rss.parse(payload)
+    except rss.CollectorError as exc:
+        return CollectionResult(
+            succeeded=False, error_class=exc.error_class.value, detail=exc.detail
+        )
+
+    ingested = normalise_and_store(session, drafts, tenant_id=tenant_id)
+    inserted = sum(
+        1
+        for entry in ingested
+        if entry.outcome.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED)
+    )
+    return CollectionResult(
+        succeeded=True,
+        drafts=len(drafts),
+        inserted=inserted,
+        skipped=len(drafts) - inserted,
+    )
 
 
 def bodies_for(session: Session, items: list[Item]) -> dict[str, str]:

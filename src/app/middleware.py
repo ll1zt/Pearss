@@ -124,11 +124,15 @@ class CorrelationAndAuditMiddleware:
                     audit_id=f"audit-{correlation_id}",
                     actor=_actor(scope),
                     operation=_operation(scope),
+                    # <400 succeeded; any 4xx was refused by us on the caller's
+                    # behalf; only 5xx means we failed. Collapsing 422 into
+                    # "failed" would make a typo in a request body look like a
+                    # server incident in the audit trail.
                     outcome=(
                         AuditOutcome.SUCCEEDED
                         if status < 400
                         else AuditOutcome.REJECTED
-                        if status in AUTH_FAILURE_STATUSES
+                        if status < 500
                         else AuditOutcome.FAILED
                     ),
                     target=scope.get("path"),

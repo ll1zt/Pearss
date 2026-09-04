@@ -29,6 +29,8 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - RSS/Atom 采集：HTTP 抓取（超时/大小上限/ETag 条件请求）+ 五套 fixture 回归
 - RSS 2.0 输出与发布闸门（`pending` 不可见）；FastAPI 应用，`just run` 可启动
 - **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 `docs/adr/0004`）
+- **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集，写操作强制 `Idempotency-Key`，cursor 分页，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
+- **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
 ### 尚未接线
 
@@ -145,6 +147,36 @@ curl -H "Authorization: Bearer $PEARSS_API_TOKEN" http://127.0.0.1:8000/v1/items
 - **审计**：写操作与 401/403 拒绍记入 `audit_log`（含 actor 与 correlation id）；
   普通读不记录，因为 AuditLog 是永久保留的事实源
 - **关联**：响应回显 `X-Request-ID`；入站值不安全（含 CRLF 等）时换用生成的值
+
+## 添加订阅源
+
+```bash
+TOKEN=$(grep '^PEARSS_API_TOKEN=' .env | cut -d= -f2)
+
+# 1. 建源（写操作必须带 Idempotency-Key）
+curl -sS -X POST http://127.0.0.1:8000/v1/sources \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://planetpython.org/rss20.xml",
+    "schedule_policy": {"type": "adaptive", "min": "15m", "max": "24h"}
+  }'
+
+# 2. 立即采集一次（返回入库条数）
+curl -sS -X POST "http://127.0.0.1:8000/v1/sources/<id>:trigger" \
+  -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $(uuidgen)"
+
+# 3. 看列表
+curl -sS "http://127.0.0.1:8000/v1/sources?limit=20" -H "Authorization: Bearer $TOKEN"
+```
+
+行为要点：
+
+- **重试安全**：同一个 `Idempotency-Key` 重发不会建第二个源，响应会带 `Idempotent-Replay: true`
+- **URL 去重**：`canonical_url` 剔掉追踪参数后作为唯一键，同一 feed 带不同 `?utm_*` 不会重复入库
+- **`schedule_policy` 严格校验**：未知键会被拒（`interwal` 这种拼错不会静默变成无间隔）
+- **删除是软删**：已发布条目的 GUID 冻结且客户端已缓存，不能随源一起消失
 
 ## NetNewsWire 接入
 

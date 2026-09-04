@@ -132,3 +132,23 @@ class AuditOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     REJECTED = "rejected"
     FAILED = "failed"
+
+
+class TrustLevel(StrEnum):
+    """Recorded operator intent about a source.
+
+    The hard rule, from docs/domain/data-model.md: this never makes fetched
+    content trusted. A `trusted` source's body is still untrusted input —
+    AGENTS.md is explicit that external pages and RSS bodies must never be
+    treated as instructions, and a per-source flag that silently flipped that
+    would be the most dangerous possible reading of the field.
+
+    Nothing currently branches on this value. It is stored and surfaced so the
+    distinction exists in the data before any behaviour depends on it; giving
+    it effects requires an ADR, because the only behaviour it could plausibly
+    change is a security default.
+    """
+
+    STANDARD = "standard"
+    TRUSTED = "trusted"
+    RESTRICTED = "restricted"

@@ -36,7 +36,10 @@ P1_TABLES = {
 # Added by migration 0002 when the Reader API was promoted to P1 (ADR 0004).
 READER_TABLES = {"read_state", "reader_credential"}
 
-EXPECTED_TABLES = P1_TABLES | READER_TABLES
+# Added by migration 0003 for the Core API.
+API_TABLES = {"idempotency_record"}
+
+EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES
 
 
 @pytest.fixture
