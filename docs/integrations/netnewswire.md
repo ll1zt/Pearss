@@ -86,7 +86,7 @@ POST -> 表单字段 T=<token>
 
 凭据由环境变量注入（`PEARSS_READER_USERNAME` / `PEARSS_READER_PASSWORD`），库内只存 scrypt 哈希。**改密码会使 token 失效**，所有已登录客户端需重新登录。
 
-item ID 对外发送完整的 32 字符（128-bit），不截断为 Reader 传统的 16 字符——理由见 ADR 0005。
+item ID 对外是**十进制数字**（内部 id 前 15 位十六进制，60-bit），不是内部那个 32 字符的 128-bit 值。原因很实际：NNW 对 `stream/items/ids` 的返回值做 `Int(id)!`，无法解析的值会被**静默丢弃**——表现为订阅源能看到、文章一条没有。各端点的具体格式差异见 ADR 0006。
 
 ### 状态写回
 

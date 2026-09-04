@@ -1,7 +1,8 @@
 # 0005 · Reader API 的凭据与 item ID 映射
 
-- 状态：accepted
+- 状态：**部分 superseded**（本文「item ID 映射」一节已被 [ADR 0006](0006-reader-api-ids-must-be-decimal.md) 取代；凭据部分仍有效）
 - 日期：2026-09-03
+- 修订：2026-09-04（标注被取代部分，不重写原文）
 - 依赖：ADR 0004（C4 提前到 P1）
 
 ## 背景
@@ -44,6 +45,12 @@ token = HMAC-SHA256(key = username + scrypt_hash, msg = "")
 | 密码明文存库 | 违反 §10.5 与 AGENTS.md 的密钥规则 |
 
 ### 2. item ID 双方都发 32 字符，不截断
+
+> ⚠️ **本节已被 ADR 0006 取代。** 下面的「NNW 实测不校验位数」是错误假设：
+> 接入 NNW 时它丢弃了全部条目（订阅可见但无文章）。真相是 NNW 对
+> `stream/items/ids` 的返回值做 `Int(articleID)!`，只接受能塞进 64-bit 的十进制数。
+> 现改为对外暴露内部 id 前 15 位十六进制（60-bit）的十进制形式。
+> 保留本节原文是为了记下这个判断是怎么错的。
 
 我们的 `item.id` 是 SHA-256 前 32 字符（128-bit），比 Reader 约定的 16 字符（64-bit）长一倍。**对外完整发送，不截断**：
 

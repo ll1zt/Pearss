@@ -329,7 +329,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 开发 shell 实现 | pkgs.mkShell，不引入 devenv | 可逆 | devenv 的 root 取 $PWD，纯求值为空会迫使 CI 加 --impure（ADR 0002） |
 | RSS 正文转义 | CDATA 原样透传 + lxml 生成 | 可逆 | 保留阅读体验；依赖 lxml 的 .text 转义防注入（ADR 0003） |
 | Reader API 时机 | C4 从 P3 提前到 P1 | 难逆 | 标准 RSS 无已读回写通道，缺了它多设备不可用（ADR 0004） |
-| Reader item ID | 对外发完整 32 字符，不截断为 16 | 不可逆 | 截断会碰撞，且使客户端已存 ID 失效（ADR 0005） |
+| Reader item ID | 对外发内部 id 前 15 位十六进制（60-bit）的十进制形式 | 不可逆 | NNW 对 ids 做 `Int(id)!`，128-bit hex 会被全部丢弃（ADR 0006） |
 
 ## 9. 技术选型
 
