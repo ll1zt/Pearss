@@ -85,8 +85,19 @@ migrate:
     uv run alembic upgrade head
 
 # Verify every migration upgrades and downgrades cleanly.
+# Verify every migration upgrades and downgrades cleanly, against a throwaway
+# database. This must never touch the configured one: `downgrade base` drops
+# every table, and item and read_state are fact sources. Running this recipe
+# against ./data/pearss.db destroyed a populated database once, which is why
+# the target is pinned to a temporary file and the environment variable is
+# overridden rather than inherited.
 migrate-check:
-    @echo "migrate-check: verifying upgrade head, then full downgrade, then up again"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    echo "migrate-check: verifying on a throwaway database (configured one was ${PEARSS_DATABASE_URL:-<default>})"
+    export PEARSS_DATABASE_URL="sqlite+pysqlite:///$tmp/migrate_check.db"
     uv run alembic upgrade head
     uv run alembic downgrade base
     uv run alembic upgrade head
