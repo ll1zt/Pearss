@@ -642,3 +642,87 @@ def test_scheduler_can_be_disabled(
         assert not scheduler_enabled(), value
     monkeypatch.setenv("PEARSS_SCHEDULER_ENABLED", "1")
     assert scheduler_enabled()
+
+
+@pytest.mark.integration
+def test_orphaned_running_runs_are_reaped_on_start(
+    session_factory: sessionmaker[Session], fake_feed: httpx.Client
+) -> None:
+    """A run left `running` by a dead process is never closed by anyone.
+
+    Without reaping, the history keeps showing work in progress that stopped
+    existing hours ago — and eight such rows accumulated in practice before
+    this existed.
+    """
+    import asyncio
+
+    from app.scheduler import Scheduler
+
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+        job_id = ensure_collect_job(
+            session,
+            source_id="s1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        create_job_run(
+            session, run_id="orphan", job_id=job_id, correlation_id="c1", at="x"
+        )
+        claim_job_run(session, run_id="orphan", at="2020-01-01T00:00:00.000000Z")
+        session.commit()
+
+    scheduler = Scheduler(session_factory, client=fake_feed, tick_seconds=3600)
+    asyncio.run(scheduler.start())
+
+    with session_factory() as session:
+        row = session.execute(
+            sa.text(
+                "select status, error_class, finished_at from job_run where id='orphan'"
+            )
+        ).one()
+    assert row[0] == "timed_out"
+    assert row[1] == "network"
+    assert row[2] is not None
+
+
+@pytest.mark.integration
+def test_a_live_run_is_not_reaped(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Only runs older than the reap window are touched.
+
+    Reaping a run that is genuinely in flight would mark live work failed.
+    """
+    from datetime import timedelta
+
+    from adapters.repository import reap_orphaned_runs
+
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+        job_id = ensure_collect_job(
+            session,
+            source_id="s1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        create_job_run(
+            session, run_id="live", job_id=job_id, correlation_id="c1", at="x"
+        )
+        # Claimed just now, so it is inside the reap window.
+        claim_job_run(
+            session,
+            run_id="live",
+            at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+        )
+        session.commit()
+
+        reaped = reap_orphaned_runs(
+            session, older_than=datetime.now(UTC) - timedelta(seconds=30)
+        )
+        session.commit()
+        assert reaped == 0
+        status = session.execute(
+            sa.text("select status from job_run where id='live'")
+        ).scalar()
+    assert status == "running"

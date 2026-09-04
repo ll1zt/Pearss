@@ -25,7 +25,7 @@ import os
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy.orm import Session, sessionmaker
@@ -39,6 +39,7 @@ from adapters.repository import (
     ensure_collect_job,
     finish_job_run,
     last_collect_at,
+    reap_orphaned_runs,
     update_gaps_for_source,
 )
 from app.pipeline import CollectionResult, collect_source
@@ -271,6 +272,26 @@ class Scheduler:
     async def start(self) -> None:
         if self._task is not None:
             return
+
+        # Reap first: a run left `running` by a crashed process is never closed
+        # by anyone, so the history would keep showing work in progress that
+        # stopped existing hours ago. Anything still running after one full
+        # interval plus slack is genuinely gone.
+        def reap() -> int:
+            with self._session_factory() as session:
+                reaped = reap_orphaned_runs(
+                    session,
+                    older_than=datetime.now(UTC)
+                    - timedelta(seconds=self._tick_seconds * 4),
+                )
+                session.commit()
+            return reaped
+
+        reaped = await asyncio.to_thread(reap)
+        if reaped:
+            LOGGER.warning(
+                "timed out %d run(s) left running by a previous process", reaped
+            )
         self._task = asyncio.create_task(self._loop(), name="pearss-scheduler")
         LOGGER.info("scheduler started, ticking every %.0fs", self._tick_seconds)
 
