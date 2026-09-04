@@ -123,6 +123,29 @@ PEARSS_PORT=8000
 服务跑在 `nix develop` 里，与 CI 用同一套解释器与工具链；崩溃自动重启，
 但有次数上限（超出则放弃而不是无限刷日志）。单元文件见 `deploy/pearss.service`。
 
+## Core API 鉴权
+
+`/v1` 与 `/internal/*` 使用独立的 bearer token，与 Reader API 凭据互不相通：
+
+```bash
+PEARSS_API_TOKEN=<随机>        # 读 + 写
+PEARSS_API_READ_TOKEN=<随机>   # 可选：仅读
+```
+
+生成：`uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+```bash
+curl -H "Authorization: Bearer $PEARSS_API_TOKEN" http://127.0.0.1:8000/v1/items
+```
+
+行为约定：
+
+- **fail-closed**：未配置 `PEARSS_API_TOKEN` 时所有 Core API 请求被拒，启动日志会提示
+- **scope 分离**（AGENTS.md）：read-only token 写操作返回 403
+- **审计**：写操作与 401/403 拒绍记入 `audit_log`（含 actor 与 correlation id）；
+  普通读不记录，因为 AuditLog 是永久保留的事实源
+- **关联**：响应回显 `X-Request-ID`；入站值不安全（含 CRLF 等）时换用生成的值
+
 ## NetNewsWire 接入
 
 RSS 输出与 Reader API 都已可用，两条路径用途不同：
