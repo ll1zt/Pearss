@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
@@ -55,14 +56,22 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
         engine.dispose()
 
 
+API_TOKEN = "test-write-token"
+READ_TOKEN = "test-read-token"
+
+
 @pytest.fixture
-def app(session_factory: sessionmaker[Session]) -> FastAPI:
+def app(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> FastAPI:
+    monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("PEARSS_API_READ_TOKEN", READ_TOKEN)
     return create_app(session_factory)
 
 
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """An async client bound straight to the ASGI app.
+    """An async client bound straight to the ASGI app, authenticated as writer.
 
     ASGITransport is async-only, so a sync httpx.Client cannot use it. Binding
     to the app rather than a port keeps requests in-process, and using the
@@ -70,7 +79,31 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     instead of being masked by a test client.
     """
     transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {API_TOKEN}"},
+    ) as opened:
+        yield opened
+
+
+@pytest_asyncio.fixture
+async def anonymous_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """A client with no credentials, for asserting refusals."""
+    transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as opened:
+        yield opened
+
+
+@pytest_asyncio.fixture
+async def read_only_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """A client holding only the read scope."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {READ_TOKEN}"},
+    ) as opened:
         yield opened
 
 
@@ -216,3 +249,172 @@ async def test_concurrent_feed_requests_do_not_serialise(app: FastAPI) -> None:
 
     # Generous bound: this is a smoke test for serialisation, not a benchmark.
     assert elapsed < 5.0, f"10 concurrent feed requests took {elapsed:.2f}s"
+
+
+# --------------------------------------------------------------------------
+# Authentication and scopes
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_write_without_credentials_is_refused(
+    anonymous_client: httpx.AsyncClient,
+) -> None:
+    response = await anonymous_client.post("/internal/items", json=draft_payload())
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_write_with_a_bad_token_is_refused(
+    app: FastAPI,
+) -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": "Bearer not-the-token"},
+    ) as opened:
+        response = await opened.post("/internal/items", json=draft_payload())
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_read_only_token_cannot_write(
+    read_only_client: httpx.AsyncClient,
+) -> None:
+    # The point of splitting scopes: a reader-shaped credential must not be
+    # able to mutate the corpus.
+    response = await read_only_client.post("/internal/items", json=draft_payload())
+    assert response.status_code == 403
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_read_only_token_can_read(client: httpx.AsyncClient) -> None:
+    assert (await client.get("/healthz")).status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_auth_failure_uses_the_documented_error_envelope(
+    anonymous_client: httpx.AsyncClient,
+) -> None:
+    response = await anonymous_client.post("/internal/items", json=draft_payload())
+    error = response.json()["detail"]["error"]
+    assert error["code"] == "unauthenticated"
+    assert "message" in error and "suggestion" in error
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_openapi_declares_the_bearer_scheme(
+    client: httpx.AsyncClient,
+) -> None:
+    # API-first: the spec is the source of truth the MCP surface is generated
+    # from, so an undocumented auth scheme would propagate into the tools.
+    spec = (await client.get("/openapi.json")).json()
+    assert "bearerAuth" in spec.get("components", {}).get("securitySchemes", {})
+
+
+# --------------------------------------------------------------------------
+# Correlation and audit
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_response_echoes_a_generated_request_id(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/healthz")
+    assert response.headers.get("x-request-id")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_inbound_request_id_is_honoured_and_echoed(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/healthz", headers={"X-Request-ID": "trace-abc-123"})
+    assert response.headers.get("x-request-id") == "trace-abc-123"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_hostile_request_id_is_replaced_not_reflected(
+    client: httpx.AsyncClient,
+) -> None:
+    # Newlines in a header value would forge log lines and could split the
+    # response. The request must still succeed, with a generated id.
+    response = await client.get("/healthz", headers={"X-Request-ID": "ok\r\nX-Fake: 1"})
+    echoed = response.headers.get("x-request-id", "")
+    assert "\r" not in echoed and "\n" not in echoed
+    assert echoed != "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_write_is_audited_with_actor_and_correlation(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    response = await client.post("/internal/items", json=draft_payload())
+    assert response.status_code == 200
+    correlation_id = response.headers.get("x-request-id")
+
+    with app.state.session_factory() as session:
+        rows = session.execute(
+            sa.text(
+                "select actor, operation, outcome, correlation_id, args_redacted"
+                " from audit_log"
+            )
+        ).fetchall()
+
+    assert rows, "a write should leave an audit record"
+    match = [row for row in rows if row[3] == correlation_id]
+    assert match, f"no audit row for correlation {correlation_id}"
+    actor, operation, outcome, _, args = match[0]
+    assert actor == "api:full"
+    assert "internal/items" in operation
+    assert outcome == "succeeded"
+    assert "Bearer" not in args
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_credentials_never_reach_the_audit_log(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    await client.post("/internal/items", json=draft_payload())
+    with app.state.session_factory() as session:
+        args = session.execute(
+            sa.text("select args_redacted from audit_log")
+        ).fetchall()
+    joined = " ".join(row[0] for row in args)
+    assert API_TOKEN not in joined
+    assert "Bearer" not in joined
+    assert "<redacted>" in joined
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reads_are_not_audited_but_refusals_are(
+    app: FastAPI, client: httpx.AsyncClient, anonymous_client: httpx.AsyncClient
+) -> None:
+    # AuditLog is a fact source kept forever, so routine reads would grow it
+    # for no investigative benefit. A refused request is the opposite: worth
+    # retaining.
+    await client.get("/feeds/default.xml")
+    with app.state.session_factory() as session:
+        after_read = session.execute(sa.text("select count(*) from audit_log")).scalar()
+
+    await anonymous_client.post("/internal/items", json=draft_payload())
+    with app.state.session_factory() as session:
+        after_refusal = session.execute(
+            sa.text("select count(*) from audit_log")
+        ).scalar()
+
+    assert after_read == 0
+    assert after_refusal == 1
