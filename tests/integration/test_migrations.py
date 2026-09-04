@@ -154,7 +154,10 @@ PROBE_STATEMENTS: dict[tuple[str, str], str] = {
         "item",
         "publish_status",
     ): "insert into item (id, publish_status) values ('probe', ?)",
-    ("source", "type"): "insert into source (id, type) values ('probe', ?)",
+    (
+        "source",
+        "type",
+    ): "insert into source (id, type, canonical_url) values ('probe', ?, 'https://p.example/f')",
     ("job_run", "status"): "insert into job_run (id, status) values ('probe', ?)",
 }
 
@@ -196,9 +199,20 @@ def test_error_class_taxonomy_is_accepted(alembic_config: Config) -> None:
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(
-            "insert into source (id, type, schedule_policy, status, tenant_id,"
-            " created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)",
-            ("s1", "rss", "{}", "active", "default", "now", "now"),
+            "insert into source (id, type, url, canonical_url, schedule_policy,"
+            " status, tenant_id, created_at, updated_at)"
+            " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "s1",
+                "rss",
+                "https://a.example/feed",
+                "https://a.example/feed",
+                "{}",
+                "active",
+                "default",
+                "now",
+                "now",
+            ),
         )
         for index, error_class in enumerate(
             ["network", "parse", "structure_changed", "blocked", "auth"]
@@ -211,3 +225,100 @@ def test_error_class_taxonomy_is_accepted(alembic_config: Config) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+@pytest.mark.integration
+def test_canonical_url_cannot_be_null(alembic_config: Config) -> None:
+    """The dedupe key must be non-null or the constraint stops covering rows.
+
+    Regression: canonical_url was nullable while sitting in a UNIQUE
+    constraint, and SQL treats NULLs as distinct — so any number of sources
+    could share one URL as long as that column was left empty, which is
+    exactly what hand-written inserts produced.
+    """
+    command.upgrade(alembic_config, "head")
+    url = alembic_config.get_main_option("sqlalchemy.url") or ""
+    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
+
+    connection = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "insert into source (id, type, url, canonical_url,"
+                " schedule_policy, status, tenant_id, created_at, updated_at)"
+                " values ('null-key', 'rss', 'https://n.example/f', NULL,"
+                " '{}', 'active', 'default', 'now', 'now')"
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_duplicate_canonical_url_is_rejected(alembic_config: Config) -> None:
+    command.upgrade(alembic_config, "head")
+    url = alembic_config.get_main_option("sqlalchemy.url") or ""
+    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
+
+    insert = (
+        "insert into source (id, type, url, canonical_url, schedule_policy,"
+        " status, tenant_id, created_at, updated_at)"
+        " values (?, 'rss', ?, ?, '{}', 'active', 'default', 'now', 'now')"
+    )
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            insert, ("dup-1", "https://d.example/f", "https://d.example/f")
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert, ("dup-2", "https://d.example/f", "https://d.example/f")
+            )
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_migration_0004_backfills_without_deleting(tmp_path: Path) -> None:
+    """A migration that destroyed published rows could not be re-run safely.
+
+    Rows with no URL at all get a synthetic `legacy://` key rather than being
+    deleted, because deleting a source cascades to its items and their read
+    states — and those items may already be cached by a client under a frozen
+    GUID.
+    """
+    db_path = tmp_path / "backfill.db"
+    url = f"sqlite+pysqlite:///{db_path}"
+    config = Config(str(MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", url)
+
+    command.upgrade(config, "0003")
+
+    connection = sqlite3.connect(db_path)
+    insert = (
+        "insert into source (id, type, url, canonical_url, schedule_policy,"
+        " status, tenant_id, created_at, updated_at)"
+        " values (?, 'rss', ?, ?, '{}', 'active', 'default', 'now', 'now')"
+    )
+    # One row with a url but no canonical key, one with neither.
+    connection.execute(insert, ("has-url", "https://a.example/f", None))
+    connection.execute(insert, ("no-url", None, None))
+    connection.commit()
+    connection.close()
+
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        rows = dict(
+            connection.execute("select id, canonical_url from source").fetchall()
+        )
+    finally:
+        connection.close()
+
+    # Nothing deleted.
+    assert set(rows) == {"has-url", "no-url"}
+    # Resolvable from the url where one existed.
+    assert rows["has-url"] == "https://a.example/f"
+    # Otherwise a synthetic key that still participates in the constraint.
+    assert rows["no-url"] == "legacy://no-url"

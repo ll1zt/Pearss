@@ -37,7 +37,7 @@ from app.auth import Principal, read_required, write_required
 from app.pipeline import collect_source
 from core.enums import SourceStatus, SourceType, TrustLevel
 from core.models import schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import canonicalize_url
+from core.normalize import source_canonical_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -223,12 +223,14 @@ class SourceCreate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _valid_url(cls, value: str) -> str:
-        # Canonicalising at the boundary means the stored value is the one the
-        # uniqueness constraint compares, so the same feed with different
-        # tracking parameters cannot create two sources.
+    def _valid_url(cls, value: str, info: Any) -> str:
+        # Validating against the dedupe key rather than a generic URL parser:
+        # rss and web sources must carry a canonicalisable URL, while agent
+        # sources legitimately carry a synthetic `agent://<name>` instead.
+        source_type = info.data.get("type", SourceType.RSS)
+        kind = getattr(source_type, "value", source_type)
         try:
-            canonicalize_url(value)
+            source_canonical_key(source_type=str(kind), url=value)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         return value
@@ -343,7 +345,7 @@ def add_source(
         policy_json = schedule_policy_to_json(
             schedule_policy_from_json(body.schedule_policy)
         )
-        canonical = canonicalize_url(body.url)
+        canonical = source_canonical_key(source_type=body.type.value, url=body.url)
     except ValueError as exc:
         raise api_error(
             status_code=422,

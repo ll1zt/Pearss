@@ -80,9 +80,10 @@ class Source(Base):
         sa.String(ENUM_LENGTHS["source_type"]), nullable=False
     )
     url: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
-    canonical_url: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.Text, nullable=True
-    )
+    # NOT NULL because this is the dedupe key. A nullable column in a unique
+    # constraint is not covered by it — SQL treats NULLs as distinct — so a
+    # row without one could duplicate any other, silently.
+    canonical_url: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     # Retained in P1 even though the plugin registry arrives in P2, so a web
     # source can record which collector parsed it from the start.
     parser_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(

@@ -155,6 +155,38 @@ def normalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", cleaned).strip()
 
 
+def source_canonical_key(*, source_type: str, url: str | None) -> str:
+    """The dedupe key for a source of the given type.
+
+    rss and web sources key on their canonicalised URL. Agent sources have no
+    URL to key on — they are pushed to, not polled — so they get a synthetic
+    `agent://<name>` key instead.
+
+    The key must never be NULL: it is what the uniqueness constraint compares,
+    and SQL treats NULLs as distinct, so a NULL here would put the row outside
+    the constraint entirely rather than merely leaving a field empty.
+    """
+    if source_type == "agent":
+        if not url or not url.strip():
+            raise ValueError(
+                "agent sources need a name to key on, given as url "
+                "(for example 'agent://newsletter-intake')"
+            )
+        supplied = url.strip()
+        return supplied if supplied.startswith("agent://") else f"agent://{supplied}"
+
+    # Checked against the known set rather than treating anything-not-agent as
+    # rss: a misspelled type would otherwise silently acquire URL semantics.
+    if source_type not in {"rss", "web"}:
+        raise ValueError(
+            f"unknown source type {source_type!r}; expected rss, web or agent"
+        )
+
+    if not url:
+        raise ValueError(f"{source_type} sources require a url")
+    return canonicalize_url(url)
+
+
 def plain_text(html: str) -> str:
     """Reduce markup to the text a reader would see.
 
