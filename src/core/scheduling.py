@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import itertools
 import math
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from core.models import SchedulePolicy
 
@@ -115,6 +117,90 @@ def observed_gaps(timestamps: list[float]) -> list[float]:
         for earlier, later in itertools.pairwise(ordered)
         if later > earlier
     ]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScheduleDecision:
+    """What the scheduler concluded about one source."""
+
+    due: bool
+    interval_seconds: float
+    # When the next attempt becomes due. None when `due` is True, since the
+    # answer to "when" is "now".
+    next_due_at: datetime | None
+    consecutive_failures: int
+
+
+def decide_schedule(
+    policy: SchedulePolicy,
+    *,
+    last_fetch_at: datetime | None,
+    observed_update_gaps: list[float] | None = None,
+    consecutive_failures: int = 0,
+    now: datetime,
+) -> ScheduleDecision:
+    """Whether a source should be collected now, and if not, when.
+
+    Pure by design: the answer is computed from the policy and the recorded
+    history rather than from a stored next-run time, so changing a policy,
+    backing off after a failure, or restoring the database from backup all
+    become self-correcting. A stored schedule would need someone to remember
+    to update it in each of those cases.
+
+    `last_fetch_at` is None for a source that has never been fetched, which is
+    treated as due: a newly added source should be collected without waiting
+    out a full interval first.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+
+    interval = next_interval(policy, observed_update_gaps)
+    # Fold the backoff in for fixed policies too. next_interval applies it for
+    # adaptive ones via the policy's own counter, but a fixed source that keeps
+    # failing must not be retried on its normal cadence either.
+    if policy.type != "adaptive" and consecutive_failures > 0:
+        interval = min(
+            interval * _backoff_multiplier(consecutive_failures),
+            float(MAX_BACKOFF_SECONDS),
+        )
+
+    if last_fetch_at is None:
+        return ScheduleDecision(
+            due=True,
+            interval_seconds=interval,
+            next_due_at=None,
+            consecutive_failures=consecutive_failures,
+        )
+
+    if last_fetch_at.tzinfo is None:
+        raise ValueError("last_fetch_at must be timezone-aware")
+
+    elapsed = (now - last_fetch_at).total_seconds()
+    if elapsed < 0:
+        # A fetch recorded in the future means clock skew or a restored backup
+        # ahead of the wall clock. Treat it as due rather than waiting out a
+        # negative interval, which would never resolve.
+        return ScheduleDecision(
+            due=True,
+            interval_seconds=interval,
+            next_due_at=None,
+            consecutive_failures=consecutive_failures,
+        )
+
+    if is_due(elapsed, interval):
+        return ScheduleDecision(
+            due=True,
+            interval_seconds=interval,
+            next_due_at=None,
+            consecutive_failures=consecutive_failures,
+        )
+
+    return ScheduleDecision(
+        due=False,
+        interval_seconds=interval,
+        next_due_at=last_fetch_at + timedelta(seconds=interval),
+        consecutive_failures=consecutive_failures,
+    )
 
 
 def is_due(elapsed_seconds: float, interval_seconds: float) -> bool:
