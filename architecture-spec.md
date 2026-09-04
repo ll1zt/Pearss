@@ -191,7 +191,11 @@ schedule_policy: { type: fixed, interval: 30m }                  # 用户设定
 schedule_policy: { type: adaptive, min: 15m, max: 24h }          # 算法自动
 ```
 
-adaptive 算法（P1 内建）：按 RawFetch 历史计算源的平均更新间隔 → 映射到抓取间隔（夹在 min/max 之间）→ 连续失败指数退避。该统计函数为**纯函数**，输入间隔序列、输出抓取间隔，是单元测试样板。
+adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的平均更新节奏 → 映射到抓取间隔（夹在 min/max 之间）→ 连续失败指数退避。
+>
+> 原定「按 RawFetch 历史」，实现时改为按 `item.published_at`：RawFetch 记录的是**我们何时抓**，用它推抓取间隔会形成反馈回路（抓得少 → 看到的更新少 → 抓得更少），而条目自己的发布时间直接度量源产出内容的频率，不受抓取节奏扭曲。见 ADR 0009。
+
+该统计函数为**纯函数**，输入间隔序列、输出抓取间隔，是单元测试样板。
 
 ## 5. 分期路线
 
@@ -305,6 +309,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 暴露方式 | 分类挂载 + 按需过滤，拒绝动态转发入口 | 可逆 | 保留 schema 校验 |
 | 大内容传输 | Resource / ID 引用 | 难逆 | 上下文预算 |
 | 调度模型 | 声明式 Job + schedule_policy 单策略 | 难逆 | 消除伪三模式；adaptive 数据自给 |
+| 下次运行时间 | 从 policy + 历史推导，不落库 | 可逆但成本高 | 改 policy/退避/恢复备份均自动自洽（ADR 0009） |
 | 审计位置 | Core API 层中间件 | 可逆 | 覆盖一切调用方 |
 | 网关时机 | P3 随子模块拆分引入 | 可逆 | 单 server 阶段 YAGNI |
 | 插件落地 | 准插件先行，P2 冻结 hookspec | 可逆 | Rule of Three |
@@ -345,7 +350,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 进程内插件 | pluggy | P2 引入注册表 | hookspec 模式经 pytest 验证 |
 | 元数据库 | SQLite + SQLAlchemy + Alembic | P3 按需 PostgreSQL | 单写者 1k–5k wps 封顶 |
 | 大产物 | 本地文件系统 | P3 MinIO | 永不入 DB |
-| 任务队列 | APScheduler + DB JobStore | P3 Dramatiq + Redis | 换触发器不动 Job 模型 |
+| 任务队列 | **自写 tick + 推导式调度**（不用 APScheduler） | P3 按需 Dramatiq + Redis | 换触发器不动 Job 模型；存 next_run_time 会与推导结果成两个事实源（ADR 0009） |
 | RSS/抓取 | feedparser / httpx+selectolax | Playwright 仅 crawler profile | 渲染隔离在 fetch hook |
 | 翻译 | LLM API 插件（默认） | DeepL / 本地模型可换 | 成本低，顺带摘要 |
 | TTS | Kokoro（本地 CPU，Apache 2.0） | Piper（GPL 注意）/ 云 API | 处理器插件 P3 引入 |
