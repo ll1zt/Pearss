@@ -255,8 +255,21 @@ def normalize(
         raise ValueError("now must be timezone-aware")
 
     url = canonicalize_url(draft.canonical_url)
-    body = plain_text(draft.content)
-    title, title_derived = _resolve_title(draft.title, body)
+    # Two different forms of the content, on purpose:
+    #
+    #   body  — the source's own markup, which is what a reader should see,
+    #           with links and formatting intact. The caller sanitises it before
+    #           storing (see app.pipeline), because core must not depend on an
+    #           HTML sanitiser and the cleaned form is not what we want to show.
+    #   text  — markup stripped, used only where structure would get in the
+    #           way: deriving a title from it, and detecting that a body had no
+    #           recoverable text.
+    #
+    # content_hash normalises the markup itself, so dedupe is unaffected by
+    # storing the richer form.
+    body = draft.content
+    text = plain_text(body)
+    title, title_derived = _resolve_title(draft.title, text)
     timestamp = now or datetime.now(UTC)
 
     item = Item(
@@ -289,9 +302,11 @@ def normalize(
         item=item,
         body=body,
         title_derived=title_derived,
-        # An empty cleaned body with a non-empty draft means the content did not
-        # survive cleaning, which is worth distinguishing downstream.
-        content_missing=not body and bool(draft.content),
+        # Tests the *cleaned* text, not the raw body: markup with no words in
+        # it, such as an image-only entry, has a non-empty body but nothing a
+        # reader could read, and that is a different problem from a source that
+        # legitimately publishes no body.
+        content_missing=not text and bool(draft.content),
     )
 
 

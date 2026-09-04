@@ -172,9 +172,26 @@ def test_untitled_when_there_is_nothing_to_derive_from() -> None:
 
 
 @pytest.mark.unit
-def test_body_is_flattened_from_markup() -> None:
-    result = normalize(draft(content="<p>One</p><p>Two</p>"), tenant_id=TENANT)
-    assert result.body == "One Two"
+def test_body_keeps_the_source_markup() -> None:
+    # The body is what a reader displays, so links and formatting must survive.
+    # Flattening it here would make the CDATA passthrough in the RSS output
+    # pointless, since there would be no markup left to preserve.
+    html = '<p>One</p><p>Two <a href="https://e.com/x">link</a></p>'
+    result = normalize(draft(content=html), tenant_id=TENANT)
+    assert result.body == html
+
+
+@pytest.mark.unit
+def test_dedupe_is_unaffected_by_markup_differences() -> None:
+    # The counterparty to keeping markup: two sources carrying the same article
+    # with different HTML must still hash identically, or cross-source dedupe
+    # (B2) silently stops working.
+    plain = draft(content="Same body here.")
+    marked = draft(content="<p>Same   body</p> <p>here.</p>")
+    assert (
+        normalize(plain, tenant_id=TENANT).item.content_hash
+        == normalize(marked, tenant_id=TENANT).item.content_hash
+    )
 
 
 @pytest.mark.unit

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from adapters import filestore
 from adapters.repository import StoreOutcome, promote_to_ready, store_item
+from adapters.sanitize import sanitize_html
 from core.models import Item, ItemDraft
 from core.normalize import (
     DedupeAction,
@@ -63,8 +64,14 @@ def normalise_and_store(
         result = normalize(draft, tenant_id=tenant_id, now=now)
         item = result.item
 
+        # Sanitised here, at the boundary where untrusted markup becomes
+        # stored content. Every reader of the store — RSS, the Reader API, any
+        # future output — therefore serves safe HTML without having to remember
+        # to sanitise, which is the failure mode a per-render sanitiser invites.
         if result.body:
-            item = with_content_ref(item, filestore.store_body(result.body))
+            item = with_content_ref(
+                item, filestore.store_body(sanitize_html(result.body))
+            )
 
         outcome = store_item(session, item)
         if outcome.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED):
