@@ -14,6 +14,10 @@ from dataclasses import dataclass
 import httpx
 
 from adapters.raw_payload import ConditionalState, RawPayload
+
+# Re-exported: fetch() takes one, so it is part of this module's public surface
+# even though the type lives in raw_payload to keep the repository off httpx.
+__all__ = ["ConditionalState", "FetchError", "FetchPolicy", "fetch"]
 from core.enums import ErrorClass
 from core.errors import classify
 

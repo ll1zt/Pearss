@@ -68,9 +68,7 @@ ignore = []
 # FastAPI resolves Form(...) and Query(...) defaults at import time by
 # design; they are not mutable defaults in the usual sense. Scoped to the
 # route modules rather than disabled project-wide.
-"src/app/reader_routes.py" = ["B008"]
-"src/app/auth.py" = ["B008"]
-"src/app/main.py" = ["B008"]
+"src/app/*.py" = ["B008"]
 # S105/S106 key on names containing "password", so a test fixture credential
 # trips them no matter how it is named. The credential is generated per test
 # and injected via monkeypatch; it is never a real secret.
