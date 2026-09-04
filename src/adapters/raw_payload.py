@@ -58,6 +58,19 @@ class RawPayload:
         return self.body.decode(charset or "utf-8", errors="replace")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ConditionalState:
+    """Conditional-request state carried between fetches of one source.
+
+    Lives with RawPayload rather than with the HTTP client so that a caller
+    which only reads stored state — the repository, for instance — does not
+    have to import the network layer to name the type.
+    """
+
+    etag: str | None = None
+    last_modified: str | None = None
+
+
 def _charset_from_content_type(content_type: str) -> str | None:
     for part in content_type.split(";"):
         candidate = part.strip().lower()

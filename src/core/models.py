@@ -11,10 +11,11 @@ a schedule policy *means*.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from core.enums import ErrorClass, PublishStatus, SourceType
+from core.enums import ErrorClass, PublishStatus, SourceStatus, SourceType, TrustLevel
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -134,9 +135,115 @@ class Source:
     type: SourceType
     url: str | None
     schedule_policy: SchedulePolicy
-    status: str
+    status: SourceStatus
     canonical_url: str | None = None
     parser_plugin_id: str | None = None
+    trust_level: TrustLevel = TrustLevel.STANDARD
+    tenant_id: str = "default"
+
+
+# --------------------------------------------------------------------------
+# schedule_policy serialisation
+#
+# The JSON column's shape is domain structure: a malformed policy must be
+# refused rather than half-accepted, and the scheduler downstream reads the
+# parsed form. Keeping the conversion in core means both the API and the
+# scheduler validate through the same path.
+# --------------------------------------------------------------------------
+
+
+def schedule_policy_from_json(raw: str | dict[str, object]) -> SchedulePolicy:
+    """Parse a stored or supplied schedule policy.
+
+    Accepts already-decoded mappings as well as text, because the API receives
+    a JSON body while the database yields a text column.
+    """
+    data: object = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(data, dict):
+        raise ValueError("schedule_policy must be a JSON object")
+
+    allowed = {"type", "interval", "min", "max"}
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(
+            f"schedule_policy has unknown keys {sorted(unknown)}; "
+            f"allowed are {sorted(allowed)}"
+        )
+
+    kind = data.get("type")
+    if not isinstance(kind, str):
+        raise ValueError("schedule_policy requires a string 'type'")
+
+    if kind == "fixed":
+        interval = data.get("interval")
+        return SchedulePolicy(type="fixed", interval_seconds=_seconds(interval))
+    if kind == "adaptive":
+        return SchedulePolicy(
+            type="adaptive",
+            min_seconds=_seconds(data.get("min")),
+            max_seconds=_seconds(data.get("max")),
+        )
+    raise ValueError(
+        f"schedule_policy type must be 'fixed' or 'adaptive', got {kind!r}"
+    )
+
+
+def schedule_policy_to_json(policy: SchedulePolicy) -> str:
+    """Render a policy in the documented `{type, interval}` / `{type, min, max}`
+    form."""
+    if policy.type == "fixed":
+        payload: dict[str, object] = {
+            "type": "fixed",
+            "interval": _format_seconds(policy.interval_seconds or 0),
+        }
+    else:
+        payload = {
+            "type": "adaptive",
+            "min": _format_seconds(policy.min_seconds or 0),
+            "max": _format_seconds(policy.max_seconds or 0),
+        }
+    return json.dumps(payload, sort_keys=True)
+
+
+def _seconds(value: object) -> int:
+    """Accept either a duration string like `30m` or a whole number of seconds."""
+    if isinstance(value, bool):
+        raise ValueError("duration must be a string like '30m' or seconds")
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError("duration must be positive")
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        for suffix, factor in (
+            ("ms", 0.001),
+            ("s", 1),
+            ("m", 60),
+            ("h", 3600),
+            ("d", 86400),
+        ):
+            if text.endswith(suffix) and len(text) > len(suffix):
+                number = text[: -len(suffix)].strip()
+                try:
+                    parsed = float(number)
+                except ValueError as exc:
+                    raise ValueError(f"invalid duration {value!r}") from exc
+                seconds = int(parsed * factor)
+                if seconds <= 0:
+                    raise ValueError(f"duration must be positive, got {value!r}")
+                return seconds
+        raise ValueError(f"unrecognised duration {value!r}; expected e.g. '30m', '24h'")
+    raise ValueError(
+        f"duration must be a string or integer, got {type(value).__name__}"
+    )
+
+
+def _format_seconds(total: int) -> str:
+    """Render seconds in the largest exact unit, matching the documented style."""
+    for suffix, factor in (("d", 86400), ("h", 3600), ("m", 60)):
+        if total % factor == 0 and total >= factor:
+            return f"{total // factor}{suffix}"
+    return f"{total}s"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

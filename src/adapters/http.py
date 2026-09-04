@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from adapters.raw_payload import RawPayload
+from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.errors import classify
 
@@ -66,14 +66,6 @@ class FetchPolicy:
     total_timeout: float = DEFAULT_TOTAL_TIMEOUT
     max_bytes: int = DEFAULT_MAX_BYTES
     user_agent: str = DEFAULT_USER_AGENT
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ConditionalState:
-    """Conditional-request state carried between fetches of one source."""
-
-    etag: str | None = None
-    last_modified: str | None = None
 
 
 def fetch(

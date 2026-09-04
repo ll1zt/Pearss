@@ -8,6 +8,7 @@ the write path in one place.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -17,11 +18,14 @@ from typing import Any, cast
 from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from adapters.db_models import IdempotencyRecord as IdempotencyRow
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
-from core.enums import ErrorClass, ItemEvent, PublishStatus
+from adapters.db_models import Source as SourceRow
+from adapters.raw_payload import ConditionalState
+from core.enums import ErrorClass, ItemEvent, PublishStatus, SourceStatus
 from core.item_state import TransitionContext, transition
 from core.models import Item
 from core.normalize import DedupeAction, decide_dedupe
@@ -448,6 +452,166 @@ def _read_state_to_domain(row: ReadStateRow) -> ReadStateDomain:
         is_starred=bool(row.is_starred),
         updated_at=_parse(row.updated_at),
     )
+
+
+# --------------------------------------------------------------------------
+# Sources
+# --------------------------------------------------------------------------
+
+
+def derive_source_id(*, tenant_id: str, source_type: str, canonical_url: str) -> str:
+    """Deterministic source id from the identity the uniqueness constraint uses.
+
+    Deriving rather than generating randomly means "add this feed" is idempotent
+    on its own terms: the same URL produces the same id, so a retried request
+    cannot create a second source even before the Idempotency-Key is consulted.
+    """
+    payload = "\x1f".join(("src1", tenant_id, source_type, canonical_url))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def create_source(
+    session: Session,
+    *,
+    source_type: str,
+    url: str,
+    canonical_url: str,
+    schedule_policy: str,
+    tenant_id: str,
+    trust_level: str = "standard",
+    parser_plugin_id: str | None = None,
+    at: str,
+) -> SourceRow:
+    """Insert a source, or return the existing one for this identity.
+
+    Returning the existing row rather than raising is what makes a retried
+    create answer with the same body instead of a 409: the caller's intent was
+    "this source should exist", and after the first request it does.
+    """
+    source_id = derive_source_id(
+        tenant_id=tenant_id, source_type=source_type, canonical_url=canonical_url
+    )
+    existing = session.get(SourceRow, source_id)
+    if existing is not None:
+        return existing
+
+    row = SourceRow(
+        id=source_id,
+        type=source_type,
+        url=url,
+        canonical_url=canonical_url,
+        parser_plugin_id=parser_plugin_id,
+        schedule_policy=schedule_policy,
+        status=SourceStatus.ACTIVE.value,
+        trust_level=trust_level,
+        tenant_id=tenant_id,
+        created_at=at,
+        updated_at=at,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_source(session: Session, source_id: str) -> SourceRow | None:
+    return session.get(SourceRow, source_id)
+
+
+def list_sources(
+    session: Session, *, tenant_id: str, limit: int, offset: int = 0
+) -> list[SourceRow]:
+    """One page of sources, oldest first so a cursor stays stable under inserts."""
+    return list(
+        session.execute(
+            select(SourceRow)
+            .where(SourceRow.tenant_id == tenant_id)
+            .order_by(SourceRow.created_at, SourceRow.id)
+            .limit(limit + 1)
+            .offset(offset)
+        ).scalars()
+    )
+
+
+# --------------------------------------------------------------------------
+# Idempotency
+# --------------------------------------------------------------------------
+
+
+def find_idempotent(
+    session: Session, *, actor: str, endpoint: str, key: str, now: str
+) -> IdempotencyRow | None:
+    """A stored result for this write, if present and unexpired.
+
+    Expired rows read as absent rather than being swept here: clearing them on
+    the read path would make every request pay for maintenance, and a stale row
+    is harmless because the key is unique per actor and endpoint.
+    """
+    row = session.get(IdempotencyRow, (actor, endpoint, key))
+    if row is None:
+        return None
+    if row.expires_at < now:
+        return None
+    return row
+
+
+def store_idempotent(
+    session: Session,
+    *,
+    actor: str,
+    endpoint: str,
+    key: str,
+    status_code: int,
+    response_body: str,
+    created_at: str,
+    expires_at: str,
+) -> None:
+    row = session.get(IdempotencyRow, (actor, endpoint, key))
+    if row is None:
+        session.add(
+            IdempotencyRow(
+                actor=actor,
+                endpoint=endpoint,
+                key=key,
+                status_code=status_code,
+                response_body=response_body,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+        )
+    else:
+        # Overwrite rather than raise: the first response was already delivered,
+        # and a 500 here would surface a normal retry race as a server fault.
+        row.status_code = status_code
+        row.response_body = response_body
+        row.created_at = created_at
+        row.expires_at = expires_at
+
+
+def last_conditional_state(
+    session: Session, *, source_id: str
+) -> ConditionalState | None:
+    """Conditional-request state from the most recent fetch of a source.
+
+    ETag and Last-Modified live on RawFetch, not Source, per
+    docs/domain/data-model.md: they describe what one response said, not what
+    the source is, and a source can in principle be fetched by more than one
+    mechanism. Returns None when nothing has been recorded, which is the same
+    as "make an unconditional request".
+    """
+
+    row = (
+        session.execute(
+            select(RawFetchRow)
+            .where(RawFetchRow.source_id == source_id)
+            .order_by(RawFetchRow.fetched_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    if row is None or not (row.etag or row.last_modified):
+        return None
+    return ConditionalState(etag=row.etag, last_modified=row.last_modified)
 
 
 def count_items(session: Session) -> int:
