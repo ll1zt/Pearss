@@ -1,0 +1,67 @@
+# Pearss — systemd user service.
+#
+# Installed to ~/.config/systemd/user/pearss.service (see `just install-unit`).
+# Runs under the user, so no root is required; combine with
+# `loginctl enable-linger` so it starts at boot and survives logout.
+#
+# Paths are absolute on purpose. A user service gets a minimal PATH that does
+# not reliably include the Nix profile, so a bare `nix` here would fail at
+# start time with a message that looks like a Nix problem rather than a PATH
+# problem.
+
+[Unit]
+Description=Pearss — single-user, agent-first RSS+ system
+Documentation=file://%h/dev/Pearss/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The project directory. Everything relative in .env (the SQLite path, the
+# content-addressed storage directory) resolves against this.
+WorkingDirectory=%h/dev/Pearss
+
+# The environment is the flake's, not the ambient one: `nix develop` gives the
+# service the same interpreter and tooling that CI uses, so "works on my
+# machine" cannot happen for a long-running service.
+#
+# `nix develop` resolves the flake from the working directory, which is why
+# WorkingDirectory above is load-bearing rather than cosmetic. There is no
+# --directory flag to pass instead: neither as a global option nor on the
+# subcommand, on nix 2.34.
+#
+# `just serve` then sources .env and reads the bind address and port from it,
+# which keeps this unit free of host, port and credential specifics.
+ExecStart=/run/current-system/sw/bin/nix develop \
+    --command /run/current-system/sw/bin/just serve
+
+# Restart on any non-zero exit, but give up rather than retry forever: a Nix
+# evaluation or flake-lock problem exits in milliseconds, and unbounded
+# restarting turns a broken commit into a permanent log-spam loop. Fifteen
+# attempts in a minute is exactly what happened when this unit first shipped.
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=120
+StartLimitBurst=5
+NICE=10
+
+# HOME is needed because the unit runs `nix`, which resolves the user profile
+# and the store database under it.
+Environment=HOME=%h
+
+# Modest hardening. The Nix store must stay readable and the project directory
+# writable (SQLite, the body store, .venv), so a full ReadOnlyPaths set is not
+# possible here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+# Enabled by `systemctl --user enable`, with linger so it runs without an
+# active login session.
+WantedBy=default.target

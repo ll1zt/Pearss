@@ -128,6 +128,55 @@ run host="127.0.0.1" port="8000":
     set +a
     exec uv run uvicorn app.main:app --host {{host}} --port {{port}}
 
+# Start the service using configuration from the environment, so a deployment
+# changes .env rather than the command line. This is what the systemd unit
+# calls; keeping it argument-free is what lets one unit file work for any host
+# and port without editing it.
+serve:
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    exec uv run uvicorn app.main:app \
+        --host "${PEARSS_BIND_HOST:-127.0.0.1}" \
+        --port "${PEARSS_PORT:-8000}"
+
+# ---------------------------------------------------------------------------
+# Service (systemd user unit; see deploy/pearss.service)
+# ---------------------------------------------------------------------------
+
+# Install the user unit and enable it. Requires no root; run `just linger`
+# first if the service must survive logout and start at boot.
+install-unit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p ~/.config/systemd/user
+    cp deploy/pearss.service ~/.config/systemd/user/pearss.service
+    systemctl --user daemon-reload
+    systemctl --user enable --now pearss.service
+    echo "installed and started. check with: just service-status"
+
+# Stop and disable the service.
+uninstall-unit:
+    systemctl --user disable --now pearss.service || true
+    rm -f ~/.config/systemd/user/pearss.service
+    systemctl --user daemon-reload
+
+# Keep the service running across logout and boot.
+linger:
+    loginctl enable-linger "$(whoami)"
+
+# Recent log lines from the service.
+# Uses --no-pager so it is usable from an agent or a script.
+service-status:
+    systemctl --user status pearss.service --no-pager || true
+    journalctl --user -u pearss.service -n 30 --no-pager || true
+
+# Restart after changing .env or the code.
+service-restart:
+    systemctl --user restart pearss.service
+
 # ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
