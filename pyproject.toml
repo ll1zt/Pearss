@@ -69,6 +69,10 @@ ignore = []
 # design; they are not mutable defaults in the usual sense. Scoped to the
 # route modules rather than disabled project-wide.
 "src/app/*.py" = ["B008"]
+# Migrations build DDL from SQL identifiers, which cannot be bound as
+# parameters. The names are module constants, and 0005 validates them against
+# an identifier pattern before interpolating.
+"migrations/versions/*.py" = ["S608"]
 # S105/S106 key on names containing "password", so a test fixture credential
 # trips them no matter how it is named. The credential is generated per test
 # and injected via monkeypatch; it is never a real secret.

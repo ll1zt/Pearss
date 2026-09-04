@@ -322,3 +322,86 @@ def test_migration_0004_backfills_without_deleting(tmp_path: Path) -> None:
     assert rows["has-url"] == "https://a.example/f"
     # Otherwise a synthetic key that still participates in the constraint.
     assert rows["no-url"] == "legacy://no-url"
+
+
+@pytest.mark.integration
+def test_timestamp_width_migration_normalises_existing_rows(
+    tmp_path: Path,
+) -> None:
+    """Mixed-width timestamps sort wrongly, so existing rows must be widened.
+
+    '.' (0x2E) is less than 'Z' (0x5A), so `...T05:00:00.000000Z` compares
+    below `...T05:00:00Z` even though both denote the same instant. Every
+    ORDER BY and keyset cursor on these columns compares text, so a column
+    holding both forms is silently mis-ordered.
+    """
+    db_path = tmp_path / "width.db"
+    url = f"sqlite+pysqlite:///{db_path}"
+    config = Config(str(MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", url)
+
+    # Stop before the normalisation and write rows in the old narrow form.
+    command.upgrade(config, "0004")
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "insert into source (id, type, url, canonical_url, schedule_policy, status,"
+        " trust_level, tenant_id, created_at, updated_at)"
+        " values ('s', 'rss', 'https://a/f', 'https://a/f', '{}', 'active',"
+        " 'standard', 'default', '2026-01-01T00:00:00Z',"
+        " '2026-01-01T00:00:00Z')"
+    )
+    connection.execute(
+        "insert into item (id, source_id, guid, content_hash, title, url,"
+        " published_at, publish_status, tenant_id, created_at, updated_at)"
+        " values ('i1', 's', 'g1', 'h1', 't', 'u',"
+        " '2026-08-31T05:00:00Z', 'ready', 'default',"
+        " '2026-09-04T06:11:23.556932Z', '2026-09-04T06:11:23.556932Z')"
+    )
+    connection.commit()
+    narrow = [row[0] for row in connection.execute("select published_at from item")]
+    connection.close()
+    assert narrow == ["2026-08-31T05:00:00Z"], "setup should write a narrow value"
+
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(db_path)
+    widened = [row[0] for row in connection.execute("select published_at from item")]
+    # Already-wide values must be left alone, not widened twice.
+    untouched = [row[0] for row in connection.execute("select created_at from item")]
+    connection.close()
+
+    assert widened == ["2026-08-31T05:00:00.000000Z"]
+    assert untouched == ["2026-09-04T06:11:23.556932Z"]
+
+
+@pytest.mark.integration
+def test_timestamp_width_migration_is_idempotent(tmp_path: Path) -> None:
+    """Re-running must not append a second fractional part."""
+    db_path = tmp_path / "idem.db"
+    url = f"sqlite+pysqlite:///{db_path}"
+    config = Config(str(MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", url)
+
+    command.upgrade(config, "0004")
+    connection = sqlite3.connect(db_path)
+    connection.execute(
+        "insert into source (id, type, url, canonical_url, schedule_policy, status,"
+        " trust_level, tenant_id, created_at, updated_at)"
+        " values ('s', 'rss', 'https://a/f', 'https://a/f', '{}', 'active',"
+        " 'standard', 'default', '2026-01-01T00:00:00Z',"
+        " '2026-01-01T00:00:00Z')"
+    )
+    connection.commit()
+    connection.close()
+
+    command.upgrade(config, "head")
+    command.downgrade(config, "0004")
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(db_path)
+    value = connection.execute("select created_at from source").fetchone()[0]
+    connection.close()
+
+    assert value == "2026-01-01T00:00:00.000000Z"
