@@ -84,10 +84,16 @@ def normalise_and_store(
             )
 
         outcome = store_item(session, item)
-        if outcome.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED):
+        if outcome.action in (
+            DedupeAction.INSERT,
+            DedupeAction.INSERT_RELATED,
+            DedupeAction.UPDATE_PENDING,
+        ):
             # P1 has no processor chain, so the gate has nothing to wait for
             # and items are promoted immediately. When P3 adds a chain, this
             # call moves to the end of that chain; the gate itself is unchanged.
+            # UPDATE_PENDING belongs here too: the row is still unseen, so it
+            # advances on the new content rather than waiting for nothing.
             promote_to_ready(session, [item])
         results.append(Ingested(result=result, outcome=outcome))
 

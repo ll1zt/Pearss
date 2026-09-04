@@ -133,33 +133,62 @@ def find_by_content_hash(session: Session, content_hash: str) -> list[Item]:
     return [row_to_item(row) for row in rows]
 
 
+def find_by_identity(session: Session, *, item_id: str, guid: str) -> list[Item]:
+    """Items that are this same entry, by id or guid.
+
+    Both are checked because the dedupe rule compares either, and a row written
+    by an earlier version of the derivation could match one and not the other.
+    """
+    rows = session.execute(
+        select(ItemRow).where(or_(ItemRow.id == item_id, ItemRow.guid == guid))
+    ).scalars()
+    return [row_to_item(row) for row in rows]
+
+
 def store_item(session: Session, candidate: Item) -> StoreOutcome:
     """Persist `candidate`, applying the dedupe rule.
 
-    The rule is evaluated against every item sharing the candidate's
-    content_hash, not just those from the same source — cross-source
-    duplicates are the case B2 exists to handle.
+    The comparison set is the union of "same entry" and "same content": the
+    first catches an article whose body changed between fetches, the second
+    catches the same article arriving from another source. Neither alone is
+    enough, and content-only matching is what previously let a reworded article
+    fall through to an INSERT that collided on the frozen guid.
     """
-    existing = find_by_content_hash(session, candidate.content_hash)
+    existing = find_by_identity(session, item_id=candidate.id, guid=candidate.guid)
+    for other in find_by_content_hash(session, candidate.content_hash):
+        if all(seen.id != other.id for seen in existing):
+            existing.append(other)
     decision = decide_dedupe(candidate, existing)
 
-    if decision.action is DedupeAction.INSERT:
+    if decision.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED):
         _insert(session, candidate)
-    elif decision.action is DedupeAction.INSERT_RELATED:
-        # Stored, but the relationship to its twin is recorded rather than
-        # left implicit; a future migration can promote this to a relation
-        # table without changing the decision logic.
-        _insert(session, candidate)
-        LOGGER.info(
-            "related item stored: %s duplicates %s", candidate.id, decision.matched_id
-        )
+        if decision.action is DedupeAction.INSERT_RELATED:
+            # Stored, but the relationship to its twin is recorded rather than
+            # left implicit; a future migration can promote this to a relation
+            # table without changing the decision logic.
+            LOGGER.info(
+                "related item stored: %s duplicates %s",
+                candidate.id,
+                decision.matched_id,
+            )
+    elif decision.action is DedupeAction.UPDATE_PENDING:
+        _update_pending(session, candidate, matched_id=decision.matched_id or "")
     else:
-        LOGGER.info(
-            "not stored (%s): %s -> %s",
-            decision.action.value,
-            candidate.id,
-            decision.matched_id,
-        )
+        if decision.action is DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED:
+            # Worth a warning rather than a debug line: the article a reader
+            # sees will differ from the source's current text, and nothing
+            # will fix that by itself.
+            LOGGER.warning(
+                "content changed after publication, keeping the published version: %s",
+                candidate.id,
+            )
+        else:
+            LOGGER.info(
+                "not stored (%s): %s -> %s",
+                decision.action.value,
+                candidate.id,
+                decision.matched_id,
+            )
 
     return StoreOutcome(
         action=decision.action,
@@ -167,6 +196,23 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
         matched_id=decision.matched_id,
         reason=decision.reason,
     )
+
+
+def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> None:
+    """Replace a pending row's content with the freshly fetched version.
+
+    Safe only because nothing has seen it yet: the gate is what makes an
+    in-place content change permissible at all.
+    """
+    row = session.get(ItemRow, matched_id)
+    if row is None:  # pragma: no cover - the lookup above found it
+        return
+    row.title = candidate.title
+    row.url = candidate.url
+    row.content_hash = candidate.content_hash
+    row.content_ref = candidate.content_ref
+    row.published_at = _optional_timestamp(candidate.published_at)
+    row.updated_at = _timestamp(datetime.now(UTC))
 
 
 def _insert(session: Session, item: Item) -> None:
@@ -966,6 +1012,40 @@ def update_gaps_for_source(
         return []
     ordered = sorted(moments)
     return observed_gaps([moment.timestamp() for moment in ordered])
+
+
+def reap_orphaned_runs(session: Session, *, older_than: datetime) -> int:
+    """Time out runs left `running` by a previous process.
+
+    A run is claimed, then collection happens, then it is closed. If the
+    process dies in the middle the row stays `running` forever: nothing will
+    ever close it, and the run history silently accumulates zombies that look
+    like work still in progress.
+
+    Timed out rather than deleted, because the state machine treats a timeout
+    as a terminal outcome and the row is real evidence that an attempt started
+    and never came back.
+    """
+    cutoff = _timestamp(older_than)
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.status == JobRunStatus.RUNNING.value,
+                or_(
+                    JobRunRow.started_at.is_(None),
+                    JobRunRow.started_at < cutoff,
+                ),
+            )
+            .values(
+                status=JobRunStatus.TIMED_OUT.value,
+                finished_at=_timestamp(datetime.now(UTC)),
+                error_class=ErrorClass.NETWORK.value,
+            )
+        ),
+    )
+    return int(result.rowcount or 0)
 
 
 def last_collect_at(session: Session, *, job_id: str) -> datetime | None:

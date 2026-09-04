@@ -24,11 +24,12 @@ def item(
     source_id: str = "src-1",
     content_hash: str = "hash-a",
     status: PublishStatus = PublishStatus.PENDING,
+    guid: str | None = None,
 ) -> Item:
     return Item(
         id=item_id,
         source_id=source_id,
-        guid=f"guid-{item_id}",
+        guid=guid if guid is not None else f"guid-{item_id}",
         content_hash=content_hash,
         title="t",
         url="https://example.com/a",
@@ -47,7 +48,12 @@ def test_unseen_content_is_inserted() -> None:
 
 @pytest.mark.unit
 def test_unrelated_items_do_not_interfere() -> None:
-    decision = decide_dedupe(item(content_hash="new"), [item(content_hash="other")])
+    # Distinct ids as well as distinct hashes: sharing an id would make these
+    # the same entry, which is the case the identity check exists for.
+    decision = decide_dedupe(
+        item(item_id="fresh", content_hash="new"),
+        [item(item_id="taken", content_hash="other")],
+    )
     assert decision.action is DedupeAction.INSERT
 
 
@@ -153,3 +159,73 @@ def test_same_url_with_different_content_is_not_a_duplicate() -> None:
 @pytest.mark.unit
 def test_different_content_is_not_a_duplicate() -> None:
     assert not is_duplicate_of(item(content_hash="a"), item(content_hash="b"))
+
+
+# --------------------------------------------------------------------------
+# The same entry re-published with different content
+# --------------------------------------------------------------------------
+#
+# Identity and content can disagree: id and guid derive from
+# (tenant, source, external_id), while content_hash derives from the body. A
+# feed that rewords an article changes one and not the other, and content-only
+# matching turned that into an INSERT colliding on the unique guid.
+
+
+@pytest.mark.unit
+def test_changed_content_while_pending_updates_the_row() -> None:
+    stored = item(item_id="i1", content_hash="h-a", status=PublishStatus.PENDING)
+    # Same id and same guid, different body: the entry moved under us.
+    incoming = item(
+        item_id="i1",
+        content_hash="h-b",
+        status=PublishStatus.PENDING,
+        guid=stored.guid,
+    )
+    decision = decide_dedupe(incoming, [stored])
+    assert decision.action is DedupeAction.UPDATE_PENDING
+    assert decision.matched_id == "i1"
+
+
+@pytest.mark.unit
+def test_changed_content_after_publication_is_left_alone() -> None:
+    # Neither rewriting (clients cached the old) nor inserting (the guid is
+    # frozen and unique) is available.
+    stored = item(item_id="i1", content_hash="h-a", status=PublishStatus.PUBLISHED)
+    incoming = item(
+        item_id="i1",
+        content_hash="h-b",
+        status=PublishStatus.PENDING,
+        guid=stored.guid,
+    )
+    decision = decide_dedupe(incoming, [stored])
+    assert decision.action is DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED
+    assert "frozen" in decision.reason
+
+
+@pytest.mark.unit
+def test_identical_re_fetch_still_skips_even_though_identity_matches_first() -> None:
+    stored = item(item_id="i1", content_hash="h-a", status=PublishStatus.READY)
+    incoming = item(
+        item_id="i1",
+        content_hash="h-a",
+        status=PublishStatus.PENDING,
+        guid=stored.guid,
+    )
+    assert decide_dedupe(incoming, [stored]).action is DedupeAction.SKIP_SAME_SOURCE
+
+
+@pytest.mark.unit
+def test_identity_match_takes_precedence_over_a_cross_source_content_match() -> None:
+    # Two rows share the content hash, but the candidate IS one of them by
+    # identity. Reporting the cross-source relation would insert a guid
+    # collision.
+    same_entry = item(item_id="i1", content_hash="h-a", status=PublishStatus.PUBLISHED)
+    twin = item(item_id="i2", source_id="src-2", content_hash="h-a")
+    incoming = item(
+        item_id="i1",
+        content_hash="h-a",
+        status=PublishStatus.PENDING,
+        guid=same_entry.guid,
+    )
+    decision = decide_dedupe(incoming, [twin, same_entry])
+    assert decision.action is DedupeAction.SKIP_SAME_SOURCE

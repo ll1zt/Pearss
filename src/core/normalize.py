@@ -411,6 +411,14 @@ class DedupeAction(StrEnum):
     # The existing item is already published; publishing this copy is what
     # would show the reader a duplicate.
     SUPPRESS = "suppress"
+    # The same entry, re-fetched with different content, still behind the gate:
+    # take the new content, since nothing has seen the old.
+    UPDATE_PENDING = "update_pending"
+    # The same entry, re-fetched with different content, already published.
+    # Neither rewriting it (clients cached the old) nor inserting it (the guid
+    # is frozen and would collide) is available, so it is left alone and
+    # reported.
+    SKIP_PUBLISHED_CONTENT_CHANGED = "skip_published_content_changed"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -432,7 +440,47 @@ def decide_dedupe(
     Pure and total: it never raises on an empty list, and it always returns an
     explicit action, so a caller cannot accidentally fall through to inserting
     a duplicate.
+
+    Identity is checked before content, and that order matters. An entry's id
+    and guid derive from (tenant, source, external_id), so the same entry
+    re-published with an edited body keeps its guid while its content_hash
+    changes. Matching on content_hash alone misses it, falls through to an
+    INSERT, and collides on the unique guid — which is what reached production
+    as soon as a feed reworded an article.
+
+    A changed body is not a new article and must not become one. Published
+    content is frozen by docs/domain/data-model.md, so the only honest
+    outcomes are "take the new content while still pending" or "leave the
+    published row alone and report the drift".
     """
+    same_identity = [
+        candidate
+        for candidate in existing
+        if candidate.id == item.id or candidate.guid == item.guid
+    ]
+    if same_identity:
+        known = same_identity[0]
+        if known.content_hash == item.content_hash:
+            return DedupeDecision(
+                action=DedupeAction.SKIP_SAME_SOURCE,
+                matched_id=known.id,
+                reason="same entry and same content already stored",
+            )
+        if known.publish_status is PublishStatus.PUBLISHED:
+            return DedupeDecision(
+                action=DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED,
+                matched_id=known.id,
+                reason=(
+                    "entry already published; its source content changed and "
+                    "published content is frozen"
+                ),
+            )
+        return DedupeDecision(
+            action=DedupeAction.UPDATE_PENDING,
+            matched_id=known.id,
+            reason="same entry, content changed while still pending",
+        )
+
     matches = [
         candidate
         for candidate in existing

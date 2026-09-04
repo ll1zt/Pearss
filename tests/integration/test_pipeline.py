@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from lxml import etree
@@ -33,7 +34,7 @@ from adapters.repository import (
 from adapters.rss_out import FeedMeta, render_feed, visible_items
 from core.enums import PublishStatus
 from core.models import Item, ItemDraft
-from core.normalize import normalize
+from core.normalize import content_hash, normalize
 from plugins.collectors import rss
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -358,3 +359,93 @@ def test_visible_items_filters_pending_in_memory() -> None:
         publish_status=PublishStatus.READY,
     )
     assert [i.id for i in visible_items([pending, ready])] == ["r"]
+
+
+@pytest.mark.integration
+def test_reworded_article_does_not_collide_on_the_guid(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bug that reached production.
+
+    An entry's id and guid derive from (tenant, source, external_id) while its
+    content_hash derives from the body. When a feed reworded an article the two
+    disagreed, content-only dedupe missed it, and the resulting INSERT hit
+    `UNIQUE constraint failed: item.tenant_id, item.guid`.
+    """
+    from app.pipeline import normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+
+    def draft_with(content: str) -> ItemDraft:
+        return ItemDraft(
+            source_id=SOURCE,
+            external_id="stable-entry-1",
+            title="An article",
+            canonical_url="https://blog.example.com/stable",
+            published_at=datetime(2026, 1, 1, tzinfo=UTC),
+            content=content,
+        )
+
+    first = normalise_and_store(session, [draft_with("<p>Original text.</p>")])
+    session.commit()
+    assert first[0].outcome.action.value == "insert"
+
+    # Same entry, reworded body, still pending at the time of the second call.
+    second = normalise_and_store(
+        session, [draft_with("<p>Rewritten text that differs.</p>")]
+    )
+    session.commit()
+
+    # It must not be treated as a new article.
+    assert second[0].outcome.action.value in {
+        "update_pending",
+        "skip_published_content_changed",
+    }
+    assert count_items(session) == 1
+
+
+@pytest.mark.integration
+def test_reworded_published_article_keeps_the_frozen_content(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.pipeline import normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    draft = ItemDraft(
+        source_id=SOURCE,
+        external_id="published-entry",
+        title="Headline",
+        canonical_url="https://blog.example.com/p",
+        published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="<p>First version.</p>",
+    )
+    normalise_and_store(session, [draft])
+    session.commit()
+    # The chain completes and a client sees it.
+    session.execute(sa.text("update item set publish_status='published'"))
+    session.commit()
+
+    changed = ItemDraft(
+        source_id=SOURCE,
+        external_id="published-entry",
+        title="Headline",
+        canonical_url="https://blog.example.com/p",
+        published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content="<p>Quietly rewritten after publication.</p>",
+    )
+    outcome = normalise_and_store(session, [changed])[0]
+    session.commit()
+    assert outcome.outcome.action.value == "skip_published_content_changed"
+
+    stored = items_ready_for_feed(session)
+    assert len(stored) == 1
+    # The stored hash is still the one derived from the ORIGINAL body. That is
+    # the whole point: a client that cached the first version keeps being
+    # served something consistent with it, rather than the row quietly
+    # changing under a frozen guid.
+    assert stored[0].content_hash == content_hash(
+        title="Headline", content="<p>First version.</p>"
+    )
+    assert stored[0].content_hash != content_hash(
+        title="Headline", content="<p>Quietly rewritten after publication.</p>"
+    )
