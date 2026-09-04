@@ -20,16 +20,21 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import IdempotencyRecord as IdempotencyRow
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import Job as JobRow
+from adapters.db_models import JobRun as JobRunRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
 from adapters.raw_payload import ConditionalState
-from core.enums import ErrorClass, ItemEvent, PublishStatus, SourceStatus
-from core.item_state import TransitionContext, transition
+from core.enums import ErrorClass, ItemEvent, JobRunStatus, PublishStatus, SourceStatus
+from core.item_state import TransitionContext
+from core.item_state import transition as item_transition
+from core.job_state import JobRunContext, JobRunEvent, transition
 from core.models import Item
 from core.normalize import DedupeAction, decide_dedupe
 from core.reader_state import ReadState as ReadStateDomain
+from core.scheduling import observed_gaps
 
 LOGGER = logging.getLogger(__name__)
 
@@ -246,7 +251,7 @@ def promote_to_ready(session: Session, items: list[Item]) -> int:
     for item in items:
         if item.publish_status is not PublishStatus.PENDING:
             continue
-        result = transition(
+        result = item_transition(
             item.publish_status,
             ItemEvent.MARK_READY,
             TransitionContext(processing_complete=True),
@@ -764,6 +769,269 @@ def update_item_content_ref(
         raise ValueError(f"no item with id {item_id!r}")
     row.content_ref = content_ref
     row.updated_at = _timestamp(datetime.now(UTC))
+
+
+# --------------------------------------------------------------------------
+# Jobs and job runs
+# --------------------------------------------------------------------------
+
+COLLECT_JOB_TYPE = "collect"
+
+
+def ensure_collect_job(
+    session: Session, *, source_id: str, tenant_id: str, at: str
+) -> str:
+    """Create the collection job for a source, or return the existing id.
+
+    One job per source: the job is the durable declaration that this source is
+    collected, while a job_run is one execution of that declaration. Keeping
+    them separate is what lets a future job type (feed regeneration, cleanup)
+    reuse the run machinery.
+
+    Idempotent because it is called from source creation, which is itself
+    idempotent.
+    """
+    existing = (
+        session.execute(
+            select(JobRow.id).where(
+                JobRow.config == source_id, JobRow.type == COLLECT_JOB_TYPE
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    job_id = f"job-{source_id}"
+    session.add(
+        JobRow(
+            id=job_id,
+            type=COLLECT_JOB_TYPE,
+            # The schedule is not stored here on purpose: when the next run is
+            # due is derived from the source's policy and history, so this row
+            # declares *what* is collected, not *when*.
+            schedule=None,
+            priority=0,
+            status="enabled",
+            config=source_id,
+            created_at=at,
+            updated_at=at,
+        )
+    )
+    session.flush()
+    return job_id
+
+
+def job_for_source(session: Session, source_id: str) -> JobRow | None:
+    return (
+        session.execute(
+            select(JobRow).where(
+                JobRow.type == COLLECT_JOB_TYPE, JobRow.config == source_id
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+
+def create_job_run(
+    session: Session,
+    *,
+    run_id: str,
+    job_id: str,
+    correlation_id: str,
+    retry_of: str | None = None,
+    at: str,
+) -> str:
+    """Open a queued run. A retry creates a new row rather than reopening one."""
+    session.add(
+        JobRunRow(
+            id=run_id,
+            job_id=job_id,
+            status=JobRunStatus.QUEUED.value,
+            metrics="{}",
+            correlation_id=correlation_id,
+            retry_of=retry_of,
+            started_at=None,
+            finished_at=None,
+        )
+    )
+    session.flush()
+    return run_id
+
+
+def claim_job_run(session: Session, *, run_id: str, at: str) -> bool:
+    """Move queued -> running with a conditional update.
+
+    The condition is the whole point: two schedulers ticking at the same time
+    both try to claim, and exactly one sees rowcount 1. Without it the same
+    source would be collected twice concurrently.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.id == run_id,
+                JobRunRow.status == JobRunStatus.QUEUED.value,
+            )
+            .values(status=JobRunStatus.RUNNING.value, started_at=at)
+        ),
+    )
+    return (result.rowcount or 0) == 1
+
+
+def finish_job_run(
+    session: Session,
+    *,
+    run_id: str,
+    event: JobRunEvent,
+    correlation_id: str,
+    error_class: ErrorClass | None = None,
+    metrics: dict[str, object] | None = None,
+    at: str,
+) -> JobRunStatus:
+    """Close a run, routing the transition through the core state machine.
+
+    The status is never assigned directly: the machine is what guarantees a
+    failed run carries an error_class and a succeeded one does not, which is
+    what keeps the taxonomy queryable and the backoff computable.
+
+    The conditional update also makes the terminal write single-shot — a run
+    already finished by another worker cannot be overwritten.
+    """
+    row = session.get(JobRunRow, run_id)
+    if row is None:
+        raise ValueError(f"no job run with id {run_id!r}")
+
+    current = JobRunStatus(row.status)
+    result = transition(current, event, JobRunContext(error_class=error_class))
+
+    written = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(JobRunRow)
+            .where(
+                JobRunRow.id == run_id,
+                JobRunRow.status == current.value,
+            )
+            .values(
+                status=result.status.value,
+                error_class=result.error_class.value if result.error_class else None,
+                metrics=json.dumps(metrics or {}, sort_keys=True),
+                finished_at=at,
+            )
+        ),
+    )
+    if (written.rowcount or 0) == 0:
+        LOGGER.warning("job run %s was already terminalised by another worker", run_id)
+    del correlation_id  # already fixed at creation; kept for call-site clarity
+    return result.status
+
+
+# --------------------------------------------------------------------------
+# Inputs for the derived schedule
+# --------------------------------------------------------------------------
+
+
+def update_gaps_for_source(
+    session: Session, *, source_id: str, limit: int = 40
+) -> list[float]:
+    """Seconds between this source's recent publication times.
+
+    Section 4 says to derive the update cadence from RawFetch history, but a
+    RawFetch records when *we* fetched, not when the source *published*. Using
+    the items' own publication timestamps measures the thing the policy
+    actually wants — how often the source produces content — and is not
+    distorted by our own fetch cadence, which is the feedback loop a
+    fetch-derived interval would create.
+
+    Returns the most recent `limit` gaps, newest first, or an empty list when
+    there are too few items to measure anything.
+    """
+    stamps = list(
+        session.execute(
+            select(ItemRow.published_at)
+            .where(
+                ItemRow.source_id == source_id,
+                ItemRow.published_at.is_not(None),
+            )
+            .order_by(ItemRow.published_at.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    moments = [parsed for parsed in (_parse(value) for value in stamps) if parsed]
+    if len(moments) < 2:
+        return []
+    ordered = sorted(moments)
+    return observed_gaps([moment.timestamp() for moment in ordered])
+
+
+def last_collect_at(session: Session, *, job_id: str) -> datetime | None:
+    """When this source's collection job last finished, any outcome.
+
+    Failures count: backing off requires knowing the last attempt happened,
+    and ignoring failed runs would retry a blocked source on its normal
+    cadence.
+    """
+    finished = (
+        session.execute(
+            select(JobRunRow.finished_at)
+            .where(
+                JobRunRow.job_id == job_id,
+                JobRunRow.finished_at.is_not(None),
+            )
+            .order_by(JobRunRow.finished_at.desc())
+            .limit(1)
+        )
+        .scalars()
+        .first()
+    )
+    return _parse(finished) if finished else None
+
+
+def consecutive_failures(session: Session, *, job_id: str, limit: int = 20) -> int:
+    """How many most recent runs failed, stopping at the first success.
+
+    Walks back from the newest run and stops early: a source that recovered
+    after three failures should not keep its backoff, so counting all failures
+    ever would be wrong.
+    """
+    statuses = session.execute(
+        select(JobRunRow.status)
+        .where(JobRunRow.job_id == job_id)
+        .order_by(JobRunRow.started_at.desc().nullslast())
+        .limit(limit)
+    ).scalars()
+    count = 0
+    for status in statuses:
+        if status == JobRunStatus.SUCCEEDED.value:
+            break
+        if status in (
+            JobRunStatus.FAILED.value,
+            JobRunStatus.TIMED_OUT.value,
+        ):
+            count += 1
+        # A queued or running run is neither a failure nor a recovery; skip it
+        # rather than stopping, since it has not resolved.
+    return count
+
+
+def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, str]]:
+    """(source_id, schedule_policy_json) for sources we should consider.
+
+    Only `active`: a paused or disabled source is not collected, and that is
+    the operator's explicit decision rather than something the scheduler
+    should second-guess.
+    """
+    rows = session.execute(
+        select(SourceRow.id, SourceRow.schedule_policy).where(
+            SourceRow.tenant_id == tenant_id,
+            SourceRow.status == SourceStatus.ACTIVE.value,
+        )
+    ).all()
+    return [(str(row[0]), str(row[1])) for row in rows]
 
 
 def count_items(session: Session) -> int:

@@ -37,6 +37,7 @@ from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
+from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
 from core.models import ItemDraft
 
@@ -89,9 +90,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     timeout = httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=60.0)
     client = httpx.Client(timeout=timeout, follow_redirects=True)
     app.state.http_client = client
+
+    scheduler = Scheduler(
+        app.state.session_factory,
+        client=client,
+        tick_seconds=float(os.environ.get("PEARSS_TICK_SECONDS", "60")),
+    )
+    app.state.scheduler = scheduler
+    if scheduler_enabled():
+        await scheduler.start()
+    else:
+        LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
     try:
         yield
     finally:
+        await scheduler.stop()
         client.close()
 
 

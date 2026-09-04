@@ -7,11 +7,15 @@ resistance to a single outlier gap, and backoff on consecutive failures.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from core.models import SchedulePolicy
 from core.scheduling import (
+    MAX_BACKOFF_SECONDS,
     adaptive_interval,
+    decide_schedule,
     is_due,
     next_interval,
     observed_gaps,
@@ -139,3 +143,151 @@ def test_policy_validation_rejects_nonsense() -> None:
         SchedulePolicy(type="adaptive", min_seconds=100, max_seconds=10)
     with pytest.raises(ValueError):
         SchedulePolicy(type="mystery")
+
+
+# --------------------------------------------------------------------------
+# Derived schedule: the answer the scheduler actually needs
+# --------------------------------------------------------------------------
+
+
+def fixed(seconds: int = 1800) -> SchedulePolicy:
+    return SchedulePolicy(type="fixed", interval_seconds=seconds)
+
+
+def adaptive_policy(min_s: int = 900, max_s: int = 86400) -> SchedulePolicy:
+    return SchedulePolicy(type="adaptive", min_seconds=min_s, max_seconds=max_s)
+
+
+NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
+
+
+def minutes_ago(minutes: float) -> datetime:
+    return NOW - timedelta(minutes=minutes)
+
+
+@pytest.mark.unit
+def test_never_fetched_source_is_due_immediately() -> None:
+    # A freshly added source should be collected without first waiting out a
+    # whole interval, or adding a feed would appear to do nothing.
+    decision = decide_schedule(fixed(), last_fetch_at=None, now=NOW)
+    assert decision.due
+    assert decision.next_due_at is None
+
+
+@pytest.mark.unit
+def test_recent_source_is_not_due_and_says_when() -> None:
+    decision = decide_schedule(fixed(1800), last_fetch_at=minutes_ago(10), now=NOW)
+    assert not decision.due
+    assert decision.next_due_at == minutes_ago(10) + timedelta(seconds=1800)
+
+
+@pytest.mark.unit
+def test_stale_source_is_due() -> None:
+    decision = decide_schedule(fixed(1800), last_fetch_at=minutes_ago(45), now=NOW)
+    assert decision.due
+
+
+@pytest.mark.unit
+def test_restart_after_downtime_recovers_without_configuration() -> None:
+    # The property the derived design buys for free: APScheduler needs
+    # misfire_grace_time tuned to approximate it.
+    decision = decide_schedule(fixed(1800), last_fetch_at=minutes_ago(3 * 60), now=NOW)
+    assert decision.due
+
+
+@pytest.mark.unit
+def test_fixed_policy_backs_off_after_failures() -> None:
+    # A fixed interval must not hammer a source that is failing. next_interval
+    # folds the backoff in for adaptive policies; fixed ones need it too.
+    one = decide_schedule(
+        fixed(600), last_fetch_at=minutes_ago(15), consecutive_failures=1, now=NOW
+    )
+    two = decide_schedule(
+        fixed(600), last_fetch_at=minutes_ago(15), consecutive_failures=2, now=NOW
+    )
+    none = decide_schedule(fixed(600), last_fetch_at=minutes_ago(15), now=NOW)
+    assert none.interval_seconds == 600
+    assert one.interval_seconds == 1200
+    assert two.interval_seconds == 2400
+    # The observable effect of backoff is a later next attempt, which is what
+    # stops a blocked source from being hammered.
+    assert one.next_due_at is not None and two.next_due_at is not None
+    assert two.next_due_at > one.next_due_at > NOW
+
+
+@pytest.mark.unit
+def test_adaptive_policy_backs_off_too() -> None:
+    # For an adaptive policy the counter rides on the policy itself, matching
+    # how the scheduler reads it out of run history.
+    calm = decide_schedule(
+        SchedulePolicy(
+            type="adaptive", min_seconds=60, max_seconds=100000, consecutive_failures=0
+        ),
+        last_fetch_at=minutes_ago(20),
+        observed_update_gaps=[600.0],
+        now=NOW,
+    )
+    failing = decide_schedule(
+        SchedulePolicy(
+            type="adaptive", min_seconds=60, max_seconds=100000, consecutive_failures=3
+        ),
+        last_fetch_at=minutes_ago(20),
+        observed_update_gaps=[600.0],
+        now=NOW,
+    )
+    assert failing.interval_seconds > calm.interval_seconds
+
+
+@pytest.mark.unit
+def test_derived_backoff_is_capped() -> None:
+    decision = decide_schedule(
+        fixed(600),
+        last_fetch_at=minutes_ago(1),
+        consecutive_failures=50,
+        now=NOW,
+    )
+    assert decision.interval_seconds <= MAX_BACKOFF_SECONDS
+
+
+@pytest.mark.unit
+def test_future_last_fetch_is_treated_as_due() -> None:
+    # Clock skew or a backup restored ahead of the wall clock. Waiting out a
+    # negative interval would never resolve, so the source is collected.
+    decision = decide_schedule(fixed(), last_fetch_at=minutes_ago(-30), now=NOW)
+    assert decision.due
+
+
+@pytest.mark.unit
+def test_naive_inputs_are_rejected() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        decide_schedule(fixed(), last_fetch_at=None, now=datetime(2026, 6, 1))
+    with pytest.raises(ValueError, match="timezone-aware"):
+        decide_schedule(fixed(), last_fetch_at=datetime(2026, 6, 1), now=NOW)
+
+
+@pytest.mark.unit
+def test_decision_reports_the_failure_count_it_used() -> None:
+    decision = decide_schedule(
+        fixed(), last_fetch_at=None, consecutive_failures=4, now=NOW
+    )
+    assert decision.consecutive_failures == 4
+
+
+@pytest.mark.unit
+def test_adaptive_interval_follows_observed_cadence() -> None:
+    # A source that publishes hourly should be fetched roughly hourly, not on a
+    # fixed guess.
+    slow = decide_schedule(
+        adaptive_policy(min_s=60, max_s=86400),
+        last_fetch_at=minutes_ago(1),
+        observed_update_gaps=[3600.0] * 6,
+        now=NOW,
+    )
+    fast = decide_schedule(
+        adaptive_policy(min_s=60, max_s=86400),
+        last_fetch_at=minutes_ago(1),
+        observed_update_gaps=[120.0] * 6,
+        now=NOW,
+    )
+    assert slow.interval_seconds == pytest.approx(3600.0)
+    assert fast.interval_seconds == pytest.approx(120.0)
