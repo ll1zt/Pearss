@@ -45,9 +45,11 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     with engine.begin() as connection:
         connection.execute(
             text(
-                "insert into source (id, type, schedule_policy, status, tenant_id,"
-                " created_at, updated_at) values ('src-1', 'rss', '{}', 'active',"
-                " 'default', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, tenant_id, created_at, updated_at)"
+                " values ('src-1', 'rss', 'https://blog.example.com/feed',"
+                " 'https://blog.example.com/feed', '{}', 'active', 'default',"
+                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
     try:

@@ -58,3 +58,4 @@ docs/adr/
 | [0005](0005-reader-api-credentials-and-id-mapping.md) | Reader API 的凭据与 item ID 映射 | **部分 superseded**（ID 部分被 0006 取代） | 2026-09-03 |
 | [0006](0006-reader-api-ids-must-be-decimal.md) | Reader API 的 item ID 必须是十进制整数 | accepted | 2026-09-04 |
 | [0007](0007-sanitize-feed-html-at-store-time.md) | 入库前用 nh3 净化正文 HTML | accepted | 2026-09-04 |
+| [0008](0008-source-canonical-url-not-null.md) | source.canonical_url 必须 NOT NULL | accepted | 2026-09-04 |

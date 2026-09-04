@@ -67,11 +67,12 @@ def session(tmp_path: Path) -> Iterator[Session]:
 def _seed_source(session: Session, source_id: str) -> None:
     session.execute(
         text(
-            "insert into source (id, type, schedule_policy, status, tenant_id,"
-            " created_at, updated_at) values (:id, 'rss', '{}', 'active',"
-            " 'default', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            "insert into source (id, type, url, canonical_url, schedule_policy,"
+            " status, tenant_id, created_at, updated_at)"
+            " values (:id, 'rss', :url, :url, '{}', 'active', 'default',"
+            " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
         ),
-        {"id": source_id},
+        {"id": source_id, "url": f"https://example.com/{source_id}/feed"},
     )
     session.commit()
 

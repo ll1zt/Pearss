@@ -56,9 +56,11 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     with engine.begin() as conn:
         conn.execute(
             sa.text(
-                "insert into source (id, type, schedule_policy, status, tenant_id,"
-                " created_at, updated_at) values ('src-1', 'rss', '{}', 'active',"
-                " 'default', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, tenant_id, created_at, updated_at)"
+                " values ('src-1', 'rss', 'https://blog.example.com/feed',"
+                " 'https://blog.example.com/feed', '{}', 'active', 'default',"
+                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
 
