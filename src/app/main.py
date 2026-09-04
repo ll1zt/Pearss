@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Response
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -28,6 +28,8 @@ from adapters.repository import (
     mark_published,
 )
 from adapters.rss_out import FeedMeta, render_feed
+from app.auth import Principal, auth_configured, write_required
+from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
@@ -106,6 +108,19 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     configure_reader_credentials(app.state.session_factory)
     app.include_router(reader_router)
 
+    # Added after the routes so the audit record can name the matched route
+    # rather than only the path. Correlation ids must still be set before any
+    # endpoint runs, which is why this is middleware and not a dependency.
+    app.add_middleware(
+        CorrelationAndAuditMiddleware, session_factory=app.state.session_factory
+    )
+
+    if not auth_configured():
+        # Fail closed: with no token every Core API request is refused. Saying
+        # so at startup is the difference between a confusing 401 and a
+        # configuration step that is simply missing.
+        LOGGER.warning("PEARSS_API_TOKEN unset; the Core API will reject every request")
+
     @app.get("/healthz", tags=["ops"])
     def healthz() -> dict[str, str]:
         """Liveness probe with no dependency on the database."""
@@ -154,13 +169,17 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         )
 
     @app.post("/internal/items", tags=["internal"])
-    def ingest_draft(draft: ItemDraft) -> dict[str, str]:
+    def ingest_draft(
+        draft: ItemDraft,
+        principal: Principal = Depends(write_required),
+    ) -> dict[str, str]:
         """Normalise and store a draft.
 
-        Internal and unauthenticated for now: authentication and the audit
-        middleware are part of the P1 control-plane work, and this endpoint
-        exists so the pipeline can be exercised end to end before then.
+        Write-scoped: this mutates the corpus, so the read-only token must not
+        be able to call it. The audit middleware records the request; the
+        principal is attached to the scope so the record names who did it.
         """
+        del principal  # resolved by the dependency; read by the audit middleware
         with app.state.session_factory() as session:
             ingested = normalise_and_store(session, [draft])[0]
 
