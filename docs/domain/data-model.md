@@ -21,14 +21,14 @@
 | `id` | 稳定来源 ID |
 | `type` | `rss` / `web` / `agent` |
 | `url` | RSS 或网页 URL；agent 类型可以为空或引用配置 |
-| `canonical_url` | 规范化后的去重 URL |
+| `canonical_url` | 规范化后的去重 URL。**NOT NULL**：它正是唯一约束比较的列，而 SQL 中 NULL 彼此不等 —— 可空会让这些行完全落在约束之外。agent 源用合成键 `agent://<name>`（见 ADR 0008） |
 | `parser_plugin_id` | web 来源使用的采集器标识；P1 为硬编码准插件 ID |
 | `schedule_policy` | `{type: fixed/adaptive, ...}`；决定下次抓取策略 |
 | `trust_level` | 来源信任等级；不改变“正文不可信”的默认规则 |
 | `status` | `active` / `paused` / `disabled` / `deleted` |
 | `tenant_id` | 租户预留字段 |
 
-不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一；停用/删除 Source 不得删除已有 Item。
+不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 —— 否则该唯一约束对 NULL 行不生效，重复源可以无限并存。停用/删除 Source 不得删除已有 Item。
 
 ### RawFetch
 
