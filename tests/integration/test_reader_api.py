@@ -299,7 +299,11 @@ async def test_tag_list_offers_the_starred_state(client: httpx.AsyncClient) -> N
 async def test_stream_item_ids(client: httpx.AsyncClient) -> None:
     ids = await fetch_ids(client, await login(client))
     assert len(ids) == 3
-    assert all(len(item_id) == 32 for item_id in ids)
+    # Decimal, and within Swift's 64-bit Int. NetNewsWire does Int(id)!
+    # on these, so anything else makes it drop every entry silently: the
+    # subscription appears but no articles do.
+    assert all(item_id.isdigit() for item_id in ids)
+    assert all(int(item_id) < 2**63 for item_id in ids)
 
 
 @pytest.mark.integration
