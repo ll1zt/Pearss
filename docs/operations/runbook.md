@@ -88,6 +88,31 @@
 4. **恢复**：使用轮换后凭据、干净配置、受测 parser/插件恢复；验证 RSS/Reader API
 5. **复盘**：补 fixture、测试、监控阈值、AGENTS.md 规则或 ADR；不修改历史审计记录
 
+## 轮换 Reader API 凭据
+
+Reader API 的密码只存在 `.env` 里，库内是 scrypt 哈希。auth token 由
+`HMAC-SHA256(username + 哈希)` 派生，所以**改密码会使所有已登录客户端的 token 失效**。
+
+```bash
+# 1. 生成新密码
+uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# 2. 更新 .env 的 PEARSS_READER_PASSWORD（不要写进任何提交、日志或 issue）
+
+# 3. 重启服务，启动时会从环境重新同步哈希
+just service-restart
+
+# 4. 验证新密码可用、旧密码已失效
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  http://127.0.0.1:8000/api/greader.php/accounts/ClientLogin \
+  -d "Email=reader&Passwd=<新密码>"        # 期望 200
+```
+
+然后**必须在每个客户端重新输入密码**：NNW 的 FreshRSS 账号类型没有“改密码”入口，
+只能删除账号重新添加。旧 token 不会报错提示原因，只会持续收到 401。
+
+若怀疑密码泄露，按本文“安全事件响应”走：轮换优先于清理痕迹。
+
 ## 升级条件
 
 暂停自动写入并优先人工处理，当出现以下任一情形：

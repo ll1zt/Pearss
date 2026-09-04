@@ -101,6 +101,28 @@ just ci-nix           # CI 实际执行的命令，含 Nix 环境入口
 nix develop --command just ci
 ```
 
+## 长期运行（systemd 用户服务）
+
+无需 root。先启用 linger，否则登出后服务会停：
+
+```bash
+just linger          # loginctl enable-linger，开机自启 + 存活于登出
+just install-unit    # 安装并启动 ~/.config/systemd/user/pearss.service
+just service-status  # 状态 + 最近 30 行日志
+just service-restart # 改完 .env 或代码后重启
+just uninstall-unit  # 停用并移除
+```
+
+监听地址与端口写在 `.env`，unit 本身不含这些细节：
+
+```bash
+PEARSS_BIND_HOST=0.0.0.0   # 127.0.0.1 仅本机；0.0.0.0 同时开放局域网与 Tailscale
+PEARSS_PORT=8000
+```
+
+服务跑在 `nix develop` 里，与 CI 用同一套解释器与工具链；崩溃自动重启，
+但有次数上限（超出则放弃而不是无限刷日志）。单元文件见 `deploy/pearss.service`。
+
 ## NetNewsWire 接入
 
 RSS 输出与 Reader API 都已可用，两条路径用途不同：
