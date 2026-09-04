@@ -101,9 +101,21 @@ revision message:
 
 # Start the API server on 127.0.0.1 by default: this is a single-user
 # service, so it should not be reachable from the network without an explicit
-# decision to expose it.
+# decision to expose it. Pass a different host to expose it, e.g.
+#   just run 100.64.0.1   # a Tailscale address
+#   just run 192.168.1.10    # the LAN address
+#
+# A gitignored .env is sourced first when present. The app itself only ever
+# reads os.environ, deliberately: keeping the loading here means there is one
+# visible place where configuration enters the process, rather than an import
+# that silently pulls a file in from wherever it happens to be.
 run host="127.0.0.1" port="8000":
-    uv run uvicorn app.main:app --host {{host}} --port {{port}}
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    exec uv run uvicorn app.main:app --host {{host}} --port {{port}}
 
 # ---------------------------------------------------------------------------
 # Aggregate

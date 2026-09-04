@@ -21,10 +21,18 @@ LOGGER = logging.getLogger(__name__)
 
 # Read/connect/write are bounded separately, plus a total budget. An unbounded
 # read is the classic way a single slow origin exhausts a worker pool.
-DEFAULT_CONNECT_TIMEOUT = 5.0
+#
+# CONNECT covers the TCP handshake *and* the TLS handshake, so it must be
+# generous enough for a slow handshake. 5 seconds proved too tight in
+# practice: roughly a third of requests to hnrss.org failed with a handshake
+# timeout, and because each failure burns the whole window, raising it made a
+# batch finish faster as well as reliably (16.4s -> 12.9s over eight
+# requests). A generous connect timeout is not a lax one: the read timeout is
+# what bounds a slow origin once the connection already exists.
+DEFAULT_CONNECT_TIMEOUT = 15.0
 DEFAULT_READ_TIMEOUT = 15.0
 DEFAULT_WRITE_TIMEOUT = 15.0
-DEFAULT_TOTAL_TIMEOUT = 30.0
+DEFAULT_TOTAL_TIMEOUT = 60.0
 
 # 5 MB. Feeds are small; this is a guard against a misconfigured origin or a
 # hostile response, not a limit anyone should routinely hit.

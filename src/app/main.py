@@ -77,7 +77,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # tying it to the connect timeout made the first request give up mid-TLS-
     # handshake on a slow origin. It gets the total budget, matching
     # adapters/http.py.
-    timeout = httpx.Timeout(connect=5.0, read=15.0, write=15.0, pool=30.0)
+    # connect covers the TLS handshake too, so it needs the same headroom as
+    # adapters/http.py; 5s dropped about a third of requests to slow origins.
+    timeout = httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=60.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         app.state.http_client = client
         yield
