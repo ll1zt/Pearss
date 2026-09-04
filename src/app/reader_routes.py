@@ -289,7 +289,12 @@ def stream_items_ids(
             states = read_states_for(session, ids, tenant_id=TENANT)
             ids = [i for i in ids if not (states.get(i) and states[i].is_read)]
 
-    return {"itemRefs": [{"id": item_id} for item_id in ids], "continuation": None}
+    # Decimal, not hex: NetNewsWire does Int(id)! on these values and drops
+    # every entry it cannot parse as an integer.
+    return {
+        "itemRefs": [{"id": str(reader_api.reader_id(item_id))} for item_id in ids],
+        "continuation": None,
+    }
 
 
 def _offset(cursor: str | None) -> int:
@@ -309,14 +314,18 @@ def stream_items_contents(
 ) -> dict[str, object]:
     """Content for specific items."""
     from adapters.db_models import Item as ItemRow
-    from adapters.repository import read_states_for
+    from adapters.repository import read_states_for, resolve_reader_ids
 
     with request.app.state.session_factory() as session:
-        wanted = [
-            item_id
-            for item_id in (reader_api.decode_item_id(raw) for raw in i)
-            if item_id
+        external = [
+            value
+            for value in (reader_api.parse_item_id_param(raw) for raw in i)
+            if value is not None
         ]
+        if not external:
+            return _empty_contents()
+
+        wanted = list(resolve_reader_ids(session, external).values())
         if not wanted:
             return _empty_contents()
 
@@ -348,7 +357,7 @@ def _render_item(row: ItemRow, *, is_read: bool, is_starred: bool) -> dict[str, 
 
     published = _epoch(row.published_at) if row.published_at else 0
     return {
-        "id": reader_api.encode_item_id(row.id),
+        "id": reader_api.encode_item_id(reader_api.reader_id(row.id)),
         "categories": categories,
         "title": row.title,
         "crawlTimeMsec": str(published * 1000),
@@ -416,16 +425,23 @@ def edit_tag(
         return PlainTextResponse("OK")
 
     from adapters.db_models import Item as ItemRow
-    from adapters.repository import read_states_for, upsert_read_state
+    from adapters.repository import (
+        read_states_for,
+        resolve_reader_ids,
+        upsert_read_state,
+    )
 
-    item_ids = [
-        item_id for item_id in (reader_api.decode_item_id(raw) for raw in i) if item_id
+    external = [
+        value
+        for value in (reader_api.parse_item_id_param(raw) for raw in i)
+        if value is not None
     ]
-    if not item_ids:
+    if not external:
         return PlainTextResponse("OK")
 
     now = datetime.now(UTC)
     with request.app.state.session_factory() as session:
+        item_ids = list(resolve_reader_ids(session, external).values())
         # Only touch items that exist and are visible; a client may still hold
         # ids for items that were withdrawn.
         rows = session.query(ItemRow).filter(ItemRow.id.in_(item_ids)).all()

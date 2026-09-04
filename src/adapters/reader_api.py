@@ -62,37 +62,80 @@ def _normalise_state_stream(stream_id: str) -> str | None:
 # Item ids
 # --------------------------------------------------------------------------
 
-# Our item ids are 32 hex characters (128 bits). The historical Google Reader
-# convention is 16, but truncating would both risk collisions and desynchronise
-# the ids clients have already stored. ADR 0005 records this: we emit and
-# accept our full 32-character ids, and NNW treats them as opaque.
-ITEM_ID_LENGTH = 32
-ITEM_ID_PATTERN = re.compile(rf"^(?P<id>[0-9a-fA-F]{{{ITEM_ID_LENGTH}}})$")
+# --------------------------------------------------------------------------
+# Item ids
+# --------------------------------------------------------------------------
+#
+# NetNewsWire does `Int(articleID)!` on the values from stream/items/ids, so
+# those must be decimal strings that fit a 64-bit signed Int. A 128-bit id
+# cannot be parsed and NNW silently drops every entry — the subscription shows
+# up but no articles do. Verified against NNW's ReaderAPICaller.swift.
+#
+# So the Reader API exposes a *narrowed* external id: the first 15 hex digits
+# of the internal id (60 bits), which leaves headroom under Int64. The mapping
+# is deterministic, so a client's stored id keeps resolving to the same item
+# across restarts and rebuilds.
+#
+# Collision risk: 60 bits means two items collide at roughly the birthday
+# bound, ~2^30 (about a billion) items for a 50% chance. A single-user feed
+# reader will not approach that; ADR 0006 records the trade-off.
+READER_ID_HEX_DIGITS = 15
 
 _LONG_FORM_PREFIX = "tag:google.com,2005:reader/item/"
+_HEX = re.compile(r"^(?P<hex>[0-9a-fA-F]{1,16})$")
 
 
-def encode_item_id(item_id: str) -> str:
-    """Render an item id in the long Google Reader form NNW expects."""
-    return f"{_LONG_FORM_PREFIX}{item_id}"
+def reader_id(item_id: str) -> int:
+    """The external numeric id for an internal item id."""
+    return int(item_id[:READER_ID_HEX_DIGITS], 16)
 
 
-def decode_item_id(raw: str) -> str | None:
-    """Recover our item id from whatever form a client sent.
+def reader_id_hex(external: int) -> str:
+    """The hex prefix an external id corresponds to, for reverse lookup."""
+    return format(external, f"0{READER_ID_HEX_DIGITS}x")
 
-    Accepts the long form we emit, a bare id, and the short prefixed form
-    other clients sometimes send. Returns None for anything unrecognised
-    rather than raising: a malformed id is a client bug, and one bad entry
-    should not fail a batch that contains valid ones.
+
+def encode_item_id(external: int) -> str:
+    """Render an external id in the long form the contents response expects.
+
+    NNW parses this with `Int(part, radix: 16)`, so it must be hex, not decimal.
+    """
+    return f"{_LONG_FORM_PREFIX}{external:x}"
+
+
+def parse_item_id_param(raw: str) -> int | None:
+    """Recover the external id from whatever form a client sent.
+
+    NetNewsWire uses three different shapes, all of which must be accepted:
+
+    - decimal, as handed back from stream/items/ids
+    - `tag:google.com,2005:reader/item/<hex>`, zero padded to 16 by edit-tag
+    - the same long form unpadded, which is what stream/items/contents sends
+
+    Returns None for anything unrecognised rather than raising: a malformed id
+    is a client bug, and one bad entry should not fail a batch of valid ones.
     """
     candidate = raw.strip()
+    # The prefix decides the base, and that has to be checked before looking at
+    # the characters: a hex value can be all digits (0x3039 is 12345), so
+    # testing isdigit() after stripping the prefix would read it as decimal and
+    # silently resolve to the wrong item.
     if candidate.startswith(_LONG_FORM_PREFIX):
-        candidate = candidate.removeprefix(_LONG_FORM_PREFIX)
-    # A short prefixed form may carry leading zeros; normalise to our width.
-    match = ITEM_ID_PATTERN.match(candidate)
-    if match:
-        return match.group("id").lower()
-    return None
+        hex_part = candidate.removeprefix(_LONG_FORM_PREFIX).strip()
+        match = _HEX.match(hex_part)
+        if not match:
+            return None
+        return int(match.group("hex"), 16)
+
+    if candidate.isdigit():
+        return int(candidate, 10)
+
+    # A bare hex value is not part of the NetNewsWire contract, but other
+    # Google Reader clients send it, so accept it when it is unambiguous.
+    match = _HEX.match(candidate)
+    if not match:
+        return None
+    return int(match.group("hex"), 16)
 
 
 # --------------------------------------------------------------------------

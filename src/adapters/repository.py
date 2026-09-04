@@ -309,6 +309,36 @@ def reader_credential(session: Session, username: str) -> str | None:
     return row.password_hash if row is not None else None
 
 
+def resolve_reader_ids(session: Session, external_ids: list[int]) -> dict[int, str]:
+    """Map external Reader API ids back to internal item ids.
+
+    The external id is the leading hex digits of the internal id, so the
+    reverse lookup is a prefix match. `substr` is used rather than LIKE
+    because it is exact and does not depend on the column's collation or on
+    SQLite's case_sensitive_like setting.
+    """
+    from adapters import reader_api
+
+    if not external_ids:
+        return {}
+
+    resolved: dict[int, str] = {}
+    for external in set(external_ids):
+        prefix = reader_api.reader_id_hex(external)
+        found = (
+            session.execute(
+                select(ItemRow.id).where(
+                    func.substr(ItemRow.id, 1, len(prefix)) == prefix
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if found is not None:
+            resolved[external] = found
+    return resolved
+
+
 def read_states_for(
     session: Session, item_ids: list[str], *, tenant_id: str
 ) -> dict[str, ReadStateDomain]:
