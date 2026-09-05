@@ -383,6 +383,7 @@ def stream_items_contents(
     """
     from adapters.db_models import Item as ItemRow
     from adapters.repository import (
+        mark_published,
         read_states_for,
         resolve_reader_ids,
         row_to_item,
@@ -413,6 +414,17 @@ def stream_items_contents(
         # request can carry a hundred ids, and a client that cannot show a
         # source name is the bug this is here to fix.
         titles = source_display_labels(session, [row.source_id for row in rows])
+        # Serving a body through the Reader API is an observable first
+        # publication, and state-machines.md requires every output adapter to
+        # record it -- only a `published` item has its content frozen. Leaving
+        # this to the RSS render meant an item read exclusively through the
+        # Reader API stayed `ready` forever, so the immutability guarantee that
+        # exists because clients cache content was not in force on the path
+        # where clients actually do the caching.
+        mark_published(
+            session, [row_to_item(row) for row in rows], at=datetime.now(UTC)
+        )
+        session.commit()
 
     items = []
     for row in rows:

@@ -517,6 +517,46 @@ async def test_starred_items_do_appear_in_the_starred_stream(
     assert refs, "a starred item should appear in the starred stream"
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_serving_a_body_through_the_reader_api_freezes_it(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """state-machines.md: every output adapter records first publication.
+
+    Only a `published` item has immutable content. If the freeze were recorded
+    solely by the RSS render, an item consumed through the Reader API would
+    stay `ready` forever -- and the guarantee that exists because clients cache
+    content would not be in force on the path where clients actually cache it.
+    """
+    from adapters.db_models import Item as ItemRow
+    from adapters.repository import resolve_reader_ids
+
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+
+    with app.state.session_factory() as session:
+        internal = list(resolve_reader_ids(session, [int(x) for x in ids]).values())
+        before = {
+            row.id: row.publish_status
+            for row in session.query(ItemRow).filter(ItemRow.id.in_(internal)).all()
+        }
+    assert set(before.values()) == {"ready"}, "fixture should start unfrozen"
+
+    await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+
+    with app.state.session_factory() as session:
+        after = {
+            row.id: row.publish_status
+            for row in session.query(ItemRow).filter(ItemRow.id.in_(internal)).all()
+        }
+    assert set(after.values()) == {"published"}, f"Reader API did not freeze: {after}"
+
+
 # --------------------------------------------------------------------------
 # State writes
 # --------------------------------------------------------------------------
