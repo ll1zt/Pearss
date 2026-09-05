@@ -439,6 +439,84 @@ async def test_contents_origin_carries_a_readable_name(
         )
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_starred_stream_returns_only_starred_items(
+    client: httpx.AsyncClient,
+) -> None:
+    """Nothing is starred, so the starred stream must be empty.
+
+    It used to return the whole library: `visible_ids_for_stream` recognised
+    `feed/<id>` and fell through to "everything" for every other shape, and a
+    client that asks "what is starred?" then renders every answer as starred.
+    That is how freshly collected feeds appeared starred in NetNewsWire while
+    the database held zero starred rows.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    assert ids, "the fixture should have items"
+
+    starred = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "n": 1000, "s": STARRED_TAG},
+    )
+    assert starred.json()["itemRefs"] == []
+
+    reading = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "n": 1000, "s": READING_LIST},
+    )
+    assert reading.json()["itemRefs"], "the reading list should still have items"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unknown_folder_is_empty_rather_than_everything(
+    client: httpx.AsyncClient,
+) -> None:
+    """A filter we do not implement must not answer with the unfiltered set.
+
+    `All` is the one folder subscription/list advertises, so it has to resolve
+    to the whole library; `Work` resolves to nothing.
+    """
+    token = await login(client)
+
+    async def for_label(label: str) -> list[object]:
+        response = await client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params={"output": "json", "n": 1000, "s": f"user/-/label/{label}"},
+        )
+        refs: list[object] = response.json()["itemRefs"]
+        return refs
+
+    assert await for_label("All")
+    assert await for_label("Work") == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_starred_items_do_appear_in_the_starred_stream(
+    client: httpx.AsyncClient,
+) -> None:
+    """The filter has to pass things through, not just return nothing."""
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    target = ids[0]
+
+    await edit(client, token, [target], add=[STARRED_TAG])
+
+    response = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "n": 1000, "s": STARRED_TAG},
+    )
+    refs = [item["id"] for item in response.json()["itemRefs"]]
+    assert refs, "a starred item should appear in the starred stream"
+
+
 # --------------------------------------------------------------------------
 # State writes
 # --------------------------------------------------------------------------

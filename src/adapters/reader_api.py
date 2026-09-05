@@ -25,8 +25,15 @@ STARRED_TAG = "user/-/state/com.google/starred"
 KEPT_UNREAD_TAG = "user/-/state/com.google/kept-unread"
 READING_LIST = "user/-/state/com.google/reading-list"
 
+# The single folder every source is listed under until FeedOut grouping exists.
+# Exported because subscription/list advertises it and stream/items/ids has to
+# answer for it consistently -- the two must not disagree about what "All" means.
+ALL_FOLDER_STREAM = "user/-/label/All"
+
 # NNW asks for these; anything else is treated as unknown.
 KNOWN_STATE_TAGS = frozenset({READ_TAG, STARRED_TAG, KEPT_UNREAD_TAG, READING_LIST})
+
+_LABEL_PREFIXES = ("user/-/label/", "user/%s/label/")
 
 _FEED_STREAM = re.compile(r"^feed/(?P<id>.+)$")
 _STATE_STREAM = re.compile(r"^user/[^/]+/state/com\.google/(?P<state>[a-z-]+)$")
@@ -42,6 +49,30 @@ def parse_feed_stream_id(stream_id: str) -> str | None:
     """Extract our source id from a feed stream id, or None if not one."""
     match = _FEED_STREAM.match(stream_id)
     return match.group("id") if match else None
+
+
+def state_stream_name(stream_id: str) -> str | None:
+    """The bare state name a stream id denotes, or None if it is not a state stream.
+
+    `user/-/state/com.google/starred` and `com.google/starred` both reduce to
+    `starred`. Callers branch on this so an unrecognised state can yield nothing
+    rather than falling through to "everything".
+    """
+    return _normalise_state_stream(stream_id)
+
+
+def label_stream_name(stream_id: str) -> str | None:
+    """The folder a label stream denotes, or None when it is not one.
+
+    `user/-/label/Work` -> `Work`. Only `All` is served today; the parser exists
+    so an unknown folder can be answered with "no items" instead of "everything".
+    """
+    for prefix in ("user/-/label/", "user/%s/label/"):
+        head = stream_id[: len(prefix)]
+        if head == prefix:
+            name = stream_id[len(prefix) :].strip()
+            return name or None
+    return None
 
 
 def is_state_stream(stream_id: str, *, state: str) -> bool:

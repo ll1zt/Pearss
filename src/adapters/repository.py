@@ -331,10 +331,15 @@ def visible_ids_for_stream(
     Pending items are excluded here, in SQL, for the same reason the RSS path
     excludes them: a client that has seen an item cannot be shown a different
     version of it, so the gate has to apply before anything is emitted.
+
+    A state stream filters on that state. An unrecognised one yields **nothing**:
+    falling through to "everything" is what made `.../starred` return the whole
+    library, which a client then renders as every item being starred. Serving an
+    empty list for a filter we do not implement is an honest gap; serving the
+    unfiltered list is a wrong answer that looks like data.
     """
     from adapters import reader_api
 
-    del tenant_id  # single tenant today; kept so the signature stays honest
     query = select(ItemRow.id).where(
         ItemRow.publish_status != PublishStatus.PENDING.value
     )
@@ -342,6 +347,31 @@ def visible_ids_for_stream(
     source_id = reader_api.parse_feed_stream_id(stream_id)
     if source_id is not None:
         query = query.where(ItemRow.source_id == source_id)
+    else:
+        state = reader_api.state_stream_name(stream_id)
+        if state == "reading-list":
+            pass  # every visible item; nothing further to filter on
+        elif state == "starred":
+            query = query.where(
+                ItemRow.id.in_(
+                    select(ReadStateRow.item_id).where(
+                        ReadStateRow.is_starred.is_(True),
+                        ReadStateRow.tenant_id == tenant_id,
+                    )
+                )
+            )
+        elif reader_api.label_stream_name(stream_id) == "All":
+            # The one folder we advertise. Every source lives in it, so it is
+            # the reading list; any other label is a folder that does not exist
+            # yet and must not silently read as "everything".
+            pass
+        elif state in {"broadcast", "verified"}:
+            # Shared/verified streams: we record neither, so there is nothing
+            # to list. Distinct from the unknown-state branch only in intent.
+            return []
+        else:
+            LOGGER.info("unhandled Reader stream %r; returning no items", stream_id)
+            return []
 
     return list(
         session.execute(

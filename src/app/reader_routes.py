@@ -292,7 +292,7 @@ def subscription_list(
                 source_id=row.id,
             ),
             "categories": [
-                {"id": "user/-/label/All", "label": "All", "type": "folder"}
+                {"id": reader_api.ALL_FOLDER_STREAM, "label": "All", "type": "folder"}
             ],
             "url": row.url or "",
             "htmlUrl": row.canonical_url or row.url or "",
