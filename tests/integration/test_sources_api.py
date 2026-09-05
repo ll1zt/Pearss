@@ -105,6 +105,47 @@ async def test_read_token_cannot_write(reader: httpx.AsyncClient) -> None:
     assert response.status_code == 403
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_snapshot_lists_every_status_including_zero_counts(
+    writer: httpx.AsyncClient,
+) -> None:
+    """A missing key cannot be told apart from a status that is empty.
+
+    Omitting zeros cost a real misreading: `pending` was absent while thousands
+    of `ready` items were present, and a client labelled the whole set "pending"
+    because the one status that contradicted that was not in the payload.
+    """
+    from core.enums import ErrorClass, JobRunStatus, PublishStatus, SourceStatus
+
+    response = await writer.get("/v1/system/snapshot")
+    assert response.status_code == 200
+    body = response.json()
+
+    expected = {
+        "sources_by_status": SourceStatus,
+        "items_by_publish_status": PublishStatus,
+        "runs_by_status": JobRunStatus,
+        "runs_by_error_class": ErrorClass,
+    }
+    for key, enum in expected.items():
+        present = set(body[key])
+        missing = {member.value for member in enum} - present
+        assert not missing, f"{key} omits {sorted(missing)}"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_snapshot_reports_pending_separately_from_ready(
+    writer: httpx.AsyncClient,
+) -> None:
+    """The two states mean opposite things and must not merge into one number."""
+    body = (await writer.get("/v1/system/snapshot")).json()
+    statuses = body["items_by_publish_status"]
+    assert "pending" in statuses and "ready" in statuses
+    assert statuses["pending"] == 0
+
+
 # --------------------------------------------------------------------------
 # Idempotency
 # --------------------------------------------------------------------------

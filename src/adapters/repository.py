@@ -13,6 +13,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, Select, and_, func, or_, select, update
@@ -28,7 +29,13 @@ from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
 from adapters.raw_payload import ConditionalState
-from core.enums import ErrorClass, ItemEvent, JobRunStatus, PublishStatus, SourceStatus
+from core.enums import (
+    ErrorClass,
+    ItemEvent,
+    JobRunStatus,
+    PublishStatus,
+    SourceStatus,
+)
 from core.item_state import TransitionContext
 from core.item_state import transition as item_transition
 from core.job_state import JobRunContext, JobRunEvent, transition
@@ -1347,34 +1354,56 @@ def system_snapshot(session: Session, *, tenant_id: str) -> dict[str, object]:
     reported here, rather than a generic row count.
     """
 
-    def counts(statement: Select[tuple[Any, int]]) -> dict[str, int]:
+    def counts(
+        statement: Select[tuple[Any, int]],
+        *,
+        every: type[StrEnum] | None = None,
+    ) -> dict[str, int]:
         """Tally a grouped `select(value, count())` into a mapping.
 
         A comprehension rather than `dict(...)`: mypy cannot infer a value type
         from a Row sequence, and the empty-dict annotation it produces poisons
         every downstream use.
+
+        `every` fills in the states that have no rows, so a consumer reads an
+        explicit zero instead of a missing key. Omitting them cost us a real
+        misreading: `pending` was absent while 4,576 `ready` items were present,
+        and a client labelled the whole set "待处理" because the one status that
+        would have contradicted that reading was not in the payload.
         """
-        return {str(key): int(total) for key, total in session.execute(statement).all()}
+        tallied = {
+            str(key): int(total) for key, total in session.execute(statement).all()
+        }
+        if every is not None:
+            for member in every:
+                tallied.setdefault(str(member.value), 0)
+        return tallied
 
     sources = counts(
         select(SourceRow.status, func.count())
         .where(SourceRow.tenant_id == tenant_id)
-        .group_by(SourceRow.status)
+        .group_by(SourceRow.status),
+        every=SourceStatus,
     )
     items = counts(
         select(ItemRow.publish_status, func.count())
         .where(ItemRow.tenant_id == tenant_id)
-        .group_by(ItemRow.publish_status)
+        .group_by(ItemRow.publish_status),
+        every=PublishStatus,
     )
     runs_by_status = counts(
-        select(JobRunRow.status, func.count()).group_by(JobRunRow.status)
+        select(JobRunRow.status, func.count()).group_by(JobRunRow.status),
+        every=JobRunStatus,
     )
     # error_class is nullable; the query drops the NULLs, and str() keeps the
     # key type uniform without asserting away the None mypy still sees.
     runs_by_error = counts(
         select(JobRunRow.error_class, func.count())
         .where(JobRunRow.error_class.is_not(None))
-        .group_by(JobRunRow.error_class)
+        .group_by(JobRunRow.error_class),
+        # Every class is listed: "no blocked runs" is a fact worth stating,
+        # and a missing key cannot be told apart from a query that forgot.
+        every=ErrorClass,
     )
     recent = session.execute(
         select(JobRunRow.status)
