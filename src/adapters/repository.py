@@ -34,6 +34,7 @@ from core.item_state import transition as item_transition
 from core.job_state import JobRunContext, JobRunEvent, transition
 from core.models import Item
 from core.normalize import DedupeAction, decide_dedupe, source_display_label
+from core.paging import MAX_RESUME_ROUNDS
 from core.reader_state import ReadState as ReadStateDomain
 from core.scheduling import observed_gaps
 
@@ -1027,14 +1028,17 @@ def save_paging_state(
     ):
         row.seen_frontier = newest_id
 
-    if resume_cursor and row.resume_cursor == resume_cursor:
-        row.resume_rounds += 1
-    elif resume_cursor:
+    # The count tracks "this cycle still ended with unfinished history", not
+    # "the same cursor as last time". A productive backfill produces a *new,
+    # deeper* cursor every cycle, so keying the count on cursor equality would
+    # pin it at 1 forever and the bound would never engage in exactly the case
+    # it exists for: a Following timeline with more history than the per-cycle
+    # budget can ever reach.
+    if resume_cursor:
         row.resume_cursor = resume_cursor
-        # A *new* cursor is different work, not the same unresolved backlog.
-        # Counting it as another round would age a fresh gap as if it had been
-        # known for several cycles.
-        row.resume_rounds = 1
+        row.resume_rounds = (
+            1 if row.resume_rounds >= MAX_RESUME_ROUNDS else row.resume_rounds + 1
+        )
     else:
         row.resume_cursor = None
         row.resume_rounds = 0

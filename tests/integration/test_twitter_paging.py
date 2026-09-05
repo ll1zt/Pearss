@@ -20,6 +20,7 @@ from adapters.db_models import Source
 from adapters.repository import paging_state, save_paging_state
 from app.pipeline import CollectionResult, collect_authenticated_pages
 from core.enums import ErrorClass
+from plugins.collectors.twitter.paging import should_drop_resume
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ID = "src-x"
@@ -278,16 +279,39 @@ def test_a_stuck_resume_ages_and_a_moving_one_does_not(session: Session) -> None
     session.commit()
     assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 2
 
-    # A different cursor is newly discovered work, not another round of old.
+    # A *deeper* cursor still ages. A productive backfill mints a new cursor
+    # every cycle, so resetting on change would pin the count at 1 forever and
+    # the bound would never engage -- exactly the scenario it exists for.
     save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor="GAP-2")
     session.commit()
-    assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 1
+    assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 3
 
     # Clearing it resets the count.
     save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor=None)
     session.commit()
     state = paging_state(session, source_id=SOURCE_ID)
     assert state.resume_rounds == 0 and state.resume_cursor is None
+
+
+@pytest.mark.integration
+def test_a_productive_backfill_still_reaches_the_bound(session: Session) -> None:
+    """Each cycle hands back a deeper cursor; the count must still climb.
+
+    This is the case a cursor-equality check gets wrong: the walk looks
+    productive, so it never ages, and a timeline with more history than the
+    budget can reach is crawled forever while new content queues behind it.
+    """
+    for expected_round in range(1, 4):
+        save_paging_state(
+            session,
+            source_id=SOURCE_ID,
+            newest_id=10,
+            resume_cursor=f"DEEPER-{expected_round}",
+        )
+        session.commit()
+        state = paging_state(session, source_id=SOURCE_ID)
+        assert state.resume_rounds == expected_round
+        assert should_drop_resume(state.resume_rounds) is (expected_round >= 3)
 
 
 @pytest.mark.integration

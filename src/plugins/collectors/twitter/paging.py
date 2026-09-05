@@ -30,6 +30,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Final
 
+from core.paging import MAX_RESUME_ROUNDS
+
 # How much of a cycle's budget is reserved for an unfinished backfill when one
 # exists, so a very active account cannot starve its own history by consuming
 # the whole budget on new content every time.
@@ -44,7 +46,9 @@ MIN_PAGES_FOR_RESERVE: Final = 3
 # so without a bound the walk retreats further into the past every cycle and
 # never catches up; dropping it accepts a bounded gap in deep history instead
 # of an unbounded one.
-MAX_RESUME_ROUNDS: Final = 3
+# Consecutive cycles an unresolved resume may slide backwards before it is
+# dropped. The bound itself lives in core.paging, because the repository ages
+# the counter and this module reads it -- the two must agree.
 
 
 def to_int(value: object) -> int | None:
