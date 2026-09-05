@@ -15,8 +15,9 @@ import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import httpx
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -31,6 +32,7 @@ from uvicorn.server import Server
 from app.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+MCP_EDGE_TOKEN = "synthetic-mcp-edge-token"
 API_TOKEN = "mcp-test-token"
 FEED_URL = "https://planetpython.org/rss20.xml"
 
@@ -86,6 +88,7 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
         "PEARSS_DATABASE_URL": url,
         "PEARSS_STORAGE_DIR": str(root / "storage"),
         "PEARSS_API_TOKEN": API_TOKEN,
+        "PEARSS_MCP_TOKEN": MCP_EDGE_TOKEN,
         "PEARSS_READER_PASSWORD": "reader-pw",
         "PEARSS_READER_USERNAME": "reader",
         "PEARSS_SCHEDULER_ENABLED": "0",
@@ -183,8 +186,23 @@ async def mcp_session(
         if elicitation_callback is not None
         else {}
     )
+    # The MCP endpoint now requires its own bearer token, so the client is
+    # built with the header rather than left to the default.
+    # The SDK vendors its own renamed httpx (`httpx2`), so the parameter is
+    # typed against a different class than the one this project depends on.
+    # Structurally identical for what the client uses; the cast records that
+    # rather than suppressing the error.
+    http_client = cast(
+        "Any",
+        httpx.AsyncClient(
+            headers={"authorization": f"Bearer {MCP_EDGE_TOKEN}"},
+            timeout=httpx.Timeout(30.0),
+            follow_redirects=True,
+        ),
+    )
     async with (
-        streamable_http_client(url) as (read, write),
+        http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write),
         ClientSession(read, write, **kwargs) as session,
     ):
         await session.initialize()

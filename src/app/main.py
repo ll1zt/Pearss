@@ -34,7 +34,8 @@ from adapters.repository import (
 from adapters.rss_out import FeedMeta, render_feed
 from app.auth import Principal, auth_configured, write_required
 from app.items_routes import router as items_router
-from app.mcp_server import build_mcp_server
+from app.mcp_guard import MCPAuthMiddleware, warn_if_unconfigured
+from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
@@ -127,10 +128,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and the StreamableHTTP session manager must be initialised there or every
     # MCP request fails. So the child lifespan is entered explicitly here and
     # its exit is tied to ours, which keeps shutdown ordering correct.
-    mcp = build_mcp_server(app)
-    mcp_app = mcp.streamable_http_app()
-    app.mount("/mcp", mcp_app)
-    app.state.mcp_app = mcp_app
+    # The inner Starlette app owns the session-manager lifespan; the auth
+    # wrapper only fronts requests. Collapsing the two would look tidier and
+    # break `router.lifespan_context` below, which is what makes MCP sessions
+    # work at all.
+    mcp_inner = build_mcp_app(app)
+    app.mount("/mcp", MCPAuthMiddleware(mcp_inner))
+    app.state.mcp_app = mcp_inner
 
     scheduler = Scheduler(
         app.state.session_factory,
@@ -139,7 +143,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.scheduler = scheduler
 
-    async with mcp_app.router.lifespan_context(mcp_app):
+    async with mcp_inner.router.lifespan_context(mcp_inner):
         if scheduler_enabled():
             await scheduler.start()
         else:
@@ -205,6 +209,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.state.reader_auth = ReaderAuth(app.state.session_factory)
     configure_reader_credentials(app.state.session_factory)
     app.include_router(reader_router)
+    warn_if_unconfigured()
     app.include_router(sources_router)
     app.include_router(items_router)
     app.include_router(system_router)

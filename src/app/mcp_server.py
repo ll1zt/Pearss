@@ -562,3 +562,24 @@ def build_mcp_server(app: Any) -> MCPServer:
         return text if isinstance(text, str) else ""
 
     return server
+
+
+def build_mcp_app(app: Any) -> Any:
+    """The MCP Starlette app, with Host pinning applied.
+
+    The SDK rejects any Host it does not recognise, which by default means only
+    loopback reaches the endpoint. `allowed_hosts` comes from the environment so
+    a deployment that serves a Tailscale address says so explicitly rather than
+    getting remote access by accident.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    from app.mcp_guard import allowed_hosts
+
+    server = build_mcp_server(app)
+    return server.streamable_http_app(
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts(),
+        )
+    )
