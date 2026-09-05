@@ -81,11 +81,39 @@ REGISTRY: tuple[Registration, ...] = (
 
 
 def select(url: str) -> Registration | None:
-    """The collector registered for `url`, or None."""
+    """The collector whose matcher claims `url`, or None.
+
+    URL matching alone is a heuristic: it looks for path fragments that a feed
+    often but not always carries. Use `select_for` when a source type is known.
+    """
     for registration in REGISTRY:
         if registration.collector.match_url(url):
             return registration
     return None
+
+
+def select_for(source_type: str, url: str) -> Registration | None:
+    """The collector for a source, honouring the type the operator declared.
+
+    Declared type wins over the URL heuristic. `hnrss.org/frontpage` is a real
+    RSS feed that contains none of the fragments the RSS matcher looks for, so
+    routing purely by URL refused to collect a source someone had explicitly
+    created as `rss` -- and the schema already records that intent in
+    `source.type`, which ignoring it threw away.
+
+    The URL still decides for `web` sources, where the type says only that
+    something must be scraped rather than which scraper fits.
+    """
+    if source_type == "rss":
+        return by_name("rss")
+    return select(url)
+
+
+def by_name(name: str) -> Registration | None:
+    return next(
+        (registration for registration in REGISTRY if registration.name == name),
+        None,
+    )
 
 
 def parse_with(registration: Registration, raw: RawPayload) -> list[ItemDraft]:

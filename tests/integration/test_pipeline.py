@@ -23,6 +23,7 @@ from lxml import etree
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
+from adapters.db_models import Source
 from adapters.raw_payload import RawPayload
 from adapters.repository import (
     count_items,
@@ -217,6 +218,97 @@ def test_rss_output_includes_descriptions(
     ).decode()
     assert "<![CDATA[" in rendered
     assert "short summary" in rendered
+
+
+@pytest.mark.integration
+def test_a_declared_rss_source_is_collected_whatever_its_url(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Routing must honour source.type, not guess from the URL.
+
+    hnrss.org/frontpage is a real RSS feed carrying none of the fragments the
+    RSS matcher looks for. Routing purely by URL refused to collect it and
+    reported structure_changed for a source the operator had explicitly
+    created as `rss` -- a regression this collector registry introduced, since
+    the pipeline previously parsed every source as a feed unconditionally.
+    """
+    from app import collector_registry
+
+    registration = collector_registry.select_for("rss", "https://hnrss.org/frontpage")
+    assert registration is not None
+    assert registration.name == "rss"
+
+    # And the URL alone still refuses, which is what makes the type decisive.
+    assert collector_registry.select("https://hnrss.org/frontpage") is None
+
+
+@pytest.mark.integration
+def test_a_web_source_is_still_routed_by_url(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`web` says something must be scraped, not which scraper fits."""
+    from app import collector_registry
+
+    assert collector_registry.select_for("web", "https://t.me/s/durov") is not None
+    assert collector_registry.select_for("web", "https://example.com/x") is None
+
+
+@pytest.mark.integration
+def test_collection_records_the_name_the_origin_gives_itself(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The feed's own <title> should end up on the source, not on each item.
+
+    Collectors report it through ItemDraft.metadata, which normalize() drops by
+    design; without this step the Reader API has nothing to show and a client
+    renders the subscription by its hex id.
+    """
+    from adapters.repository import set_source_title_if_absent
+    from app.pipeline import normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    drafts = collect(SOURCE, "valid.xml")
+    assert drafts[0].metadata.get("feed_title") == "Example Blog"
+
+    set_source_title_if_absent(
+        session, source_id=SOURCE, title=drafts[0].metadata.get("feed_title")
+    )
+    normalise_and_store(session, drafts)
+    session.commit()
+
+    row = session.get(Source, SOURCE)
+    assert row is not None
+    assert row.title == "Example Blog"
+
+
+@pytest.mark.integration
+def test_a_recorded_title_is_not_overwritten(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's rename, or an earlier origin name, outranks a later guess.
+
+    The writer is conditional for the same reason the schedule is not stored
+    twice: an unconditional write would let the origin silently undo a decision
+    made on the operator's side.
+    """
+    from adapters.repository import set_source_title_if_absent
+
+    assert set_source_title_if_absent(session, source_id=SOURCE, title="Kept") is True
+    session.commit()
+    assert set_source_title_if_absent(session, source_id=SOURCE, title="Later") is False
+    session.commit()
+
+    row = session.get(Source, SOURCE)
+    assert row is not None and row.title == "Kept"
+
+
+@pytest.mark.integration
+def test_blank_title_is_not_recorded(session: Session) -> None:
+    """A whitespace-only origin title must not occupy the column."""
+    from adapters.repository import set_source_title_if_absent
+
+    assert set_source_title_if_absent(session, source_id=SOURCE, title="   ") is False
+    assert set_source_title_if_absent(session, source_id=SOURCE, title=None) is False
 
 
 @pytest.mark.integration

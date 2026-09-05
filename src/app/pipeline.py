@@ -154,7 +154,7 @@ def collect_source(
     if not result.succeeded or max_pages <= 1:
         return result
 
-    registration = collector_registry.select(url)
+    registration = collector_registry.select_for(source.type, url)
     if registration is None:
         return result
     backfiller = collector_registry.backfiller(registration)
@@ -216,7 +216,7 @@ def _collect_one_page(
     if payload.not_modified:
         return CollectionResult(succeeded=True, not_modified=True)
 
-    registration = collector_registry.select(url)
+    registration = collector_registry.select_for(source.type, url)
     if registration is None:
         # No collector claims this URL. Recording it as structure_changed
         # rather than parse: the fetch worked, but nothing here knows how to
