@@ -116,11 +116,11 @@
     }
   },
   "search_items": {
-    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource.",
+    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource, or the get_item_body tool.\n\nFilter on the server, not in your context. These cost nothing here and are expensive if you pull a wide list and filter it yourself: - fields: comma-separated subset of id,guid,title,url,published_at,source_id,publish_status. Requesting fewer fields is the single biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB with fields=id).\n- limit: how many rows (default 20, max 100). Ask for what you need.\n- source_id, q, since, until, publish_status: narrow the query.\nSo 'recent posts from one source' is one narrowed call, not a wide list you then scan.",
     "input_schema": {
       "properties": {
         "fields": {
-          "default": "id,guid,title,url,published_at",
+          "default": "id,guid,title,url,published_at,source_id",
           "title": "Fields",
           "type": "string"
         },
@@ -128,6 +128,18 @@
           "default": 20,
           "title": "Limit",
           "type": "integer"
+        },
+        "publish_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publish Status"
         },
         "q": {
           "anyOf": [
@@ -141,6 +153,18 @@
           "default": null,
           "title": "Q"
         },
+        "since": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Since"
+        },
         "source_id": {
           "anyOf": [
             {
@@ -152,6 +176,18 @@
           ],
           "default": null,
           "title": "Source Id"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Until"
         }
       },
       "title": "search_itemsArguments",

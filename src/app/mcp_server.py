@@ -286,24 +286,54 @@ def build_mcp_server(app: Any) -> MCPServer:
 
     @server.tool(
         description=(
-            "Search collected items. Returns summaries only — titles, urls, "
-            "ids and timestamps. Bodies are at the item://{id} Resource."
+            "Search collected items. Returns summaries only — titles, urls, ids "
+            "and timestamps. Bodies are at the item://{id} Resource, or the "
+            "get_item_body tool.\n\n"
+            "Filter on the server, not in your context. These cost nothing here "
+            "and are expensive if you pull a wide list and filter it yourself: "
+            "- fields: comma-separated subset of id,guid,title,url,published_at,"
+            "source_id,publish_status. Requesting fewer fields is the single "
+            "biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB "
+            "with fields=id).\n"
+            "- limit: how many rows (default 20, max 100). Ask for what you need.\n"
+            "- source_id, q, since, until, publish_status: narrow the query.\n"
+            "So 'recent posts from one source' is one narrowed call, not a wide "
+            "list you then scan."
         )
     )
     async def search_items(
         q: str | None = None,
         source_id: str | None = None,
         limit: int = 20,
-        fields: str = "id,guid,title,url,published_at",
+        # source_id is included by default so a result is self-describing: a
+        # list you cannot tell apart by source makes filtering by source_id a
+        # blind request.
+        fields: str = "id,guid,title,url,published_at,source_id",
+        since: str | None = None,
+        until: str | None = None,
+        publish_status: str | None = None,
     ) -> dict[str, Any]:
+        """Item summaries, narrowed on the server.
+
+        Every filter is forwarded to `/v1/items`, so narrowing happens in SQL
+        rather than in the model's context. That is the whole point: the
+        alternative -- a wide list the caller then filters -- costs context in
+        proportion to how unselective the request was, and Pearss's own filter
+        pushdown (ADR 0009's query API) already exists to avoid it.
+        """
         params: dict[str, Any] = {
             "limit": min(limit, 100),
             "fields": fields,
         }
-        if q:
-            params["q"] = q
-        if source_id:
-            params["source_id"] = source_id
+        for name, value in (
+            ("q", q),
+            ("source_id", source_id),
+            ("since", since),
+            ("until", until),
+            ("publish_status", publish_status),
+        ):
+            if value:
+                params[name] = value
         status, payload = await core.get("/v1/items", **params)
         if status != 200:
             return _error_from(payload, status)
@@ -311,6 +341,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         result["body_hint"] = (
             "Fetch a body with the item://{item_id} resource, not here."
         )
+        # Teach the shape once, at the moment it matters: a wide request just
+        # cost context proportional to how unselective it was, and saying so is
+        # cheaper than letting the caller repeat it.
+        if limit >= 50:
+            result["cost_hint"] = (
+                "fields and limit are the levers; a narrower request costs "
+                "correspondingly less to read."
+            )
         return result
 
     @server.tool(

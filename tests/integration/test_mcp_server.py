@@ -448,6 +448,78 @@ async def test_get_item_body_is_read_only(mcp_url: str) -> None:
     assert payload["body"].startswith("<p>")
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_narrowing_fields_cuts_what_reaches_the_model(mcp_url: str) -> None:
+    """The point of filter pushdown, measured rather than asserted.
+
+    A wide list the model then filters costs context in proportion to how
+    unselective the request was. This pins the saving so a future change that
+    stopped forwarding `fields` cannot pass silently.
+    """
+    wide_payload = await _call(mcp_url, "search_items", {"limit": 100})
+    narrow_payload = await _call(
+        mcp_url, "search_items", {"limit": 100, "fields": "id"}
+    )
+
+    # The stable property: rows carry exactly the fields requested, nothing
+    # more. A wrapper that accepted `fields` and ignored it could still be
+    # "smaller" for unrelated reasons, so this is what pins the behaviour.
+    assert all(set(row) == {"id"} for row in narrow_payload["data"])
+    assert {"title", "url"} <= set(wide_payload["data"][0])
+
+    # The saving scales with row count, since a fixed envelope is paid either
+    # way; two seeded rows should still show it clearly.
+    wide = json.dumps(wide_payload)
+    narrow = json.dumps(narrow_payload)
+    assert len(narrow) < len(wide) * 0.75, (
+        f"fields=id ({len(narrow)} chars) should be clearly smaller than all "
+        f"fields ({len(wide)} chars)"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_every_documented_filter_is_forwarded(mcp_url: str) -> None:
+    """Filters exist to be used; one that is accepted and ignored is a trap.
+
+    Each is applied to a value that selects something, so a filter silently
+    dropped by the wrapper leaves the result set unchanged and this fails.
+    """
+    all_items = await _call(mcp_url, "search_items", {"limit": 100})
+
+    by_source = await _call(
+        mcp_url, "search_items", {"limit": 100, "source_id": "src-1"}
+    )
+    assert [row["id"] for row in by_source["data"]]
+    assert all(row["source_id"] == "src-1" for row in by_source["data"])
+
+    by_status = await _call(
+        mcp_url, "search_items", {"limit": 100, "publish_status": "pending"}
+    )
+    # The gate excludes pending rows from every output path, this one included.
+    assert by_status["data"] == []
+
+    by_time = await _call(
+        mcp_url,
+        "search_items",
+        {"limit": 100, "since": "2099-01-01T00:00:00.000000Z"},
+    )
+    assert by_time["data"] == [], f"since was ignored: {by_time}"
+    assert len(all_items["data"]) >= len(by_source["data"])
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_wide_request_is_told_what_it_cost(mcp_url: str) -> None:
+    """The hint appears exactly when the request was unselective."""
+    narrow = await _call(mcp_url, "search_items", {"limit": 5})
+    assert "cost_hint" not in narrow
+
+    wide = await _call(mcp_url, "search_items", {"limit": 100})
+    assert "cost_hint" in wide
+
+
 # --------------------------------------------------------------------------
 # Writes require confirmation
 # --------------------------------------------------------------------------
