@@ -34,6 +34,9 @@ SENSITIVE_HEADERS = frozenset(
         "proxy-authorization",
         "x-api-key",
         "x-reader-token",
+        # X's `ct0` value, which is a login-derived session token and is sent
+        # as this header by the authenticated collector (ADR 0012).
+        "x-csrf-token",
     }
 )
 

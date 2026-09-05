@@ -93,6 +93,19 @@ class Source(Base):
     parser_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(128), nullable=True
     )
+    # Paging state for sources whose origin is walked a page at a time. RSS has
+    # no such concept, so all three are unused by the other collectors.
+    # Not derivable from `item`: a cursor is an opaque string from the origin,
+    # and a gap position is not recoverable from stored rows.
+    seen_frontier: sa.orm.Mapped[int | None] = sa.orm.mapped_column(
+        sa.BigInteger, nullable=True
+    )
+    resume_cursor: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    resume_rounds: sa.orm.Mapped[int] = sa.orm.mapped_column(
+        sa.Integer, nullable=False, default=0
+    )
     # Per-source scheduling: fixed interval or adaptive bounds, plus the
     # consecutive-failure count that drives backoff.
     schedule_policy: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)

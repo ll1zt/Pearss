@@ -19,6 +19,7 @@ from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.rss import collector as rss
 from plugins.collectors.telegram import collector as telegram
+from plugins.collectors.twitter import collector as twitter
 
 
 class CollectorError(Exception):
@@ -68,6 +69,12 @@ class BackfillingCollector(Protocol):
 class Registration:
     name: str
     collector: Collector
+    # A paged collector is walked a page at a time against stored cursor state,
+    # which is a different collection path, not a loop around the same one.
+    # Declared here rather than probed from the module: the presence of a
+    # `page_ids` attribute says a collector happens to define a function, not
+    # that collection should persist a frontier.
+    paged: bool = False
 
 
 # Order matters: the first match wins, so the more specific matcher goes first.
@@ -76,6 +83,7 @@ class Registration:
 # contain.
 REGISTRY: tuple[Registration, ...] = (
     Registration(name="telegram", collector=telegram),
+    Registration(name="twitter", collector=twitter, paged=True),
     Registration(name="rss", collector=rss),
 )
 
