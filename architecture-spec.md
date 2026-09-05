@@ -149,6 +149,9 @@ structlog+correlation_id]
 | JobRun | id, job_id, status, **error_class**, metrics, correlation_id | P1 | 可重建 | 近期保留排障 |
 | FeedOut | id, name, filter_query, pipeline_chain, format, token | P1 | 事实源 | |
 | AuditLog | id, actor, session_id, path/tool, args, result, ts | P1 | 事实源 | API 层中间件全覆盖 |
+| ReadState | item_id, tenant_id, is_read, is_starred, updated_at | P1（原 P3） | 事实源 | Reader API 写回；复合主键使 upsert 成立 |
+| ReaderCredential | username, password_hash, created_at, updated_at | P1 | 事实源 | 只存 scrypt 哈希，明文仅存在于环境（ADR 0005） |
+| IdempotencyRecord | actor, endpoint, key, status_code, response_body, expires_at | P1 | 可重建 | 支撑「写操作幂等」；带过期，非长期事实源 |
 
 ### 2.2 管道与发布闸门
 
@@ -164,7 +167,9 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
 
 ### 2.3 MCP 工具面（控制平面）
 
-- **P1**：`discover_feed(url)`、`add_source`⚠、`import_opml`⚠ / `export_opml`、`list_sources`、`search_items`、`list_jobs` / `trigger_job` / `pause_job` / `update_schedule_policy`⚠、`create_feed`⚠、`get_system_snapshot`（简版）
+- **P1（已实现）**：`list_sources`、`search_items`、`get_system_snapshot`、`list_jobs` / `list_runs`、`add_source`⚠、`update_schedule_policy`⚠、`set_source_status`⚠（暂停/恢复）、`remove_source`⚠、`trigger_job`⚠；正文走 `item://{item_id}` Resource
+- **P1（暂缓，尚无对应 Core API）**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6）、`create_feed`⚠（FeedOut 尚无 CRUD）
+- ⚠ = 需 elicitation 用户确认。工具经 `/v1` 调用而非直调仓储，理由见 ADR 0010
 - **P2**：`diagnose_source`、`diagnose_plugin`、`get_logs(correlation_id)`、插件管理组（⚠：import/enable/disable）
 - **P3**：`run_processor`、`list_pending_items` / `retry_enrichment` / `force_publish`⚠、ingest token 管理
 - 约定：分页+字段过滤+截断；错误返回 `{"error", "error_class", "suggestion", "next_actions"}`；正文走 `item://{id}` Resource
@@ -201,8 +206,8 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | FastAPI + SQLite + RSS 采集 + discover_feed + OPML + 准插件爬虫×2-3 + schedule_policy（含 adaptive）+ APScheduler + 单 FastMCP（elicitation）+ RSS feed + 发布闸门字段 + 错误分类法 + 审计中间件 + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI** | agent 完成“发现→加源→抓取→出 feed”；OPML 可用；五类错误落库；开发环境与 CI 均由 `nix develop --command just ci` 通过 |
-| P2 可观测+插件化 | structlog + correlation_id + 快照/诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed + Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + token 鉴权 + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、网页采集器（A2 仅 1/2–3）、`create_feed`/FeedOut CRUD、备份与恢复演练 | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（521 测试）。未达成：「发现」环节与 OPML 迁移 |
+| P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
 | P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
 
@@ -210,26 +215,26 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 需求 | 组件 | 阶段 | 验收标准 |
 |---|---|---|---|
-| A1 RSS 采集 | 采集服务 | P1 | 增量抓取入库，ETag 生效 |
-| A2 爬虫插件 | 准插件 → Plugin Runtime | P1→P2 | P1 三爬虫可用；P2 第三个接入未改前两个 |
+| A1 RSS 采集 | 采集服务 | P1 ✅ | 增量抓取入库，ETag 生效（实测 304） |
+| A2 爬虫插件 | 准插件 → Plugin Runtime | P1→P2 🟡 | 仅 RSS 一个准插件；网页采集器未做，故 P2 的 hookspec 冻结前提（Rule of Three）未满足 |
 | A3 主动接入 | Ingest API | P3 | 外部 agent 持 token 幂等推送 |
-| A4 调度策略 | schedule_policy + 调度器 | P1 | fixed/adaptive 可配，adaptive 自调节，失败退避 |
-| A5 Feed 发现 | discover_feed | P1 | 给 URL 返回候选 feed |
-| A6 OPML | 导入/导出端点 | P1 | 双向迁移成功 |
-| B1 分层存储 | DB + 文件系统 | P1 | 原始/规范化分离 |
-| B2 关系建模 | Item.content_hash | P1 | 同文多源去重生效 |
-| B3 处理管道 | Pipeline | P1 骨架 / P3 挂载 | job 幂等可重放 |
+| A4 调度策略 | schedule_policy + 推导式调度器 | P1 ✅ | fixed/adaptive 可配，adaptive 自调节，失败指数退避；到期时间不落库（ADR 0009） |
+| A5 Feed 发现 | discover_feed | P1 ⏸ | **已决定暂缓**：无对应端点与 MCP 工具 |
+| A6 OPML | 导入/导出端点 | P1 ❌ | 未实现 |
+| B1 分层存储 | DB + CAS 文件存储 | P1 ✅ | 正文存内容寻址存储，DB 只存 `content_ref` |
+| B2 关系建模 | Item.content_hash + 身份 | P1 ✅ | 同文多源去重生效；身份（id/guid）优先于内容匹配，否则改写正文会撞冻结的 GUID（ADR 0008 相关） |
+| B3 处理管道 | app/pipeline + Job/JobRun | P1 ✅ | Job=声明、JobRun=执行；采集幂等可重放；处理器链挂载留 P3 |
 | B4 处理插件 | Processor hookspec | P3 | 翻译插件跑通 enrich |
-| B5 错误分类法 | JobRun.error_class（enum 单源） | P1 | 五分类强制落库 |
-| C1 RSS 输出 | 发布服务 | P1 | NNW 订阅成功，GUID 稳定 |
-| C2 查询 API | search_items + Resource | P1 | 紧凑返回 |
+| B5 错误分类法 | JobRun.error_class（enum 单源） | P1 ✅ | 五分类落库且 DB CHECK 强制；分类优先级与重试表同源 |
+| C1 RSS 输出 | 发布服务 | P1 ✅ | NNW 实测订阅成功，GUID 稳定，正文 CDATA |
+| C2 查询 API | /v1/items + item://{id} | P1 ✅ | 紧凑摘要 + keyset 分页 + 字段选择；正文独立端点 |
 | C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
-| C4 Reader API | /api/greader.php | P1（原 P3） | NNW FreshRSS 登录，已读同步；ADR 0004 提前 |
-| C5 发布闸门 | Item.publish_status | P1 字段 / P3 联动 | pending 条目不出现在 feed |
-| D1-D6 操作面 | MCP 工具组 | P1-P3 | 见 §2.3 |
+| C4 Reader API | /api/greader.php | P1 ✅（原 P3） | NNW FreshRSS 登录 + 已读/星标同步，实测通过；ADR 0004 提前 |
+| C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 RSS、Reader API、MCP 工具三条路径均不可见；P3 处理器链联动待做 |
+| D1-D6 操作面 | MCP 工具组（10 工具） | P1 ✅ | 见 §2.3；D1 诊断类工具（diagnose_source 等）属 P2 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
-| F1 可复现环境 | Nix Flake + direnv + uv | P1 | 新机器 clone 后按 README/AGENTS.md 可进入相同环境并通过 CI |
-| F2 依赖供应链 | flake.lock + uv.lock | P1 | 锁文件在版本控制；依赖更新经完整 CI |
+| F1 可复现环境 | Nix Flake + direnv + uv | P1 ✅ | clean slate 下 `nix develop --command just ci` 通过 |
+| F2 依赖供应链 | flake.lock + uv.lock | P1 ✅ | 两份锁文件均入库 |
 
 ## 7. 可维护性设计（防腐）
 
@@ -275,27 +280,42 @@ CI 顺序：`nix flake check` → `nix develop --command just ci`，其中 `just
 
 ```
 repo/
-  AGENTS.md
-  README.md
+  AGENTS.md              # agent 操作约定与完成标准
+  README.md              # 如何开始开发与验证
+  architecture-spec.md   # 本文件
   flake.nix              # Nix 开发环境（pkgs.mkShell，含 crawler profile）
   flake.lock             # 锁定 nixpkgs 与 Flake 输入
   .envrc                 # use flake，由 direnv 自动激活（见 ADR 0002）
-  pyproject.toml         # Python 项目元数据与依赖声明
+  .gitignore             # 数据/密钥/venv/缓存一律不入库
+  .env                   # 未提交：数据库 URL、Reader 与 API token、tick 间隔
+  justfile               # 人机共用命令入口（唯一入口）
+  pyproject.toml         # 元数据、依赖、ruff/mypy/pytest/import-linter 配置
   uv.lock                # 锁定 Python 依赖图
-  justfile               # 人机共用命令入口
-  core/                  # 纯领域逻辑，零框架 import
-  adapters/              # http / mcp / db / rss 等 outward 适配
-  plugins/               # collectors / processors / P1 准插件
-  app/                   # 组装、注册、启动
+  alembic.ini            # sqlalchemy.url 故意留空，URL 由 env.py 从环境解析
+  migrations/versions/   # 0001 P1 七表 … 0005 时间戳定宽
+  deploy/pearss.service  # systemd 用户服务（ADR 未单列，见 README）
+  src/                   # src layout；四层由 import-linter 强制
+    core/                # 纯领域：零框架 import（已 AST 核验）
+    adapters/            # http / db / repository / rss_out / reader_api /
+                         # filestore / sanitize / audit / correlation / raw_payload
+    plugins/collectors/  # 准插件 + 其 fixture 与回归测试
+    app/                 # 组装：main / sources_routes / items_routes /
+                         # system_routes / reader_routes / pipeline / scheduler /
+                         # mcp_server / auth / middleware
   tests/
-    unit/
-    fixtures/            # RSS/HTML 快照 → 期望 ItemDraft
-    contract/            # OpenAPI diff、MCP 工具 snapshot
-    e2e/
-    evals/               # agent golden 任务（P2 起）
-  docs/adr/              # 一决策一文件，可 supersede
-  architecture-spec.md
-```
+    unit/                # core 纯函数、状态机、去重、调度、脱敏、净化
+    integration/         # SQLite + ASGI + MCP 客户端 + systemd 级行为
+    contract/mcp_tools.json   # 工具面 snapshot（just contract）
+    fixtures/            # 采集器快照（实际位于 plugins/collectors/rss/fixtures）
+    e2e/                 # 预留：需 compose，尚未接线
+    evals/               # P2 agent golden 任务，尚未创建
+  docs/
+    api/                 # style-guide.md, mcp-tool-guide.md
+    domain/              # data-model.md, state-machines.md, error-taxonomy.md
+    guides/              # collector-guide.md, testing.md
+    operations/          # runbook.md
+    integrations/        # netnewswire.md
+    adr/                 # 一决策一文件，可 supersede；0000 为索引```
 
 ### 7.7 运行期腐化信号
 
@@ -324,7 +344,8 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 契约保护 | oasdiff + 工具 snapshot 测试 | 可逆 | 破坏式变更必须显式 |
 | 外部世界钉住 | 每源/爬虫 fixture 快照 | 可逆 | 网站改版是最大腐化源 |
 | Agent 协作 | AGENTS.md + justfile | 可逆 | agent 是主要编码协作者 |
-| 备份策略 | 事实源备份、派生物重建 | 可逆 | 重放即恢复，备份减负 |
+| 备份策略 | 事实源备份、派生物重建 | 可逆 | 重放即恢复，备份减负；**尚未实施**，见 §7.5 |
+| 去重匹配次序 | 身份（id/guid）优先于内容 | 难逆 | 正文被改写时只按 content_hash 匹配会漏，进而撞冻结 GUID（ADR 0008 相关） |
 | 开发环境 | **Nix Flake + direnv**（pkgs.mkShell，不用 devenv） | 可逆 | 系统依赖、解释器与工具链可复现且自动激活；不用 devenv 以保证纯求值（ADR 0002） |
 | Python 依赖 | **uv + uv.lock** | 可逆 | 快速、Python 原生依赖解析；避免为每个 PyPI 包维护 Nix derivation |
 | 环境职责边界 | **Nix 管系统，uv 管 Python** | 可逆 | 可复现性与日常开发效率平衡 |
@@ -345,9 +366,9 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 |---|---|---|---|
 | 系统开发环境 | Nix Flake + direnv | named shells / profiles | flake.lock 锁定解释器、CLI、OS 动态库及工具链 |
 | Python 包管理 | uv + pyproject.toml + uv.lock | — | uv 锁定 PyPI 依赖；不在 P1 全量 Nix 化 Python 包 |
-| 语言/框架 | Python 3.12+ / FastAPI | — | OpenAPI 自动生成是地基 |
+| 语言/框架 | Python 3.13（flake 固定）/ FastAPI | — | OpenAPI 自动生成是地基 |
 | MCP | **官方 `mcp` SDK 的 `mcp.server.fastmcp`**（原写 3.x，已过时），Streamable HTTP | P3 拆子模块 + Gateway | 官方 SDK 上层封装；版本与调用方式见 ADR 0010 |
-| 进程内插件 | pluggy | P2 引入注册表 | hookspec 模式经 pytest 验证 |
+| 进程内插件 | pluggy | P2 引入注册表 | hookspec 模式经 pytest 验证；**P2 前提（三个爬虫）未满足** |
 | 元数据库 | SQLite + SQLAlchemy + Alembic | P3 按需 PostgreSQL | 单写者 1k–5k wps 封顶 |
 | 大产物 | 本地文件系统 | P3 MinIO | 永不入 DB |
 | 任务队列 | **自写 tick + 推导式调度**（不用 APScheduler） | P3 按需 Dramatiq + Redis | 换触发器不动 Job 模型；存 next_run_time 会与推导结果成两个事实源（ADR 0009） |
@@ -355,8 +376,8 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 翻译 | LLM API 插件（默认） | DeepL / 本地模型可换 | 成本低，顺带摘要 |
 | TTS | Kokoro（本地 CPU，Apache 2.0） | Piper（GPL 注意）/ 云 API | 处理器插件 P3 引入 |
 | 日志 | structlog JSON + correlation_id | — | 诊断工具的数据基础 |
-| 质量门禁 | ruff + mypy + import-linter + oasdiff + pytest | P2 加 agent evals | 由 `just ci` 统一执行 |
-| 部署 | Docker 单容器 | P3 compose 多服务 | Docker 不作为默认开发环境 |
+| 质量门禁 | ruff + mypy + import-linter + pytest + MCP 工具 snapshot | P2 加 agent evals | 由 `just ci` 统一执行；**oasdiff 不在 nixpkgs，OpenAPI diff 未接线**（`just contract` 会说明而非隐藏） |
+| 部署 | **systemd 用户服务（当前）** | Docker 单容器 → P3 compose 多服务 | Docker 不作为默认开发环境；容器化尚未做 |
 
 ## 10. 开发环境、CI 与供应链纪律
 
@@ -368,7 +389,8 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | Nix Flake + direnv | 开发 shell 定义与自动激活、环境变量 | `flake.nix`、`flake.lock`、`.envrc` | 代替项目包管理器；承载服务进程编排（P3 另行评估，见 ADR 0002） |
 | uv | FastAPI/FastMCP/SQLAlchemy/pytest 等 Python 依赖与 virtualenv | `pyproject.toml`、`uv.lock` | 安装 OS 库、替代 Nix |
 | just | 人和 agent 统一命令 | `justfile` | 自行隐式安装依赖 |
-| Docker Compose | 集成测试与生产运行编排 | `compose.yaml` | 默认本地 Python 开发环境 |
+| Docker Compose | 集成测试与生产运行编排（**尚未做**） | `compose.yaml` | 默认本地 Python 开发环境 |
+| systemd（用户级） | 长期运行、开机自启、崩溃重启 | `deploy/pearss.service` | 代替 Nix 提供开发环境 |
 
 ### 10.2 推荐 Flake 形态
 
@@ -432,17 +454,18 @@ P1 不把所有 Python 包打包成 Nix derivation：MCP/agent/爬虫/AI SDK 更
 ## 11. 部署形态演进
 
 ```
-P1（单容器）                     P3（compose 多服务）
-┌─────────────────────┐         ┌──────────┐  ┌──────────┐
-│ core (FastAPI+MCP)  │         │ core     │  │ MCP GW   │
-│ APScheduler         │         ├──────────┤  ├──────────┤
-│ 准插件(进程内)       │   →     │ worker×N │  │ Redis    │
-│ SQLite (文件)        │         ├──────────┤  ├──────────┤
-│ 产物 (本地目录)      │         │ Postgres │  │ MinIO    │
-└─────────────────────┘         └──────────┘  └──────────┘
+P1（当前：单进程 + systemd 用户服务）      P3（compose 多服务，未做）
+┌──────────────────────────────┐          ┌──────────┐  ┌──────────┐
+│ FastAPI                      │          │ core     │  │ MCP GW   │
+│  ├ /v1 Core API              │          ├──────────┤  ├──────────┤
+│  ├ /api/greader.php Reader   │    →     │ worker×N │  │ Redis    │
+│  └ /mcp/mcp  MCP 工具面       │          ├──────────┤  ├──────────┤
+│ 推导式调度器（asyncio 任务）    │          │ Postgres │  │ MinIO    │
+│ SQLite（文件）+ CAS 文件存储    │          └──────────┘  └──────────┘
+└──────────────────────────────┘
 ```
 
-Nix 管开发期与 CI 的环境；Docker/Compose 管集成测试和生产运行。P1→P3 的组件替换不触碰：OpenAPI 契约、hookspec 合约、Job 模型、错误分类法、MCP 工具面语义。
+Nix 管开发期与 CI 的环境；**当前生产运行由 systemd 用户服务托管**（`deploy/pearss.service` + linger），Docker/Compose 尚未引入。P1→P3 的组件替换不触碰：OpenAPI 契约、hookspec 合约、Job 模型、错误分类法、MCP 工具面语义。
 
 ## 12. 术语表
 
