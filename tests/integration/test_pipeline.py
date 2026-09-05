@@ -12,6 +12,7 @@ already cached the wrong content.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -309,6 +310,68 @@ def test_blank_title_is_not_recorded(session: Session) -> None:
 
     assert set_source_title_if_absent(session, source_id=SOURCE, title="   ") is False
     assert set_source_title_if_absent(session, source_id=SOURCE, title=None) is False
+
+
+@pytest.mark.integration
+def test_the_feed_is_a_window_not_the_whole_archive(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unbounded render reached 5.7 MB and 4,677 items.
+
+    Every one of those also pulled its body out of the file store, and a client
+    polling on a timer paid that per poll. The window keeps the feed a feed;
+    older items stay reachable through the query API and the Reader API.
+    """
+    from adapters.repository import FEED_WINDOW, items_ready_for_feed
+    from app.pipeline import normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    drafts = collect(SOURCE, "valid.xml")
+    # Enough distinct items to exceed the window, so a missing LIMIT cannot pass.
+    pages = FEED_WINDOW // max(1, len(drafts)) + 2
+    for page in range(pages):
+        normalise_and_store(
+            session,
+            [
+                # Content must differ too: identical bodies share a
+                # content_hash and dedupe into one item, which is correct and
+                # would leave this test seeding three rows.
+                replace(
+                    draft,
+                    external_id=f"{draft.external_id}-{page}",
+                    canonical_url=f"{draft.canonical_url}-{page}",
+                    title=f"{draft.title} (page {page})",
+                    content=f"{draft.content} body-{page}",
+                )
+                for draft in drafts
+            ],
+        )
+    session.commit()
+
+    total = int(session.execute(sa.text("select count(*) from item")).scalar() or 0)
+    assert total > FEED_WINDOW, f"seeded only {total} items; test proves nothing"
+
+    rendered = items_ready_for_feed(session)
+    assert len(rendered) == FEED_WINDOW
+    # Newest first, so the window is the recent window rather than an arbitrary
+    # slice of the table. Items without a publication time sort last by design,
+    # so compare only the dated prefix.
+    dated = [item.published_at for item in rendered if item.published_at]
+    assert dated == sorted(dated, reverse=True)
+
+
+@pytest.mark.integration
+def test_the_window_can_be_widened_by_a_caller(
+    session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The limit is a default, not a hard ceiling baked into the query."""
+    from adapters.repository import FEED_WINDOW, items_ready_for_feed
+    from app.pipeline import normalise_and_store
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    normalise_and_store(session, collect(SOURCE, "valid.xml"))
+    session.commit()
+    assert len(items_ready_for_feed(session, limit=FEED_WINDOW * 3)) == 3
 
 
 @pytest.mark.integration

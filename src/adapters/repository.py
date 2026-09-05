@@ -238,8 +238,16 @@ def _insert(session: Session, item: Item) -> None:
     )
 
 
-def items_ready_for_feed(session: Session) -> list[Item]:
-    """Items the gate permits, newest first.
+# How many items one RSS render carries. A feed is a window onto recent
+# content, not an archive: an unbounded render reached 5.7 MB and 4,677 items,
+# each of which also pulled its body out of the file store, and a client
+# polling on a timer paid that per poll. Items outside the window stay
+# reachable through the query API and the Reader API.
+FEED_WINDOW: int = 200
+
+
+def items_ready_for_feed(session: Session, *, limit: int = FEED_WINDOW) -> list[Item]:
+    """Items the gate permits, newest first, within the feed window.
 
     Pending is excluded in SQL rather than in Python: the gate is a hard
     invariant, and letting a pending row reach memory at all means a future
@@ -249,6 +257,7 @@ def items_ready_for_feed(session: Session) -> list[Item]:
         select(ItemRow)
         .where(ItemRow.publish_status != PublishStatus.PENDING.value)
         .order_by(ItemRow.published_at.desc().nullslast(), ItemRow.guid)
+        .limit(max(1, limit))
     ).scalars()
     return [row_to_item(row) for row in rows]
 
