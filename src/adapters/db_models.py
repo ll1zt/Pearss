@@ -84,6 +84,10 @@ class Source(Base):
     # constraint is not covered by it — SQL treats NULLs as distinct — so a
     # row without one could duplicate any other, silently.
     canonical_url: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # The name the origin gives itself, discovered at collection time. Nullable
+    # because a source created before its first fetch legitimately has none; the
+    # Reader API falls back to the id rather than showing a blank sidebar.
+    title: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
     # Retained in P1 even though the plugin registry arrives in P2, so a web
     # source can record which collector parsed it from the start.
     parser_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(

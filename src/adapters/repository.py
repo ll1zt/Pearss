@@ -33,7 +33,7 @@ from core.item_state import TransitionContext
 from core.item_state import transition as item_transition
 from core.job_state import JobRunContext, JobRunEvent, transition
 from core.models import Item
-from core.normalize import DedupeAction, decide_dedupe
+from core.normalize import DedupeAction, decide_dedupe, source_display_label
 from core.reader_state import ReadState as ReadStateDomain
 from core.scheduling import observed_gaps
 
@@ -980,6 +980,63 @@ def finish_job_run(
 # --------------------------------------------------------------------------
 # Inputs for the derived schedule
 # --------------------------------------------------------------------------
+
+
+def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
+    """Display labels for the given sources, keyed by source id.
+
+    Batched because a contents request can name a hundred items across several
+    sources, and resolving a name per item would turn one page into one hundred
+    queries. Falls back through core.source_display_label so a source never
+    collected still gets something better than its hex id.
+    """
+    wanted = [source_id for source_id in set(source_ids) if source_id]
+    if not wanted:
+        return {}
+    rows = session.execute(
+        select(
+            SourceRow.id, SourceRow.title, SourceRow.url, SourceRow.canonical_url
+        ).where(SourceRow.id.in_(wanted))
+    ).all()
+    return {
+        row.id: source_display_label(
+            title=row.title,
+            url=row.url,
+            canonical_url=row.canonical_url,
+            source_id=row.id,
+        )
+        for row in rows
+    }
+
+
+def set_source_title_if_absent(
+    session: Session, *, source_id: str, title: str | None
+) -> bool:
+    """Record the name the origin gives itself, when we have none.
+
+    Conditional on purpose. The title arrives from the feed or page, so an
+    operator who renamed a source through the API would otherwise have that
+    choice overwritten by the next collection; and a source whose origin
+    changes its name keeps the one clients already recognise.
+
+    Returns whether the row changed, so the caller can decide whether a commit
+    is owed.
+    """
+    cleaned = (title or "").strip()
+    if not cleaned:
+        return False
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(SourceRow)
+            .where(
+                SourceRow.id == source_id,
+                or_(SourceRow.title.is_(None), SourceRow.title == ""),
+            )
+            .values(title=cleaned, updated_at=_timestamp(datetime.now(UTC)))
+        ),
+    )
+    return (result.rowcount or 0) == 1
 
 
 def update_gaps_for_source(

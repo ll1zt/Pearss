@@ -277,6 +277,7 @@ def subscription_list(
     request: Request, _: str = Depends(authenticate_any)
 ) -> dict[str, list[dict[str, object]]]:
     from adapters.db_models import Source
+    from core.normalize import source_display_label
 
     with request.app.state.session_factory() as session:
         rows = session.query(Source).all()
@@ -284,7 +285,12 @@ def subscription_list(
     subscriptions = [
         {
             "id": reader_api.feed_stream_id(row.id),
-            "title": row.id,
+            "title": source_display_label(
+                title=row.title,
+                url=row.url,
+                canonical_url=row.canonical_url,
+                source_id=row.id,
+            ),
             "categories": [
                 {"id": "user/-/label/All", "label": "All", "type": "folder"}
             ],
@@ -376,7 +382,12 @@ def stream_items_contents(
     which surfaced as a populated article list whose bodies were all blank.
     """
     from adapters.db_models import Item as ItemRow
-    from adapters.repository import read_states_for, resolve_reader_ids, row_to_item
+    from adapters.repository import (
+        read_states_for,
+        resolve_reader_ids,
+        row_to_item,
+        source_display_labels,
+    )
     from app.pipeline import bodies_for
 
     with request.app.state.session_factory() as session:
@@ -398,6 +409,10 @@ def stream_items_contents(
         rows = [row for row in rows if row.publish_status != "pending"]
         states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
         bodies = bodies_for(session, [row_to_item(row) for row in rows])
+        # One query for the whole page rather than one per item: a contents
+        # request can carry a hundred ids, and a client that cannot show a
+        # source name is the bug this is here to fix.
+        titles = source_display_labels(session, [row.source_id for row in rows])
 
     items = []
     for row in rows:
@@ -408,13 +423,19 @@ def stream_items_contents(
                 is_read=bool(state and state.is_read),
                 is_starred=bool(state and state.is_starred),
                 body=bodies.get(row.id, ""),
+                source_title=titles.get(row.source_id),
             )
         )
     return _contents_payload(items)
 
 
 def _render_item(
-    row: ItemRow, *, is_read: bool, is_starred: bool, body: str = ""
+    row: ItemRow,
+    *,
+    is_read: bool,
+    is_starred: bool,
+    body: str = "",
+    source_title: str | None = None,
 ) -> dict[str, object]:
     categories = [reader_api.READING_LIST]
     if is_read:
@@ -440,7 +461,7 @@ def _render_item(
         "content": {"direction": "ltr", "content": body},
         "origin": {
             "streamId": reader_api.feed_stream_id(row.source_id),
-            "title": row.source_id,
+            "title": source_title,
             "htmlUrl": row.url,
         },
         "enclosure": [],

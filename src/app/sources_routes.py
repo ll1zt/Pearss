@@ -282,6 +282,9 @@ def _source_payload(row: SourceRow) -> dict[str, Any]:
         "type": row.type,
         "url": row.url,
         "canonical_url": row.canonical_url,
+        # The name the origin reports, discovered at collection time. Null
+        # until a source has been fetched once.
+        "title": row.title,
         "parser_plugin_id": row.parser_plugin_id,
         "schedule_policy": json.loads(row.schedule_policy),
         "status": row.status,

@@ -187,6 +187,54 @@ def source_canonical_key(*, source_type: str, url: str | None) -> str:
     return canonicalize_url(url)
 
 
+def source_display_label(
+    *, title: str | None, url: str | None, canonical_url: str | None, source_id: str
+) -> str:
+    """A name to show for a source, preferring what the origin calls itself.
+
+    Three levels, in order of trustworthiness:
+
+    1. the recorded title, discovered at collection time
+    2. a label derived from the URL, for a source not yet collected
+    3. the id, which is opaque but at least stable
+
+    Level 2 exists because showing a 32-character hex string in a subscription
+    list is not a name. It is deliberately *not* written back to the database:
+    a derived guess stored in the title column would occupy it and block the
+    origin's real name from ever being recorded.
+    """
+    recorded = (title or "").strip()
+    if recorded:
+        return recorded
+
+    for candidate in (url, canonical_url):
+        derived = _label_from_url(candidate)
+        if derived:
+            return derived
+    return source_id
+
+
+def _label_from_url(url: str | None) -> str | None:
+    """The channel or host a URL names, or None when it names neither.
+
+    Telegram preview and permalink URLs carry the channel in the path, where a
+    host would say nothing useful -- every channel lives on t.me. Everything
+    else is labelled by host, which is stable and recognisable.
+    """
+    if not url:
+        return None
+    parts = urlsplit(url.strip())
+    host = (parts.hostname or "").lower()
+    segments = [segment for segment in parts.path.split("/") if segment]
+
+    if host in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
+        if segments and segments[0] == "s":
+            segments = segments[1:]
+        if segments:
+            return segments[0].lstrip("@") or None
+    return host or None
+
+
 def plain_text(html: str) -> str:
     """Reduce markup to the text a reader would see.
 

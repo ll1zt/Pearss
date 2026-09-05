@@ -21,6 +21,7 @@ from core.normalize import (
     derive_item_id,
     normalize,
     plain_text,
+    source_display_label,
 )
 
 TENANT = "default"
@@ -295,3 +296,66 @@ def test_item_rejects_naive_timestamps() -> None:
             published_at=datetime(2026, 1, 1),
             publish_status=PublishStatus.PENDING,
         )
+
+
+# ---------------------------------------------------------------------------
+# source_display_label
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_display_label_prefers_the_recorded_title() -> None:
+    assert (
+        source_display_label(
+            title="Planet Python",
+            url="https://planetpython.org/rss20.xml",
+            canonical_url="https://planetpython.org/rss20.xml",
+            source_id="a" * 32,
+        )
+        == "Planet Python"
+    )
+
+
+@pytest.mark.unit
+def test_display_label_uses_the_channel_for_telegram_urls() -> None:
+    """Every Telegram channel lives on t.me, so the host names nothing."""
+    for url in (
+        "https://t.me/s/durov",
+        "https://t.me/durov/546",
+        "https://t.me/@durov",
+    ):
+        assert (
+            source_display_label(
+                title=None, url=url, canonical_url=url, source_id="b" * 32
+            )
+            == "durov"
+        ), url
+
+
+@pytest.mark.unit
+def test_display_label_falls_back_to_the_host_otherwise() -> None:
+    assert (
+        source_display_label(
+            title=None,
+            url="https://hnrss.org/frontpage",
+            canonical_url="https://hnrss.org/frontpage",
+            source_id="c" * 32,
+        )
+        == "hnrss.org"
+    )
+
+
+@pytest.mark.unit
+def test_display_label_last_resort_is_the_id() -> None:
+    assert (
+        source_display_label(
+            title=None, url=None, canonical_url=None, source_id="d" * 32
+        )
+        == "d" * 32
+    )
+    assert (
+        source_display_label(
+            title="   ", url="", canonical_url=None, source_id="e" * 32
+        )
+        == "e" * 32
+    )

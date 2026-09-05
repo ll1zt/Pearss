@@ -25,6 +25,7 @@ from adapters.repository import (
     StoreOutcome,
     last_conditional_state,
     promote_to_ready,
+    set_source_title_if_absent,
     store_item,
 )
 from adapters.sanitize import sanitize_html
@@ -233,6 +234,17 @@ def _collect_one_page(
     except collector_registry.CollectorError as exc:
         return CollectionResult(
             succeeded=False, error_class=exc.error_class.value, detail=exc.detail
+        )
+
+    # The collectors report the name the origin gives itself through draft
+    # metadata, which normalize() drops: a channel title belongs to the source,
+    # not to each of its items. Captured here, at the one moment both the
+    # drafts and the source row are in scope.
+    if drafts:
+        set_source_title_if_absent(
+            session,
+            source_id=source.id,
+            title=drafts[0].metadata.get("feed_title"),
         )
 
     ingested = normalise_and_store(session, drafts, tenant_id=tenant_id)

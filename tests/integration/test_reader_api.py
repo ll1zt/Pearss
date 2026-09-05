@@ -7,6 +7,7 @@ and the state round-trip that NetNewsWire's "FreshRSS account" type performs.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -386,6 +387,56 @@ async def test_stream_contents_carries_the_article_body(
     for item in items:
         body = (item.get("summary") or {}).get("content") or ""
         assert body.strip(), f"item {item.get('id')} has no body"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_subscription_list_shows_a_readable_name_not_the_id(
+    client: httpx.AsyncClient,
+) -> None:
+    """The sidebar entry is the only handle a reader has on a feed.
+
+    It used to be the source's 32-character hex id, which is not a name: the
+    user could not tell one subscription from another. The recorded title wins;
+    failing that a label derived from the URL is shown, and never the id while
+    a URL exists.
+    """
+    token = await login(client)
+    response = await client.get(
+        "/api/greader.php/reader/api/0/subscription/list",
+        headers=auth_header(token),
+        params={"output": "json"},
+    )
+    subs = response.json()["subscriptions"]
+    assert subs
+    for sub in subs:
+        assert sub["title"] != sub["id"].removeprefix("feed/"), (
+            "subscription title is the raw source id"
+        )
+        assert not re.fullmatch(r"[0-9a-f]{32}", sub["title"]), (
+            f"subscription shown by hex id: {sub['title']}"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_contents_origin_carries_a_readable_name(
+    client: httpx.AsyncClient,
+) -> None:
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+    items = response.json()["items"]
+    assert items
+    for item in items:
+        title = (item.get("origin") or {}).get("title") or ""
+        assert title and not re.fullmatch(r"[0-9a-f]{32}", title), (
+            f"origin shown by hex id: {title!r}"
+        )
 
 
 # --------------------------------------------------------------------------
