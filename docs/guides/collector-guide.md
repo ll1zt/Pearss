@@ -15,6 +15,10 @@
 
 ## P1 准插件结构
 
+> **实现现状**：已交付 1 个准插件 —— `src/plugins/collectors/rss.py`（RSS 2.0 + Atom），
+> 含 valid / valid_atom / empty / changed / malformed 五套 fixture。
+> **网页采集器尚未做**，因此 §3「第三个爬虫接入且未改动前两个」这一 P2 hookspec 冻结前提未满足。
+
 P1 不做动态安装/manifest；每个采集器仍按统一目录和接口形态编写：
 
 ```text

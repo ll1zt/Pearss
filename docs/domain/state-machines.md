@@ -4,6 +4,13 @@
 
 ## Item 发布状态机
 
+> **已实现**：`src/core/item_state.py`。P1 无处理器链，故条目入库即 `pending → ready`；
+> 闸门本身在三条输出路径（RSS、Reader API、MCP 工具）上都强制 `pending` 不可见。
+>
+> **一条实现中补上的规则**：条目正文被源改写时，若该条目已 `published`，只能
+> **保持不动并告警**（`skip_published_content_changed`）—— 重写会与客户端缓存分叉，
+> 插入会撞冻结的 GUID。仍 `pending` 则可以就地更新，因为还没有任何人看过它。
+
 ```text
                          enrich 成功 / 无处理链
 pending ------------------------------------------------> ready
@@ -35,6 +42,10 @@ pending <---------------------------------------------- published
 
 ## JobRun 状态机
 
+> **已实现**：`src/core/job_state.py`，转移集中在该模块，仓储层通过它改状态而非直接赋值。
+> 每条合法与非法转移都有测试。`claim` 用条件更新（`WHERE status='queued'`）保证并发下
+> 恰好一个赢家；进程崩溃留下的 `running` 行由调度器启动时回收为 `timed_out`。
+
 ```text
 queued -> running -> succeeded
                   -> failed
@@ -61,6 +72,9 @@ running -> cancelled
 
 ## Source 状态机
 
+> **部分实现**：`active ↔ paused`、`→ disabled/deleted` 由 `PATCH`/`DELETE /v1/sources/{id}`
+> 驱动，均为软状态、不删数据。`deleted` 源的历史 Item 保留（外键 CASCADE 只在 Item 清理时生效）。
+
 ```text
 active <-> paused
 active -> disabled
@@ -79,7 +93,7 @@ action state -> deleted  # 软删除，需用户确认
 
 `deleted` Source 的历史 Item 默认保留，避免破坏已发布 RSS GUID 和 Reader API 历史；物理清理属于独立维护流程。
 
-## Plugin 状态机（P2）
+## Plugin 状态机（P2，未实现）
 
 ```text
 discovered -> imported -> enabled -> disabled -> removed

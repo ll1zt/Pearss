@@ -9,8 +9,8 @@
 | 单元测试 | `tests/unit/` | core 纯函数、状态机、去重、调度统计、错误分类 | 否 | 每次改动 |
 | Fixture 测试 | `tests/fixtures/` 或插件目录 | RSS/HTML 快照到 ItemDraft 的解析行为 | 否 | 每次改动 |
 | 集成测试 | `tests/integration/` | adapter 与 SQLite、文件存储、FastAPI 的集成 | 不访问公网；可用临时本地服务 | 每次改动 |
-| 契约测试 | `tests/contract/` | OpenAPI 兼容性、MCP Tool schema/描述 snapshot | 否 | 每次改动 |
-| E2E | `tests/e2e/` | Compose 启动后的“发现→添加→抓取→发布”闭环 | 仅本地 Compose 服务/测试 fixture server | PR/合并前 |
+| 契约测试 | `tests/contract/` | MCP Tool 名称/描述/输入 schema 的 snapshot（`mcp_tools.json`）；OpenAPI diff **尚未接线**（nixpkgs 无 oasdiff） | 否 | 每次改动 |
+| E2E | `tests/e2e/` | Compose 启动后的完整闭环 | 仅本地 Compose 服务/测试 fixture server | **尚未接线**：需 `compose.yaml`，`just e2e` 会说明而非假装通过 |
 | Agent eval | `tests/evals/`（P2） | golden 指令的 Tool 选择、确认、安全边界 | 使用 mock MCP 或受控环境 | MCP 改动时 |
 
 ## 必测领域不变量
@@ -71,6 +71,16 @@ P1 的 E2E 场景：
 7. 重复同一 Idempotency-Key 的添加/触发请求，断言无重复副作用
 
 P3 加：翻译闸门、TTS enclosure、Reader API 已读/星标同步。
+
+## 实际验证过的手法
+
+这些不是建议，是仓库里已经在跑的做法，新增测试应沿用：
+
+- **注入式验证**：每条安全/不变量测试都要确认它**会失败**。做法是临时注入对应回归，跑测试，看它红，再恢复。本项目靠这个抓出多个「测试通过但功能不工作」的情形
+- **假测试自查**：断言恒真（`x or True`）、辅助函数从未被调用、`or` 短路顺序导致先对 `None` 求值 —— 都出现过。写完问一句「什么回归会让它失败」
+- **MCP 用真实客户端**：经 Streamable HTTP 连活服务，而不是直接调工具函数。测的是线上契约（schema 生成、elicitation、审计覆盖）。elicitation 回调要**在同一 task 内进出**，故用 helper 上下文管理器而非 async fixture（anyio cancel scope 限制）
+- **调度器注入时钟**：`run_tick(now=...)` 可传时钟；不传时生产用真实时间。注意**时钟必须贯穿** —— 用挂钟写 run 时间戳而用注入值判到期，会让 elapsed 为负、被时钟偏移规则判为「永远到期」，退避静默失效
+- **对外契约以对端实现为准**：Reader API 的 item id 格式与 GET/POST 动词，两次都是「读文档/读源码得出的结论」被**真实客户端流量**推翻（见 ADR 0006 与 netnewswire.md）
 
 ## 本地与 CI 命令
 

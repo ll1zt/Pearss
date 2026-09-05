@@ -2,6 +2,13 @@
 
 错误分类法是采集、调度、诊断、监控和 agent 建议共同依赖的领域契约。错误类在 `core.ErrorClass` enum 中单一来源定义；不得以任意字符串代替。
 
+> **实现现状**：`core/enums.py` 的 `ErrorClass` 同时携带**分类优先级**（`precedence`）
+> 与**是否允许自动重试**（`allows_automatic_retry`），二者与本文同源。
+> 分类逻辑在 `core/errors.py`（纯函数），采集器不自己判分类。
+> **数据库层用 CHECK 约束强制五值** —— SQLite 不自发强制 VARCHAR 枚举，
+> 没有 CHECK 时 `error_class='made_up'` 能直接写进去，AGENTS.md 的「不得用字符串绕过 enum」
+> 就只在应用层成立。
+
 ## ErrorClass
 
 | 值 | 含义 | 常见证据 | 默认安全建议 |
@@ -74,7 +81,10 @@ JobRun 或错误事件至少保存：
 
 ## 诊断输出规则
 
-`diagnose_source` 必须基于最近 JobRun 的结构化分类与 evidence，输出：
+`diagnose_source`（**P2，尚未实现**）应基于最近 JobRun 的结构化分类与 evidence 输出。
+当前可用的是 `GET /v1/jobs/{id}/runs`（含 `error_class` 与 metrics）与
+`GET /v1/system/snapshot`（`runs_by_error_class` 分布）；MCP 侧对应 `list_runs` /
+`get_system_snapshot`。
 
 1. 当前健康状态与最近成功时间
 2. 主错误分类和证据

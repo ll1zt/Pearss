@@ -99,6 +99,10 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 
 `Job` 是长期声明；`JobRun` 是某次实际执行。
 
+> P1 现状：采集任务与源一一对应（`type='collect'`，`config` 存 source id）。
+> **`schedule` 列故意留空** —— 下次何时抓是从 `source.schedule_policy` 与历史
+> **推导**的，不落库，否则会与推导结果成为两个事实源（ADR 0009）。
+
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
 | Job | `id`、`type`、`schedule`、`priority`、`status`、`config` | 可被调度器实现替换而不变的声明模型 |
@@ -145,6 +149,35 @@ ReadState 是事实源；清理 Item 前必须定义其级联/保留策略。
 | `status` | 生命周期状态 |
 | `trust` | `trusted` / `sandboxed` 等执行隔离决策 |
 
+### IdempotencyRecord（P1）
+
+支撑「所有写操作幂等」的存储。身份是 `actor + endpoint + key`，值存首次响应以便重放。
+
+| 字段 | 说明 |
+|---|---|
+| `actor` / `endpoint` / `key` | 复合主键；三者共同定义一次逻辑写 |
+| `status_code` / `response_body` | 首次结果，重放时原样返回 |
+| `created_at` / `expires_at` | 窗口期；过期后视为不存在 |
+
+不变量与取舍：
+
+- **带过期，非长期事实源**。幂等保证只需覆盖客户端的重试窗口；永久保留会让表无界增长
+- 键**按 actor 隔离**：不同调用方复用同一 key 不得互相重放对方的结果
+- 重放在响应头标 `Idempotent-Replay: true`，否则重试与首次执行无法区分
+- 键由调用方**每次操作新生成**，不从参数派生：参数派生的稳定键会把第二次有意为之的操作永久重放成第一次的结果
+
+### ReaderCredential（P1）
+
+Reader API 的登录。单用户，故一行。
+
+| 字段 | 说明 |
+|---|---|
+| `username` | 主键 |
+| `password_hash` | scrypt 哈希，自描述格式 `scrypt$<n>$<r>$<p>$<salt>$<hash>` |
+| `created_at` / `updated_at` | — |
+
+不变量：**明文密码永不入库**，只存在于环境变量。auth token 由 `HMAC-SHA256(username + 哈希)` 派生，因此**改密码会使所有已登录客户端掉线**（见 ADR 0005、runbook 的轮换流程）。
+
 ### AuditLog
 
 每一个有业务意义的调用留下的不可变审计事实。
@@ -169,6 +202,8 @@ RawFetch 1 --- N ItemDraft (逻辑关系)
 Item   1 --- N ItemEnrichment
 Job    1 --- N JobRun
 Item   1 --- 1 ReadState (每 tenant)
+Job    1 --- 1 Source   (type='collect')
+Source 1 --- N Item
 FeedOut N --- N Item (由 filter_query 与发布记录隐式关联)
 Plugin 1 --- N ItemEnrichment
 ```
