@@ -437,3 +437,116 @@ async def test_openapi_documents_the_core_api(writer: httpx.AsyncClient) -> None
     assert "/v1/sources" in paths
     assert "get" in paths["/v1/sources"] and "post" in paths["/v1/sources"]
     assert any(":trigger" in path for path in paths)
+
+
+# --------------------------------------------------------------------------
+# Triggering records a run
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def with_mock_client(app: FastAPI) -> Iterator[FastAPI]:
+    """Install a shared HTTP client, as the lifespan would.
+
+    The trigger path needs one, and an ASGITransport does not run the
+    lifespan that creates it. A fixture supplies it explicitly rather than
+    letting the endpoint fall back to something, so the production path stays
+    the only way to get a client.
+    """
+    body = (
+        b'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>'
+        b"<item><title>Triggered post</title>"
+        b"<link>https://trig.example.com/1</link><guid>trig-1</guid>"
+        b"<pubDate>Mon, 01 Jun 2026 10:00:00 +0000</pubDate>"
+        b"<description>Body.</description></item></channel></rss>"
+    )
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+    )
+    app.state.http_client = client
+    try:
+        yield app
+    finally:
+        del app.state.http_client
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_trigger_records_a_job_run(
+    with_mock_client: FastAPI,
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A manual trigger must be as observable as a scheduled one.
+
+    It used to call the pipeline helper directly, so the source was collected
+    but no JobRun existed: list_runs showed nothing and the backoff, which
+    reads run history, could not see the attempt.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "run-seed"},
+        json={"url": FEED_URL, "schedule_policy": {"type": "fixed", "interval": "30m"}},
+    )
+    source_id = created.json()["id"]
+
+    response = await writer.post(
+        f"/v1/sources/{source_id}:trigger", headers={"Idempotency-Key": "run-1"}
+    )
+    assert response.status_code in (200, 502)
+
+    with session_factory() as session:
+        jobs = session.execute(sa.text("select id from job")).fetchall()
+        runs = session.execute(
+            sa.text("select status, error_class from job_run")
+        ).fetchall()
+    assert jobs, "triggering should create the collect job"
+    assert runs, "triggering should record a run"
+    assert runs[0][0] in {"succeeded", "failed", "timed_out"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_trigger_reports_the_run_status(
+    with_mock_client: FastAPI,
+    writer: httpx.AsyncClient,
+) -> None:
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "rs-seed"},
+        json={"url": FEED_URL, "schedule_policy": {"type": "fixed", "interval": "30m"}},
+    )
+    response = await writer.post(
+        f"/v1/sources/{created.json()['id']}:trigger",
+        headers={"Idempotency-Key": "rs-1"},
+    )
+    assert response.json()["run_status"] in {"succeeded", "failed", "timed_out"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_trigger_without_a_lifespan_says_what_is_missing(
+    app: FastAPI,
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A bare ASGI transport skips the lifespan, so there is no shared client.
+
+    The old behaviour was an AttributeError surfacing as an opaque 500.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "nl-seed"},
+        json={"url": FEED_URL, "schedule_policy": {"type": "fixed", "interval": "30m"}},
+    )
+    # The fixture app is built without a running lifespan, so http_client is
+    # absent unless something else installed it.
+    if hasattr(app.state, "http_client"):
+        pytest.skip("this app instance has a client; the guard needs one that does not")
+
+    response = await writer.post(
+        f"/v1/sources/{created.json()['id']}:trigger",
+        headers={"Idempotency-Key": "nl-1"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["error"]["code"] == "http_client_unavailable"
