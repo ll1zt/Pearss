@@ -15,9 +15,15 @@
 
 ## P1 准插件结构
 
-> **实现现状**：已交付 1 个准插件 —— `src/plugins/collectors/rss.py`（RSS 2.0 + Atom），
-> 含 valid / valid_atom / empty / changed / malformed 五套 fixture。
-> **网页采集器尚未做**，因此 §3「第三个爬虫接入且未改动前两个」这一 P2 hookspec 冻结前提未满足。
+> **实现现状**：已交付 2 个准插件，均为 `collectors/<name>/collector.py` 包形态：
+> - `rss`（RSS 2.0 + Atom）：valid / valid_atom / empty / changed / malformed 五套 fixture
+> - `telegram`（公开频道预览页）：valid / empty / changed / media_only / legacy_ids 五套 fixture
+>
+> **还差一个**（A2 要求 2–3 个），故 §3「第三个爬虫接入且未改动前两个」这一 P2
+> hookspec 冻结前提（Rule of Three）**仍未满足**。
+>
+> 选择在 `src/app/collector_registry.py`：按 URL 选采集器（`match_url`），而非 pipeline
+> 硬编码调某一个。`fetch` 不在采集器内，由 `adapters/http.py` 统一负责。
 
 P1 不做动态安装/manifest；每个采集器仍按统一目录和接口形态编写：
 

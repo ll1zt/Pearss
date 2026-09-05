@@ -216,7 +216,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 | 需求 | 组件 | 阶段 | 验收标准 |
 |---|---|---|---|
 | A1 RSS 采集 | 采集服务 | P1 ✅ | 增量抓取入库，ETag 生效（实测 304） |
-| A2 爬虫插件 | 准插件 → Plugin Runtime | P1→P2 🟡 | 仅 RSS 一个准插件；网页采集器未做，故 P2 的 hookspec 冻结前提（Rule of Three）未满足 |
+| A2 爬虫插件 | 准插件 → Plugin Runtime | P1→P2 🟡 | 已交付 2 个（RSS + Telegram 网页采集器），A2 要求 2–3 个 → **还差 1 个**，故 P2 的 hookspec 冻结前提（Rule of Three）**仍未满足** |
 | A3 主动接入 | Ingest API | P3 | 外部 agent 持 token 幂等推送 |
 | A4 调度策略 | schedule_policy + 推导式调度器 | P1 ✅ | fixed/adaptive 可配，adaptive 自调节，失败指数退避；到期时间不落库（ADR 0009） |
 | A5 Feed 发现 | discover_feed | P1 ⏸ | **已决定暂缓**：无对应端点与 MCP 工具 |

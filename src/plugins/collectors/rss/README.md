@@ -8,7 +8,7 @@ Parses standard RSS 2.0 and Atom feeds into `ItemDraft`.
 
 ```text
 src/plugins/collectors/rss/
-  collector.py 的内容在 rss.py      # 本目录即采集器
+  collector.py                      # 采集器本体
   test_collector.py                 # fixture 回归测试
   fixtures/
     valid.xml          # 正常 RSS 2.0，含 guid / 日期 / content:encoded / 无日期三种条目
