@@ -982,6 +982,65 @@ def finish_job_run(
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PagingState:
+    """Where the last walk of this source's origin left off."""
+
+    seen_frontier: int | None = None
+    resume_cursor: str | None = None
+    resume_rounds: int = 0
+
+
+def paging_state(session: Session, *, source_id: str) -> PagingState:
+    row = session.get(SourceRow, source_id)
+    if row is None:
+        return PagingState()
+    return PagingState(
+        seen_frontier=row.seen_frontier,
+        resume_cursor=row.resume_cursor,
+        resume_rounds=row.resume_rounds,
+    )
+
+
+def save_paging_state(
+    session: Session,
+    *,
+    source_id: str,
+    newest_id: int | None,
+    resume_cursor: str | None,
+) -> None:
+    """Persist where this walk ended.
+
+    The frontier only moves forward. A re-walk of old history reports ids
+    below it, and letting those win would drag the anchor backwards so every
+    later cycle re-reads content it already has.
+
+    `resume_rounds` counts consecutive cycles that ended still holding a
+    resume. It resets when the resume clears, which is what bounds how far a
+    backlog can slide into the past.
+    """
+    row = session.get(SourceRow, source_id)
+    if row is None:
+        return
+    if newest_id is not None and (
+        row.seen_frontier is None or newest_id > row.seen_frontier
+    ):
+        row.seen_frontier = newest_id
+
+    if resume_cursor and row.resume_cursor == resume_cursor:
+        row.resume_rounds += 1
+    elif resume_cursor:
+        row.resume_cursor = resume_cursor
+        # A *new* cursor is different work, not the same unresolved backlog.
+        # Counting it as another round would age a fresh gap as if it had been
+        # known for several cycles.
+        row.resume_rounds = 1
+    else:
+        row.resume_cursor = None
+        row.resume_rounds = 0
+    row.updated_at = _timestamp(datetime.now(UTC))
+
+
 def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
     """Display labels for the given sources, keyed by source id.
 

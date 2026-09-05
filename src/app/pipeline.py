@@ -21,10 +21,13 @@ from sqlalchemy.orm import Session
 from adapters import filestore
 from adapters.db_models import Source as SourceRow
 from adapters.http import FetchError, fetch
+from adapters.raw_payload import RawPayload
 from adapters.repository import (
     StoreOutcome,
     last_conditional_state,
+    paging_state,
     promote_to_ready,
+    save_paging_state,
     set_source_title_if_absent,
     store_item,
 )
@@ -217,6 +220,10 @@ def _collect_one_page(
         return CollectionResult(succeeded=True, not_modified=True)
 
     registration = collector_registry.select_for(source.type, url)
+    if registration is not None and registration.paged:
+        return collect_authenticated_pages(
+            session, source=source, client=client, tenant_id=tenant_id
+        )
     if registration is None:
         # No collector claims this URL. Recording it as structure_changed
         # rather than parse: the fetch worked, but nothing here knows how to
@@ -261,6 +268,147 @@ def _collect_one_page(
         inserted=inserted,
         skipped=len(drafts) - inserted,
         last_cursor=cursor,
+    )
+
+
+def collect_authenticated_pages(
+    session: Session,
+    *,
+    source: SourceRow,
+    client: httpx.Client,
+    tenant_id: str = TENANT,
+    max_pages: int = 20,
+) -> CollectionResult:
+    """Collect a source whose origin is walked a page at a time.
+
+    Used when the collector exposes a cursor -- today that is X's timeline.
+    Kept separate from `_collect_one_page` rather than folded into it because
+    the two differ in kind, not degree: this one reads and writes paging state,
+    filters pages against a frontier, and can return a partial result after a
+    mid-walk failure.
+
+    The collector supplies the page shape and the parsing; the walk policy
+    lives in `paging.py`; the state lives in the database. Nothing here knows
+    anything specific about X.
+    """
+    from plugins.collectors.twitter import client as x_client
+    from plugins.collectors.twitter import collector as x_collector
+    from plugins.collectors.twitter import paging
+
+    if not x_client.credentials_configured():
+        # ADR 0012: a missing credential stops as `auth`. It is not worked
+        # around by trying anonymously, which would only produce a 403 that
+        # looks like a different problem.
+        return CollectionResult(
+            succeeded=False,
+            error_class=ErrorClass.AUTH.value,
+            detail="X session credentials are not configured",
+        )
+
+    state = paging_state(session, source_id=source.id)
+    credentials = x_client.Credentials.from_env()
+    query_id = x_client.current_query_id()
+    count = x_client.configured_count()
+
+    def fetch_page(cursor: str | None) -> paging.Page:
+        payload = x_client.fetch_page(
+            client=client,
+            credentials=credentials,
+            query_id=query_id,
+            cursor=cursor,
+            count=count,
+            source_id=source.id,
+        )
+        body = payload.body
+        return paging.Page(
+            body=body,
+            ids=x_collector.page_ids(body),
+            next_cursor=x_collector.page_cursor(body),
+            sort_span=x_collector.page_sort_span(body),
+        )
+
+    def fetch_with_recovery(cursor: str | None) -> paging.Page:
+        """One stale-queryId retry, then the failure propagates.
+
+        X rotates the queryId without notice and answers 400. Re-extracting it
+        from the site's own bundle is the difference between a self-healing
+        source and one that needs a human every few weeks.
+        """
+        nonlocal query_id
+        try:
+            return fetch_page(cursor)
+        except x_client.QueryIdRejected:
+            fresh = x_client.refresh_query_id(client)
+            if fresh is None or fresh == query_id:
+                raise
+            query_id = fresh
+            return fetch_page(cursor)
+
+    try:
+        result = paging.two_phase_walk(
+            fetch_page=fetch_with_recovery,
+            max_pages=max_pages,
+            seen_frontier=state.seen_frontier,
+            resume=None
+            if paging.should_drop_resume(state.resume_rounds)
+            else state.resume_cursor,
+        )
+    except Exception as exc:  # classified below; nothing retrieved
+        error_class = getattr(exc, "error_class", None)
+        return CollectionResult(
+            succeeded=False,
+            error_class=(
+                error_class.value
+                if isinstance(error_class, ErrorClass)
+                else ErrorClass.NETWORK.value
+            ),
+            detail=str(exc),
+        )
+
+    keep = {str(value) for value in result.keep_ids}
+    drafts: list[ItemDraft] = []
+    for body in result.pages:
+        for draft in x_collector.parse(
+            RawPayload(
+                url=source.canonical_url,
+                status_code=200,
+                body=body,
+                source_id=source.id,
+            )
+        ):
+            # The walk decided what is new; a page below the frontier is read
+            # for continuity checking, not for ingestion.
+            if draft.external_id.removeprefix("twitter:") in keep:
+                drafts.append(draft)
+
+    set_source_title_if_absent(session, source_id=source.id, title="X Following")
+    save_paging_state(
+        session,
+        source_id=source.id,
+        newest_id=result.newest_id,
+        resume_cursor=result.resume,
+    )
+
+    if not result.ok:
+        return CollectionResult(
+            succeeded=False,
+            error_class=ErrorClass.BLOCKED.value,
+            detail=result.failed or "no page could be retrieved",
+        )
+
+    ingested = normalise_and_store(session, drafts, tenant_id=tenant_id)
+    inserted = sum(
+        1
+        for entry in ingested
+        if entry.outcome.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED)
+    )
+    return CollectionResult(
+        succeeded=result.failed is None,
+        error_class=None if result.failed is None else ErrorClass.NETWORK.value,
+        detail=result.failed,
+        drafts=len(drafts),
+        inserted=inserted,
+        skipped=len(drafts) - inserted,
     )
 
 
