@@ -43,12 +43,23 @@ collector-guide 第 14 行原本无条件禁止绕过登录限制与反自动化
 - **账号风控**：可能限流、要求验证、乃至封号。
 - **私有接口不稳定**：`HomeLatestTimeline` 的 queryId 与响应结构由 X 单方变更，
   无兼容性承诺。故 queryId 自动恢复与 `structure_changed` 分类是必需件而非优化。
-- **CookieCloud 引入第三方信任**：凭据经由自部署的同步服务下发。
+- **CookieCloud 的 token 比它取回的凭据更强力**。`COOKIE_CLOUD_SERVER_PASSWORD`
+  是服务端主密钥：它能解密导出**任意 uuid、任意域名**的 cookie。`domain=` 参数只
+  缩小本次响应的范围，不缩小 token 的权限。持有它等于持有你同步过的**全部**站点
+  会话，包括银行与邮箱。
+
+  因此本 ADR 追加要求：该 token 只从环境读取、永不进日志与错误详情；指向非回环
+  地址的明文 http 必须告警；部署应使用**只含阅读器所需站点的专用 uuid**，而不是
+  整个浏览器档案的同步记录。
 
 ## 实现约束
 
-- 凭据只从环境读取（`PEARSS_X_AUTH_TOKEN` / `PEARSS_X_CT0`，或 CookieCloud），
-  **不存进数据库**，不作为 `source` 的字段，不进 `adapter_config` 之类的通用配置列
+- 凭据只从环境读取（`PEARSS_X_AUTH_TOKEN` / `PEARSS_X_CT0`，或 CookieCloud 的
+  `PEARSS_COOKIECLOUD_*`），**不存进数据库**，不作为 `source` 的字段，
+  不进 `adapter_config` 之类的通用配置列
+- CookieCloud 客户端是**通用适配器**（`src/adapters/cookiecloud.py`），不隶属任何
+  单个采集器：下一个登录型源直接复用，而不是复制一份或产生 `plugins -> plugins`
+  的反向依赖
 - HTTP 层必须把 `auth_token`/`ct0` 当作与 API key 同级的秘密：脱敏列表包含
   `cookie`、`authorization`、`x-csrf-token`
 - 状态码沿用 `docs/domain/error-taxonomy.md` 的单一来源分类，**不为本源另立规则**：

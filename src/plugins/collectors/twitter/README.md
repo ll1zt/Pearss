@@ -52,10 +52,32 @@ curl -sS -X POST http://127.0.0.1:8000/v1/sources \
   -d '{"url":"https://x.com/home","type":"web","schedule_policy":{"type":"fixed","interval":"60m"}}'
 ```
 
-## 上游未做的两件事
+## CookieCloud（凭据自动续期）
 
-CookieCloud（凭据经自部署同步服务下发）**未移植**。静态 cookie 已覆盖核心需求，
-引入一个第三方凭据分发通道值得单独决策，不该作为移植的附带项。
+浏览器重新登录后 X 会轮换 `ct0`，静态值就失效了。配了 CookieCloud 就不必重启：
+
+```bash
+PEARSS_COOKIECLOUD_URL=http://127.0.0.1:4000   # 自部署 cookie_cloud_server
+PEARSS_COOKIECLOUD_UUID=<你的同步 uuid>
+PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD>
+PEARSS_COOKIECLOUD_DOMAIN=x.com               # 可选，默认 x.com
+PEARSS_COOKIECLOUD_CACHE_SECONDS=300          # 可选
+```
+
+**解析顺序**：静态 `PEARSS_X_*` > CookieCloud。静态优先 —— 显式钉住值就是明确要求
+用那个值，不该被一个在跑的同步服务悄悄覆盖。
+
+**被拒时自愈**：X 返回 401 说明会话已轮换，此时绕过缓存重取一次并重试该页。
+只重试一次 —— 对着拒绝反复重试是在轰炸对方，而真正的问题是没人能给我们授权。
+
+> ⚠️ **`COOKIE_CLOUD_SERVER_PASSWORD` 不是"某个站的 cookie"**。它是服务端**主密钥**，
+> 能解密导出**任意 uuid、任意域名**的 cookie。`domain=` 只缩小本次响应，不缩小
+> token 权限。持有它 = 持有你同步过的全部站点会话（含银行、邮箱）。
+>
+> 因此：**用一个只含阅读器所需站点的专用 uuid**，别指向整个浏览器档案。
+> 明文 http 指向非回环地址时启动会告警（不记 token）。
+
+客户端是通用适配器 `src/adapters/cookiecloud.py`，下一个登录型源直接复用。
 
 ## 三个必须记住的行为
 
@@ -113,7 +135,7 @@ X 把它解释为"排除这些"。于是本地停止锚点永远碰不到已摄�
 ## 运行测试
 
 ```bash
-just test        # 含本目录 69 个测试，全部离线
+just test        # 含本目录 69 个 + tests/unit/test_cookiecloud.py 31 个，全部离线
 ```
 
 无 fixture 含凭据；HTTP 层一律用 `httpx.MockTransport`。
