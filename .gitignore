@@ -41,6 +41,12 @@ secrets/
 # --- Alembic / tooling artifacts ---
 .alembic-cache
 
+# --- Local working notes (not part of the project) ---
+# Deliberate: this records decisions that were thought through and deferred, so
+# they stop resurfacing as new ideas. It is a developer's own file, not a
+# project deliverable.
+FUTHER_MAY_TODO.md
+
 # --- Editors and OS ---
 .idea/
 .vscode/
