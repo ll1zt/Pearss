@@ -19,6 +19,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -34,7 +35,7 @@ from adapters.repository import (
     store_idempotent,
 )
 from app.auth import Principal, read_required, write_required
-from app.pipeline import collect_source
+from app.scheduler import collect_now
 from core.enums import SourceStatus, SourceType, TrustLevel
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
@@ -242,6 +243,32 @@ class SourcePatch(BaseModel):
     schedule_policy: dict[str, Any] | None = None
     status: SourceStatus | None = None
     trust_level: TrustLevel | None = None
+
+
+def _shared_client(request: Request) -> httpx.Client:
+    """The process-wide HTTP client, or a clear failure if startup did not run.
+
+    The client is created by the application lifespan. Mounting the ASGI app
+    with a bare transport — as tests and embedded uses do — skips that, and a
+    direct `app.state.http_client` would then raise AttributeError and surface
+    as an unexplained 500 on an endpoint whose contract says it triggers a
+    fetch.
+    """
+    client: httpx.Client | None = getattr(request.app.state, "http_client", None)
+    if client is None:
+        raise api_error(
+            status_code=503,
+            code="http_client_unavailable",
+            message=(
+                "The shared HTTP client is not initialised; the application "
+                "lifespan has not run."
+            ),
+            suggestion=(
+                "Serve the app with a lifespan-aware runner (uvicorn) rather "
+                "than a bare ASGI transport."
+            ),
+        )
+    return client
 
 
 def _source_payload(row: SourceRow) -> dict[str, Any]:
@@ -525,13 +552,35 @@ def trigger_source(
                 message=f"Source is {row.status}; only active sources are collected.",
                 suggestion="Set status to active before triggering.",
             )
-        result = collect_source(
-            session, source=row, client=request.app.state.http_client
+        # Resolved after the status check: a paused source is the caller's
+        # error to see, and looking up the client first would report a missing
+        # lifespan over a perfectly valid 409.
+        client = _shared_client(request)
+        # collect_now, not collect_source: it is what opens the JobRun, claims
+        # it and closes it with the outcome. Calling the pipeline helper
+        # directly collected the source but left no record that it happened, so
+        # a manual trigger was invisible to list_runs and to the backoff that
+        # reads run history — the same action observed through one entry point
+        # and not the other.
+        status, result = collect_now(
+            session,
+            source_id=source_id,
+            policy_json=row.schedule_policy,
+            client=client,
         )
         session.commit()
 
+    if result is None:
+        raise api_error(
+            status_code=409,
+            code="already_running",
+            message="Another collection of this source is in progress.",
+            suggestion="Check list_runs for the outcome of the in-flight run.",
+        )
+
     payload: dict[str, Any] = {
         "source_id": source_id,
+        "run_status": status.value,
         "succeeded": result.succeeded,
         "not_modified": result.not_modified,
         "drafts": result.drafts,
