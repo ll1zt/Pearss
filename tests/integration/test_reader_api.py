@@ -23,7 +23,7 @@ from adapters.raw_payload import RawPayload
 from adapters.repository import store_item
 from app.main import create_app
 from core.normalize import normalize
-from plugins.collectors import rss
+from plugins.collectors.rss import collector as rss
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"

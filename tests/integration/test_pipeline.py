@@ -35,7 +35,7 @@ from adapters.rss_out import FeedMeta, render_feed, visible_items
 from core.enums import PublishStatus
 from core.models import Item, ItemDraft
 from core.normalize import content_hash, normalize
-from plugins.collectors import rss
+from plugins.collectors.rss import collector as rss
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"

@@ -18,7 +18,7 @@ import pytest
 
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
-from plugins.collectors import rss
+from plugins.collectors.rss import collector as rss
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_ID = "src-1"

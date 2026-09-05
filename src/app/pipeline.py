@@ -36,7 +36,7 @@ from core.normalize import (
     normalize,
     with_content_ref,
 )
-from plugins.collectors import rss
+from plugins.collectors.rss import collector as rss
 
 LOGGER = logging.getLogger(__name__)
 
