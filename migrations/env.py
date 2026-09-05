@@ -12,8 +12,15 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` is load-bearing, not a style preference.
+# The default disables every logger that already exists, so a process that
+# runs migrations -- the CLI, a test session, an app that configures its
+# credential on first use -- silently loses all application logging for
+# whatever comes next. Tests caught this only because one asserted on a
+# warning, and it passed in isolation while failing in a full run.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # The URL is resolved here rather than in alembic.ini so that no credentials
 # live in the repository. PEARSS_DATABASE_URL is honoured in every
