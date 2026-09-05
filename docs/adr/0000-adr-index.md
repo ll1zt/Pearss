@@ -60,3 +60,4 @@ docs/adr/
 | [0007](0007-sanitize-feed-html-at-store-time.md) | 入库前用 nh3 净化正文 HTML | accepted | 2026-09-04 |
 | [0008](0008-source-canonical-url-not-null.md) | source.canonical_url 必须 NOT NULL | accepted | 2026-09-04 |
 | [0009](0009-derived-schedule-without-apscheduler.md) | 调度时间从策略与历史推导，不引入 APScheduler | accepted | 2026-09-04 |
+| [0010](0010-mcp-tools-via-core-api.md) | MCP 工具面经 Core API 调用，用官方 mcp SDK | accepted | 2026-09-04 |

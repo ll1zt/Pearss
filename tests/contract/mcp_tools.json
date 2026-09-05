@@ -1,0 +1,199 @@
+{
+  "add_source": {
+    "description": "Add a feed source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}.",
+    "input_schema": {
+      "properties": {
+        "schedule_policy": {
+          "additionalProperties": true,
+          "title": "Schedule Policy",
+          "type": "object"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "schedule_policy"
+      ],
+      "title": "add_sourceArguments",
+      "type": "object"
+    }
+  },
+  "get_system_snapshot": {
+    "description": "Compact system state: source and item counts by status, run counts by error class, and recent success rate. Read-only.",
+    "input_schema": {
+      "properties": {},
+      "title": "get_system_snapshotArguments",
+      "type": "object"
+    }
+  },
+  "list_jobs": {
+    "description": "List collection jobs, each with its source and last run.",
+    "input_schema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "list_jobsArguments",
+      "type": "object"
+    }
+  },
+  "list_runs": {
+    "description": "Recent runs for one job, with error_class on failures. Use it to see whether a source is failing and why.",
+    "input_schema": {
+      "properties": {
+        "job_id": {
+          "title": "Job Id",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "job_id"
+      ],
+      "title": "list_runsArguments",
+      "type": "object"
+    }
+  },
+  "list_sources": {
+    "description": "List configured sources with their schedule policy and status. Read-only; no side effects.",
+    "input_schema": {
+      "properties": {
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        }
+      },
+      "title": "list_sourcesArguments",
+      "type": "object"
+    }
+  },
+  "remove_source": {
+    "description": "Remove a source. Requires confirmation. This is a soft delete: already-collected items stay published and keep their GUIDs, but the source stops being fetched.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "remove_sourceArguments",
+      "type": "object"
+    }
+  },
+  "search_items": {
+    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource.",
+    "input_schema": {
+      "properties": {
+        "fields": {
+          "default": "id,guid,title,url,published_at",
+          "title": "Fields",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "q": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Q"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Id"
+        }
+      },
+      "title": "search_itemsArguments",
+      "type": "object"
+    }
+  },
+  "set_source_status": {
+    "description": "Pause or resume a source. Requires confirmation. Pausing stops collection without deleting anything already gathered.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "status"
+      ],
+      "title": "set_source_statusArguments",
+      "type": "object"
+    }
+  },
+  "trigger_job": {
+    "description": "Fetch a source now, outside its schedule. Requires confirmation: this issues a real request to the origin.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "trigger_jobArguments",
+      "type": "object"
+    }
+  },
+  "update_schedule_policy": {
+    "description": "Change a source's schedule policy. Requires confirmation: an aggressive interval puts real load on the origin site.",
+    "input_schema": {
+      "properties": {
+        "schedule_policy": {
+          "additionalProperties": true,
+          "title": "Schedule Policy",
+          "type": "object"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "schedule_policy"
+      ],
+      "title": "update_schedule_policyArguments",
+      "type": "object"
+    }
+  }
+}

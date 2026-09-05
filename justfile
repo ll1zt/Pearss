@@ -67,9 +67,11 @@ test-integration:
 
 # OpenAPI diff and MCP tool snapshots. Stubs until the API surface exists.
 contract:
-    @echo "contract: OpenAPI diff not yet wired (no API surface in the skeleton)"
-    @echo "contract: MCP tool snapshot not yet wired (no MCP tools yet)"
-    @just _test contract
+    @echo "contract: MCP tool surface snapshot (tests/contract/mcp_tools.json)"
+    @uv run pytest -m contract -q
+    @echo "contract: OpenAPI diff not yet wired — oasdiff is not available in nixpkgs"
+    @echo "          and no breaking-change baseline exists yet. Tracked as a gap;"
+    @echo "          the MCP snapshot above is the contract check that does run."
 
 # Full Compose end-to-end run. Requires Docker.
 e2e:

@@ -34,12 +34,14 @@ from adapters.repository import (
 from adapters.rss_out import FeedMeta, render_feed
 from app.auth import Principal, auth_configured, write_required
 from app.items_routes import router as items_router
+from app.mcp_server import build_mcp_server
 from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import bodies_for, normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
+from app.system_routes import router as system_router
 from core.models import ItemDraft
 
 LOGGER = logging.getLogger(__name__)
@@ -117,21 +119,36 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     client = httpx.Client(timeout=timeout, follow_redirects=True)
     app.state.http_client = client
 
+    # Entered before the yield so the session manager is running by the time
+    # the port accepts traffic.
+
+    # The MCP surface is a Starlette sub-app mounted into this one. Mounting
+    # does not run the child's lifespan — Starlette only runs the top app's —
+    # and the StreamableHTTP session manager must be initialised there or every
+    # MCP request fails. So the child lifespan is entered explicitly here and
+    # its exit is tied to ours, which keeps shutdown ordering correct.
+    mcp = build_mcp_server(app)
+    mcp_app = mcp.streamable_http_app()
+    app.mount("/mcp", mcp_app)
+    app.state.mcp_app = mcp_app
+
     scheduler = Scheduler(
         app.state.session_factory,
         client=client,
         tick_seconds=float(os.environ.get("PEARSS_TICK_SECONDS", "60")),
     )
     app.state.scheduler = scheduler
-    if scheduler_enabled():
-        await scheduler.start()
-    else:
-        LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
-    try:
-        yield
-    finally:
-        await scheduler.stop()
-        client.close()
+
+    async with mcp_app.router.lifespan_context(mcp_app):
+        if scheduler_enabled():
+            await scheduler.start()
+        else:
+            LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
+        try:
+            yield
+        finally:
+            await scheduler.stop()
+            client.close()
 
 
 # Keys that carry non-serialisable or client-useless values.
@@ -190,6 +207,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.include_router(reader_router)
     app.include_router(sources_router)
     app.include_router(items_router)
+    app.include_router(system_router)
 
     @app.exception_handler(RequestValidationError)
     def on_validation(request: Request, exc: RequestValidationError) -> JSONResponse:

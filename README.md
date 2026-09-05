@@ -31,6 +31,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 `docs/adr/0004`）
 - **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集；`/v1/items` 紧凑查询（keyset 分页、字段选择、sort 白名单）+ `/v1/items/{id}/body` 独立取正文；写操作强制 `Idempotency-Key`，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
+- **MCP 控制平面**：10 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数，正文走 `item://{item_id}` Resource；工具面 snapshot 由 `just contract` 校验
 - **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
 ### 尚未接线
@@ -39,7 +40,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 以下 `just` 命令是显式占位，运行会说明缺少什么而不是报“无此命令”：
 
-- `just contract`：OpenAPI diff 与 MCP tool snapshot 未接线
+- `just contract`：跑 MCP 工具面 snapshot；OpenAPI diff 未接线（nixpkgs 无 oasdiff，且尚无破坏式变更基线）
 - `just e2e`：需要 `compose.yaml` 与 P1 服务镜像
 
 MCP 工具面、网页采集器、OPML、`discover_feed` 与调度器接线均待实现，见
@@ -179,6 +180,26 @@ curl -sS "http://127.0.0.1:8000/v1/sources?limit=20" -H "Authorization: Bearer $
 - **`schedule_policy` 严格校验**：未知键会被拒（`interwal` 这种拼错不会静默变成无间隔）
 - **删除是软删**：已发布条目的 GUID 冻结且客户端已缓存，不能随源一起消失
 
+## MCP 控制平面
+
+MCP server 挂在同一应用的 `/mcp/mcp`（Streamable HTTP）。工具：
+
+| 工具 | 需确认 | 作用 |
+|---|---|---|
+| `list_sources` | | 列出来源 |
+| `search_items` | | 搜索条目（**不含正文**） |
+| `get_system_snapshot` | | 状态快照：错误分布、pending 积压、近期成功率 |
+| `list_jobs` / `list_runs` | | 任务与执行历史 |
+| `add_source` | ⚠ | 加源 |
+| `update_schedule_policy` | ⚠ | 改调度策略 |
+| `set_source_status` | ⚠ | 暂停 / 恢复 |
+| `remove_source` | ⚠ | 软删除来源 |
+| `trigger_job` | ⚠ | 立即抓取 |
+
+正文通过 Resource `item://{item_id}` 取，不进工具返回值 —— 这是「上下文经济」的硬约束。
+
+写操作由 **server 侧 elicitation** 确认；客户端不支持 elicitation 时**拒绝执行**而非照做。确认表单预填待执行的值，且执行前校验确认值与实际参数一致。
+
 ## NetNewsWire 接入
 
 RSS 输出与 Reader API 都已可用，两条路径用途不同：
@@ -214,7 +235,7 @@ PEARSS_READER_PASSWORD=<your-password>
 | `architecture-spec.md` | 总体需求、架构、路线图、选型与决策 |
 | `AGENTS.md` | 编码 agent 的项目规则与完成标准 |
 | `docs/api/style-guide.md` | REST/OpenAPI 设计与演进规范 |
-| `docs/api/mcp-tool-guide.md` | MCP Tool/Resource 语义与安全规范（待编写，见 P1 路线） |
+| `docs/api/mcp-tool-guide.md` | MCP Tool/Resource 语义与安全规范 |
 | `docs/domain/data-model.md` | 领域实体、关系、保留与备份策略 |
 | `docs/domain/state-machines.md` | Item、JobRun、Plugin 等状态机 |
 | `docs/domain/error-taxonomy.md` | 错误分类、错误 envelope 与诊断语义 |

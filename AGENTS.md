@@ -88,7 +88,9 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 ### API 与 MCP
 
 - 新增/修改 HTTP endpoint：更新 OpenAPI，遵循 `docs/api/style-guide.md`，通过 `just contract`
-- 新增/修改 MCP Tool：更新 Tool 描述与 schema，更新 snapshot，遵循 `docs/api/mcp-tool-guide.md`
+- 新增/修改 MCP Tool：更新 Tool 描述与 schema，更新 snapshot（`MCP_SNAPSHOT_UPDATE=1 just contract` 后审查 diff），遵循 `docs/api/mcp-tool-guide.md`
+- MCP 工具**必须经 `/v1` 调用**，不得直调 `adapters/repository`：那样会绕过审计中间件、鉴权与校验（ADR 0010）
+- 工具的 elicitation schema 只能用原始类型；嵌套对象在渲染时抛 TypeError，结构化参数须以 canonical JSON 文本传递
 - 写工具：默认需要用户确认；返回审计 ID 与 correlation ID
 - 大正文、HTML、音频不得塞进 Tool 返回值；返回 item/enrichment ID 或 Resource URI
 
