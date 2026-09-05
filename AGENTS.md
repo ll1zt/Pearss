@@ -96,7 +96,7 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 - MCP 工具**必须经 `/v1` 调用**，不得直调 `adapters/repository`：那样会绕过审计中间件、鉴权与校验（ADR 0010）
 - 工具的 elicitation schema 只能用原始类型；嵌套对象在渲染时抛 TypeError，结构化参数须以 canonical JSON 文本传递
 - 写工具：默认需要用户确认；返回审计 ID 与 correlation ID
-- 大正文、HTML、音频不得塞进 Tool 返回值；返回 item/enrichment ID 或 Resource URI
+- **不得批量返回正文**：列表类工具只返回 item/enrichment ID 或 Resource URI。单条、显式、带截断的正文获取允许（`get_item_body`，见 ADR 0013），因为 Resource 是 MCP 中采用率最低的特性，客户端不支持时 agent 完全取不到正文
 
 ### Reader API（兼容层）
 

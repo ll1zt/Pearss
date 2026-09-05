@@ -25,8 +25,13 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 
 ### 硬性规则
 
-1. **正文、HTML、原始 payload、音频一律不得进 Tool 返回值**。返回 `item_id` /
-   `enrichment_id` 或 Resource URI（AGENTS.md 明文）
+1. **不得批量返回正文**。列表类工具返回 `item_id` / `enrichment_id` 或 Resource
+   URI（AGENTS.md 明文）。单条获取例外：`get_item_body` 带 `max_chars` 截断，
+   且返回值必须自述 `truncated` / `total_chars`（ADR 0013）。
+
+   这条规则的依据是**粒度**，不是"Resource 不进上下文"—— 后者是错的：
+   `resources/read` 的 `text` 与工具结果同样进入对话上下文，MCP 没有
+   "读取但不进上下文"的语义。Resource 仍优先，因为部分客户端把它当附件。
 2. **列表必须分页 + 截断**。默认 `limit=50`，上限 100，与 `/v1` 一致
 3. **字符串字段截断**。标题等短字段截到 200 字符并标注被截断；长文本不进返回值
 4. **默认只返回摘要字段**，完整字段由调用方显式 `fields=` 索取

@@ -63,3 +63,4 @@ docs/adr/
 | [0010](0010-mcp-tools-via-core-api.md) | MCP 工具面经 Core API 调用，用官方 mcp SDK | accepted | 2026-09-04 |
 | [0011](0011-telegram-collector-decisions.md) | Telegram 采集器：t.me 原生 URL、CSS 取图、可选回溯 | accepted | 2026-09-05 |
 | [0012](0012-authenticated-collectors.md) | 登录型采集器：允许使用用户自供凭据 | accepted（**修订 collector-guide 第 14 行**） | 2026-09-05 |
+| [0013](0013-get-item-body-tool.md) | 允许 get_item_body 工具，以截断为条件 | accepted（**修订 AGENTS.md 第 99 行**） | 2026-09-05 |
