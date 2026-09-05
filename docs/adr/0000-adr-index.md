@@ -61,3 +61,4 @@ docs/adr/
 | [0008](0008-source-canonical-url-not-null.md) | source.canonical_url 必须 NOT NULL | accepted | 2026-09-04 |
 | [0009](0009-derived-schedule-without-apscheduler.md) | 调度时间从策略与历史推导，不引入 APScheduler | accepted | 2026-09-04 |
 | [0010](0010-mcp-tools-via-core-api.md) | MCP 工具面经 Core API 调用，用官方 mcp SDK | accepted | 2026-09-04 |
+| [0011](0011-telegram-collector-decisions.md) | Telegram 采集器：t.me 原生 URL、CSS 取图、可选回溯 | accepted | 2026-09-05 |
