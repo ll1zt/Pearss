@@ -33,8 +33,14 @@ def handler_for(
     return handle
 
 
+# Captured before any test can patch httpx.Client: `client_with` is used to
+# build the very replacement that gets patched in, so resolving the name at
+# call time would recurse.
+_REAL_CLIENT = httpx.Client
+
+
 def client_with(handler: Callable[[httpx.Request], httpx.Response]) -> httpx.Client:
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return _REAL_CLIENT(transport=httpx.MockTransport(handler))
 
 
 def credentials() -> x.Credentials:
@@ -86,6 +92,156 @@ def test_csrf_header_must_equal_the_ct0_cookie() -> None:
     assert headers["x-csrf-token"] == FAKE_CT0
     assert f"ct0={FAKE_CT0}" in headers["cookie"]
     assert f"auth_token={FAKE_AUTH}" in headers["cookie"]
+
+
+# --------------------------------------------------------------------------
+# Credential resolution: static first, CookieCloud as the fallback
+# --------------------------------------------------------------------------
+
+
+def cookiecloud_env(monkeypatch: pytest.MonkeyPatch, header: str) -> None:
+    from adapters import cookiecloud as cc
+
+    for key in (x.AUTH_TOKEN_ENV, x.CT0_ENV):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
+    monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
+    monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
+    monkeypatch.delenv(cc.DOMAIN_ENV, raising=False)
+    cc.invalidate()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/get/"):
+            return httpx.Response(200, text=header)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: client_with(handler))
+
+
+@pytest.mark.unit
+def test_static_credentials_win_over_cookiecloud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator who pinned a value asked for that one deliberately."""
+    cookiecloud_env(monkeypatch, "auth_token=from-cloud; ct0=from-cloud")
+    monkeypatch.setenv(x.AUTH_TOKEN_ENV, FAKE_AUTH)
+    monkeypatch.setenv(x.CT0_ENV, FAKE_CT0)
+    made = x.Credentials.from_env()
+    assert made.auth_token == FAKE_AUTH
+    assert made.ct0 == FAKE_CT0
+
+
+@pytest.mark.unit
+def test_cookiecloud_fills_in_when_nothing_is_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cookiecloud_env(monkeypatch, "auth_token=cloud-a; ct0=cloud-b; junk=1")
+    made = x.Credentials.from_env()
+    assert made.auth_token == "cloud-a"
+    assert made.ct0 == "cloud-b"
+
+
+@pytest.mark.unit
+def test_a_cookiecloud_response_without_an_x_session_is_not_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sync scoped to another domain must not look like a usable session."""
+    cookiecloud_env(monkeypatch, "sessdata=abc; bili_jct=def")
+    with pytest.raises(x.CredentialError):
+        x.Credentials.from_env()
+
+
+@pytest.mark.unit
+def test_the_failure_message_names_the_real_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'set these env vars' is wrong advice when they are already set."""
+    cookiecloud_env(monkeypatch, "nothing_relevant=1")
+    with pytest.raises(x.CredentialError) as excinfo:
+        x.Credentials.from_env()
+    message = str(excinfo.value)
+    assert "CookieCloud" in message
+    assert x.AUTH_TOKEN_ENV not in message
+
+
+@pytest.mark.unit
+def test_no_configuration_at_all_lists_both_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import cookiecloud as cc
+
+    for key in (
+        x.AUTH_TOKEN_ENV,
+        x.CT0_ENV,
+        cc.BASE_URL_ENV,
+        cc.UUID_ENV,
+        cc.TOKEN_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+    with pytest.raises(x.CredentialError) as excinfo:
+        x.Credentials.from_env()
+    assert x.AUTH_TOKEN_ENV in str(excinfo.value)
+    assert cc.BASE_URL_ENV in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_refresh_bypasses_the_cache_and_picks_up_a_rotated_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """X rotates ct0 on login, so a cached copy is exactly what got rejected.
+
+    Without this the source stays broken until the process restarts, even
+    though the browser has already synced a working pair.
+    """
+    cookiecloud_env(monkeypatch, "auth_token=stale-a; ct0=stale-b")
+    stale = x.Credentials.from_env()
+    assert stale.ct0 == "stale-b"
+
+    cookiecloud_env(monkeypatch, "auth_token=fresh-a; ct0=fresh-b")
+    fresh = x.Credentials.refresh()
+    assert fresh.ct0 == "fresh-b"
+
+
+@pytest.mark.unit
+def test_refreshing_a_pinned_credential_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-reading a pinned value would loop; the operator has to act."""
+    from adapters import cookiecloud as cc
+
+    for key in (cc.BASE_URL_ENV, cc.UUID_ENV, cc.TOKEN_ENV):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(x.AUTH_TOKEN_ENV, FAKE_AUTH)
+    monkeypatch.setenv(x.CT0_ENV, FAKE_CT0)
+    with pytest.raises(x.CredentialError) as excinfo:
+        x.Credentials.refresh()
+    assert "pinned" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_cookiecloud_counts_as_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the pipeline reports `auth` before ever trying the fallback."""
+    cookiecloud_env(monkeypatch, "auth_token=a; ct0=b")
+    assert x.credentials_configured()
+
+
+@pytest.mark.unit
+def test_a_down_cookiecloud_server_does_not_look_like_no_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One needs a re-sync; the other needs configuration. Different fixes."""
+    cookiecloud_env(monkeypatch, "auth_token=a; ct0=b")
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(httpx, "Client", lambda *a, **k: client_with(boom))
+    assert x.credentials_configured()
+    with pytest.raises(x.CredentialError) as excinfo:
+        x.Credentials.from_env()
+    assert "CookieCloud" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------

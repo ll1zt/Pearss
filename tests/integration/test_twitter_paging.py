@@ -330,6 +330,91 @@ def test_a_dropped_resume_lets_the_walk_restart_from_the_newest(
 
 
 @pytest.mark.integration
+def test_a_rejected_session_is_refreshed_and_the_page_retried(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """X rotates ct0 on login, so a cached session is exactly what gets 401'd.
+
+    Without the refresh the source stays broken until the process restarts even
+    though the browser already synced a working pair. With an unbounded retry it
+    would instead hammer the origin while nothing can authorise us, so this
+    asserts both halves: it recovers, and it recovers exactly once.
+    """
+    from adapters import cookiecloud as cc
+    from plugins.collectors.twitter import client as x_client
+
+    for key in (x_client.AUTH_TOKEN_ENV, x_client.CT0_ENV):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
+    monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
+    monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
+    monkeypatch.delenv(cc.DOMAIN_ENV, raising=False)
+    cc.invalidate()
+
+    state = {"x_calls": 0, "cc_calls": 0}
+
+    def route(request: httpx.Request) -> httpx.Response:
+        from adapters.cookiecloud import parse_cookie_header
+
+        if request.url.path.startswith("/get/"):
+            # The browser re-synced between the two lookups: the first hands
+            # out the session X is about to reject, the second the fresh one.
+            state["cc_calls"] += 1
+            issued = "stale" if state["cc_calls"] == 1 else "fresh"
+            return httpx.Response(200, text=f"auth_token=a; ct0={issued}")
+
+        state["x_calls"] += 1
+        sent = parse_cookie_header(request.headers.get("cookie", ""))
+        if sent.get("ct0") != "fresh":
+            return httpx.Response(401)
+        return httpx.Response(200, content=timeline(["900"], None))
+
+    result = collect_authenticated_pages(
+        session,
+        source=source_row(session),
+        client=httpx.Client(transport=httpx.MockTransport(route)),
+    )
+    session.commit()
+
+    assert result.succeeded is True
+    assert result.inserted == 1
+    # Two CookieCloud lookups: the cached one that got rejected, then a forced
+    # refresh that bypassed the cache.
+    assert state["cc_calls"] == 2, state
+    assert state["x_calls"] == 2, "one rejection, one retry"
+
+
+@pytest.mark.integration
+def test_a_persistent_rejection_does_not_retry_forever(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One refresh attempt, then the failure stands.
+
+    Looping on a rejection would hammer the origin while the real problem is
+    that nobody can authorise us.
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    calls = {"n": 0}
+
+    def route(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(401)
+
+    result = collect_authenticated_pages(
+        session,
+        source=source_row(session),
+        client=httpx.Client(transport=httpx.MockTransport(route)),
+    )
+    assert result.succeeded is False
+    assert result.error_class == ErrorClass.AUTH.value
+    assert calls["n"] == 1, f"expected a single attempt, got {calls['n']}"
+
+
+@pytest.mark.integration
 def test_collection_result_defaults_cover_paging_fields() -> None:
     """The dataclass is shared with the single-page path; defaults must hold."""
     result = CollectionResult(succeeded=True)

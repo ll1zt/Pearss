@@ -100,6 +100,65 @@ class CredentialError(Exception):
     """No usable login credentials. Reported as `auth`, never worked around."""
 
 
+def _from_cookie_cloud(
+    *, force: bool, client: httpx.Client | None = None
+) -> Credentials | None:
+    """The session from a self-hosted CookieCloud, or None when unavailable.
+
+    None on failure rather than an exception: a sync server being down is not
+    the same as no credential existing, and the caller's message should say
+    which. The distinction matters operationally -- one needs a re-sync, the
+    other needs configuration.
+    """
+    from adapters import cookiecloud
+
+    config = cookiecloud.config_from_env()
+    if config is None:
+        return None
+    # The caller's client is reused rather than a fresh one built here: it
+    # carries the deployment's proxy and pool configuration, and building a
+    # private client would make this path untestable without a network.
+    own_client = client is None
+    active = client if client is not None else httpx.Client()
+    try:
+        header = cookiecloud.fetch_cookie_header(active, config, force=force)
+    except cookiecloud.CookieCloudError as exc:
+        LOGGER.info("CookieCloud unavailable for X session: %s", exc)
+        return None
+    finally:
+        if own_client:
+            active.close()
+
+    pairs = cookiecloud.parse_cookie_header(header)
+    auth = pairs.get("auth_token", "")
+    ct0 = pairs.get("ct0", "")
+    if not auth or not ct0:
+        LOGGER.info(
+            "CookieCloud returned no X session for domain %s; it holds %d cookie(s)",
+            config.domain,
+            len(pairs),
+        )
+        return None
+    return Credentials(auth_token=auth, ct0=ct0)
+
+
+def _missing_credentials_message(*, auth: str, ct0: str) -> str:
+    from adapters import cookiecloud
+
+    if cookiecloud.config_from_env() is not None:
+        return (
+            "no usable X session: CookieCloud is configured but did not return "
+            f"auth_token/ct0 for domain {cookiecloud.configured_domains()!r}"
+        )
+    missing = cookiecloud.missing_config_keys()
+    return (
+        f"{AUTH_TOKEN_ENV} and {CT0_ENV} are both required, or set "
+        f"{cookiecloud.BASE_URL_ENV}/{cookiecloud.UUID_ENV}/"
+        f"{cookiecloud.TOKEN_ENV}"
+        + (f" (missing: {', '.join(missing)})" if missing else "")
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Credentials:
     """The operator's own session, read from the environment."""
@@ -108,15 +167,48 @@ class Credentials:
     ct0: str
 
     @classmethod
-    def from_env(cls) -> Credentials:
+    def from_env(cls, client: httpx.Client | None = None) -> Credentials:
+        """Resolve the session: static environment first, then CookieCloud.
+
+        Static wins because an operator who pinned a value deliberately asked
+        for that one, and a running sync server should not be able to override
+        it. CookieCloud is the fallback for the common case where nobody wants
+        to re-export a cookie after every login.
+        """
         auth = os.environ.get(AUTH_TOKEN_ENV, "").strip()
         ct0 = os.environ.get(CT0_ENV, "").strip()
-        if not auth or not ct0:
+        if auth and ct0:
+            return cls(auth_token=auth, ct0=ct0)
+
+        from_cookie_cloud = _from_cookie_cloud(force=False, client=client)
+        if from_cookie_cloud is not None:
+            return from_cookie_cloud
+
+        raise CredentialError(_missing_credentials_message(auth=auth, ct0=ct0))
+
+    @classmethod
+    def refresh(cls, client: httpx.Client | None = None) -> Credentials:
+        """Re-resolve bypassing the cookie cache.
+
+        Used after X rejects the session: X rotates `ct0` on login, so a cached
+        copy is exactly what a 401 means. Without this the source stays broken
+        until the process restarts, even though the browser has already synced
+        a working pair.
+        """
+        auth = os.environ.get(AUTH_TOKEN_ENV, "").strip()
+        ct0 = os.environ.get(CT0_ENV, "").strip()
+        if auth and ct0:
+            # Pinned statically: there is nothing fresher to fetch, and
+            # re-reading the same value would only loop.
             raise CredentialError(
-                f"{AUTH_TOKEN_ENV} and {CT0_ENV} are both required for an "
-                "authenticated X source"
+                f"{AUTH_TOKEN_ENV} was rejected by X; it is pinned in the "
+                "environment, so re-export the session or unset it to fall "
+                "back to CookieCloud"
             )
-        return cls(auth_token=auth, ct0=ct0)
+        fresh = _from_cookie_cloud(force=True, client=client)
+        if fresh is None:
+            raise CredentialError(_missing_credentials_message(auth=auth, ct0=ct0))
+        return fresh
 
     def headers(self) -> dict[str, str]:
         """The header set that presents this as the logged-in web client.
@@ -288,11 +380,20 @@ def credentials_configured() -> bool:
 
     Used to report `auth` at collection time with a clear message rather than
     letting a missing credential surface as an opaque HTTP 403.
+
+    CookieCloud counts as configured without probing it: a probe here would put
+    a network call inside a predicate the pipeline runs before every source,
+    and an unreachable server is reported by the resolution that follows.
     """
-    return bool(
+    static = (
         os.environ.get(AUTH_TOKEN_ENV, "").strip()
         and os.environ.get(CT0_ENV, "").strip()
     )
+    if static:
+        return True
+    from adapters import cookiecloud
+
+    return cookiecloud.config_from_env() is not None
 
 
 __all__ = [

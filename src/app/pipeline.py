@@ -306,9 +306,12 @@ def collect_authenticated_pages(
         )
 
     state = paging_state(session, source_id=source.id)
-    credentials = x_client.Credentials.from_env()
+    credentials = x_client.Credentials.from_env(client)
     query_id = x_client.current_query_id()
     count = x_client.configured_count()
+    # Set when X rejects the session, so the walk can retry once with a fresh
+    # pair instead of failing the cycle.
+    refreshed = False
 
     def fetch_page(cursor: str | None) -> paging.Page:
         payload = x_client.fetch_page(
@@ -328,13 +331,19 @@ def collect_authenticated_pages(
         )
 
     def fetch_with_recovery(cursor: str | None) -> paging.Page:
-        """One stale-queryId retry, then the failure propagates.
+        """Recover from a rotated queryId or a rejected session, once each.
 
-        X rotates the queryId without notice and answers 400. Re-extracting it
+        X rotates the queryId without notice and answers 400; re-extracting it
         from the site's own bundle is the difference between a self-healing
         source and one that needs a human every few weeks.
+
+        A 401/403 means the session itself went stale -- X rotates `ct0` on
+        login, so the cached CookieCloud copy is exactly what was rejected.
+        Re-resolving bypasses the cache and picks up what the browser synced.
+        Both retries are once-only: looping on a rejection would hammer the
+        origin while the real problem is that nobody can authorise us.
         """
-        nonlocal query_id
+        nonlocal query_id, credentials, refreshed
         try:
             return fetch_page(cursor)
         except x_client.QueryIdRejected:
@@ -342,6 +351,12 @@ def collect_authenticated_pages(
             if fresh is None or fresh == query_id:
                 raise
             query_id = fresh
+            return fetch_page(cursor)
+        except FetchError as exc:
+            if exc.error_class is not ErrorClass.AUTH or refreshed:
+                raise
+            refreshed = True
+            credentials = x_client.Credentials.refresh(client)
             return fetch_page(cursor)
 
     try:
@@ -352,6 +367,14 @@ def collect_authenticated_pages(
             resume=None
             if paging.should_drop_resume(state.resume_rounds)
             else state.resume_cursor,
+        )
+    except x_client.CredentialError as exc:
+        # A credential problem, not a transport one: the operator has to act,
+        # and `network` would tell them to wait instead.
+        return CollectionResult(
+            succeeded=False,
+            error_class=ErrorClass.AUTH.value,
+            detail=str(exc),
         )
     except Exception as exc:  # classified below; nothing retrieved
         error_class = getattr(exc, "error_class", None)
