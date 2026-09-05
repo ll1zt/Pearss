@@ -11,7 +11,9 @@
 3. 官方 API：若有合法、稳定、符合使用条款的 API
 4. 网页采集器：仅在无 feed/API 或 feed 内容明显不足时使用
 
-采集器不得绕过 robots.txt、登录限制、CAPTCHA、付费墙、访问控制或站点明确的反自动化要求。遇到此类情况归类为 `blocked` 或 `auth`，而非尝试规避。
+**匿名采集（默认）**：采集器不得绕过 robots.txt、登录限制、CAPTCHA、付费墙、访问控制或站点明确的反自动化要求。遇到此类情况归类为 `blocked` 或 `auth`，而非尝试规避。
+
+**登录型采集（例外，需显式配置）**：当且仅当凭据由用户本人提供、账号属于该用户、且采集范围不超出该账号自身可见的数据时，允许携带登录态。全部条件与风险见 ADR 0012。凭据缺失或失效时仍归 `auth` 并停止，不得尝试规避。
 
 ## P1 准插件结构
 
@@ -19,8 +21,8 @@
 > - `rss`（RSS 2.0 + Atom）：valid / valid_atom / empty / changed / malformed 五套 fixture
 > - `telegram`（公开频道预览页）：valid / empty / changed / media_only / legacy_ids 五套 fixture
 >
-> **还差一个**（A2 要求 2–3 个），故 §3「第三个爬虫接入且未改动前两个」这一 P2
-> hookspec 冻结前提（Rule of Three）**仍未满足**。
+> 第三个（`twitter`，登录型）进行中。凑齐三个后，§3「第三个爬虫接入且未改动前两个」
+> 这一 P2 hookspec 冻结前提（Rule of Three）才满足。
 >
 > 选择在 `src/app/collector_registry.py`：按 URL 选采集器（`match_url`），而非 pipeline
 > 硬编码调某一个。`fetch` 不在采集器内，由 `adapters/http.py` 统一负责。
