@@ -10,6 +10,45 @@
 4. 变更前先备份事实源数据；变更后运行最小验证
 5. 不确定时优先暂停特定 Source/Plugin，避免扩大错误输出
 
+## 服务形态与观察
+
+当前由 **systemd 用户服务**托管（`deploy/pearss.service` + linger），不是容器：
+
+```bash
+just service-status     # 状态 + 最近 30 行日志
+just service-restart    # 改完 .env 或代码后
+journalctl --user -u pearss.service -f
+```
+
+三个进程内组件共用一个进程：Core API、Reader API、MCP 工具面，外加 asyncio 调度任务。
+`PEARSS_SCHEDULER_ENABLED=0` 可只跑 API 不跑调度；`PEARSS_TICK_SECONDS` 控制轮询间隔。
+
+## 调度器
+
+**到期时间不落库**，每轮从 `source.schedule_policy` + `job_run`/`item` 历史推导（ADR 0009）。
+所以「为什么没抓」要按推导的输入去查，而不是找一张 next_run 表：
+
+| 症状 | 查什么 | 说明 |
+|---|---|---|
+| 某源一直不抓 | `select status from source` | 只有 `active` 会被抓；paused/disabled 是运维的显式决定 |
+| 失败后间隔变长 | `job_run` 最近状态 | 连续失败按 2^n 退避，上限 24h；**这是预期行为**，不是卡住 |
+| adaptive 抓得太稀 | `item.published_at` 间隔 | 更新节奏按**条目发布时间**算，不是按抓取时间 |
+| 重启后大批 `timed_out` | 启动日志 | 上次进程被杀时留下的 `running` 行被回收，属正常清理 |
+| 同一源被并发抓 | 不应发生 | claim 是条件更新（`WHERE status='queued'`），恰好一个赢 |
+
+**手动触发**：`POST /v1/sources/{id}:trigger`（或 MCP `trigger_job`）。它走与调度器同一条
+`collect_now`，因此**同样写 JobRun** —— 手动触发不可见曾是真实 bug。
+
+## MCP 工具面
+
+- 端点 `/mcp/mcp`（Streamable HTTP），与 API 同进程
+- **写操作需 elicitation**。客户端不支持时**拒绝执行**并返回 `{"declined": true}`，
+  不会静默照做。若用户报告「工具说 declined」，是客户端缺 elicitation 能力，不是故障
+- 工具经 `/v1` 调用，所以审计与鉴权与任何客户端一致；审计里 actor 是 `api:full`
+  （服务持有的 token），**agent 身份靠 correlation_id 关联，不体现在 actor 上**（ADR 0010 记录了这个可归因性弱化）
+- 工具面变更会撞 snapshot：`MCP_SNAPSHOT_UPDATE=1 just contract` 后**审查 diff 再提交**，
+  不要为了让测试绿而重写
+
 ## 日常健康检查
 
 检查以下信号：
@@ -22,7 +61,12 @@
 - RSS 输出可访问性、最近 GUID 是否稳定
 - 备份最近一次成功时间与最近恢复演练日期
 
-可使用 `get_system_snapshot`、`list_jobs`、`diagnose_source`（P2）或 Swagger UI。
+可使用 `GET /v1/system/snapshot`、`GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、MCP 的
+`get_system_snapshot` / `list_runs`，或 Swagger UI。`diagnose_source` 属 P2，尚未实现。
+
+快照刻意报告**衰减信号**而非一堆计数器：`runs_by_error_class` 里 `structure_changed`
+扎堆意味着网站改版；`recent_run_success_rate` 只统计最近 50 次完成运行，因为刚坏的源
+应该立刻反映出来。
 
 ## 故障处置表
 
@@ -37,6 +81,9 @@
 | Reader 已读不同步（P3） | Reader API 请求日志、ReadState、认证 | 校验 endpoint/认证；按幂等事件重放 | 直接修改 Item 内容/发布状态 |
 | SQLite 损坏/无法打开 | 最近备份、磁盘、应用日志 | 停服务、保留故障副本、恢复到新文件、验证 | 在原损坏库上继续写入 |
 | 怀疑 token 泄漏 | AuditLog、访问日志、部署 Secret | 立刻撤销/轮换 token，评估暴露范围，清理受控日志 | 只改代码或只删除一条日志 |
+| 条目数不涨 | `source.status`、`job_run` 最近状态、启动日志有无 scheduler 行 | 见「调度器」一节按推导输入排查 | 去找 next_run 表 —— 不存在，是设计如此 |
+| 文章正文与源不一致 | `job_run` 是否有 `skip_published_content_changed` 告警 | 已发布内容按设计冻结；需要更正只能作为新条目 | 改已发布 Item 的正文或 GUID |
+| MCP 写操作全被拒 | 客户端是否实现 elicitation | 换支持的客户端，或直接用 `/v1` | 让工具在无确认时继续执行 |
 
 ## Source/采集器问题操作步骤
 
