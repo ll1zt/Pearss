@@ -348,7 +348,6 @@ def test_a_rejected_session_is_refreshed_and_the_page_retried(
     monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
     monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
     monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
-    monkeypatch.delenv(cc.DOMAIN_ENV, raising=False)
     cc.invalidate()
 
     state = {"x_calls": 0, "cc_calls": 0}

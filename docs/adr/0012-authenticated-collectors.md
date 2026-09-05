@@ -60,6 +60,10 @@ collector-guide 第 14 行原本无条件禁止绕过登录限制与反自动化
 - CookieCloud 客户端是**通用适配器**（`src/adapters/cookiecloud.py`），不隶属任何
   单个采集器：下一个登录型源直接复用，而不是复制一份或产生 `plugins -> plugins`
   的反向依赖
+- **要导出哪个域名由采集器声明，不由部署配置**。`config_from_env(domain=...)` 的
+  `domain` 是必填关键字参数，无默认值。它曾是一个全局环境变量（默认 `x.com`），
+  那样第二个登录型采集器会静默拿到第一个的 cookie，然后去找不存在的 cookie 名。
+  空 domain 也被显式拒绝 —— 服务端在过滤条件为空时返回**全部**站点
 - HTTP 层必须把 `auth_token`/`ct0` 当作与 API key 同级的秘密：脱敏列表包含
   `cookie`、`authorization`、`x-csrf-token`
 - 状态码沿用 `docs/domain/error-taxonomy.md` 的单一来源分类，**不为本源另立规则**：

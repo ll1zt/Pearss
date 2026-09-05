@@ -60,12 +60,15 @@ curl -sS -X POST http://127.0.0.1:8000/v1/sources \
 PEARSS_COOKIECLOUD_URL=http://127.0.0.1:4000   # 自部署 cookie_cloud_server
 PEARSS_COOKIECLOUD_UUID=<你的同步 uuid>
 PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD>
-PEARSS_COOKIECLOUD_DOMAIN=x.com               # 可选，默认 x.com
 PEARSS_COOKIECLOUD_CACHE_SECONDS=300          # 可选
 ```
 
 **解析顺序**：静态 `PEARSS_X_*` > CookieCloud。静态优先 —— 显式钉住值就是明确要求
 用那个值，不该被一个在跑的同步服务悄悄覆盖。
+
+**没有 `PEARSS_COOKIECLOUD_DOMAIN` 这个配置项。** 要导出哪个域是**采集器自己的事实**
+（X 声明 `COOKIE_DOMAIN = "x.com"`，未来的知乎采集器声明 `"zhihu.com"`），不是部署选项。
+它曾经是个全局环境变量，那样第二个登录型采集器会静默拿到第一个的 cookie。
 
 **被拒时自愈**：X 返回 401 说明会话已轮换，此时绕过缓存重取一次并重试该页。
 只重试一次 —— 对着拒绝反复重试是在轰炸对方，而真正的问题是没人能给我们授权。

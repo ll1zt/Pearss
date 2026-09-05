@@ -107,7 +107,6 @@ def cookiecloud_env(monkeypatch: pytest.MonkeyPatch, header: str) -> None:
     monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
     monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
     monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
-    monkeypatch.delenv(cc.DOMAIN_ENV, raising=False)
     cc.invalidate()
 
     def handler(request: httpx.Request) -> httpx.Response:

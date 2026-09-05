@@ -80,6 +80,12 @@ QUERY_ID_ENV = "PEARSS_X_QUERY_ID"
 COUNT_ENV = "PEARSS_X_COUNT"
 USER_AGENT_ENV = "PEARSS_X_USER_AGENT"
 
+# The domain whose cookies hold the X session. Stated by the collector rather
+# than configured globally: it is a fact about x.com, not a deployment choice,
+# and a shared setting would make a second login-type collector read the
+# first one's cookies.
+COOKIE_DOMAIN = "x.com"
+
 # X serves a different document to a client it does not recognise as a browser,
 # so the UA is part of the request shape rather than a courtesy. Overridable so
 # a deployment can present its own contact.
@@ -112,7 +118,7 @@ def _from_cookie_cloud(
     """
     from adapters import cookiecloud
 
-    config = cookiecloud.config_from_env()
+    config = cookiecloud.config_from_env(domain=COOKIE_DOMAIN)
     if config is None:
         return None
     # The caller's client is reused rather than a fresh one built here: it
@@ -145,10 +151,10 @@ def _from_cookie_cloud(
 def _missing_credentials_message(*, auth: str, ct0: str) -> str:
     from adapters import cookiecloud
 
-    if cookiecloud.config_from_env() is not None:
+    if cookiecloud.enabled():
         return (
             "no usable X session: CookieCloud is configured but did not return "
-            f"auth_token/ct0 for domain {cookiecloud.configured_domains()!r}"
+            f"auth_token/ct0 for domain {COOKIE_DOMAIN!r}"
         )
     missing = cookiecloud.missing_config_keys()
     return (
@@ -393,11 +399,12 @@ def credentials_configured() -> bool:
         return True
     from adapters import cookiecloud
 
-    return cookiecloud.config_from_env() is not None
+    return cookiecloud.enabled()
 
 
 __all__ = [
     "AUTH_TOKEN_ENV",
+    "COOKIE_DOMAIN",
     "CT0_ENV",
     "CredentialError",
     "Credentials",

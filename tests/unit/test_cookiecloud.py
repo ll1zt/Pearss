@@ -49,7 +49,6 @@ def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv(cc.BASE_URL_ENV, BASE)
     monkeypatch.setenv(cc.UUID_ENV, FAKE_UUID)
     monkeypatch.setenv(cc.TOKEN_ENV, FAKE_TOKEN)
-    monkeypatch.delenv(cc.DOMAIN_ENV, raising=False)
     monkeypatch.delenv(cc.CACHE_TTL_ENV, raising=False)
     return monkeypatch
 
@@ -94,7 +93,7 @@ def test_absent_configuration_is_none_rather_than_an_error() -> None:
 
     Raising would break every collection for a feature nobody turned on.
     """
-    made = cc.config_from_env()
+    made = cc.config_from_env(domain="x.com")
     assert made is None or not made.base_url
 
 
@@ -102,13 +101,13 @@ def test_absent_configuration_is_none_rather_than_an_error() -> None:
 def test_partial_configuration_is_ignored(env: pytest.MonkeyPatch) -> None:
     monkeypatch = env
     monkeypatch.delenv(cc.TOKEN_ENV)
-    assert cc.config_from_env() is None
+    assert cc.config_from_env(domain="x.com") is None
     assert cc.TOKEN_ENV in cc.missing_config_keys()
 
 
 @pytest.mark.unit
 def test_full_configuration_is_read(env: pytest.MonkeyPatch) -> None:
-    made = cc.config_from_env()
+    made = cc.config_from_env(domain="x.com")
     assert made is not None
     assert made.domain == "x.com"
     assert made.cache_seconds == cc.DEFAULT_CACHE_SECONDS
@@ -118,7 +117,7 @@ def test_full_configuration_is_read(env: pytest.MonkeyPatch) -> None:
 @pytest.mark.unit
 def test_trailing_slash_does_not_double_up_in_the_url(env: pytest.MonkeyPatch) -> None:
     env.setenv(cc.BASE_URL_ENV, BASE + "/")
-    made = cc.config_from_env()
+    made = cc.config_from_env(domain="x.com")
     assert made is not None and made.base_url == BASE
 
 
@@ -127,8 +126,72 @@ def test_a_nonsense_ttl_falls_back_rather_than_crashing(
     env: pytest.MonkeyPatch,
 ) -> None:
     env.setenv(cc.CACHE_TTL_ENV, "soon")
-    made = cc.config_from_env()
+    made = cc.config_from_env(domain="x.com")
     assert made is not None and made.cache_seconds == cc.DEFAULT_CACHE_SECONDS
+
+
+@pytest.mark.unit
+def test_the_domain_is_required_rather_than_defaulted(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """No default domain, on purpose.
+
+    A shared default would let a second login-type collector ask for cookies
+    without saying whose, silently receive the first collector's, and then fail
+    looking for cookie names that are not there. Requiring the argument moves
+    that from a runtime mystery to a call-site error.
+    """
+    with pytest.raises(TypeError):
+        cc.config_from_env()  # type: ignore[call-arg]
+
+
+@pytest.mark.unit
+def test_an_empty_domain_is_rejected_rather_than_exporting_everything(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """The server returns *all* buckets when the filter is empty.
+
+    An unset domain must not quietly widen the request to every synced site.
+    """
+    with pytest.raises(ValueError):
+        cc.config_from_env(domain="   ")
+
+
+@pytest.mark.unit
+def test_two_collectors_get_their_own_cookies_from_one_server(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """The case the global setting could not serve.
+
+    X and a hypothetical Zhihu collector ask the same server and must each
+    receive only their own domain's cookies, with independent cache entries.
+    """
+    asked: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        domain = request.url.params["domain"]
+        asked.append(domain)
+        return httpx.Response(200, text=f"session=for-{domain}")
+
+    with client_with(capture) as client:
+        x = cc.fetch_cookie_header(
+            client, cc.config_from_env(domain="x.com") or config()
+        )
+        zhihu = cc.fetch_cookie_header(
+            client, cc.config_from_env(domain="zhihu.com") or config()
+        )
+
+    assert x == "session=for-x.com"
+    assert zhihu == "session=for-zhihu.com"
+    assert asked == ["x.com", "zhihu.com"]
+
+
+@pytest.mark.unit
+def test_a_collector_declares_its_own_domain() -> None:
+    """The domain lives with the collector, not in the deployment config."""
+    from plugins.collectors.twitter import client as x_client
+
+    assert x_client.COOKIE_DOMAIN == "x.com"
 
 
 # --------------------------------------------------------------------------

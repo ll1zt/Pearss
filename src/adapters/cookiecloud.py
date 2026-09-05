@@ -44,10 +44,8 @@ LOGGER = logging.getLogger(__name__)
 BASE_URL_ENV = "PEARSS_COOKIECLOUD_URL"
 UUID_ENV = "PEARSS_COOKIECLOUD_UUID"
 TOKEN_ENV = "PEARSS_COOKIECLOUD_TOKEN"  # noqa: S105
-DOMAIN_ENV = "PEARSS_COOKIECLOUD_DOMAIN"
 CACHE_TTL_ENV = "PEARSS_COOKIECLOUD_CACHE_SECONDS"
 
-DEFAULT_DOMAIN: Final = "x.com"
 # Short enough that a re-login on the desktop reaches the collector without a
 # restart, long enough that a burst of paging does not hammer the server.
 DEFAULT_CACHE_SECONDS: Final = 300.0
@@ -78,7 +76,10 @@ class Config:
     base_url: str
     uuid: str
     token: str
-    domain: str = DEFAULT_DOMAIN
+    # No default. Which domain to export belongs to the site being collected,
+    # so every caller states it; a shared default would hand one collector
+    # another's cookies without saying so.
+    domain: str
     cache_seconds: float = DEFAULT_CACHE_SECONDS
 
     @property
@@ -86,21 +87,42 @@ class Config:
         return (self.base_url, self.uuid, self.domain)
 
 
-def config_from_env() -> Config | None:
-    """The configured provider, or None when CookieCloud is not set up.
+def _deployment() -> tuple[str, str, str] | None:
+    """`(base, uuid, token)` when a server is configured, else None.
 
-    Returns None rather than raising on a partial configuration: an operator
-    who set only a URL has not enabled this path, and failing loudly would
-    break every collection for a feature that is not in use. The caller
-    reports what is missing when it actually needs a credential.
+    Split out so `enabled()` can ask "is there a server" without naming a
+    domain -- that question is asked before any particular collector is chosen.
     """
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     uuid = os.environ.get(UUID_ENV, "").strip()
     token = os.environ.get(TOKEN_ENV, "").strip()
     if not (base and uuid and token):
         return None
+    return base, uuid, token
 
-    domain = os.environ.get(DOMAIN_ENV, "").strip() or DEFAULT_DOMAIN
+
+def config_from_env(*, domain: str) -> Config | None:
+    """The provider for `domain`, or None when no server is configured.
+
+    `domain` is a required keyword with no default, because which site to export
+    is a property of the collector, not of the deployment: `x.com` for X,
+    `zhihu.com` for Zhihu. A single global value -- or a shared default -- makes
+    the second login-type collector silently receive the first one's cookies and
+    then fail looking for cookie names that are not there.
+
+    Returns None rather than raising when the server is only partly configured:
+    an operator who set a URL and nothing else has not enabled this path, and
+    failing loudly would break every collection for a feature nobody turned on.
+    """
+    deployment = _deployment()
+    if deployment is None:
+        return None
+    base, uuid, token = deployment
+
+    wanted = domain.strip()
+    if not wanted:
+        raise ValueError("a CookieCloud lookup needs the domain it is asking for")
+
     raw_ttl = os.environ.get(CACHE_TTL_ENV, "").strip()
     try:
         ttl = float(raw_ttl) if raw_ttl else DEFAULT_CACHE_SECONDS
@@ -111,7 +133,7 @@ def config_from_env() -> Config | None:
         base_url=base,
         uuid=uuid,
         token=token,
-        domain=domain,
+        domain=wanted,
         cache_seconds=max(0.0, ttl),
     )
 
@@ -123,11 +145,6 @@ def missing_config_keys() -> list[str]:
         for key in (BASE_URL_ENV, UUID_ENV, TOKEN_ENV)
         if not os.environ.get(key, "").strip()
     ]
-
-
-def configured_domains() -> str:
-    """The domain this deployment exports, for diagnostics."""
-    return os.environ.get(DOMAIN_ENV, "").strip() or DEFAULT_DOMAIN
 
 
 def _warn_if_plaintext(config: Config) -> None:
@@ -270,13 +287,16 @@ def _cache_put(key: tuple[str, str, str], value: str, ttl_seconds: float) -> Non
 
 
 def enabled() -> bool:
-    """Whether a CookieCloud-backed source could run at all."""
-    return config_from_env() is not None
+    """Whether a CookieCloud-backed source could run at all.
+
+    Takes no domain on purpose: this is a "is a server configured" probe that
+    runs before any particular collector has been chosen.
+    """
+    return _deployment() is not None
 
 
 __all__ = [
     "BASE_URL_ENV",
-    "DOMAIN_ENV",
     "TOKEN_ENV",
     "UUID_ENV",
     "Config",
