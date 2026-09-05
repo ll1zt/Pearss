@@ -29,11 +29,16 @@ from sqlalchemy import text
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
+from adapters.filestore import store_body
 from app.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "synthetic-mcp-edge-token"
 API_TOKEN = "mcp-test-token"
+# Long enough that the default cap truncates it, so `truncated` is
+# exercised rather than merely implemented.
+LONG_BODY = "<p>" + ("body text. " * 900) + "</p>"
+
 FEED_URL = "https://planetpython.org/rss20.xml"
 
 pytestmark = pytest.mark.integration
@@ -72,6 +77,18 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
                 " '2026-06-01T10:00:00.000000Z',"
                 " '2026-06-01T10:00:00.000000Z', 'cas://missing')"
             )
+        )
+        conn.execute(
+            text(
+                "insert into item (id, source_id, guid, content_hash, title, url,"
+                " published_at, publish_status, tenant_id, created_at, updated_at,"
+                " content_ref)"
+                " values ('i-long', 'src-1', 'g-long', 'h-long', 'Item with a body',"
+                " 'https://blog.example.com/long',"
+                " '2026-06-01T12:00:00.000000Z', 'ready', 'default',"
+                " '2026-06-01T12:00:00.000000Z', '2026-06-01T12:00:00.000000Z', :ref)"
+            ),
+            {"ref": store_body(LONG_BODY, root=root / "storage")},
         )
         conn.execute(
             text(
@@ -244,6 +261,9 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
     assert names == {
         "list_sources",
         "search_items",
+        # A read added under ADR 0013: bounded, self-describing, and the
+        # fallback for clients that cannot read the item:// Resource.
+        "get_item_body",
         "get_system_snapshot",
         "list_jobs",
         "list_runs",
@@ -308,7 +328,8 @@ async def test_pending_items_are_invisible_to_the_tools(mcp_url: str) -> None:
 async def test_snapshot_reports_counts(mcp_url: str) -> None:
     payload = await _call(mcp_url, "get_system_snapshot", {})
     assert payload["sources_by_status"]["active"] == 1
-    assert payload["items_by_publish_status"]["ready"] == 1
+    # Two ready items: `i-1` (body reference points nowhere) and `i-long`.
+    assert payload["items_by_publish_status"]["ready"] == 2
     assert payload["items_by_publish_status"]["pending"] == 1
 
 
@@ -328,6 +349,103 @@ async def test_error_codes_match_the_core_api(mcp_url: str) -> None:
     payload = await _call(mcp_url, "list_runs", {"job_id": "nope"})
     assert payload["error"] == "job_not_found"
     assert payload["next_actions"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_returns_the_stored_html(mcp_url: str) -> None:
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "i-long"})
+    assert payload["body"].startswith("<p>")
+    assert payload["item_id"] == "i-long"
+    assert payload["untrusted"] is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_truncates_and_says_so(mcp_url: str) -> None:
+    """A silently shortened body reads as the whole thing.
+
+    An agent that cannot tell would summarise content it never received, so
+    `truncated` and `total_chars` are the load-bearing fields here, not the
+    clipping itself.
+    """
+    payload = await _call(
+        mcp_url, "get_item_body", {"item_id": "i-long", "max_chars": 100}
+    )
+    assert len(payload["body"]) == 100
+    assert payload["truncated"] is True
+    assert payload["total_chars"] == len(LONG_BODY)
+    assert payload["max_chars"] == 100
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_default_cap_actually_bites(mcp_url: str) -> None:
+    """The default must be a real bound, not a number that never applies."""
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "i-long"})
+    assert payload["truncated"] is True
+    assert len(payload["body"]) == 4000
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_refuses_an_over_cap_request(mcp_url: str) -> None:
+    """Otherwise the tool is the easy way around the granularity rule."""
+    payload = await _call(
+        mcp_url, "get_item_body", {"item_id": "i-long", "max_chars": 999_999}
+    )
+    assert payload["error"] == "max_chars_too_large"
+    assert payload["max_chars_allowed"] == 20000
+    assert "body" not in payload
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_rejects_a_non_positive_cap(mcp_url: str) -> None:
+    payload = await _call(
+        mcp_url, "get_item_body", {"item_id": "i-long", "max_chars": 0}
+    )
+    assert payload["error"] == "invalid_max_chars"
+    assert "body" not in payload
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_honours_the_publish_gate(mcp_url: str) -> None:
+    """A pending item is invisible on every path, this one included."""
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "i-pending"})
+    assert payload.get("error"), payload
+    assert "body" not in payload
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_reports_a_missing_item(mcp_url: str) -> None:
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "does-not-exist"})
+    assert payload.get("error")
+    assert "body" not in payload
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_on_an_item_without_a_stored_body(mcp_url: str) -> None:
+    """`i-1` points at a CAS object that does not exist.
+
+    The honest answer is an explicit error, not a silent "" an agent could read
+    as "this post has no content".
+    """
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "i-1"})
+    assert payload.get("error"), payload
+    assert payload.get("body") is None
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_get_item_body_is_read_only(mcp_url: str) -> None:
+    """A read must not require elicitation."""
+    payload = await _call(mcp_url, "get_item_body", {"item_id": "i-long"})
+    assert "declined" not in payload and "aborted" not in payload
+    assert payload["body"].startswith("<p>")
 
 
 # --------------------------------------------------------------------------
