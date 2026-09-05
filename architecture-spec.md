@@ -305,7 +305,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 
 | 决策点 | 选择 | 可逆性 | 理由 |
 |---|---|---|---|
-| API 与 MCP | API-first，FastMCP 从 OpenAPI 生成 | 难逆 | 单一事实来源 |
+| API 与 MCP | API-first，MCP 工具经 `/v1` 调用（薄封装而非代码生成） | 难逆 | 单一事实来源；直调仓储会绕过审计中间件（ADR 0010） |
 | 暴露方式 | 分类挂载 + 按需过滤，拒绝动态转发入口 | 可逆 | 保留 schema 校验 |
 | 大内容传输 | Resource / ID 引用 | 难逆 | 上下文预算 |
 | 调度模型 | 声明式 Job + schedule_policy 单策略 | 难逆 | 消除伪三模式；adaptive 数据自给 |
@@ -346,7 +346,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 系统开发环境 | Nix Flake + direnv | named shells / profiles | flake.lock 锁定解释器、CLI、OS 动态库及工具链 |
 | Python 包管理 | uv + pyproject.toml + uv.lock | — | uv 锁定 PyPI 依赖；不在 P1 全量 Nix 化 Python 包 |
 | 语言/框架 | Python 3.12+ / FastAPI | — | OpenAPI 自动生成是地基 |
-| MCP | FastMCP 3.x，Streamable HTTP | P3 拆子模块 + Gateway | 官方 SDK 上层封装 |
+| MCP | **官方 `mcp` SDK 的 `mcp.server.fastmcp`**（原写 3.x，已过时），Streamable HTTP | P3 拆子模块 + Gateway | 官方 SDK 上层封装；版本与调用方式见 ADR 0010 |
 | 进程内插件 | pluggy | P2 引入注册表 | hookspec 模式经 pytest 验证 |
 | 元数据库 | SQLite + SQLAlchemy + Alembic | P3 按需 PostgreSQL | 单写者 1k–5k wps 封顶 |
 | 大产物 | 本地文件系统 | P3 MinIO | 永不入 DB |
