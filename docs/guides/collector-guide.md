@@ -17,12 +17,13 @@
 
 ## P1 准插件结构
 
-> **实现现状**：已交付 2 个准插件，均为 `collectors/<name>/collector.py` 包形态：
-> - `rss`（RSS 2.0 + Atom）：valid / valid_atom / empty / changed / malformed 五套 fixture
-> - `telegram`（公开频道预览页）：valid / empty / changed / media_only / legacy_ids 五套 fixture
+> **实现现状**：已交付 3 个准插件，均为 `collectors/<name>/collector.py` 包形态：
+> - `rss`（RSS 2.0 + Atom）：5 套 fixture
+> - `telegram`（公开频道预览页）：5 套 fixture
+> - `twitter`（X 时间线，**登录型**，见 ADR 0012）：9 套 fixture
 >
-> 第三个（`twitter`，登录型）进行中。凑齐三个后，§3「第三个爬虫接入且未改动前两个」
-> 这一 P2 hookspec 冻结前提（Rule of Three）才满足。
+> 三个齐了，§3「第三个爬虫接入且未改动前两个」这一 P2 hookspec 冻结前提
+> （Rule of Three）**已满足**——但需实际核对第三个是否迫使前两个改过代码。
 >
 > 选择在 `src/app/collector_registry.py`：按 URL 选采集器（`match_url`），而非 pipeline
 > 硬编码调某一个。`fetch` 不在采集器内，由 `adapters/http.py` 统一负责。
@@ -41,7 +42,10 @@ plugins/collectors/<pattern_name>/
   test_collector.py
 ```
 
-在 `app/` 的显式注册表硬编码注册，不使用动态 import。P2 依据多个真实采集器的共同模式冻结 hookspec，再引入 pluggy、manifest 与插件生命周期。
+在 `app/collector_registry.py` 的显式注册表硬编码注册，不使用动态 import。P2 依据多个真实采集器的共同模式冻结 hookspec，再引入 pluggy、manifest 与插件生命周期。
+
+注册表按 URL 选采集器，但**声明类型优先于 URL 猜测**（`select_for`）：`hnrss.org/frontpage`
+是真 RSS feed 却不含任何 feed 形状的路径，纯 URL 路由会拒绝采集一个运维明确建成 `rss` 的源。
 
 ## Collector 职责
 

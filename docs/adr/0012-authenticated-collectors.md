@@ -51,8 +51,11 @@ collector-guide 第 14 行原本无条件禁止绕过登录限制与反自动化
   **不存进数据库**，不作为 `source` 的字段，不进 `adapter_config` 之类的通用配置列
 - HTTP 层必须把 `auth_token`/`ct0` 当作与 API key 同级的秘密：脱敏列表包含
   `cookie`、`authorization`、`x-csrf-token`
-- 401/403 → `auth`；429 → `blocked`；风控空响应（`data: null`）不得当成"没有新内容"
-  静默成功，必须显式报错
+- 状态码沿用 `docs/domain/error-taxonomy.md` 的单一来源分类，**不为本源另立规则**：
+  401（token 失效）→ `auth`；403（对方拒绝）与 429（限流）→ `blocked`。
+  两者的处置不同且都不可绕过：`auth` 等用户更新凭据，`blocked` 退避。
+- 风控空响应（`data: null`）在 HTTP 层是 200，必须由解析层识别为 `blocked`，
+  不得当成"没有新内容"静默成功
 - 限流与重试**不在采集器内**：页间间隔、退避、预算属 `adapters/http.py` 与调度器
   （见 collector-guide 的职责边界表）
 
