@@ -9,7 +9,9 @@ collector decide what it means.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Final
 
 import httpx
 
@@ -17,7 +19,13 @@ from adapters.raw_payload import ConditionalState, RawPayload
 
 # Re-exported: fetch() takes one, so it is part of this module's public surface
 # even though the type lives in raw_payload to keep the repository off httpx.
-__all__ = ["ConditionalState", "FetchError", "FetchPolicy", "fetch"]
+__all__ = [
+    "ConditionalState",
+    "FetchError",
+    "FetchPolicy",
+    "fetch",
+    "post_json",
+]
 from core.enums import ErrorClass
 from core.errors import classify
 
@@ -60,6 +68,13 @@ class FetchError(Exception):
         self.detail = detail
 
 
+# Headers httpx owns. A policy may add browser-shaped headers, but overriding
+# these would leave the headers contradicting the request actually sent.
+_TRANSPORT_HEADERS: Final[frozenset[str]] = frozenset(
+    {"content-length", "host", "transfer-encoding", "connection"}
+)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchPolicy:
     """Bounds applied to a fetch."""
@@ -70,6 +85,13 @@ class FetchPolicy:
     total_timeout: float = DEFAULT_TOTAL_TIMEOUT
     max_bytes: int = DEFAULT_MAX_BYTES
     user_agent: str = DEFAULT_USER_AGENT
+    # Sent after the defaults, verbatim. Some origins only answer a request
+    # shaped like a browser's. These are treated as potentially secret: they
+    # are never logged, and the names that carry credentials are on the audit
+    # redaction list.
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
+    # Overrides the feed-oriented accept header, for JSON endpoints.
+    accept: str | None = None
 
 
 def fetch(
@@ -81,6 +103,63 @@ def fetch(
     policy: FetchPolicy | None = None,
     conditional: ConditionalState | None = None,
     correlation_id: str = "",
+) -> RawPayload:
+    """GET `url`, returning a RawPayload or raising FetchError."""
+    return _request(
+        "GET",
+        url,
+        client=client,
+        source_id=source_id,
+        raw_fetch_id=raw_fetch_id,
+        policy=policy,
+        conditional=conditional,
+        correlation_id=correlation_id,
+    )
+
+
+def post_json(
+    url: str,
+    *,
+    body: Mapping[str, object],
+    client: httpx.Client,
+    source_id: str = "",
+    raw_fetch_id: str | None = None,
+    policy: FetchPolicy | None = None,
+    correlation_id: str = "",
+) -> RawPayload:
+    """POST `body` as JSON, under the same bounds as a GET.
+
+    Shares `_request` with `fetch` rather than reimplementing it, so a caller
+    that needs a POST cannot accidentally opt out of the timeout and size cap.
+    Conditional state is not offered: an origin does not hand out an ETag for a
+    request with a body, and pretending otherwise would imply a cache that does
+    not exist.
+    """
+    return _request(
+        "POST",
+        url,
+        client=client,
+        source_id=source_id,
+        raw_fetch_id=raw_fetch_id,
+        policy=policy,
+        correlation_id=correlation_id,
+        json_body=dict(body),
+        follow_redirects=False,
+    )
+
+
+def _request(
+    method: str,
+    url: str,
+    *,
+    client: httpx.Client,
+    source_id: str,
+    raw_fetch_id: str | None,
+    policy: FetchPolicy | None,
+    correlation_id: str,
+    conditional: ConditionalState | None = None,
+    json_body: dict[str, object] | None = None,
+    follow_redirects: bool = True,
 ) -> RawPayload:
     """Fetch `url`, returning a RawPayload or raising FetchError.
 
@@ -102,18 +181,18 @@ def fetch(
         pool=limits.total_timeout,
     )
 
-    headers = {"user-agent": limits.user_agent, "accept": _accept_header()}
-    prior = conditional or ConditionalState()
-    if prior.etag:
-        headers["if-none-match"] = prior.etag
-    if prior.last_modified:
-        headers["if-modified-since"] = prior.last_modified
+    headers = _request_headers(limits, conditional, json_body=json_body is not None)
 
     try:
         # Streaming so an oversized response is abandoned mid-body instead of
         # being buffered in full before the cap can be applied.
         with client.stream(
-            "GET", url, timeout=timeout, headers=headers, follow_redirects=True
+            method,
+            url,
+            timeout=timeout,
+            headers=headers,
+            follow_redirects=follow_redirects,
+            json=json_body,
         ) as response:
             status = response.status_code
 
@@ -163,6 +242,39 @@ def fetch(
         last_modified=last_modified,
         correlation_id=correlation_id,
     )
+
+
+def _request_headers(
+    limits: FetchPolicy,
+    conditional: ConditionalState | None,
+    *,
+    json_body: bool = False,
+) -> dict[str, str]:
+    """Headers for a request: defaults, then conditional state, then policy.
+
+    The policy's extras go last so a source that must look like a browser can
+    set its own `accept` or `referer`, but never its `content-length` or host:
+    those belong to the transport and httpx sets them.
+    """
+    headers = {
+        "user-agent": limits.user_agent,
+        "accept": limits.accept or _accept_header(),
+    }
+    if json_body:
+        headers["content-type"] = "application/json"
+    prior = conditional or ConditionalState()
+    if prior.etag:
+        headers["if-none-match"] = prior.etag
+    if prior.last_modified:
+        headers["if-modified-since"] = prior.last_modified
+    for name, value in limits.extra_headers.items():
+        lowered = name.lower()
+        if lowered in _TRANSPORT_HEADERS:
+            # Left to httpx: a hand-set value here would contradict the request
+            # the transport is actually about to send.
+            continue
+        headers[lowered] = value
+    return headers
 
 
 def _accept_header() -> str:
