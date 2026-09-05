@@ -28,7 +28,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - P1 数据库 schema 与 Alembic migration（0001 七张表，含 enum CHECK 约束）
 - RSS/Atom 采集：HTTP 抓取（超时/大小上限/ETag 条件请求）+ 五套 fixture 回归
 - RSS 2.0 输出与发布闸门（`pending` 不可见）；FastAPI 应用，`just run` 可启动
-- **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 `docs/adr/0004`）
+- **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 ADR 0004）
 - **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集；`/v1/items` 紧凑查询（keyset 分页、字段选择、sort 白名单）+ `/v1/items/{id}/body` 独立取正文；写操作强制 `Idempotency-Key`，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
 - **MCP 控制平面**：10 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数，正文走 `item://{item_id}` Resource；工具面 snapshot 由 `just contract` 校验
@@ -36,15 +36,13 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 ### 尚未接线
 
-### 尚未接线
+部分接线的命令，运行会说明缺了什么而不是假装通过：
 
-以下 `just` 命令是显式占位，运行会说明缺少什么而不是报“无此命令”：
+- `just contract`：MCP 工具面 snapshot 已接；**OpenAPI diff 未接**（nixpkgs 无 `oasdiff`，且尚无破坏式变更基线）
+- `just e2e`：**未接**，需要 `compose.yaml` 与镜像
 
-- `just contract`：跑 MCP 工具面 snapshot；OpenAPI diff 未接线（nixpkgs 无 oasdiff，且尚无破坏式变更基线）
-- `just e2e`：需要 `compose.yaml` 与 P1 服务镜像
-
-MCP 工具面、网页采集器、OPML、`discover_feed` 与调度器接线均待实现，见
-`architecture-spec.md` §5 的 P1 验收标准。
+其余待实现项：网页采集器（A2，仅 1/2–3）、OPML（A6）、`discover_feed`（A5，已暂缓）、
+`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5）。见 `architecture-spec.md` §5/§6。
 
 ## 快速开始
 
@@ -68,15 +66,25 @@ just migrate
 
 开发环境由 Nix Flake 提供（`pkgs.mkShell`，见 ADR 0002）；Python 项目依赖由 uv 安装。不要在项目目录外创建或提交 `.venv`。
 
-> `just run` 尚未接线：FastAPI 应用还没创建。当前可验证的是 `just sync` → `just migrate` → `just ci`。
+启动服务（需先在 `.env` 里配置 `PEARSS_API_TOKEN`，否则 Core API 会 fail-closed 拒绝所有请求）：
+
+```bash
+just run                      # 仅本机 127.0.0.1:8000
+just run 100.64.0.1 8000  # 绑到某个地址，例如 Tailscale
+```
 
 ### 最小验收
 
-1. 用 Swagger UI 或 MCP 调用 `discover_feed(url)`，获取网站的候选 RSS/Atom 地址
-2. 调用 `add_source` 添加一个候选 feed
-3. 调用 `trigger_job` 立即抓取
-4. 打开对应的 RSS 输出地址，在 NetNewsWire 中订阅
-5. 用 `list_jobs`、`search_items` 或 Swagger UI 检查结果
+`architecture-spec.md` §5 的 P1 验收标准是「agent 完成发现→加源→抓取→出 feed」。
+**「发现」环节（A5 `discover_feed`）已决定暂缓**，故当前可走通的是后半段：
+
+1. `POST /v1/sources`（或 MCP `add_source`⚠）添加一个 feed
+2. `POST /v1/sources/{id}:trigger`（或 MCP `trigger_job`⚠）立即抓取；此后由调度器自动续抓
+3. 订阅 `GET /feeds/default.xml`，或用 NNW 的 FreshRSS 账号连 `/api/greader.php`
+4. `GET /v1/items` / MCP `search_items` 查条目；正文走 `item://{id}` Resource
+5. `GET /v1/jobs/{id}/runs` / `GET /v1/system/snapshot` 检查采集健康
+
+OPML 迁移（A6）与网页采集器（A2）尚未实现。
 
 ## 常用命令
 
@@ -85,18 +93,26 @@ just migrate
 ```text
 just shell            # 打印环境解析到的工具链版本
 just sync             # uv sync
-just run              # 启动 FastAPI + MCP（尚未接线）
+just run [host port]  # 启动 API + Reader + MCP + 调度器（默认 127.0.0.1:8000）
+just serve            # 同上，但地址与端口取自 .env（systemd 单元用的就是它）
 just test             # 单元测试与 fixture 回归测试
 just test-integration # SQLite / 临时服务集成测试
 just lint             # ruff、mypy、import-linter
 just fix              # 自动修复可修复的 lint 与格式问题
-just contract         # OpenAPI diff 与 MCP 工具 snapshot（尚未接线）
+just contract         # MCP 工具面 snapshot；OpenAPI diff 未接线
 just migrate          # alembic upgrade head
 just migrate-check    # 验证 upgrade / downgrade / upgrade 往返
 just revision "msg"   # 生成新 migration
-just e2e              # Docker Compose 全链路测试（尚未接线）
+just e2e              # Compose 全链路（尚未接线：无 compose.yaml）
 just ci               # 本地完整质量门禁
 just ci-nix           # CI 实际执行的命令，含 Nix 环境入口
+
+# 长期运行（systemd 用户服务，无需 root）
+just linger           # 开机自启 + 存活于登出
+just install-unit     # 安装并启用 deploy/pearss.service
+just service-status   # 状态 + 最近日志
+just service-restart  # 改完 .env 或代码后
+just uninstall-unit   # 停用并移除
 ```
 
 提交前必须运行：
@@ -146,7 +162,7 @@ curl -H "Authorization: Bearer $PEARSS_API_TOKEN" http://127.0.0.1:8000/v1/items
 
 - **fail-closed**：未配置 `PEARSS_API_TOKEN` 时所有 Core API 请求被拒，启动日志会提示
 - **scope 分离**（AGENTS.md）：read-only token 写操作返回 403
-- **审计**：写操作与 401/403 拒绍记入 `audit_log`（含 actor 与 correlation id）；
+- **审计**：写操作与 401/403 拒绝记入 `audit_log`（含 actor 与 correlation id）；
   普通读不记录，因为 AuditLog 是永久保留的事实源
 - **关联**：响应回显 `X-Request-ID`；入站值不安全（含 CRLF 等）时换用生成的值
 
@@ -243,7 +259,8 @@ PEARSS_READER_PASSWORD=<your-password>
 | `docs/guides/testing.md` | 测试层次、fixture、契约与 e2e 规则 |
 | `docs/operations/runbook.md` | 故障处理与恢复操作手册 |
 | `docs/integrations/netnewswire.md` | NetNewsWire 集成与缓存约束 |
-| `docs/adr/` | 架构决策记录 |
+| `docs/adr/` | 架构决策记录（0000 为索引） |
+| `deploy/pearss.service` | systemd 用户服务单元 |
 
 ## 贡献原则
 

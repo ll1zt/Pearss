@@ -24,8 +24,8 @@ core -> adapters -> plugins -> app
 
 - `src/core/`：纯领域模型、状态机、normalize、去重、调度统计。不得导入 FastAPI、SQLAlchemy、feedparser、httpx、FastMCP、Pydantic settings 或任何 I/O/框架依赖
 - `src/adapters/`：数据库、HTTP、RSS、MCP、文件存储等外部适配器；实现 core 定义的 ports/protocols
-- `plugins/`：采集器和处理器。P1 的准插件也在这里；不得绕过 core 状态机直接写数据库
-- `app/`：依赖注入、FastAPI 路由注册、启动配置、任务组装。不得承载领域规则
+- `src/plugins/`：采集器和处理器。P1 的准插件也在这里；不得绕过 core 状态机直接写数据库
+- `src/app/`：依赖注入、路由注册、启动配置、任务组装。不得承载领域规则
 
 禁止反向 import。运行 `just lint` 以执行 import-linter。
 
@@ -33,8 +33,12 @@ core -> adapters -> plugins -> app
 
 - 所有数据入口（RSS、网页、未来 ingest）必须先产生 `ItemDraft`，再由 core normalize 为 `Item`
 - `Item` 去重使用稳定的 `content_hash`；不得把 URL 当作唯一去重依据
+- **去重匹配次序：身份（id/guid）优先于内容**。id/guid 派生自 `(tenant, source, external_id)`，content_hash 派生自正文；源改写正文时两者会分叉，只按内容匹配会漏掉已有行并插入撞车 GUID 的新行
+- **`source.canonical_url` 是去重键，必须 NOT NULL**：可空列上的 UNIQUE 约束对 NULL 行完全不生效（SQL 中 NULL 彼此不等），等于没有约束
+- **时间戳必须定宽**（`%Y-%m-%dT%H:%M:%S.%f` + `Z`）。`isoformat()` 在微秒为 0 时省略小数部分，同一列混两种宽度会让字典序与时间序不一致（`.` 0x2E < `Z` 0x5A）
 - 已发布条目不可修改内容：NNW 等客户端会缓存。处理链完成前保持 `publish_status=pending`；仅成功后转 `ready`，首次输出后转 `published`
-- 失败必须使用唯一的 `ErrorClass` enum：`network`、`parse`、`structure_changed`、`blocked`、`auth`。不得新增字符串常量绕过 enum
+- 失败必须使用唯一的 `ErrorClass` enum：`network`、`parse`、`structure_changed`、`blocked`、`auth`。不得新增字符串常量绕过 enum；DB 层用 CHECK 约束强制（SQLite 不自发强制 VARCHAR 枚举）
+- **下次抓取时间从 policy + 历史推导，不落库**。存 `next_run_time` 会与推导结果成为两个事实源，改 policy、失败退避、恢复备份三处都会分叉（ADR 0009）
 - 所有写操作必须幂等，API 写请求需要 `Idempotency-Key`
 - 所有 API 调用方均需经过 Core API 审计中间件；不得只在 MCP 层做审计
 - 任何 API/MCP 写操作都必须有清晰的 actor、session/correlation ID；需要用户确认的 MCP 动作必须走 elicitation
