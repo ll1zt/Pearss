@@ -364,10 +364,17 @@ def _offset(cursor: str | None) -> int:
 @router.post("/reader/api/0/stream/items/contents")
 def stream_items_contents(
     request: Request,
-    _: str = Depends(_auth_from_form),
+    _: str = Depends(authenticate_any),
     i: list[str] = Form(default=[]),
 ) -> dict[str, object]:
-    """Content for specific items."""
+    """Content for specific items.
+
+    Authenticated like a read, not like a write. This endpoint changes nothing
+    -- it is POST only because the item ids are too numerous for a query
+    string -- and NetNewsWire sends it with the Authorization header and no
+    form `T`. Requiring `T` here returned 401 to every real client request,
+    which surfaced as a populated article list whose bodies were all blank.
+    """
     from adapters.db_models import Item as ItemRow
     from adapters.repository import read_states_for, resolve_reader_ids, row_to_item
     from app.pipeline import bodies_for

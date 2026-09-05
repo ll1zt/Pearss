@@ -20,9 +20,8 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.raw_payload import RawPayload
-from adapters.repository import store_item
 from app.main import create_app
-from core.normalize import normalize
+from app.pipeline import normalise_and_store
 from plugins.collectors.rss import collector as rss
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -46,6 +45,9 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     monkeypatch.setenv("PEARSS_DATABASE_URL", url)
     monkeypatch.setenv("PEARSS_READER_USERNAME", USERNAME)
     monkeypatch.setenv("PEARSS_READER_PASSWORD", TEST_PASSWORD)
+    # Without this the file store falls back to ./data/storage, which is where
+    # a developer's real collected bodies live.
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
 
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
@@ -74,10 +76,12 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
         )
     )
     with Session(engine) as session:
-        for draft in drafts:
-            store_item(session, normalize(draft, tenant_id=TENANT).item)
-        session.commit()
-        session.execute(sa.text("update item set publish_status = 'ready'"))
+        # normalise_and_store rather than store_item: it is the path the
+        # pipeline actually uses, and the only one that writes the body to the
+        # file store and attaches content_ref. Seeding with store_item left
+        # every item body-less, so the Reader API could never serve one and no
+        # test noticed.
+        normalise_and_store(session, drafts, tenant_id=TENANT)
         session.commit()
 
     application = create_app(factory)
@@ -337,6 +341,51 @@ async def test_stream_contents_returns_long_form_ids(
     assert all(
         item["id"].startswith("tag:google.com,2005:reader/item/") for item in items
     )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stream_contents_accepts_header_auth_without_form_token(
+    client: httpx.AsyncClient,
+) -> None:
+    """NetNewsWire authenticates this POST with the Authorization header.
+
+    Contents is a read that happens to use POST because the item ids go in the
+    body. Requiring the form field `T` -- the convention for *writes* -- made
+    every real client request come back 401, so the article list filled in but
+    every body was blank. The existing tests all sent `T`, which is why the
+    suite stayed green while the client saw nothing.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["items"]) == 3
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_stream_contents_carries_the_article_body(
+    client: httpx.AsyncClient,
+) -> None:
+    """A contents response with empty bodies is indistinguishable from a
+    missing body, so assert the text actually arrives."""
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+    items = response.json()["items"]
+    assert items
+    for item in items:
+        body = (item.get("summary") or {}).get("content") or ""
+        assert body.strip(), f"item {item.get('id')} has no body"
 
 
 # --------------------------------------------------------------------------
