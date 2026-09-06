@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as SourceRow
@@ -101,9 +102,12 @@ def collect_now(
 ) -> tuple[JobRunStatus, CollectionResult | None]:
     """Run one source's collection, recording the job run around it.
 
-    The run is claimed with a conditional update before any work starts, so
-    two schedulers ticking together cannot both collect the same source: one
-    claim wins and the other sees rowcount 0 and stands down.
+    Mutual exclusion is enforced by the schema: a unique partial index on
+    `job_run(job_id)` over the active statuses makes a second concurrent run
+    for the same job impossible, so a manual trigger and a scheduler tick (or
+    two processes against one database) cannot both collect the same source.
+    The loser's insert raises IntegrityError and it stands down with 409
+    semantics already in place at the call sites.
     """
     moment = now or datetime.now(UTC)
     job_id = ensure_collect_job(
@@ -111,21 +115,30 @@ def collect_now(
     )
     run_id = f"run-{secrets.token_hex(8)}"
     correlation_id = secrets.token_hex(8)
-    create_job_run(
-        session,
-        run_id=run_id,
-        job_id=job_id,
-        correlation_id=correlation_id,
-        at=_iso(moment),
-    )
-    session.commit()
-
-    if not claim_job_run(session, run_id=run_id, at=_iso(moment)):
+    try:
+        # Insert and claim share one transaction. Claiming inside it means a
+        # crash can leave neither a queued row (which would hold the job's
+        # only active-run slot forever) nor an unclaimed one to reap.
+        create_job_run(
+            session,
+            run_id=run_id,
+            job_id=job_id,
+            correlation_id=correlation_id,
+            at=_iso(moment),
+        )
+        claimed = claim_job_run(session, run_id=run_id, at=_iso(moment))
         session.commit()
-        LOGGER.info("run %s was claimed elsewhere; standing down", run_id)
+    except IntegrityError:
+        session.rollback()
+        LOGGER.info("job %s already has an active run; standing down", job_id)
         return JobRunStatus.CANCELLED, None
 
-    session.commit()
+    if not claimed:
+        # Unreachable while the partial index exists: the row was created and
+        # claimed inside one transaction. Kept so a schema without the index
+        # degrades to standing down rather than double-collecting.
+        LOGGER.info("run %s was claimed elsewhere; standing down", run_id)
+        return JobRunStatus.CANCELLED, None
 
     source = session.get(SourceRow, source_id)
     if source is None:

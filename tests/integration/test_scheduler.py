@@ -217,11 +217,11 @@ def test_reopening_a_terminal_run_is_refused(
 def test_claim_is_exclusive_under_concurrency(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The conditional update is what stops a source being fetched twice.
+    """The conditional update stops one run row being claimed twice.
 
-    Two schedulers ticking at the same instant both try to claim; exactly one
-    must win, or the same feed is collected concurrently and the second run
-    duplicates work while both write job_run rows.
+    Job-level exclusion between two *different* runs is the unique partial
+    index's job (see test_second_collection_while_a_run_is_active_stands_down);
+    this pins the row lifecycle guard underneath it.
     """
     with session_factory() as session:
         add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
@@ -534,6 +534,44 @@ def test_collect_now_returns_a_cancelled_run_when_claim_loses(
         session.commit()
     assert status is JobRunStatus.SUCCEEDED
     assert result is not None and result.inserted == 1
+
+
+@pytest.mark.integration
+def test_second_collection_while_a_run_is_active_stands_down(
+    session_factory: sessionmaker[Session], fake_feed: httpx.Client
+) -> None:
+    """A job with an active run refuses a second collection.
+
+    Regression: each caller creates its own run id, so a conditional update on
+    that row can never arbitrate between them. The unique partial index over
+    active runs per job is what stops a manual trigger and a scheduler tick
+    from both fetching the same source.
+    """
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+        job_id = ensure_collect_job(
+            session,
+            source_id="s1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        create_job_run(
+            session, run_id="r-live", job_id=job_id, correlation_id="c1", at="x"
+        )
+        claim_job_run(session, run_id="r-live", at="2026-01-01T00:00:01.000000Z")
+        session.commit()
+
+    with session_factory() as session:
+        status, result = collect_now(
+            session,
+            source_id="s1",
+            policy_json='{"type": "fixed", "interval": "30m"}',
+            client=fake_feed,
+            now=NOW,
+        )
+        session.commit()
+    assert status is JobRunStatus.CANCELLED
+    assert result is None
 
 
 @pytest.mark.integration

@@ -938,7 +938,13 @@ def create_job_run(
     retry_of: str | None = None,
     at: str,
 ) -> str:
-    """Open a queued run. A retry creates a new row rather than reopening one."""
+    """Open a queued run. A retry creates a new row rather than reopening one.
+
+    Raises IntegrityError when the job already has a queued or running run:
+    the unique partial index over active runs is what enforces one collection
+    per job, since every caller creates its own run id and cannot be told
+    apart by a conditional update on its own row.
+    """
     session.add(
         JobRunRow(
             id=run_id,
@@ -958,9 +964,10 @@ def create_job_run(
 def claim_job_run(session: Session, *, run_id: str, at: str) -> bool:
     """Move queued -> running with a conditional update.
 
-    The condition is the whole point: two schedulers ticking at the same time
-    both try to claim, and exactly one sees rowcount 1. Without it the same
-    source would be collected twice concurrently.
+    Cross-callers mutual exclusion lives in the schema (the unique partial
+    index over active runs per job), not here: each caller creates its own
+    run id, so this update's condition guards the row's own lifecycle rather
+    than arbitrating between callers.
     """
     result = cast(
         "CursorResult[Any]",

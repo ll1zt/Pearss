@@ -1,16 +1,27 @@
-"""Code review 实证: 并发 claim 是否真只有一个赢家。
+"""并发互斥的实证。
 
-`claim_job_run` 的注释断言「两个调度器同时 tick, 恰好一个看到 rowcount 1」。
-这个断言此前从未被并发实测过 —— 本文件把它变成可执行事实。
+互斥分两层，各自可执行验证：
+
+- **job 级**：同一 job 同时至多一个活跃 run。由 job_run 上的唯一部分索引在
+  schema 层强制 —— 每个 caller 各自创建自己的 run_id，行级条件更新无法在它们
+  之间仲裁（那是本文件此前实证过、随后被修正的错误假设）。
+- **行级**：单个 run 的 queued -> running 只能发生一次。由 claim 的条件更新
+  保证，是 run 生命周期自身的守卫。
 """
 
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source
-from adapters.repository import claim_job_run, create_job_run, ensure_collect_job
+from adapters.repository import (
+    claim_job_run,
+    create_job_run,
+    ensure_collect_job,
+    job_for_source,
+)
 from core.enums import SourceStatus, TrustLevel
 
 pytestmark = pytest.mark.integration
@@ -46,10 +57,49 @@ def run_id(migrated_factory: sessionmaker[Session]) -> str:
         return "run-1"
 
 
+def test_second_active_run_for_a_job_is_refused(
+    migrated_factory: sessionmaker[Session], run_id: str
+) -> None:
+    """job 级互斥: 活跃 run 已存在时, 第二个 run 的 insert 必须失败。"""
+    with migrated_factory() as session:
+        job = job_for_source(session, source_id="src-1")
+        assert job is not None
+        with pytest.raises(IntegrityError):
+            create_job_run(
+                session,
+                run_id="run-2",
+                job_id=job.id,
+                correlation_id="corr-2",
+                at=NOW,
+            )
+            session.commit()
+
+
+def test_run_from_a_finished_job_slot_can_be_created(
+    migrated_factory: sessionmaker[Session], run_id: str
+) -> None:
+    """行级 claim 之后, 唯一索引的槽位被占用; 终结该 run 后槽位释放。"""
+    with migrated_factory() as session:
+        assert claim_job_run(session, run_id=run_id, at=NOW) is True
+        session.commit()
+    with migrated_factory() as session:
+        job = job_for_source(session, source_id="src-1")
+        assert job is not None
+        with pytest.raises(IntegrityError):
+            create_job_run(
+                session,
+                run_id="run-2",
+                job_id=job.id,
+                correlation_id="corr-2",
+                at=NOW,
+            )
+            session.commit()
+
+
 def test_concurrent_claim_has_exactly_one_winner(
     migrated_factory: sessionmaker[Session], run_id: str
 ) -> None:
-    """两个 worker 各自持独立 session 同时 claim: 恰好一个赢。"""
+    """两个 worker 各自持独立 session 同时 claim 同一行: 恰好一个赢。"""
     wins = 0
     for _ in range(2):
         with migrated_factory() as session:

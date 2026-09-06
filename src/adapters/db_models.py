@@ -288,6 +288,18 @@ class JobRun(Base):
             "error_class",
             ("network", "parse", "structure_changed", "blocked", "auth"),
         ),
+        # One active run per job, enforced by the schema so two processes
+        # cannot both collect the same source. The application-level claim
+        # (the queued -> running conditional update) sits on top of this, not
+        # instead of it: each caller creates its own run id, so only the
+        # unique index can arbitrate between them.
+        sa.Index(
+            "uq_job_run_active_per_job",
+            "job_id",
+            unique=True,
+            sqlite_where=sa.text("status IN ('queued', 'running')"),
+            postgresql_where=sa.text("status IN ('queued', 'running')"),
+        ),
     )
 
 
