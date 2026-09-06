@@ -458,3 +458,108 @@ async def test_reads_are_not_audited_but_refusals_are(
 
     assert after_read == 0
     assert after_refusal == 1
+
+
+# --------------------------------------------------------------------------
+# Public-exposure hardening (ADR 0016)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_oversized_bodies_are_rejected_before_the_app(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PEARSS_MAX_BODY_BYTES", "64")
+    hardened = create_app(session_factory)
+    transport = httpx.ASGITransport(app=hardened)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as aclient:
+        response = await aclient.post(
+            "/v1/sources",
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+            json={"url": "https://blog.example.com/" + "x" * 200},
+        )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_every_response_carries_nosniff(client: httpx.AsyncClient) -> None:
+    response = await client.get("/healthz")
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_html_bodies_are_served_with_a_sandbox_csp(
+    client: httpx.AsyncClient,
+) -> None:
+    created = await client.post("/internal/items", json=draft_payload())
+    item_id = created.json()["id"]
+    response = await client.get(f"/v1/items/{item_id}/body")
+    assert response.status_code == 200
+    assert response.headers["content-security-policy"] == "sandbox"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_auth_failures_are_rate_limited(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brute force must hit a wall, not an unlimited guessing game.
+
+    The budget is deliberately tiny here (3 failures); the production default
+    is 50 per 5 minutes with a 15 minute block.
+    """
+    monkeypatch.setenv("PEARSS_AUTH_RATELIMIT_MAX", "3")
+    hardened = create_app(session_factory)
+    transport = httpx.ASGITransport(app=hardened)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as aclient:
+        for _ in range(3):
+            wrong = await aclient.get("/v1/sources")
+            assert wrong.status_code == 401
+
+        blocked = await aclient.get("/v1/sources")
+        assert blocked.status_code == 429
+        assert blocked.json()["error"]["code"] == "rate_limited"
+        assert "retry-after" in blocked.headers
+
+        # Even a *valid* token is refused while blocked: the attacker's next
+        # move after a burst is replaying a guessed or phished credential.
+        still = await aclient.get(
+            "/v1/sources", headers={"Authorization": f"Bearer {API_TOKEN}"}
+        )
+        assert still.status_code == 429
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_reader_login_is_rate_limited_too(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PEARSS_AUTH_RATELIMIT_MAX", "2")
+    monkeypatch.setenv("PEARSS_READER_USERNAME", "reader")
+    monkeypatch.setenv("PEARSS_READER_PASSWORD", "probe-reader-pass-0123456789")
+    hardened = create_app(session_factory)
+    transport = httpx.ASGITransport(app=hardened)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as aclient:
+        for _ in range(2):
+            wrong = await aclient.post(
+                "/api/greader.php/accounts/ClientLogin",
+                data={"Email": "reader", "Passwd": "wrong-password"},
+            )
+            assert wrong.status_code == 401
+
+        blocked = await aclient.post(
+            "/api/greader.php/accounts/ClientLogin",
+            data={"Email": "reader", "Passwd": "wrong-password"},
+        )
+        assert blocked.status_code == 429

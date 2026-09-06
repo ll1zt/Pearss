@@ -27,6 +27,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
 from app.auth import Principal, auth_configured, write_required
+from app.hardening import (
+    AuthFailureRateLimitMiddleware,
+    BodySizeLimitMiddleware,
+    SecurityHeadersMiddleware,
+    env_int,
+)
 from app.items_routes import router as items_router
 from app.mcp_guard import MCPAuthMiddleware, warn_if_unconfigured
 from app.mcp_server import build_mcp_app
@@ -259,6 +265,20 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     # endpoint runs, which is why this is middleware and not a dependency.
     app.add_middleware(
         CorrelationAndAuditMiddleware, session_factory=app.state.session_factory
+    )
+    # Public-exposure hardening (ADR 0016). Starlette wraps in reverse
+    # registration order, so the rate limiter ends up outermost: a blocked
+    # address is refused before the body limit, the audit write, or any route
+    # runs, and 413s never reach the application either.
+    app.add_middleware(
+        BodySizeLimitMiddleware, max_bytes=env_int("PEARSS_MAX_BODY_BYTES", 1024 * 1024)
+    )
+    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(
+        AuthFailureRateLimitMiddleware,
+        max_failures=env_int("PEARSS_AUTH_RATELIMIT_MAX", 50),
+        window_seconds=env_int("PEARSS_AUTH_RATELIMIT_WINDOW_SECONDS", 300),
+        block_seconds=env_int("PEARSS_AUTH_RATELIMIT_BLOCK_SECONDS", 900),
     )
 
     if not auth_configured():

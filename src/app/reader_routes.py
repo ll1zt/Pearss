@@ -20,7 +20,7 @@ import logging
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -370,11 +370,16 @@ def stream_items_ids(
     }
 
 
+# A continuation cursor deeper than this many items is a client bug or an
+# attacker; either way the answer is an empty stream, not an unbounded scan.
+_MAX_OFFSET: Final[int] = 100_000
+
+
 def _offset(cursor: str | None) -> int:
     if not cursor:
         return 0
     try:
-        return max(0, int(cursor))
+        return min(max(0, int(cursor)), _MAX_OFFSET)
     except ValueError:
         return 0
 

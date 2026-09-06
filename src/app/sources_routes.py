@@ -120,7 +120,15 @@ def decode_cursor(cursor: str | None) -> int:
             message="The cursor is not valid for this API version.",
             suggestion="Omit the cursor to start from the beginning.",
         )
-    return int(digits)
+    offset = int(digits)
+    if offset > 10_000_000:
+        raise api_error(
+            status_code=400,
+            code="invalid_cursor",
+            message="The cursor is not valid for this API version.",
+            suggestion="Page through the list instead of seeking.",
+        )
+    return offset
 
 
 # --------------------------------------------------------------------------

@@ -147,7 +147,9 @@ def read_items(
     _: Principal = Depends(read_required),
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = Query(
-        default=None, description="Opaque cursor from a previous response."
+        default=None,
+        max_length=256,
+        description="Opaque cursor from a previous response.",
     ),
     sort: ItemSort = Query(
         default=ItemSort.PUBLISHED_DESC,
@@ -341,4 +343,15 @@ def read_item_body(
         mark_published(session, [item], at=datetime.now(UTC))
         session.commit()
 
-    return Response(content=body, media_type="text/html; charset=utf-8")
+    return Response(
+        content=body,
+        media_type="text/html; charset=utf-8",
+        # The body is nh3-sanitised remote HTML served on the API's own
+        # origin; `sandbox` makes even a sanitiser mistake inert (no script,
+        # no forms, no same-origin fetches), and nosniff stops content-type
+        # guessing in browsers that ignore the declared type.
+        headers={
+            "content-security-policy": "sandbox",
+            "x-content-type-options": "nosniff",
+        },
+    )
