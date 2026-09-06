@@ -31,7 +31,8 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 ADR 0004）
 - **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集；`/v1/items` 紧凑查询（keyset 分页、字段选择、sort 白名单）+ `/v1/items/{id}/body` 独立取正文；写操作强制 `Idempotency-Key`，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
-- **MCP 控制平面**：10 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数，正文走 `item://{item_id}` Resource；工具面 snapshot 由 `just contract` 校验
+- **采集器（3 个）**：`rss`（RSS 2.0 + Atom）、`telegram`（公开频道预览页）、`twitter`（X Following 时间线，**登录型**，见 ADR 0012）。按 URL 选，但**声明类型优先**于 URL 猜测
+- **MCP 控制平面**：11 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数；正文优先走 `item://{item_id}` Resource，不支持 Resource 的客户端可用 `get_item_body`（带截断，ADR 0013）；工具面 snapshot 由 `just contract` 校验
 - **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
 ### 尚未接线
@@ -41,8 +42,9 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - `just contract`：MCP 工具面 snapshot 已接；**OpenAPI diff 未接**（nixpkgs 无 `oasdiff`，且尚无破坏式变更基线）
 - `just e2e`：**未接**，需要 `compose.yaml` 与镜像
 
-其余待实现项：网页采集器（A2，仅 1/2–3）、OPML（A6）、`discover_feed`（A5，已暂缓）、
-`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5）。见 `architecture-spec.md` §5/§6。
+其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
+**备份与恢复演练**（§7.5）。采集器 A2 已交付 3 个（RSS / Telegram / X）。
+见 `architecture-spec.md` §5/§6。
 
 ## 快速开始
 
@@ -206,13 +208,42 @@ MCP server 挂在同一应用的 `/mcp/mcp`（Streamable HTTP）。工具：
 | `search_items` | | 搜索条目（**不含正文**） |
 | `get_system_snapshot` | | 状态快照：错误分布、pending 积压、近期成功率 |
 | `list_jobs` / `list_runs` | | 任务与执行历史 |
+| `get_item_body` | | 取单条正文（截断，默认 4000、上限 20000 字符） |
 | `add_source` | ⚠ | 加源 |
 | `update_schedule_policy` | ⚠ | 改调度策略 |
 | `set_source_status` | ⚠ | 暂停 / 恢复 |
 | `remove_source` | ⚠ | 软删除来源 |
 | `trigger_job` | ⚠ | 立即抓取 |
 
-正文通过 Resource `item://{item_id}` 取，不进工具返回值 —— 这是「上下文经济」的硬约束。
+**取正文**：优先用 Resource `item://{item_id}` —— 部分客户端把它当附件，不占模型上下文。
+客户端不支持 Resource 时用 `get_item_body`（ADR 0013），它带截断并自述 `truncated` /
+`total_chars`。
+
+> 「Resource 不进上下文」是常见误解：`resources/read` 的返回同样进上下文，MCP 没有
+> “读取但不物化”的语义。规则的真实依据是**不得批量返回正文** —— 列表工具一次带 N 篇
+> 正文才是必然的上下文爆炸。
+
+**过滤在服务器端做**：`search_items` 的 `fields` 是最省的单一杠杆。实测（真实库 4677 条）：
+
+```text
+search_items(limit=100)                        32,434 字符
+search_items(limit=100, fields=id)              4,323 字符   (-87%)
+search_items(limit=5, fields=id,title,
+             source_id=…, q=…)                      66 字符
+```
+
+### 鉴权
+
+MCP 端点使用**独立的** `PEARSS_MCP_TOKEN`，与 Core API token 分开（撤销客户端不该连带登出 API）：
+
+```bash
+PEARSS_MCP_TOKEN=<随机>
+# 客户端要连非回环地址时，还需显式放行 Host（SDK 的 DNS-rebinding 防护）
+PEARSS_MCP_ALLOWED_HOSTS=127.0.0.1:*,100.64.0.1:*,192.168.1.10:*
+```
+
+- **fail-closed**：未配置 `PEARSS_MCP_TOKEN` 时端点返回 503 并拒绝一切，启动记 warning
+- 不设 `PEARSS_MCP_ALLOWED_HOSTS` 则**只有回环可达**（SDK 默认），远程访问需要两个显式选择
 
 写操作由 **server 侧 elicitation** 确认；客户端不支持 elicitation 时**拒绝执行**而非照做。确认表单预填待执行的值，且执行前校验确认值与实际参数一致。
 
@@ -222,7 +253,7 @@ RSS 输出与 Reader API 都已可用，两条路径用途不同：
 
 | 路径 | 地址 | 用途 |
 |---|---|---|
-| RSS 输出 | `http://<host>:8000/feeds/default.xml` | 内容投递 |
+| RSS 输出 | `http://<host>:8000/feeds/default.xml` | 内容投递（最近 **200** 条窗口） |
 | Reader API | `http://<host>:8000/api/greader.php` | 已读/星标多端同步 |
 
 Reader API 需要设置凭据（写入未提交的 `.env`）：
@@ -236,6 +267,31 @@ PEARSS_READER_PASSWORD=<your-password>
 用户名与密码填上面的值。库内只保存 scrypt 哈希，明文密码只存在于环境变量。
 
 > **改密码会让 token 失效**，所有已登录客户端需要重新登录——token 由哈希派生，见 ADR 0005。
+
+> RSS 是**窗口不是档案库**：只渲染最近 200 条，窗口外的条目仍可通过 `/v1/items` 查询与
+> Reader API 取到。此前无上限时单次渲染达 5.7 MB / 4677 条。
+
+## X（Twitter）源：登录型采集
+
+X 源读取**你自己的** Following 时间线，需要会话 cookie（ADR 0012 的条件与风险）。两种配法：
+
+```bash
+# 1) 静态（简单，但重登后失效，需重启）
+PEARSS_X_AUTH_TOKEN=<你的 auth_token cookie>
+PEARSS_X_CT0=<你的 ct0 cookie>
+
+# 2) CookieCloud 自动续期（推荐）
+PEARSS_COOKIECLOUD_URL=http://127.0.0.1:4000
+PEARSS_COOKIECLOUD_UUID=<你的同步 uuid>
+PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD 的值>
+```
+
+解析顺序：**静态优先**于 CookieCloud（显式钉住值就是明确要求用那个值）。X 返回 401 说明
+会话已轮换，此时绕过缓存重取一次并重试该页（只一次）。
+
+> ⚠️ `COOKIE_CLOUD_SERVER_PASSWORD` 是**服务端主密钥**，能导出任意 uuid、任意域名的
+> cookie —— 持有它等于持有你同步过的全部站点会话（含银行、邮箱）。用**只含阅读器所需
+> 站点的专用 uuid**，别指向整个浏览器档案。详见 ADR 0012。
 
 ## 数据与密钥
 
