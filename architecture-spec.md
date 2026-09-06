@@ -167,12 +167,13 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
 
 ### 2.3 MCP 工具面（控制平面）
 
-- **P1（已实现）**：`list_sources`、`search_items`、`get_system_snapshot`、`list_jobs` / `list_runs`、`add_source`⚠、`update_schedule_policy`⚠、`set_source_status`⚠（暂停/恢复）、`remove_source`⚠、`trigger_job`⚠；正文走 `item://{item_id}` Resource
+- **P1（已实现，11 个）**：`list_sources`、`search_items`、`get_system_snapshot`、`list_jobs` / `list_runs`、`get_item_body`（截断取正文，ADR 0013）、`add_source`⚠、`update_schedule_policy`⚠、`set_source_status`⚠（暂停/恢复）、`remove_source`⚠、`trigger_job`⚠；正文优先走 `item://{item_id}` Resource
 - **P1（暂缓，尚无对应 Core API）**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6）、`create_feed`⚠（FeedOut 尚无 CRUD）
 - ⚠ = 需 elicitation 用户确认。工具经 `/v1` 调用而非直调仓储，理由见 ADR 0010
 - **P2**：`diagnose_source`、`diagnose_plugin`、`get_logs(correlation_id)`、插件管理组（⚠：import/enable/disable）
 - **P3**：`run_processor`、`list_pending_items` / `retry_enrichment` / `force_publish`⚠、ingest token 管理
-- 约定：分页+字段过滤+截断；错误返回 `{"error", "error_class", "suggestion", "next_actions"}`；正文走 `item://{id}` Resource
+- 约定：分页+字段过滤+截断；错误返回 `{"error", "error_class", "suggestion", "next_actions"}`；**不得批量返回正文**（列表只给 id/URI），单条带截断的获取是例外
+- 端点自身需 `PEARSS_MCP_TOKEN`（独立于 Core API token，fail-closed）；远程访问另需 `PEARSS_MCP_ALLOWED_HOSTS`
 
 ## 3. 插件系统（两段式落地）
 
@@ -206,7 +207,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed + Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + token 鉴权 + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、网页采集器（A2 仅 1/2–3）、`create_feed`/FeedOut CRUD、备份与恢复演练 | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（521 测试）。未达成：「发现」环节与 OPML 迁移 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **3 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线，见 ADR 0011/0012）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（716 测试）。未达成：「发现」环节与 OPML 迁移 |
 | P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
 | P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
@@ -230,8 +231,8 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 | C2 查询 API | /v1/items + item://{id} | P1 ✅ | 紧凑摘要 + keyset 分页 + 字段选择；正文独立端点 |
 | C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
 | C4 Reader API | /api/greader.php | P1 ✅（原 P3） | NNW FreshRSS 登录 + 已读/星标同步，实测通过；ADR 0004 提前 |
-| C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 RSS、Reader API、MCP 工具三条路径均不可见；P3 处理器链联动待做 |
-| D1-D6 操作面 | MCP 工具组（10 工具） | P1 ✅ | 见 §2.3；D1 诊断类工具（diagnose_source 等）属 P2 |
+| C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 RSS、Reader API、MCP 工具三条路径均不可见；P3 处理器链联动待做。**注意**：`ready` → `published` 由可观察的首次输出触发，**三条输出路径都会写 `first_publish`**（此前只有 RSS 写，Reader API 不写 → 经 NNW 消费的条目永不冻结，违反本文件 §4 的状态机要求） |
+| D1-D6 操作面 | MCP 工具组（11 工具） | P1 ✅ | 见 §2.3；D1 诊断类工具（diagnose_source 等）属 P2 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
 | F1 可复现环境 | Nix Flake + direnv + uv | P1 ✅ | clean slate 下 `nix develop --command just ci` 通过 |
 | F2 依赖供应链 | flake.lock + uv.lock | P1 ✅ | 两份锁文件均入库 |
