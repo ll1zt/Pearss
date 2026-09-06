@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from adapters.correlation import current
 from adapters.db_models import AuditLog
+from adapters.repository import timestamp
 from core.enums import AuditOutcome
 
 LOGGER = logging.getLogger(__name__)
@@ -168,7 +169,10 @@ def record(
     session.add(
         AuditLog(
             id=audit_id,
-            occurred_at=stamp.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            # Fixed-width, like every other stored instant: audit rows are
+            # ordered and read as text, and isoformat()'s omitted fractional
+            # part at microsecond zero would mix widths in a fact-source table.
+            occurred_at=timestamp(stamp),
             actor=actor,
             session_id=session_id,
             operation=operation,

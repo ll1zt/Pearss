@@ -33,6 +33,7 @@ from adapters.repository import (
     get_source,
     list_sources,
     store_idempotent,
+    timestamp,
 )
 from app.auth import Principal, read_required, write_required
 from app.scheduler import collect_now
@@ -156,10 +157,6 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _iso(moment: datetime) -> str:
-    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
 def replay_or_none(
     session_factory: sessionmaker[Any],
     *,
@@ -168,7 +165,7 @@ def replay_or_none(
     key: str,
 ) -> JSONResponse | None:
     """Return a stored response for this write, if one exists."""
-    now = _iso(_now())
+    now = timestamp(_now())
     with session_factory() as session:
         stored = find_idempotent(
             session, actor=actor, endpoint=endpoint, key=key, now=now
@@ -202,8 +199,8 @@ def remember(
             key=key,
             status_code=status_code,
             response_body=json.dumps(body, sort_keys=True),
-            created_at=_iso(created),
-            expires_at=_iso(created + IDEMPOTENCY_WINDOW),
+            created_at=timestamp(created),
+            expires_at=timestamp(created + IDEMPOTENCY_WINDOW),
         )
         session.commit()
 
@@ -397,7 +394,7 @@ def add_source(
             tenant_id=TENANT,
             trust_level=body.trust_level.value,
             parser_plugin_id=body.parser_plugin_id,
-            at=_iso(_now()),
+            at=timestamp(_now()),
         )
         session.commit()
         payload = _source_payload(row)
@@ -473,7 +470,7 @@ def update_source(
         row = _require_source(session, source_id)
         for column, value in changes.items():
             setattr(row, column, value)
-        row.updated_at = _iso(_now())
+        row.updated_at = timestamp(_now())
         session.commit()
         payload = _source_payload(row)
 
@@ -510,7 +507,7 @@ def delete_source(
     with factory() as session:
         row = _require_source(session, source_id)
         row.status = SourceStatus.DELETED.value
-        row.updated_at = _iso(_now())
+        row.updated_at = timestamp(_now())
         session.commit()
         payload = _source_payload(row)
 

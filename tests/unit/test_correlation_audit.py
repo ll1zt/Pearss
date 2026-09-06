@@ -10,6 +10,8 @@ could not be serialised at all.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from adapters import correlation
@@ -19,6 +21,7 @@ from adapters.audit import (
     redact_headers,
     redact_url,
 )
+from adapters.repository import timestamp
 
 # --------------------------------------------------------------------------
 # Correlation ids
@@ -172,3 +175,16 @@ def test_url_without_query_is_unchanged() -> None:
 @pytest.mark.unit
 def test_query_of_only_secrets_leaves_no_marker() -> None:
     assert redact_url("https://example.com/f?token=x") == "https://example.com/f"
+
+
+@pytest.mark.unit
+def test_stored_timestamps_are_fixed_width() -> None:
+    # Regression: sources_routes and the audit writer used isoformat(), which
+    # omits the fractional part at microsecond zero and mixes widths inside a
+    # column — the exact defect migration 0005 exists to repair.
+    assert timestamp(datetime(2026, 9, 6, 10, 0, 0, tzinfo=UTC)) == (
+        "2026-09-06T10:00:00.000000Z"
+    )
+    assert timestamp(datetime(2026, 9, 6, 10, 0, 0, 500000, tzinfo=UTC)) == (
+        "2026-09-06T10:00:00.500000Z"
+    )

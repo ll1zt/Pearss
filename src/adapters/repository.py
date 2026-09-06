@@ -64,7 +64,7 @@ class StoreOutcome:
 EPOCH_FLOOR = "0000-01-01T00:00:00.000000Z"
 
 
-def _timestamp(moment: datetime) -> str:
+def timestamp(moment: datetime) -> str:
     """Store timestamps as fixed-width RFC 3339 UTC text.
 
     Fixed width is the point, not cosmetics. These values are compared as text
@@ -81,7 +81,7 @@ def _timestamp(moment: datetime) -> str:
 
 
 def _optional_timestamp(moment: datetime | None) -> str | None:
-    return None if moment is None else _timestamp(moment)
+    return None if moment is None else timestamp(moment)
 
 
 def record_raw_fetch(
@@ -115,7 +115,7 @@ def record_raw_fetch(
             last_modified=last_modified,
             status=status,
             error_class=error_class.value if error_class else None,
-            fetched_at=_timestamp(fetched_at or datetime.now(UTC)),
+            fetched_at=timestamp(fetched_at or datetime.now(UTC)),
             correlation_id=correlation_id,
         )
     )
@@ -221,11 +221,11 @@ def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> No
     row.content_hash = candidate.content_hash
     row.content_ref = candidate.content_ref
     row.published_at = _optional_timestamp(candidate.published_at)
-    row.updated_at = _timestamp(datetime.now(UTC))
+    row.updated_at = timestamp(datetime.now(UTC))
 
 
 def _insert(session: Session, item: Item) -> None:
-    now = _timestamp(datetime.now(UTC))
+    now = timestamp(datetime.now(UTC))
     session.add(
         ItemRow(
             id=item.id,
@@ -239,8 +239,8 @@ def _insert(session: Session, item: Item) -> None:
             publish_status=item.publish_status.value,
             published_to_feed_at=_optional_timestamp(item.published_to_feed_at),
             tenant_id=item.tenant_id,
-            created_at=_timestamp(item.created_at) if item.created_at else now,
-            updated_at=_timestamp(item.updated_at) if item.updated_at else now,
+            created_at=timestamp(item.created_at) if item.created_at else now,
+            updated_at=timestamp(item.updated_at) if item.updated_at else now,
         )
     )
 
@@ -279,7 +279,7 @@ def mark_published(session: Session, items: list[Item], *, at: datetime) -> int:
     if not items:
         return 0
     ids = [item.id for item in items]
-    stamp = _timestamp(at)
+    stamp = timestamp(at)
     # session.execute is typed as returning Result[Any], but a DML statement
     # yields a CursorResult at runtime, which is where rowcount lives. The cast
     # is narrowed to this one statement rather than disabling the check.
@@ -406,7 +406,7 @@ def upsert_reader_credential(
     The plaintext password is never passed here; it lives in the environment
     only, and what is stored is a scrypt hash (ADR 0005).
     """
-    stamp = _timestamp(at)
+    stamp = timestamp(at)
     row = session.get(ReaderCredential, username)
     if row is None:
         session.add(
@@ -485,7 +485,7 @@ def upsert_read_state(
     The timestamp comes from the state object, which core set from the server
     clock — never from the client.
     """
-    stamp = _timestamp(state.updated_at or datetime.now(UTC))
+    stamp = timestamp(state.updated_at or datetime.now(UTC))
     # Read-modify-write rather than an upsert: SQLAlchemy's typed Insert does
     # not expose on_conflict_do_update, and the dialect-specific form would
     # not carry over to Postgres in P3. The composite primary key prevents a
@@ -519,7 +519,7 @@ def mark_all_read(
     Only touches items that are unread, so a repeated call is a no-op rather
     than repeatedly rewriting rows and bumping their timestamps.
     """
-    cutoff = _timestamp(before)
+    cutoff = timestamp(before)
     existing = select(ReadStateRow.item_id).where(
         ReadStateRow.tenant_id == tenant_id, ReadStateRow.is_read.is_(True)
     )
@@ -539,7 +539,7 @@ def mark_all_read(
     if not ids:
         return 0
 
-    now = _timestamp(datetime.now(UTC))
+    now = timestamp(datetime.now(UTC))
     for item_id in ids:
         row = session.get(ReadStateRow, (item_id, tenant_id))
         if row is None:
@@ -875,7 +875,7 @@ def update_item_content_ref(
     if row is None:
         raise ValueError(f"no item with id {item_id!r}")
     row.content_ref = content_ref
-    row.updated_at = _timestamp(datetime.now(UTC))
+    row.updated_at = timestamp(datetime.now(UTC))
 
 
 # --------------------------------------------------------------------------
@@ -1108,7 +1108,7 @@ def save_paging_state(
     else:
         row.resume_cursor = None
         row.resume_rounds = 0
-    row.updated_at = _timestamp(datetime.now(UTC))
+    row.updated_at = timestamp(datetime.now(UTC))
 
 
 def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
@@ -1162,7 +1162,7 @@ def set_source_title_if_absent(
                 SourceRow.id == source_id,
                 or_(SourceRow.title.is_(None), SourceRow.title == ""),
             )
-            .values(title=cleaned, updated_at=_timestamp(datetime.now(UTC)))
+            .values(title=cleaned, updated_at=timestamp(datetime.now(UTC)))
         ),
     )
     return (result.rowcount or 0) == 1
@@ -1213,7 +1213,7 @@ def reap_orphaned_runs(session: Session, *, older_than: datetime) -> int:
     as a terminal outcome and the row is real evidence that an attempt started
     and never came back.
     """
-    cutoff = _timestamp(older_than)
+    cutoff = timestamp(older_than)
     result = cast(
         "CursorResult[Any]",
         session.execute(
@@ -1227,7 +1227,7 @@ def reap_orphaned_runs(session: Session, *, older_than: datetime) -> int:
             )
             .values(
                 status=JobRunStatus.TIMED_OUT.value,
-                finished_at=_timestamp(datetime.now(UTC)),
+                finished_at=timestamp(datetime.now(UTC)),
                 error_class=ErrorClass.NETWORK.value,
             )
         ),
