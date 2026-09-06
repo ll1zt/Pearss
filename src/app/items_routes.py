@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from adapters.correlation import current as current_correlation_id
 from adapters.filestore import read_body
-from adapters.repository import ItemFilter, get_item, query_items
+from adapters.repository import ItemFilter, get_item, query_items, timestamp
 from app.auth import Principal, read_required
 from app.sources_routes import api_error
 from core.enums import PublishStatus
@@ -186,8 +186,8 @@ def read_items(
                     publish_status.value if publish_status is not None else None
                 ),
                 query=q,
-                since=since,
-                until=until,
+                since=_parse_bound(since, code="invalid_since", field="since"),
+                until=_parse_bound(until, code="invalid_until", field="until"),
             ),
             descending=descending,
             limit=limit,
@@ -221,6 +221,37 @@ def _parse_cursor(cursor: str | None) -> tuple[str, str] | None:
             suggestion="Omit the cursor to start from the beginning.",
         )
     return (value, item_id)
+
+
+def _parse_bound(value: str | None, *, code: str, field: str) -> str | None:
+    """Normalise a `since`/`until` bound to the stored fixed-width form.
+
+    The column is compared as text, so a bound in any other shape selects the
+    wrong rows: `until=2026-01-03T00:00:00Z` (no fractional part) sorts after
+    the stored `...T00:00:00.000000Z`, excluding the very instant it names,
+    and an `+08:00` offset compares as garbage. Parsing and re-rendering in
+    the stored form makes the comparison exact and refuses malformed input
+    with a 400 instead of a quietly wrong page.
+    """
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        raise api_error(
+            status_code=400,
+            code=code,
+            message=f"{field} is not a valid timestamp.",
+            suggestion="Send an RFC 3339 timestamp, e.g. 2026-09-06T00:00:00Z.",
+        ) from None
+    if moment.tzinfo is None:
+        raise api_error(
+            status_code=400,
+            code=code,
+            message=f"{field} must carry a timezone.",
+            suggestion="Send an RFC 3339 timestamp with Z or an explicit offset.",
+        )
+    return timestamp(moment)
 
 
 @router.get("/items/{item_id}", operation_id="getItem")

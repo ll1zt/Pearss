@@ -437,6 +437,53 @@ async def test_date_bounds(
     assert len(body["data"]) == 3
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_until_without_a_fractional_part_includes_the_instant_it_names(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """Regression: bounds are re-rendered to the stored width before comparing.
+
+    The items in this store are published exactly at midnight. Compared as
+    raw text, `until=2026-01-03T00:00:00Z` sorts after the stored
+    `...T00:00:00.000000Z` and excluded the very instant it named.
+    """
+    body = (
+        await client.get("/v1/items", params={"until": "2026-01-03T00:00:00Z"})
+    ).json()
+    assert len(body["data"]) == 3
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_date_bounds_accept_an_explicit_offset(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    # 2026-01-04T08:00:00+08:00 is 2026-01-04T00:00:00Z, so items 04 through 12.
+    body = (
+        await client.get(
+            "/v1/items", params={"since": "2026-01-04T08:00:00+08:00", "limit": 100}
+        )
+    ).json()
+    assert len(body["data"]) == 9
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_date_bounds_that_cannot_parse_are_refused(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    garbage = await client.get("/v1/items", params={"until": "not-a-date"})
+    assert garbage.status_code == 400
+    assert garbage.json()["detail"]["error"]["code"] == "invalid_until"
+
+    naive = await client.get(
+        "/v1/items", params={"since": "2026-01-03T00:00:00"}
+    )
+    assert naive.status_code == 400
+    assert naive.json()["detail"]["error"]["code"] == "invalid_since"
+
+
 # --------------------------------------------------------------------------
 # Single item and body
 # --------------------------------------------------------------------------
