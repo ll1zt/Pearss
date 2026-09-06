@@ -552,11 +552,7 @@ def decide_dedupe(
     # not become a second one. Picking matches[0] would make the decision
     # depend on the database's row order, which is not a decision at all.
     cross_source = next(
-        (
-            match
-            for match in matches
-            if match.publish_status is PublishStatus.PUBLISHED
-        ),
+        (match for match in matches if match.publish_status is PublishStatus.PUBLISHED),
         matches[0],
     )
     if cross_source.publish_status is PublishStatus.PUBLISHED:

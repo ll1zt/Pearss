@@ -125,7 +125,6 @@ def _safe_cdata(body: str) -> str:
     The reader receives the HTML as text and renders it under its own rules.
     """
     cleaned = _strip_illegal_xml_chars(body)
-    # Splitting the terminator is the standard mitigation: one CDATA closes
     # Remove every "]]>" so the CDATA section cannot be closed early. It is
     # deleted rather than split, because the usual "split across two CDATA
     # sections" trick does not work here: lxml writes the replacement through

@@ -107,10 +107,11 @@ def test_next_interval_dispatches_on_policy_type() -> None:
 
 @pytest.mark.unit
 def test_next_interval_applies_failure_backoff() -> None:
-    policy = SchedulePolicy(type="adaptive", min_seconds=int(HOUR), max_seconds=int(100 * HOUR))
-    assert (
-        next_interval(policy, [2 * HOUR], consecutive_failures=2)
-        == pytest.approx(8 * HOUR)
+    policy = SchedulePolicy(
+        type="adaptive", min_seconds=int(HOUR), max_seconds=int(100 * HOUR)
+    )
+    assert next_interval(policy, [2 * HOUR], consecutive_failures=2) == pytest.approx(
+        8 * HOUR
     )
 
 

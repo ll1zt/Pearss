@@ -403,9 +403,7 @@ async def test_reused_request_id_does_not_drop_audit_rows(
         assert response.status_code == 200
 
     with app.state.session_factory() as session:
-        count = session.execute(
-            sa.text("select count(*) from audit_log")
-        ).scalar()
+        count = session.execute(sa.text("select count(*) from audit_log")).scalar()
     assert count == 2
 
 

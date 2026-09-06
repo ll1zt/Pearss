@@ -477,9 +477,7 @@ async def test_date_bounds_that_cannot_parse_are_refused(
     assert garbage.status_code == 400
     assert garbage.json()["detail"]["error"]["code"] == "invalid_until"
 
-    naive = await client.get(
-        "/v1/items", params={"since": "2026-01-03T00:00:00"}
-    )
+    naive = await client.get("/v1/items", params={"since": "2026-01-03T00:00:00"})
     assert naive.status_code == 400
     assert naive.json()["detail"]["error"]["code"] == "invalid_since"
 

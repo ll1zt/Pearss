@@ -45,10 +45,8 @@ MIN_PAGES_FOR_RESERVE: Final = 3
 # dropped. A backlog deeper than the frontier has no natural stopping anchor,
 # so without a bound the walk retreats further into the past every cycle and
 # never catches up; dropping it accepts a bounded gap in deep history instead
-# of an unbounded one.
-# Consecutive cycles an unresolved resume may slide backwards before it is
-# dropped. The bound itself lives in core.paging, because the repository ages
-# the counter and this module reads it -- the two must agree.
+# of an unbounded one. The bound itself lives in core.paging, because the
+# repository ages the counter and this module reads it -- the two must agree.
 
 
 def to_int(value: object) -> int | None:
