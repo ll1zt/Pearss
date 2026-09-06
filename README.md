@@ -26,7 +26,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - core 领域层：`ErrorClass` 分类法与优先级、Item 发布状态机、adaptive 调度纯函数、normalize 与去重规则
 - P1 数据库 schema 与 Alembic migration（0001 七张表，含 enum CHECK 约束）
 - RSS/Atom 采集：HTTP 抓取（超时/大小上限/ETag 条件请求）+ 五套 fixture 回归
-- RSS 2.0 输出与发布闸门（`pending` 不可见）；FastAPI 应用，`just run` 可启动
+- 发布闸门（`pending` 对一切输出不可见）；FastAPI 应用，`just run` 可启动
 - **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 ADR 0004）
 - **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集；`/v1/items` 紧凑查询（keyset 分页、字段选择、sort 白名单）+ `/v1/items/{id}/body` 独立取正文；写操作强制 `Idempotency-Key`，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
@@ -85,7 +85,7 @@ just run 100.64.0.1 8000  # 绑到某个地址，例如 Tailscale
 4. `GET /v1/items` / MCP `search_items` 查条目；正文走 `item://{id}` Resource
 5. `GET /v1/jobs/{id}/runs` / `GET /v1/system/snapshot` 检查采集健康
 
-OPML 迁移（A6）与网页采集器（A2）尚未实现。
+OPML 迁移（A6）尚未实现。
 
 ## 常用命令
 
@@ -284,7 +284,7 @@ PEARSS_MCP_ALLOWED_HOSTS=127.0.0.1:*,100.64.0.1:*,192.168.1.10:*
 
 ## NetNewsWire 接入
 
-RSS 输出与 Reader API 都已可用，两条路径用途不同：
+Reader API 是唯一的内容消费路径（公开 RSS 输出已移除，ADR 0016）：
 
 | 路径 | 地址 | 用途 |
 |---|---|---|

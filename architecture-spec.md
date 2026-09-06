@@ -466,7 +466,7 @@ P1（当前：单进程 + systemd 用户服务）      P3（compose 多服务，
 └──────────────────────────────┘
 ```
 
-Nix 管开发期与 CI 的环境；**当前生产运行由 systemd 用户服务托管**（`deploy/pearss.service` + linger），Docker/Compose 尚未引入。P1→P3 的组件替换不触碰：OpenAPI 契约、hookspec 合约、Job 模型、错误分类法、MCP 工具面语义。
+Nix 管开发期与 CI 的环境；**当前生产运行由 systemd 用户服务托管**（`deploy/pearss.service` + linger），应用只绑 127.0.0.1，公网经隧道（Cloudflare Tunnel / Tailscale Funnel）仅路由已鉴权的 Reader API（ADR 0016）。Docker/Compose 尚未引入。P1→P3 的组件替换不触碰：OpenAPI 契约、hookspec 合约、Job 模型、错误分类法、MCP 工具面语义。
 
 ## 12. 术语表
 

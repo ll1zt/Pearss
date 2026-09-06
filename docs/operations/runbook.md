@@ -86,7 +86,7 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 - `pending` Item 的数量与最久等待时长
 - JobRun 队列深度、超时率、重试率
 - 插件崩溃/超时率（P2）
-- RSS 输出可访问性、最近 GUID 是否稳定
+- Reader API 可访问性、最近 GUID 是否稳定
 - 备份最近一次成功时间与最近恢复演练日期
 
 可使用 `GET /v1/system/snapshot`、`GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、MCP 的
@@ -107,7 +107,7 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 | `ready` | 闸门已放行、可发布；**尚未被任何客户端看到**，内容未冻结 |
 | `published` | 已被某条输出路径发出；**内容与 GUID 冻结**，不可回退 |
 
-「拉一次 `/feeds/default.xml` 后 `ready` 全变 `published`」是预期行为，不是数据修复。
+「通过 Reader API 拉取正文后 `ready` 变 `published`」是预期行为（首次输出即冻结，ADR 0016），不是数据修复。
 
 ## 故障处置表
 
@@ -150,7 +150,7 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 
 ## 发布闸门与 NNW 缓存
 
-- `pending` Item 不应出现在 RSS 输出；先查处理链和 enrichment JobRun
+- `pending` Item 不应出现在任何输出（Reader API、`/v1/items`、MCP 工具）；先查处理链和 enrichment JobRun
 - `ready` Item 进入 feed 后，首次被输出即成为 `published`
 - 不要“先发原文，后改译文”：NNW 可能缓存第一次内容
 - 已发布内容错误时，按明确的补发/更正策略创建新的稳定 Item；不要复用或修改旧 GUID
