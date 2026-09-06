@@ -8,10 +8,14 @@ collector decide what it means.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import os
+import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -20,6 +24,7 @@ from adapters.raw_payload import ConditionalState, RawPayload
 # Re-exported: fetch() takes one, so it is part of this module's public surface
 # even though the type lives in raw_payload to keep the repository off httpx.
 __all__ = [
+    "ALLOW_PRIVATE_FETCH_ENV",
     "ConditionalState",
     "FetchError",
     "FetchPolicy",
@@ -53,6 +58,89 @@ DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 # A contactable agent, per the collector guide. Overridable so a deployment can
 # supply its own contact address.
 DEFAULT_USER_AGENT = "Pearss/0.1 (+https://github.com/pearss/pearss; RSS reader)"
+
+# ADR 0016: on a public deployment a leaked write token must not buy the
+# attacker a probe of the server's own network (cloud metadata, RFC1918,
+# loopback). Fetches to private addresses are therefore refused by default;
+# an operator who legitimately subscribes to internal sources can opt out.
+ALLOW_PRIVATE_FETCH_ENV: Final = "PEARSS_ALLOW_PRIVATE_FETCH"
+MAX_MANUAL_REDIRECT_HOPS: Final = 5
+
+# Headers that must not follow a cross-host redirect: the redirect target is
+# chosen by whatever sent the 3xx, and these authenticate us to the *previous*
+# host only.
+# httpx 0.28's `is_redirect` also matches 304 and location-less 302s, which
+# would misroute a legitimate not-modified answer into the redirect loop.
+REDIRECT_STATUSES: Final[frozenset[int]] = frozenset({301, 302, 303, 307, 308})
+
+_CREDENTIAL_HEADERS: Final[frozenset[str]] = frozenset(
+    {"cookie", "authorization", "x-csrf-token", "proxy-authorization"}
+)
+
+
+def allow_private_fetch() -> bool:
+    """Whether private-address targets are permitted (default: refused)."""
+    return os.environ.get(ALLOW_PRIVATE_FETCH_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def resolve_host(host: str) -> set[str]:
+    """Every address `host` resolves to; empty means unresolvable.
+
+    Module-level so tests can substitute a hermetic answer — the guard must
+    not make the test suite depend on real DNS.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, OSError):
+        return set()
+    return {str(info[4][0]) for info in infos}
+
+
+def _is_private_ip(address_text: str) -> bool:
+    try:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        return True  # an unparseable answer is not one we can vouch for
+    return (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _resolves_private(url: str) -> bool:
+    """Whether `url`'s host is (or resolves to) a private address.
+
+    Fail-closed on resolution errors: a name the server cannot resolve is not
+    one it should fetch, and DNS is exactly the layer an SSRF chain plays
+    with. Known limitation, recorded in ADR 0016: the check resolves once and
+    the connection re-resolves, so textbook DNS rebinding remains possible;
+    the threat here is a leaked write token probing an internal network, not
+    a hostile resolver racing the socket.
+    """
+    host = urlsplit(url).hostname
+    if not host:
+        return True
+    addresses = resolve_host(host)
+    if not addresses:
+        return True  # unresolvable → refused, fail-closed
+    return any(_is_private_ip(address) for address in addresses)
+
+
+def _strip_credentials(headers: dict[str, str]) -> dict[str, str]:
+    return {
+        name: value
+        for name, value in headers.items()
+        if name not in _CREDENTIAL_HEADERS
+    }
 
 
 class FetchError(Exception):
@@ -183,43 +271,86 @@ def _request(
 
     headers = _request_headers(limits, conditional, json_body=json_body is not None)
 
+    # The guard runs before the socket: an unresolvable or private target is
+    # refused without spending a connection. When the guard is active,
+    # redirects are followed manually so every hop is classified too — the
+    # classic SSRF bypass is a public URL that 302s to the metadata service.
+    guard_private = not allow_private_fetch()
+    if guard_private and _resolves_private(url):
+        raise FetchError(
+            ErrorClass.BLOCKED,
+            f"private-address fetch refused for {_redact(url)}",
+        )
+    manual_redirects = guard_private and follow_redirects
+    hops = 0
+
     try:
-        # Streaming so an oversized response is abandoned mid-body instead of
-        # being buffered in full before the cap can be applied.
-        with client.stream(
-            method,
-            url,
-            timeout=timeout,
-            headers=headers,
-            follow_redirects=follow_redirects,
-            json=json_body,
-        ) as response:
-            status = response.status_code
+        while True:
+            # Streaming so an oversized response is abandoned mid-body instead
+            # of being buffered in full before the cap can be applied.
+            with client.stream(
+                method,
+                url,
+                timeout=timeout,
+                headers=headers,
+                follow_redirects=follow_redirects and not manual_redirects,
+                json=json_body,
+            ) as response:
+                status = response.status_code
 
-            if status == 304:
-                # Not modified: a legitimate outcome, not an error. The caller
-                # records it and skips parsing.
-                return RawPayload(
-                    url=url,
-                    status_code=status,
-                    body=b"",
-                    source_id=source_id,
-                    raw_fetch_id=raw_fetch_id,
-                    headers=_safe_headers(response.headers),
-                    not_modified=True,
-                    etag=response.headers.get("etag"),
-                    last_modified=response.headers.get("last-modified"),
-                    correlation_id=correlation_id,
-                )
+                if manual_redirects and status in REDIRECT_STATUSES:
+                    hops += 1
+                    if hops > MAX_MANUAL_REDIRECT_HOPS:
+                        raise FetchError(
+                            ErrorClass.NETWORK,
+                            f"redirect loop past {MAX_MANUAL_REDIRECT_HOPS} "
+                            f"hops for {_redact(url)}",
+                        )
+                    location = response.headers.get("location")
+                    if not location:
+                        raise FetchError(
+                            ErrorClass.NETWORK,
+                            f"redirect without location for {_redact(url)}",
+                        )
+                    next_url = urljoin(url, location)
+                    if _resolves_private(next_url):
+                        raise FetchError(
+                            ErrorClass.BLOCKED,
+                            "redirect to a private address refused for "
+                            f"{_redact(next_url)}",
+                        )
+                    if urlsplit(next_url).hostname != urlsplit(url).hostname:
+                        # The new host was chosen by the old host; credentials
+                        # are for the old host and must not travel.
+                        headers = _strip_credentials(headers)
+                    url = next_url
+                    continue
 
-            if status != 200:
-                error_class = classify(http_status=status) or ErrorClass.NETWORK
-                raise FetchError(error_class, f"HTTP {status} for {_redact(url)}")
+                if status == 304:
+                    # Not modified: a legitimate outcome, not an error. The
+                    # caller records it and skips parsing.
+                    return RawPayload(
+                        url=url,
+                        status_code=status,
+                        body=b"",
+                        source_id=source_id,
+                        raw_fetch_id=raw_fetch_id,
+                        headers=_safe_headers(response.headers),
+                        not_modified=True,
+                        etag=response.headers.get("etag"),
+                        last_modified=response.headers.get("last-modified"),
+                        correlation_id=correlation_id,
+                    )
 
-            body = _read_capped(response, limits.max_bytes, url)
-            response_headers = _safe_headers(response.headers)
-            etag = response.headers.get("etag")
-            last_modified = response.headers.get("last-modified")
+                if status != 200:
+                    error_class = classify(http_status=status) or ErrorClass.NETWORK
+                    raise FetchError(error_class, f"HTTP {status} for {_redact(url)}")
+
+                body = _read_capped(response, limits.max_bytes, url)
+                response_headers = _safe_headers(response.headers)
+                etag = response.headers.get("etag")
+                last_modified = response.headers.get("last-modified")
+                break
 
     except FetchError:
         raise

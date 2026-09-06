@@ -8,6 +8,8 @@ instead of testing a mock of the library.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 
@@ -283,3 +285,201 @@ def test_correlation_id_is_carried_through() -> None:
     with client_for(ok_transport()) as client:
         payload = fetch(URL, client=client, correlation_id="corr-1")
     assert payload.correlation_id == "corr-1"
+
+
+# --------------------------------------------------------------------------
+# Private-address guard (ADR 0016)
+# --------------------------------------------------------------------------
+
+
+def _resolve_answer(answers: dict[str, set[str]]) -> Callable[[str], set[str]]:
+    """A resolver stub keyed by host; unknown hosts answer public."""
+
+    def resolve(host: str) -> set[str]:
+        return answers.get(host, {"93.184.216.34"})
+
+    return resolve
+
+
+@pytest.mark.unit
+def test_private_literal_ip_is_refused_without_a_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import http as pearss_http
+
+    requests: list[httpx.Request] = []
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", _resolve_answer({"127.0.0.1": {"127.0.0.1"}})
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch("http://127.0.0.1:8901/feeds", client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.BLOCKED
+    assert requests == [], "the guard must refuse before touching a socket"
+
+
+@pytest.mark.unit
+def test_cloud_metadata_address_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(
+        pearss_http,
+        "resolve_host",
+        _resolve_answer({"169.254.169.254": {"169.254.169.254"}}),
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200))
+
+    with (
+        httpx.Client(transport=transport) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch("http://169.254.169.254/latest/meta-data/", client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.BLOCKED
+
+
+@pytest.mark.unit
+def test_an_unresolvable_host_is_refused_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(pearss_http, "resolve_host", lambda host: set())
+    transport = httpx.MockTransport(lambda request: httpx.Response(200))
+
+    with (
+        httpx.Client(transport=transport) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch("https://gone.example.com/rss", client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.BLOCKED
+
+
+@pytest.mark.unit
+def test_a_redirect_to_a_private_host_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import http as pearss_http
+
+    # The classic SSRF chain: a public URL that 302s to the metadata service.
+    monkeypatch.setattr(
+        pearss_http,
+        "resolve_host",
+        _resolve_answer({"metadata.internal": {"169.254.169.254"}}),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "public.example.com":
+            return httpx.Response(
+                302, headers={"location": "http://metadata.internal/latest"}
+            )
+        return httpx.Response(200, content=FEED_BODY)
+
+    transport = httpx.MockTransport(handler)
+    with (
+        httpx.Client(transport=transport) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch("https://public.example.com/rss", client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.BLOCKED
+
+
+@pytest.mark.unit
+def test_a_cross_host_redirect_leaves_credentials_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import http as pearss_http
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.host == "public.example.com":
+            return httpx.Response(
+                302, headers={"location": "https://other.example.com/feed"}
+            )
+        return httpx.Response(200, content=FEED_BODY)
+
+    monkeypatch.setattr(pearss_http, "resolve_host", _resolve_answer({}))
+    policy = FetchPolicy(extra_headers={"cookie": "session=1"})
+    transport = httpx.MockTransport(handler)
+
+    with httpx.Client(transport=transport) as http_client:
+        fetch("https://public.example.com/rss", client=http_client, policy=policy)
+
+    assert seen[0].headers["cookie"] == "session=1"
+    assert "cookie" not in seen[1].headers, (
+        "the redirect target was chosen by the previous host; credentials are "
+        "for the previous host only"
+    )
+
+
+@pytest.mark.unit
+def test_a_same_host_redirect_keeps_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from adapters import http as pearss_http
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/moved":
+            return httpx.Response(
+                302, headers={"location": "https://feed.example.com/rss"}
+            )
+        return httpx.Response(200, content=FEED_BODY)
+
+    monkeypatch.setattr(pearss_http, "resolve_host", _resolve_answer({}))
+    policy = FetchPolicy(extra_headers={"cookie": "session=1"})
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as http_client:
+        fetch("https://feed.example.com/moved", client=http_client, policy=policy)
+
+    assert seen[1].headers["cookie"] == "session=1"
+
+
+@pytest.mark.unit
+def test_redirect_hops_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(pearss_http, "resolve_host", _resolve_answer({}))
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            302, headers={"location": "https://feed.example.com/next"}
+        )
+    )
+    with (
+        httpx.Client(transport=transport) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch(URL, client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.NETWORK
+
+
+@pytest.mark.unit
+def test_allow_private_fetch_env_disables_the_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from adapters import http as pearss_http
+
+    monkeypatch.setenv(pearss_http.ALLOW_PRIVATE_FETCH_ENV, "1")
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", _resolve_answer({"127.0.0.1": {"127.0.0.1"}})
+    )
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"ok"))
+
+    with httpx.Client(transport=transport) as http_client:
+        payload = fetch("http://127.0.0.1:8901/local-feed", client=http_client)
+
+    assert payload.body == b"ok"
