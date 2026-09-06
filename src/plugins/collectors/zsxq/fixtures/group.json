@@ -1,0 +1,10 @@
+{
+  "succeeded": true,
+  "resp_data": {
+    "group": {
+      "group_id": 88855458825252,
+      "name": "示例星球",
+      "description": "用于测试的星球"
+    }
+  }
+}
