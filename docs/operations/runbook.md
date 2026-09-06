@@ -39,9 +39,37 @@ journalctl --user -u pearss.service -f
 **手动触发**：`POST /v1/sources/{id}:trigger`（或 MCP `trigger_job`）。它走与调度器同一条
 `collect_now`，因此**同样写 JobRun** —— 手动触发不可见曾是真实 bug。
 
+## X（Twitter）源：登录型采集
+
+X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**采集：每轮走多个页面直到
+前端（seen frontier）或预算耗尽，游标状态存在 `source` 上（`seen_frontier` /
+`resume_cursor` / `resume_rounds`）。
+
+| 症状 | 查什么 | 说明 |
+|---|---|---|
+| `error_class=auth` | `PEARSS_X_*` 或 CookieCloud 配置 | 凭据缺失/失效**不会**匿名重试（ADR 0012）—— 若看到 `auth` 但确信配好了，查 CookieCloud 是否返回了 `auth_token`/`ct0` |
+| 每次采到很深的历史 | `source.resume_rounds` | 首次采集无 frontier，20 页预算会走很深（实测一轮 ~1500 条）。护栏在连续 3 轮仍有 resume 时丢弃游标，之后只取新推文 |
+| CookieCloud 连不上 | 服务日志 `CookieCloud unavailable` | 静态 `PEARSS_X_*` 优先；若两者都无 → `auth`。服务端不可达与“没配置”是**不同处置** |
+| X 返回 401 | 服务日志 | 会话已轮换；会绕过缓存重取一次并重试该页（只一次）。若持续 401，说明 CookieCloud 里的仍未更新 —— 需在浏览器重新同步 |
+| `structure_changed` | 响应结构 | X 的 queryId 与结构由 X 单方变更；queryId 会自动从 x.com 的 JS bundle 恢复，失败则 human 介入（见采集器 README） |
+
+**手动续期**：CookieCloud 缓存 TTL 默认 300s（`PEARSS_COOKIECLOUD_CACHE_SECONDS`）。
+浏览器重登后最多等一个 TTL，或重启服务立即生效。
+
+> ⚠️ `COOKIE_CLOUD_SERVER_PASSWORD` 是**服务端主密钥**，能导出任意 uuid、任意域名的 cookie。
+> 它比它取回的那一个会话值强得多 —— 持有它等于持有同步过的全部站点会话（含银行、邮箱）。
+
 ## MCP 工具面
 
 - 端点 `/mcp/mcp`（Streamable HTTP），与 API 同进程
+- **需要鉴权**：`PEARSS_MCP_TOKEN`（独立于 Core API token，便于单独撤销）。未配置时端点
+  返回 **503** 并拒绝一切 —— 这是 fail-closed，不是“未鉴权”。无凭据请求返回 **401**
+- **远程访问需放行 Host**：`PEARSS_MCP_ALLOWED_HOSTS`（如 `100.64.0.1:*`）。不设则
+  **只有回环可达**，因为 MCP SDK 默认开 DNS-rebinding 防护，会对未知 Host 返回 **421**
+  `Invalid Host header`。
+
+  **排错要点**：`421` 不是鉴权失败，别去找 token；是 Host 不在白名单里。
+  另外白名单条目需要 `host:*` 形式（浏览器总带端口），裸 `host` 匹配不上 `host:8000`。
 - **写操作需 elicitation**。客户端不支持时**拒绝执行**并返回 `{"declined": true}`，
   不会静默照做。若用户报告「工具说 declined」，是客户端缺 elicitation 能力，不是故障
 - 工具经 `/v1` 调用，所以审计与鉴权与任何客户端一致；审计里 actor 是 `api:full`
@@ -68,6 +96,19 @@ journalctl --user -u pearss.service -f
 扎堆意味着网站改版；`recent_run_success_rate` 只统计最近 50 次完成运行，因为刚坏的源
 应该立刻反映出来。
 
+**所有状态都会列出（含 0）**。此前省略零值导致一次真实误读：快照显示 4576 条 `ready`
+而没有 `pending` 键，客户端把整批标成「待处理」—— 唯一能反驳这个读法的状态不在报文里。
+
+三个状态的含义：
+
+| 状态 | 含义 |
+|---|---|
+| `pending` | 闸门未放行，**对所有输出路径不可见** |
+| `ready` | 闸门已放行、可发布；**尚未被任何客户端看到**，内容未冻结 |
+| `published` | 已被某条输出路径发出；**内容与 GUID 冻结**，不可回退 |
+
+「拉一次 `/feeds/default.xml` 后 `ready` 全变 `published`」是预期行为，不是数据修复。
+
 ## 故障处置表
 
 | 症状 | 先看什么 | 安全动作 | 不要做什么 |
@@ -84,6 +125,9 @@ journalctl --user -u pearss.service -f
 | 条目数不涨 | `source.status`、`job_run` 最近状态、启动日志有无 scheduler 行 | 见「调度器」一节按推导输入排查 | 去找 next_run 表 —— 不存在，是设计如此 |
 | 文章正文与源不一致 | `job_run` 是否有 `skip_published_content_changed` 告警 | 已发布内容按设计冻结；需要更正只能作为新条目 | 改已发布 Item 的正文或 GUID |
 | MCP 写操作全被拒 | 客户端是否实现 elicitation | 换支持的客户端，或直接用 `/v1` | 让工具在无确认时继续执行 |
+| NNW 里条目**全被标星** | `read_state.is_starred`、`s=.../starred` 流的返回 | 检查 Reader API 的状态流是否被正确过滤；数据库里 0 条星标却全部显示星标 = 状态流返回了全库 | 把「客户端显示」当成「数据库状态」 |
+| 经 NNW 消费的条目**永不冻结** | `item.publish_status` 是否停在 `ready` | 三条输出路径都必须写 `first_publish`；此前只有 RSS 写，Reader API 不写 → 不可变性保证在客户端实际缓存的那条路径上失效 | 只修 RSS 渲染 |
+| 应用日志**突然全部消失** | 是否执行过 alembic 迁移 | `fileConfig` 默认 `disable_existing_loggers=True`；已改为 `False` | 以为是代码没打日志 |
 
 ## Source/采集器问题操作步骤
 
