@@ -46,6 +46,7 @@ secrets/
 # they stop resurfacing as new ideas. It is a developer's own file, not a
 # project deliverable.
 FUTHER_MAY_TODO.md
+TODO.md
 
 # --- Editors and OS ---
 .idea/
