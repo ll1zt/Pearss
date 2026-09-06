@@ -7,8 +7,8 @@ database.
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -232,7 +232,9 @@ async def test_docs_can_be_disabled_for_public_deployments(
     monkeypatch.setenv("PEARSS_DOCS_ENABLED", "0")
     hardened = create_app(session_factory)
     transport = httpx.ASGITransport(app=hardened)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as aclient:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as aclient:
         for path in ("/docs", "/redoc", "/openapi.json"):
             assert (await aclient.get(path)).status_code == 404, path
 

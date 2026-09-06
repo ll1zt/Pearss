@@ -23,6 +23,7 @@ import contextlib
 import logging
 import os
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ from adapters.repository import (
     ensure_collect_job,
     finish_job_run,
     last_collect_at,
+    prune_audit_log,
     reap_orphaned_runs,
     update_gaps_for_source,
 )
@@ -53,6 +55,19 @@ LOGGER = logging.getLogger(__name__)
 
 TENANT = "default"
 DEFAULT_TICK_SECONDS = 60.0
+DEFAULT_TICKS = 60.0
+PRUNE_INTERVAL_SECONDS = 3600.0
+
+
+def audit_retention_days() -> int:
+    """How long audit rows are kept (ADR 0016). `0` disables pruning."""
+    raw = os.environ.get("PEARSS_AUDIT_RETENTION_DAYS", "").strip()
+    if not raw:
+        return 30
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 30
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -272,11 +287,16 @@ class Scheduler:
         client: httpx.Client,
         tick_seconds: float = DEFAULT_TICK_SECONDS,
         on_tick: Callable[[TickReport], None] | None = None,
+        prune_every: float = PRUNE_INTERVAL_SECONDS,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
         self._tick_seconds = tick_seconds
         self._on_tick = on_tick
+        self._prune_every = prune_every
+        # Zero means the first loop pass prunes immediately: booting after a
+        # long outage is exactly when stale rows should go.
+        self._next_prune_at = 0.0
         self._task: asyncio.Task[None] | None = None
         # Guards against a slow tick overlapping the next one. Without it a
         # fetch longer than the interval would stack up runs indefinitely.
@@ -323,6 +343,29 @@ class Scheduler:
         while True:
             await asyncio.sleep(self._tick_seconds)
             await self.tick_once()
+            await self._prune_audit_if_due()
+
+    async def _prune_audit_if_due(self) -> None:
+        now = time.monotonic()
+        if now < self._next_prune_at:
+            return
+        self._next_prune_at = now + self._prune_every
+        days = audit_retention_days()
+        if days <= 0:
+            return
+
+        def prune() -> int:
+            with self._session_factory() as session:
+                pruned = prune_audit_log(
+                    session,
+                    older_than=datetime.now(UTC) - timedelta(days=days),
+                )
+                session.commit()
+            return pruned
+
+        pruned = await asyncio.to_thread(prune)
+        if pruned:
+            LOGGER.info("audit retention pruned %d row(s) older than %dd", pruned, days)
 
     async def tick_once(self) -> TickReport:
         """Run one pass off the event loop, at most one at a time."""

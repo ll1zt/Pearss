@@ -19,6 +19,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.db_models import AuditLog
 from adapters.repository import (
     claim_job_run,
     collectable_sources,
@@ -28,6 +29,7 @@ from adapters.repository import (
     finish_job_run,
     job_for_source,
     last_collect_at,
+    prune_audit_log,
     update_gaps_for_source,
 )
 from app.scheduler import TickReport, collect_now, run_tick
@@ -764,3 +766,43 @@ def test_a_live_run_is_not_reaped(
             sa.text("select status from job_run where id='live'")
         ).scalar()
     assert status == "running"
+
+
+@pytest.mark.integration
+def test_audit_retention_prunes_only_old_rows(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """ADR 0016: audit rows older than the retention window are deleted.
+
+    A public deployment turns every unauthorized probe into an audit row, so
+    without a retention window the forensic table itself becomes the disk
+    exhaustion channel. The cutoff is the fixed-width text format, so the
+    comparison stays exact.
+    """
+    from datetime import UTC
+    from datetime import datetime as dt
+
+    with session_factory() as session:
+        for audit_id, occurred in (
+            ("audit-old", "2020-01-01T00:00:00.000000Z"),
+            ("audit-new", "2099-01-01T00:00:00.000000Z"),
+        ):
+            session.add(
+                AuditLog(
+                    id=audit_id,
+                    occurred_at=occurred,
+                    actor="probe",
+                    operation="GET /v1/items",
+                    args_redacted="{}",
+                    outcome="rejected",
+                    correlation_id=audit_id,
+                )
+            )
+        session.commit()
+        pruned = prune_audit_log(session, older_than=dt.now(UTC).replace(year=2026))
+        session.commit()
+
+    assert pruned == 1
+    with session_factory() as session:
+        remaining = session.execute(sa.text("select id from audit_log")).fetchall()
+    assert [row[0] for row in remaining] == ["audit-new"]

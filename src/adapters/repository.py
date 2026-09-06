@@ -16,16 +16,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, and_, func, or_, select, update
+from sqlalchemy import CursorResult, Select, and_, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from adapters.correlation import current
+from adapters.db_models import AuditLog, ReaderCredential
 from adapters.db_models import IdempotencyRecord as IdempotencyRow
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import Job as JobRow
 from adapters.db_models import JobRun as JobRunRow
 from adapters.db_models import RawFetch as RawFetchRow
-from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
 from adapters.raw_payload import ConditionalState
@@ -1206,6 +1206,25 @@ def update_gaps_for_source(
         return []
     ordered = sorted(moments)
     return observed_gaps([moment.timestamp() for moment in ordered])
+
+
+def prune_audit_log(session: Session, *, older_than: datetime) -> int:
+    """Delete audit rows recorded before `older_than`.
+
+    ADR 0016: AuditLog was an append-forever fact source while the service was
+    inner-network only. Public exposure turns every unauthorized probe into a
+    row, so retention is part of the design now — 30 days by default
+    (PEARSS_AUDIT_RETENTION_DAYS). The table deliberately has no occurred_at
+    index: the retention cap keeps it small enough that the delete's scan is
+    cheap, and an index would exist only to serve this delete.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            delete(AuditLog).where(AuditLog.occurred_at < timestamp(older_than))
+        ),
+    )
+    return int(result.rowcount or 0)
 
 
 def reap_orphaned_runs(session: Session, *, older_than: datetime) -> int:
