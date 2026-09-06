@@ -214,3 +214,21 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
 - 已发布 feed 出现批量错误或 GUID 重复
 - 数据库完整性检查失败或无可用备份
 
+
+
+## 公网运行（ADR 0016）
+
+服务经隧道暴露公网后（仅 Reader API 路由；`/v1` 与 `/mcp` 是否放行由隧道路由
+自行决定），以下信号与处置是新的：
+
+- **429 `rate_limited`**：某个客户端地址的 401/403 在 5 分钟内超过 50 次，
+  已被阻断 15 分钟。若是你自己的客户端——它拿的是过期凭据，先改 `.env` 再
+  重启，等阻断自然过期；若是陌生地址——忽略即可，它已经被限速。
+- **审计 30 天滚动**：`audit_log` 每小时由调度器清理一次（
+  `PEARSS_AUDIT_RETENTION_DAYS`，0 = 永久）。取证窗口是 30 天，需要长期留存
+  的在清理前导出。调度器关闭（`PEARSS_SCHEDULER_ENABLED=0`）时清理不运行。
+- **Reader token 永不过期**（ADR 0016 决定，风险已知并接受）：怀疑泄露时
+  立即修改 `PEARSS_READER_PASSWORD` 并 `just service-restart`——所有已登录
+  客户端的 token 随哈希轮换而全部失效，需重新登录。
+- **凭据泄露总处置**：改 `.env` 中对应 token → `just service-restart` →
+  检查 `audit_log` 中该 token 名下的操作记录（30 天窗口内）。

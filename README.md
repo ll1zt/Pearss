@@ -13,7 +13,6 @@ P1 目标提供：
 - OPML 导入导出
 - 2–3 个准插件网页采集器
 - 固定与自适应调度策略
-- 标准 RSS 输出，供 NetNewsWire 订阅
 - FastAPI Core API 与 FastMCP 操作面
 - 发布闸门、错误分类、审计、fixture 回归测试
 
@@ -82,7 +81,7 @@ just run 100.64.0.1 8000  # 绑到某个地址，例如 Tailscale
 
 1. `POST /v1/sources`（或 MCP `add_source`⚠）添加一个 feed
 2. `POST /v1/sources/{id}:trigger`（或 MCP `trigger_job`⚠）立即抓取；此后由调度器自动续抓
-3. 订阅 `GET /feeds/default.xml`，或用 NNW 的 FreshRSS 账号连 `/api/greader.php`
+3. 用 NNW 的 FreshRSS 账号连 `/api/greader.php`（公开 RSS 输出已移除，见 ADR 0016）
 4. `GET /v1/items` / MCP `search_items` 查条目；正文走 `item://{id}` Resource
 5. `GET /v1/jobs/{id}/runs` / `GET /v1/system/snapshot` 检查采集健康
 
@@ -138,8 +137,44 @@ just uninstall-unit  # 停用并移除
 监听地址与端口写在 `.env`，unit 本身不含这些细节：
 
 ```bash
-PEARSS_BIND_HOST=0.0.0.0   # 127.0.0.1 仅本机；0.0.0.0 同时开放局域网与 Tailscale
+PEARSS_BIND_HOST=127.0.0.1  # 隧道部署（ADR 0016）只绑本机，由隧道代理对外
 PEARSS_PORT=8000
+```
+
+## 公网暴露（隧道部署，ADR 0016）
+
+公开 RSS 输出已移除：公网只暴露已鉴权的 Reader API（`/api/greader.php`），
+RSS 客户端一律用 NNW 的 FreshRSS 账号连接。`/v1` 与 `/mcp` 默认不暴露，
+是否把 agent 面放公网由隧道路由规则自行决定（有 token 与限速保护）。
+
+**Cloudflare Tunnel**（推荐，按路径只路由 Reader API）：
+
+```ini
+# ~/.cloudflared/config.yml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+ingress:
+  - hostname: pearss.example.com
+    path: ^/api/greader\.php
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+**Tailscale Funnel** 注意：Funnel 按主机名整源暴露，不支持路径路由——
+必须同时设置 `PEARSS_DOCS_ENABLED=0` 关闭 Swagger/openapi.json，
+否则完整 API schema 会对公网披露。
+
+应用侧已内置（无需反代配置）：401/403 失败按地址限速（默认 50 次/5 分钟，
+超限 429 十五分钟）、请求体上限 1MB（超限 413）、全响应 `nosniff`、
+审计行 30 天滚动保留。`just serve` 已带 `--proxy-headers`，限速按
+X-Forwarded-For 的真实客户端地址计数。相关开关：
+
+```bash
+PEARSS_DOCS_ENABLED=0              # 关闭 Swagger/redoc/openapi.json
+PEARSS_AUDIT_RETENTION_DAYS=30     # 审计保留天数，0 = 永久
+PEARSS_MAX_BODY_BYTES=1048576      # 请求体上限，0 = 不限
+PEARSS_AUTH_RATELIMIT_MAX=50       # 失败预算，0 = 关闭限速
+PEARSS_ALLOW_PRIVATE_FETCH=0       # 1 = 允许采集私网地址的源
 ```
 
 服务跑在 `nix develop` 里，与 CI 用同一套解释器与工具链；崩溃自动重启，
@@ -253,8 +288,7 @@ RSS 输出与 Reader API 都已可用，两条路径用途不同：
 
 | 路径 | 地址 | 用途 |
 |---|---|---|
-| RSS 输出 | `http://<host>:8000/feeds/default.xml` | 内容投递（最近 **200** 条窗口） |
-| Reader API | `http://<host>:8000/api/greader.php` | 已读/星标多端同步 |
+| Reader API | `http://<host>:8000/api/greader.php` | 内容消费 + 已读/星标多端同步（公开 RSS 输出已移除，ADR 0016） |
 
 Reader API 需要设置凭据（写入未提交的 `.env`）：
 
@@ -267,9 +301,6 @@ PEARSS_READER_PASSWORD=<your-password>
 用户名与密码填上面的值。库内只保存 scrypt 哈希，明文密码只存在于环境变量。
 
 > **改密码会让 token 失效**，所有已登录客户端需要重新登录——token 由哈希派生，见 ADR 0005。
-
-> RSS 是**窗口不是档案库**：只渲染最近 200 条，窗口外的条目仍可通过 `/v1/items` 查询与
-> Reader API 取到。此前无上限时单次渲染达 5.7 MB / 4677 条。
 
 ## X（Twitter）源：登录型采集
 

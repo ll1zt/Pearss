@@ -142,7 +142,8 @@ serve:
     set +a
     exec uv run uvicorn app.main:app \
         --host "${PEARSS_BIND_HOST:-127.0.0.1}" \
-        --port "${PEARSS_PORT:-8000}"
+        --port "${PEARSS_PORT:-8000}" \
+        --proxy-headers --forwarded-allow-ips="127.0.0.1"
 
 # ---------------------------------------------------------------------------
 # Service (systemd user unit; see deploy/pearss.service)

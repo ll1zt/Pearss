@@ -66,3 +66,4 @@ docs/adr/
 | [0013](0013-get-item-body-tool.md) | 允许 get_item_body 工具，以截断为条件 | accepted（**修订 AGENTS.md 第 99 行**） | 2026-09-05 |
 | [0014](0014-zhihu-collector-fetch-hook.md) | 知乎采集器与注册表的可选 fetch 钩子 | accepted | 2026-09-06 |
 | [0015](0015-zsxq-collector-scope-query-param.md) | 知识星球采集器：scope 即 URL 查询参数 | accepted | 2026-09-06 |
+| [0016](0016-public-exposure-hardening.md) | 公网暴露：移除公开 RSS 输出，隧道优先，防御内移 | accepted（**修订 §1.2 Swagger 兜底、§6 C1、§2.1 AuditLog 保留**） | 2026-09-06 |
