@@ -14,6 +14,7 @@ import pytest
 
 from adapters.raw_payload import ConditionalState, RawPayload
 from app import collector_registry
+from core.models import ItemDraft
 
 
 def _payload() -> RawPayload:
@@ -32,7 +33,18 @@ def test_fetch_hook_is_declared_not_probed() -> None:
         registration = collector_registry.by_name(name)
         assert registration is not None
         assert registration.fetches is False
-    assert collector_registry.by_name("twitter").paged is True
+    twitter = collector_registry.by_name("twitter")
+    assert twitter is not None and twitter.paged is True
+
+
+@pytest.mark.unit
+def test_zhihu_declares_its_own_fetch() -> None:
+    # The signed Zhihu API is why the hook exists; the registration records
+    # that decision explicitly rather than probing the module.
+    registration = collector_registry.by_name("zhihu")
+    assert registration is not None
+    assert registration.fetches is True
+    assert registration.paged is False
 
 
 @pytest.mark.unit
@@ -44,7 +56,13 @@ def test_plain_registration_fetches_through_the_adapter(
 
     seen: dict[str, object] = {}
 
-    def fake_fetch(url, *, client, source_id, conditional):
+    def fake_fetch(
+        url: str,
+        *,
+        client: httpx.Client,
+        source_id: str,
+        conditional: ConditionalState | None,
+    ) -> RawPayload:
         seen["url"] = url
         seen["source_id"] = source_id
         seen["conditional"] = conditional
@@ -78,10 +96,11 @@ def test_fetching_registration_uses_its_own_hook(
 
         @staticmethod
         def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
-            return RawPayload(url=url, status_code=200, body=f"signed:{source_id}".encode())
+            body = f"signed:{source_id}".encode()
+            return RawPayload(url=url, status_code=200, body=body)
 
         @staticmethod
-        def parse(raw: RawPayload) -> list:
+        def parse(raw: RawPayload) -> list[ItemDraft]:
             return []
 
     registration = collector_registry.Registration(

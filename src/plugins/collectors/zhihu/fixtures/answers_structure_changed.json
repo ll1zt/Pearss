@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 404,
+    "name": "Not Found",
+    "message": "用户不存在"
+  }
+}

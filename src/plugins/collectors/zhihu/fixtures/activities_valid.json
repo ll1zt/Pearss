@@ -1,0 +1,143 @@
+{
+  "paging": {
+    "is_end": true,
+    "totals": 6,
+    "next": ""
+  },
+  "data": [
+    {
+      "id": 4100001,
+      "verb": "ANSWER_VOTE_UP",
+      "action_text": "赞同了回答",
+      "created_time": 1767225600,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "answer",
+        "id": 3100001,
+        "question": {
+          "id": 5501001,
+          "title": "在单人项目里，如何让约定不靠自觉？"
+        },
+        "author": {
+          "name": "原作者乙",
+          "url_token": "example-b"
+        },
+        "content": "<p>这是被赞同回答的正文。</p>"
+      }
+    },
+    {
+      "id": 4100002,
+      "verb": "PIN_CREATE",
+      "action_text": "发布了想法",
+      "created_time": 1767139200,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "pin",
+        "id": 6100001,
+        "author": {
+          "name": "示例用户",
+          "url_token": "example"
+        },
+        "content": [
+          {
+            "type": "text",
+            "own_text": "这是一个足够长的想法正文，用来验证标题截断逻辑是否按六十字符上限生效。再补一段，把正文长度真正推过六十字的标题上限，看看省略号是否如期出现。"
+          },
+          {
+            "type": "image",
+            "url": "https://picx.zhimg.com/v2-pin_xl.jpg"
+          },
+          {
+            "type": "video",
+            "playlist": [
+              {
+                "url": "https://v.vzuu.com/video/example-low"
+              },
+              {
+                "url": "https://v.vzuu.com/video/example-hd",
+                "width": 720,
+                "height": 1280
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 4100003,
+      "verb": "MEMBERS_COLLECT_FAVORITE",
+      "action_text": "收藏了文章",
+      "created_time": 1767052800,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "article",
+        "id": 3200001,
+        "title": "示例文章：推导式调度的推导",
+        "author": {
+          "name": "原作者丙",
+          "url_token": "example-c"
+        },
+        "content": "<p>被收藏文章的正文。</p>"
+      }
+    },
+    {
+      "id": 4100004,
+      "verb": "QUESTION_FOLLOW",
+      "action_text": "关注了问题",
+      "created_time": 1766966400,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "question",
+        "id": 5501003,
+        "title": "被关注的问题"
+      }
+    },
+    {
+      "id": 4100005,
+      "verb": "QUESTION_CREATE",
+      "action_text": "提出了问题",
+      "created_time": 1766880000,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "question",
+        "id": 5501004,
+        "title": "新提出的问题"
+      }
+    },
+    {
+      "id": 4100006,
+      "verb": "MEMBER_READ_EBOOK",
+      "action_text": "试读了电子书",
+      "created_time": 1766793600,
+      "actor": {
+        "name": "示例用户",
+        "url_token": "example",
+        "headline": "一句话简介"
+      },
+      "target": {
+        "type": "ebook",
+        "id": 90001
+      }
+    }
+  ]
+}

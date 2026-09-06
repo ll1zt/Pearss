@@ -1,0 +1,22 @@
+{
+  "paging": {"is_end": true, "totals": 2, "next": ""},
+  "data": [
+    {
+      "id": 3100001,
+      "type": "answer",
+      "question": {"id": 5501001, "title": "在单人项目里，如何让约定不靠自觉？"},
+      "author": {"name": "示例作者甲", "url_token": "example-a"},
+      "content": "<p>先写测试，再让 CI 替你记仇。</p><p class=\"ztext-empty-paragraph\"><br></p><p>详见<a href=\"https://link.zhihu.com/?target=https%3A%2F%2Fexample.com%2Fpost\">博客原文</a>。</p>",
+      "created_time": 1767225600,
+      "voteup_count": 12
+    },
+    {
+      "id": 3100002,
+      "type": "answer",
+      "question": {"id": 5501002, "title": "SQLite 什么时候该换 Postgres？"},
+      "author": {"name": "示例作者甲", "url_token": "example-a"},
+      "content": "<p>单写者够用就不换。</p>",
+      "created_time": 1767139200
+    }
+  ]
+}

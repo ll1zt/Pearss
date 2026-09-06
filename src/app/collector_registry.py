@@ -23,6 +23,7 @@ from core.models import ItemDraft
 from plugins.collectors.rss import collector as rss
 from plugins.collectors.telegram import collector as telegram
 from plugins.collectors.twitter import collector as twitter
+from plugins.collectors.zhihu import collector as zhihu
 
 
 class CollectorError(Exception):
@@ -101,10 +102,11 @@ class Registration:
 # Order matters: the first match wins, so the more specific matcher goes first.
 # Telegram is checked before RSS because a t.me URL is unambiguous, whereas the
 # RSS matcher looks for path fragments that a channel URL could theoretically
-# contain.
+# contain. Zhihu is host-scoped and unambiguous for the same reason.
 REGISTRY: tuple[Registration, ...] = (
     Registration(name="telegram", collector=telegram),
     Registration(name="twitter", collector=twitter, paged=True),
+    Registration(name="zhihu", collector=zhihu, fetches=True),
     Registration(name="rss", collector=rss),
 )
 
@@ -154,7 +156,11 @@ def parse_with(registration: Registration, raw: RawPayload) -> list[ItemDraft]:
     """
     try:
         return registration.collector.parse(raw)
-    except (rss.CollectorError, telegram.CollectorError) as exc:
+    except (
+        rss.CollectorError,
+        telegram.CollectorError,
+        zhihu.CollectorError,
+    ) as exc:
         raise CollectorError(exc.error_class, exc.detail) from exc
 
 

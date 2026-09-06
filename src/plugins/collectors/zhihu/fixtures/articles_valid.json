@@ -1,0 +1,23 @@
+{
+  "paging": {"is_end": true, "totals": 2, "next": ""},
+  "data": [
+    {
+      "id": 3200001,
+      "type": "article",
+      "title": "示例文章：推导式调度的推导",
+      "author": {"name": "示例作者甲", "url_token": "example-a"},
+      "content": "<p>正文第一段。</p><p><img class=\"origin_image zh-lightbox-thumb\" src=\"https://picx.zhimg.com/v2-example_small_b.jpg\" data-actualsrc=\"https://picx.zhimg.com/v2-example_big.jpg\" width=\"720\"></p><p>正文第二段。</p>",
+      "created": 1767052800,
+      "updated": 1767139200
+    },
+    {
+      "id": 3200002,
+      "type": "article",
+      "title": "示例文章：仅标题与正文",
+      "author": {"name": "示例作者甲", "url_token": "example-a"},
+      "content": "<p>短文正文。</p>",
+      "created": 1766966400,
+      "updated": 1766966400
+    }
+  ]
+}
