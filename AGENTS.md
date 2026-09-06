@@ -111,6 +111,9 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 - 新爬虫优先使用官方 RSS/Atom；只有 feed 不存在或内容不完整时才实现网页采集
 - 每个采集器必须含有效、空结果、结构变化的脱敏 fixture 与预期 `ItemDraft`
 - 不在采集器中混入数据库访问、RSS 输出或调度逻辑
+- 登录型/签名源在注册表声明 `fetches=True` 自取页面（ADR 0014）；钩子的失败
+  契约是 `FetchError(ErrorClass)`——凭据缺失在采集器边界映射为 `auth`，不得
+  让其他异常类型逃过 pipeline 的分类
 - P1 不引入 manifest/动态安装；硬编码注册的准插件即可
 
 ### 安全与隐私

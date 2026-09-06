@@ -293,6 +293,42 @@ PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD 的值>
 > cookie —— 持有它等于持有你同步过的全部站点会话（含银行、邮箱）。用**只含阅读器所需
 > 站点的专用 uuid**，别指向整个浏览器档案。详见 ADR 0012。
 
+## 知乎与知识星球源：登录型采集
+
+两个源都走 fetch 钩子自取 API 页（ADR 0014/0015），加源时 `type` 填 `web`。
+凭据写入 `.env`，与 X 共用同一 CookieCloud 部署（按 domain 过滤）：
+
+```bash
+# 知乎：Cookie 须含 d_c0（x-zse-96 签名绑定该值，本地计算）
+PEARSS_ZHIHU_COOKIES="d_c0=…; z_c0=…"
+# 或走 CookieCloud（domain=zhihu.com）
+
+# 知识星球：裸 token 即可
+PEARSS_ZSXQ_ACCESS_TOKEN="…"
+# 或完整 Cookie：PEARSS_ZSXQ_COOKIE="zsxq_access_token=…; …"
+```
+
+源 URL 与路由：
+
+```text
+https://www.zhihu.com/people/<url_token>           # 动态（裸 URL 的默认路由）
+https://www.zhihu.com/people/<url_token>/answers   # 回答
+https://www.zhihu.com/people/<url_token>/posts     # 文章（org/<name>/posts 为机构）
+https://wx.zsxq.com/dweb2/index/group/<group_id>                       # 最新
+https://wx.zsxq.com/dweb2/index/group/<group_id>?scope=digests         # 精华等栏目
+```
+
+行为要点：
+
+- **知乎**动态会丢弃「关注了…」「提出了问题」类噪音，其余条目打动作标签
+  （[赞同] [创作] [收藏]）；401 时若走 CookieCloud 自动刷新重试一次，403 是
+  `blocked` 不重试。
+- **知识星球**的裸 URL 就是 `scope=all` 的规范形态——不要用 `?scope=all`
+  显式订阅，那会给同一个 feed 建第二个身份；业务码 1059（风控）按上游惯例
+  退避重试 3 次，耗尽即 `blocked`。
+- 两者凭据只存在于 `.env` 与内存；会话失效表现为 `auth` 分类的失败 run，
+  `get_system_snapshot` 可见。
+
 ## 数据与密钥
 
 - 开发数据目录、SQLite 数据库、原始抓取内容、TTS 产物、`.venv`、Nix store 一律不提交 Git
