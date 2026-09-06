@@ -35,6 +35,7 @@ import httpx
 from lxml import etree
 from lxml import html as lxml_html
 
+from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
@@ -183,12 +184,21 @@ def api_path_for(route: SourceRoute) -> tuple[str, str]:
 
 
 def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
-    """Fetch the API page a source URL names (the registry's fetch hook)."""
+    """Fetch the API page a source URL names (the registry's fetch hook).
+
+    The hook's failure contract is FetchError, so a missing session maps to
+    `auth` here — the pipeline classifies FetchError, and an uncaught
+    CredentialError would surface as an unexplained 500 instead of a run
+    a diagnostic can read.
+    """
     route = resolve_source(url)
     api_path, referer = api_path_for(route)
-    return zhihu_client.get_json(
-        api_path, client=client, source_id=source_id, referer=referer
-    )
+    try:
+        return zhihu_client.get_json(
+            api_path, client=client, source_id=source_id, referer=referer
+        )
+    except zhihu_client.CredentialError as exc:
+        raise FetchError(ErrorClass.AUTH, str(exc)) from exc
 
 
 def parse(raw: RawPayload) -> list[ItemDraft]:
