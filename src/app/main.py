@@ -16,28 +16,22 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
-from adapters.repository import (
-    items_ready_for_feed,
-    mark_published,
-)
-from adapters.rss_out import FeedMeta, render_feed
 from app.auth import Principal, auth_configured, write_required
 from app.items_routes import router as items_router
 from app.mcp_guard import MCPAuthMiddleware, warn_if_unconfigured
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
-from app.pipeline import bodies_for, normalise_and_store
+from app.pipeline import normalise_and_store
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
@@ -188,6 +182,22 @@ def _safe_errors(errors: object) -> list[dict[str, object]]:
     return safe
 
 
+def docs_enabled() -> bool:
+    """Whether Swagger/redoc/openapi.json are served.
+
+    Swagger is the documented fallback admin UI (spec 1.2), so it stays on by
+    default; on a public deployment the tunnel routes only the Reader API and
+    this flag turns the fallback off entirely (ADR 0016), because an
+    unauthenticated /openapi.json hands an attacker the full API surface.
+    """
+    return os.environ.get("PEARSS_DOCS_ENABLED", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     """Build the application.
 
@@ -199,6 +209,9 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         description="Single-user, agent-first RSS+ system.",
         version="0.1.0",
         lifespan=lifespan,
+        docs_url="/docs" if docs_enabled() else None,
+        redoc_url="/redoc" if docs_enabled() else None,
+        openapi_url="/openapi.json" if docs_enabled() else None,
     )
     app.state.session_factory = session_factory or create_session_factory()
 
@@ -258,48 +271,6 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     def healthz() -> dict[str, str]:
         """Liveness probe with no dependency on the database."""
         return {"status": "ok"}
-
-    # Declared `def`, not `async def`, on purpose. The work is synchronous
-    # (SQLAlchemy and lxml), so FastAPI runs it in a threadpool and the event
-    # loop stays free. Marking it `async def` would make every request block
-    # the loop and serialise the server — verified by
-    # test_concurrent_feed_requests_do_not_serialise, which fails with a
-    # blocking call under `async def` and passes under `def`.
-    @app.get("/feeds/{feed_id}.xml", tags=["feeds"])
-    def read_feed(feed_id: str) -> Response:
-        """Render one RSS feed.
-
-        Only items the gate permits are included. Rendering also records
-        first publication, which freezes those items' content — so this
-        endpoint is not side-effect free, and a client's first poll is the
-        moment an item becomes permanent.
-        """
-        if feed_id != "default":
-            raise HTTPException(status_code=404, detail="unknown feed")
-
-        with app.state.session_factory() as session:
-            items = items_ready_for_feed(session)
-            now = datetime.now(UTC)
-            published = mark_published(session, items, at=now)
-            session.commit()
-
-            if published:
-                LOGGER.info("first publication recorded for %d item(s)", published)
-
-            body = render_feed(
-                FeedMeta(
-                    title="Pearss",
-                    link="/",
-                    description="All collected items.",
-                ),
-                items,
-                bodies_for(session, items),
-            )
-
-        return Response(
-            content=body,
-            media_type="application/rss+xml; charset=utf-8",
-        )
 
     @app.post("/internal/items", tags=["internal"])
     def ingest_draft(

@@ -7,6 +7,7 @@ database.
 
 from __future__ import annotations
 
+import json
 import asyncio
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -121,7 +122,7 @@ def draft_payload() -> dict[str, object]:
 
 
 # --------------------------------------------------------------------------
-# Health and feeds
+# Health, ingestion visibility, and the removed public feed
 # --------------------------------------------------------------------------
 
 
@@ -135,33 +136,30 @@ async def test_healthz_reports_ok(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_empty_feed_is_valid_rss(client: httpx.AsyncClient) -> None:
-    response = await client.get("/feeds/default.xml")
-    assert response.status_code == 200
-    assert "application/rss+xml" in response.headers["content-type"]
-    assert "<rss" in response.text
-    assert "<item>" not in response.text
+async def test_removed_feed_route_serves_nothing(client: httpx.AsyncClient) -> None:
+    """The public RSS render is gone (ADR 0016): no route, no content, no 500.
 
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_unknown_feed_is_404(client: httpx.AsyncClient) -> None:
+    Content is consumed through the authenticated Reader API, so a feed URL —
+    real or invented — must answer 404 rather than leak or half-exist.
+    """
+    assert (await client.get("/feeds/default.xml")).status_code == 404
     assert (await client.get("/feeds/nonexistent.xml")).status_code == 404
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_ingested_item_appears_in_the_feed(client: httpx.AsyncClient) -> None:
+async def test_ingested_item_is_queryable(client: httpx.AsyncClient) -> None:
     created = await client.post("/internal/items", json=draft_payload())
     assert created.status_code == 200
     guid = created.json()["guid"]
     assert created.json()["action"] == "insert"
 
-    feed = await client.get("/feeds/default.xml")
-    assert guid in feed.text
+    body = (await client.get("/v1/items?limit=10")).json()
+    rows = [row for row in body["data"] if row["guid"] == guid]
+    assert len(rows) == 1
     # Tracking parameter stripped during normalisation.
-    assert "utm_source" not in feed.text
-    assert "https://blog.example.com/2026/01/posted" in feed.text
+    assert "utm_source" not in json.dumps(rows)
+    assert rows[0]["url"] == "https://blog.example.com/2026/01/posted"
 
 
 @pytest.mark.integration
@@ -173,8 +171,8 @@ async def test_ingest_is_idempotent(client: httpx.AsyncClient) -> None:
     assert first["guid"] == second["guid"]
     assert second["action"] == "skip_same_source"
 
-    feed = await client.get("/feeds/default.xml")
-    assert feed.text.count("<item>") == 1
+    body = (await client.get("/v1/items?limit=10")).json()
+    assert len(body["data"]) == 1
 
 
 @pytest.mark.integration
@@ -199,21 +197,21 @@ async def test_pending_items_never_appear(
             store_item(session, item)
         session.commit()
 
-    feed = await client.get("/feeds/default.xml")
+    body = (await client.get("/v1/items?limit=10")).json()
     for item in items:
-        assert item.guid not in feed.text
+        assert item.guid not in json.dumps(body)
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_feed_leaks_no_internal_ids(client: httpx.AsyncClient) -> None:
+async def test_internal_id_differs_from_public_guid(client: httpx.AsyncClient) -> None:
     created = (await client.post("/internal/items", json=draft_payload())).json()
-    feed = await client.get("/feeds/default.xml")
 
-    # The internal row id and the public guid are different values, and only
-    # the guid belongs in the feed.
-    assert created["id"] not in feed.text
-    assert created["guid"] in feed.text
+    # The internal row id and the public guid are different values by
+    # construction; nothing in the system should treat one as the other.
+    assert created["id"] != created["guid"]
+    row = (await client.get(f"/v1/items/{created['id']}")).json()
+    assert row["guid"] == created["guid"]
 
 
 @pytest.mark.integration
@@ -224,6 +222,21 @@ async def test_openapi_is_served(client: httpx.AsyncClient) -> None:
     assert (await client.get("/openapi.json")).status_code == 200
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_docs_can_be_disabled_for_public_deployments(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR 0016: an unauthenticated /openapi.json hands over the whole API
+    surface, so a public deployment turns the fallback UI off entirely."""
+    monkeypatch.setenv("PEARSS_DOCS_ENABLED", "0")
+    hardened = create_app(session_factory)
+    transport = httpx.ASGITransport(app=hardened)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as aclient:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert (await aclient.get(path)).status_code == 404, path
+
+
 # --------------------------------------------------------------------------
 # Concurrency: the app must not block the event loop
 # --------------------------------------------------------------------------
@@ -231,7 +244,7 @@ async def test_openapi_is_served(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_concurrent_feed_requests_do_not_serialise(app: FastAPI) -> None:
+async def test_concurrent_query_requests_do_not_serialise(app: FastAPI) -> None:
     """Ten concurrent requests must not take ten times as long as one.
 
     A blocking call inside an async handler would serialise them, which is
@@ -240,7 +253,7 @@ async def test_concurrent_feed_requests_do_not_serialise(app: FastAPI) -> None:
     transport = httpx.ASGITransport(app=app)
 
     async def once(aclient: httpx.AsyncClient) -> None:
-        await aclient.get("/feeds/default.xml")
+        await aclient.get("/v1/items?limit=5")
 
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test"
@@ -431,7 +444,7 @@ async def test_reads_are_not_audited_but_refusals_are(
     # AuditLog is a fact source kept forever, so routine reads would grow it
     # for no investigative benefit. A refused request is the opposite: worth
     # retaining.
-    await client.get("/feeds/default.xml")
+    await client.get("/v1/items")
     with app.state.session_factory() as session:
         after_read = session.execute(sa.text("select count(*) from audit_log")).scalar()
 

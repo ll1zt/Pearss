@@ -25,7 +25,13 @@ from pydantic import BaseModel
 
 from adapters.correlation import current as current_correlation_id
 from adapters.filestore import read_body
-from adapters.repository import ItemFilter, get_item, query_items, timestamp
+from adapters.repository import (
+    ItemFilter,
+    get_item,
+    mark_published,
+    query_items,
+    timestamp,
+)
 from app.auth import Principal, read_required
 from app.sources_routes import api_error
 from core.enums import PublishStatus
@@ -290,28 +296,36 @@ def read_item_body(
     Separate by design: docs/api/style-guide.md forbids inlining HTML bodies in
     list responses, and the architecture routes large content through an
     explicit reference so a caller pays for it only when it asks.
+
+    Serving a body is an observable first publication (ADR 0016: with the
+    public RSS render removed, this and the Reader API are the paths where a
+    client actually sees content), so the item's content is frozen here — the
+    immutability guarantee exists because clients cache what they were shown.
     """
     del _
     with request.app.state.session_factory() as session:
         item = get_item(session, item_id)
-    if item is None or item.publish_status is PublishStatus.PENDING:
-        raise api_error(
-            status_code=404,
-            code="item_not_found",
-            message=f"No item with id {item_id!r}.",
-            suggestion="Search items to find the intended id.",
-        )
-    if not item.content_ref:
-        raise api_error(
-            status_code=404,
-            code="body_not_stored",
-            message="This item has no stored body.",
-            suggestion=(
-                "The source may publish no body, or the item predates body "
-                "storage. Check content_ref on the item."
-            ),
-        )
-    body = read_body(item.content_ref)
+        if item is None or item.publish_status is PublishStatus.PENDING:
+            # A pending item is reported absent rather than as forbidden:
+            # saying "this exists but you may not see it" would leak the
+            # gate's decisions to a caller who has no business knowing them.
+            raise api_error(
+                status_code=404,
+                code="item_not_found",
+                message=f"No item with id {item_id!r}.",
+                suggestion="Search items to find the intended id.",
+            )
+        if not item.content_ref:
+            raise api_error(
+                status_code=404,
+                code="body_not_stored",
+                message="This item has no stored body.",
+                suggestion=(
+                    "The source may publish no body, or the item predates body "
+                    "storage. Check content_ref on the item."
+                ),
+            )
+        body = read_body(item.content_ref)
     if not body:
         raise api_error(
             status_code=404,
@@ -320,4 +334,11 @@ def read_item_body(
             suggestion="Check the storage directory and the item's content_ref.",
             details=[{"content_ref": item.content_ref}],
         )
+
+    # Only a successful read freezes the item: a corrupt store must not be
+    # mistaken for a published one.
+    with request.app.state.session_factory() as session:
+        mark_published(session, [item], at=datetime.now(UTC))
+        session.commit()
+
     return Response(content=body, media_type="text/html; charset=utf-8")
