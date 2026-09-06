@@ -79,6 +79,10 @@ ignore = []
 # trips them no matter how it is named. The credential is generated per test
 # and injected via monkeypatch; it is never a real secret.
 "tests/integration/test_reader_api.py" = ["S105", "S106"]
+# Zhihu feed content is Chinese prose: fullwidth punctuation in titles and
+# bodies is the product, not an ambiguous ASCII lookalike. The MD5 in the
+# signature module is Zhihu's own web-API protocol, not a password hash.
+"src/plugins/collectors/zhihu/**" = ["RUF001", "S324"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]
