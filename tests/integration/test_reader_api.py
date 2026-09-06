@@ -293,6 +293,29 @@ async def test_subscription_list(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_subscription_list_excludes_a_deleted_source(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """A soft-deleted source must not linger in the client's sidebar.
+
+    The source row survives (its items are published and frozen), but the
+    subscription itself is gone, so the listing has to say so.
+    """
+    with app.state.session_factory() as session:
+        session.execute(
+            sa.text("update source set status = 'deleted' where id = 'src-1'")
+        )
+        session.commit()
+
+    response = await client.get(
+        "/api/greader.php/reader/api/0/subscription/list",
+        headers=auth_header(await login(client)),
+    )
+    assert response.json()["subscriptions"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_tag_list_offers_the_starred_state(client: httpx.AsyncClient) -> None:
     response = await client.get(
         "/api/greader.php/reader/api/0/tag/list",

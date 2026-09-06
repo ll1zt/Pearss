@@ -277,10 +277,22 @@ def subscription_list(
     request: Request, _: str = Depends(authenticate_any)
 ) -> dict[str, list[dict[str, object]]]:
     from adapters.db_models import Source
+    from core.enums import SourceStatus
     from core.normalize import source_display_label
 
     with request.app.state.session_factory() as session:
-        rows = session.query(Source).all()
+        rows = (
+            session.query(Source)
+            .filter(
+                Source.tenant_id == TENANT,
+                # A deleted source's items stay published, but the source is
+                # gone: listing it would put a dead subscription back into the
+                # client's sidebar on every refresh. Paused stays listed — the
+                # operator may resume it, and its history is still readable.
+                Source.status != SourceStatus.DELETED.value,
+            )
+            .all()
+        )
 
     subscriptions = [
         {
