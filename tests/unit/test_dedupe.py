@@ -108,6 +108,32 @@ def test_ready_twin_is_related_not_suppressed() -> None:
 
 
 @pytest.mark.unit
+def test_published_twin_governs_even_when_listed_second() -> None:
+    # With one ready and one published copy of the same content, the published
+    # one decides the outcome regardless of the order the rows arrived in — a
+    # database-order dependence here would make suppress-vs-related random.
+    existing = [
+        item(
+            item_id="i1",
+            source_id="src-1",
+            content_hash="hash-a",
+            status=PublishStatus.READY,
+        ),
+        item(
+            item_id="i2",
+            source_id="src-2",
+            content_hash="hash-a",
+            status=PublishStatus.PUBLISHED,
+        ),
+    ]
+    decision = decide_dedupe(
+        item(item_id="i3", source_id="src-3", content_hash="hash-a"), existing
+    )
+    assert decision.action is DedupeAction.SUPPRESS
+    assert decision.matched_id == "i2"
+
+
+@pytest.mark.unit
 def test_same_source_takes_precedence_over_published_twin() -> None:
     # A re-fetch of the row we already have is a skip, regardless of what other
     # sources have done with the same content.

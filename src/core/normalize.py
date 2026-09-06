@@ -547,7 +547,18 @@ def decide_dedupe(
             reason="same content_hash already stored from this source",
         )
 
-    cross_source = matches[0]
+    # The published copy governs when several exist in different states: the
+    # reader has already been shown the article through it, so our copy must
+    # not become a second one. Picking matches[0] would make the decision
+    # depend on the database's row order, which is not a decision at all.
+    cross_source = next(
+        (
+            match
+            for match in matches
+            if match.publish_status is PublishStatus.PUBLISHED
+        ),
+        matches[0],
+    )
     if cross_source.publish_status is PublishStatus.PUBLISHED:
         # The reader has already been shown this article. Publishing our copy
         # under a different GUID is exactly the silent duplicate the model
