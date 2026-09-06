@@ -179,6 +179,9 @@ class RawFetch(Base):
             "error_class",
             ("network", "parse", "structure_changed", "blocked", "auth"),
         ),
+        # The conditional-request state for the next fetch is the most recent
+        # row for a source; raw_fetch only grows, so this needs an index.
+        sa.Index("ix_raw_fetch_source_id_fetched_at", "source_id", "fetched_at"),
     )
 
 
@@ -223,6 +226,9 @@ class Item(Base):
         ),
         sa.UniqueConstraint("tenant_id", "guid", name="uq_item_guid"),
         sa.Index("ix_item_status_published", "publish_status", "published_at"),
+        # Cross-source dedupe looks items up by content hash once per stored
+        # draft during every collection.
+        sa.Index("ix_item_content_hash", "content_hash"),
     )
 
 
@@ -300,6 +306,10 @@ class JobRun(Base):
             sqlite_where=sa.text("status IN ('queued', 'running')"),
             postgresql_where=sa.text("status IN ('queued', 'running')"),
         ),
+        # The scheduler reads each job's recent runs every tick: the failure
+        # streak walks started_at, the last finished run walks finished_at.
+        sa.Index("ix_job_run_job_id_started_at", "job_id", "started_at"),
+        sa.Index("ix_job_run_job_id_finished_at", "job_id", "finished_at"),
     )
 
 
