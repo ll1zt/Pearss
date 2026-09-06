@@ -63,16 +63,30 @@ def adaptive_interval(
 def next_interval(
     policy: SchedulePolicy,
     observed_gaps: list[float] | None = None,
+    *,
+    consecutive_failures: int = 0,
 ) -> float:
-    """Next interval for a policy, dispatching on its type."""
+    """Next interval for a policy, dispatching on its type.
+
+    `consecutive_failures` comes from run history with every decision, not from
+    the policy: a policy parsed from JSON cannot carry a live counter, so a
+    failure count stored there would always read as zero and the backoff would
+    never engage for adaptive sources.
+    """
     if policy.type == "fixed":
         if policy.interval_seconds is None:
             raise ValueError("fixed policy requires interval_seconds")
-        return float(policy.interval_seconds)
+        interval = float(policy.interval_seconds)
+        if consecutive_failures > 0:
+            interval = min(
+                interval * _backoff_multiplier(consecutive_failures),
+                float(MAX_BACKOFF_SECONDS),
+            )
+        return interval
     return adaptive_interval(
         observed_gaps or [],
         policy,
-        consecutive_failures=policy.consecutive_failures,
+        consecutive_failures=consecutive_failures,
     )
 
 
@@ -154,15 +168,9 @@ def decide_schedule(
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
-    interval = next_interval(policy, observed_update_gaps)
-    # Fold the backoff in for fixed policies too. next_interval applies it for
-    # adaptive ones via the policy's own counter, but a fixed source that keeps
-    # failing must not be retried on its normal cadence either.
-    if policy.type != "adaptive" and consecutive_failures > 0:
-        interval = min(
-            interval * _backoff_multiplier(consecutive_failures),
-            float(MAX_BACKOFF_SECONDS),
-        )
+    interval = next_interval(
+        policy, observed_update_gaps, consecutive_failures=consecutive_failures
+    )
 
     if last_fetch_at is None:
         return ScheduleDecision(

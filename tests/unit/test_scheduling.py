@@ -106,14 +106,12 @@ def test_next_interval_dispatches_on_policy_type() -> None:
 
 
 @pytest.mark.unit
-def test_next_interval_uses_policy_failure_count() -> None:
-    policy = SchedulePolicy(
-        type="adaptive",
-        min_seconds=int(HOUR),
-        max_seconds=int(100 * HOUR),
-        consecutive_failures=2,
+def test_next_interval_applies_failure_backoff() -> None:
+    policy = SchedulePolicy(type="adaptive", min_seconds=int(HOUR), max_seconds=int(100 * HOUR))
+    assert (
+        next_interval(policy, [2 * HOUR], consecutive_failures=2)
+        == pytest.approx(8 * HOUR)
     )
-    assert next_interval(policy, [2 * HOUR]) == pytest.approx(8 * HOUR)
 
 
 @pytest.mark.unit
@@ -217,25 +215,23 @@ def test_fixed_policy_backs_off_after_failures() -> None:
 
 @pytest.mark.unit
 def test_adaptive_policy_backs_off_too() -> None:
-    # For an adaptive policy the counter rides on the policy itself, matching
-    # how the scheduler reads it out of run history.
+    # Regression: the failure count arrives from run history with every
+    # decision. A counter read from the policy object itself is always zero
+    # for a JSON-parsed policy, which left adaptive sources without backoff.
     calm = decide_schedule(
-        SchedulePolicy(
-            type="adaptive", min_seconds=60, max_seconds=100000, consecutive_failures=0
-        ),
+        SchedulePolicy(type="adaptive", min_seconds=60, max_seconds=100000),
         last_fetch_at=minutes_ago(20),
         observed_update_gaps=[600.0],
         now=NOW,
     )
     failing = decide_schedule(
-        SchedulePolicy(
-            type="adaptive", min_seconds=60, max_seconds=100000, consecutive_failures=3
-        ),
+        SchedulePolicy(type="adaptive", min_seconds=60, max_seconds=100000),
         last_fetch_at=minutes_ago(20),
         observed_update_gaps=[600.0],
+        consecutive_failures=3,
         now=NOW,
     )
-    assert failing.interval_seconds > calm.interval_seconds
+    assert failing.interval_seconds == pytest.approx(calm.interval_seconds * 8)
 
 
 @pytest.mark.unit

@@ -73,8 +73,6 @@ class SchedulePolicy:
     # Adaptive: bounds that the computed interval is clamped to.
     min_seconds: int | None = None
     max_seconds: int | None = None
-    # Consecutive failures so far; drives exponential backoff.
-    consecutive_failures: int = 0
 
     def __post_init__(self) -> None:
         if self.type == "fixed":
