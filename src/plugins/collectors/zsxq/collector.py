@@ -119,7 +119,7 @@ def resolve_source(url: str) -> SourceRoute:
     if host not in _HOSTS:
         raise ValueError(f"not a zsxq group page: {url!r}")
 
-    match = _GROUP_PATH_RE.match(parts.path)
+    match = _GROUP_PATH_RE.match(parts.path.rstrip("/"))
     if match is None:
         raise ValueError(f"not a routable zsxq group page: {url!r}")
 
@@ -164,8 +164,16 @@ def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
     except zsxq_client.CredentialError as exc:
         raise FetchError(ErrorClass.AUTH, str(exc)) from exc
 
+    # The reference fetch_group unwraps `{"group": …}`; some deployments
+    # answer with the group map directly. Accept both, prefer the wrapper.
+    group_resp = json.loads(group_raw.text())
+    group = (
+        group_resp.get("group")
+        if isinstance(group_resp.get("group"), dict)
+        else group_resp
+    )
     merged = {
-        "group": json.loads(group_raw.text()),
+        "group": group,
         "topics": json.loads(topics_raw.text()).get("topics") or [],
     }
     return RawPayload(

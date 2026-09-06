@@ -48,6 +48,15 @@ def test_zhihu_declares_its_own_fetch() -> None:
 
 
 @pytest.mark.unit
+def test_zsxq_declares_its_own_fetch() -> None:
+    # The cookie-authenticated zsxq API goes through the same hook.
+    registration = collector_registry.by_name("zsxq")
+    assert registration is not None
+    assert registration.fetches is True
+    assert registration.paged is False
+
+
+@pytest.mark.unit
 def test_plain_registration_fetches_through_the_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
