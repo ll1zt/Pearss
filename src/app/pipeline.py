@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from adapters import filestore
 from adapters.db_models import Source as SourceRow
-from adapters.http import FetchError, fetch
+from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from adapters.repository import (
     StoreOutcome,
@@ -204,8 +204,23 @@ def _collect_one_page(
     Split out of `collect_source` so a backfill can call it per page without
     duplicating the sequence, and so the single-page case has no loop in it.
     """
+    # Selection happens before any network call: match_url is documented as
+    # network-free, and a URL no collector claims should not be fetched at all.
+    registration = collector_registry.select_for(source.type, url)
+    if registration is None:
+        # Classified as structure_changed rather than parse: nothing here knows
+        # how to read what the origin would return, which is what the
+        # classification means, and unlike a transient decode problem it will
+        # not be retried as if waiting helps.
+        return CollectionResult(
+            succeeded=False,
+            error_class=ErrorClass.STRUCTURE_CHANGED.value,
+            detail=f"no collector registered for {url}",
+        )
+
     try:
-        payload = fetch(
+        payload = collector_registry.fetch_page_with(
+            registration,
             url,
             client=client,
             source_id=source.id,
@@ -219,21 +234,9 @@ def _collect_one_page(
     if payload.not_modified:
         return CollectionResult(succeeded=True, not_modified=True)
 
-    registration = collector_registry.select_for(source.type, url)
-    if registration is not None and registration.paged:
+    if registration.paged:
         return collect_authenticated_pages(
             session, source=source, client=client, tenant_id=tenant_id
-        )
-    if registration is None:
-        # No collector claims this URL. Recording it as structure_changed
-        # rather than parse: the fetch worked, but nothing here knows how to
-        # read what came back — which is what the classification means, and
-        # unlike a generic parse failure it will not be retried as if a
-        # transient decode problem were to blame.
-        return CollectionResult(
-            succeeded=False,
-            error_class=ErrorClass.STRUCTURE_CHANGED.value,
-            detail=f"no collector registered for {url}",
         )
 
     try:

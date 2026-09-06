@@ -14,7 +14,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from adapters.raw_payload import RawPayload
+import httpx
+
+from adapters.http import fetch as plain_fetch
+from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.rss import collector as rss
@@ -50,6 +53,21 @@ class Collector(Protocol):
     def parse(self, raw: RawPayload) -> list[ItemDraft]: ...
 
 
+class FetchingCollector(Protocol):
+    """The optional fetch hook from the hookspec draft (spec section 3).
+
+    A collector whose origin needs signed or cookie-authenticated requests
+    fetches its own page: the plain adapter cannot know how to sign one. The
+    module exposes `fetch(url, *, client, source_id) -> RawPayload` and the
+    registration declares `fetches=True` — declared, not probed, so a module
+    that happens to define the name does not silently change collection.
+    """
+
+    def fetch(
+        self, url: str, *, client: httpx.Client, source_id: str
+    ) -> RawPayload: ...
+
+
 class BackfillingCollector(Protocol):
     """The optional half: an origin that can be walked backwards.
 
@@ -75,6 +93,9 @@ class Registration:
     # `page_ids` attribute says a collector happens to define a function, not
     # that collection should persist a frontier.
     paged: bool = False
+    # The collector fetches its own pages (signed or cookie-authenticated
+    # origins). Same reasoning as `paged`: declared here rather than probed.
+    fetches: bool = False
 
 
 # Order matters: the first match wins, so the more specific matcher goes first.
@@ -135,6 +156,26 @@ def parse_with(registration: Registration, raw: RawPayload) -> list[ItemDraft]:
         return registration.collector.parse(raw)
     except (rss.CollectorError, telegram.CollectorError) as exc:
         raise CollectorError(exc.error_class, exc.detail) from exc
+
+
+def fetch_page_with(
+    registration: Registration,
+    url: str,
+    *,
+    client: httpx.Client,
+    source_id: str,
+    conditional: ConditionalState | None,
+) -> RawPayload:
+    """Fetch through the collector's own hook, or the plain adapter.
+
+    The conditional state is only meaningful to the plain path: a signed API
+    fetch replays no ETag, so the hook's signature omits it rather than
+    accepting an argument it would have to ignore.
+    """
+    if registration.fetches:
+        fetcher = cast("FetchingCollector", registration.collector)
+        return fetcher.fetch(url, client=client, source_id=source_id)
+    return plain_fetch(url, client=client, source_id=source_id, conditional=conditional)
 
 
 def backfiller(registration: Registration) -> BackfillingCollector | None:
