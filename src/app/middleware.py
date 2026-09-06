@@ -15,6 +15,7 @@ the whole point of this middleware, so the propagation guarantee matters.
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import MutableMapping
 from typing import Any
 
@@ -121,7 +122,11 @@ class CorrelationAndAuditMiddleware:
             with self.session_factory() as session:
                 record(
                     session,
-                    audit_id=f"audit-{correlation_id}",
+                    # Random per record, not derived from the correlation id:
+                    # that id may echo a client-supplied X-Request-ID, and a
+                    # client that reuses one would collide on this primary
+                    # key, silently dropping every audit row after the first.
+                    audit_id=f"audit-{secrets.token_hex(8)}",
                     actor=_actor(scope),
                     operation=_operation(scope),
                     # <400 succeeded; any 4xx was refused by us on the caller's

@@ -386,6 +386,31 @@ async def test_write_is_audited_with_actor_and_correlation(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_reused_request_id_does_not_drop_audit_rows(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """A client that reuses X-Request-ID must not lose audit records.
+
+    Regression: the audit row's primary key was derived from the correlation
+    id, which echoes this header — the second write collided and was dropped.
+    """
+    for _ in range(2):
+        response = await client.post(
+            "/internal/items",
+            json=draft_payload(),
+            headers={"X-Request-ID": "reused-by-the-client"},
+        )
+        assert response.status_code == 200
+
+    with app.state.session_factory() as session:
+        count = session.execute(
+            sa.text("select count(*) from audit_log")
+        ).scalar()
+    assert count == 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_credentials_never_reach_the_audit_log(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
