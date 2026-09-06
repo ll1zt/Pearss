@@ -278,6 +278,13 @@ def mark_published(session: Session, items: list[Item], *, at: datetime) -> int:
     """
     if not items:
         return 0
+    # Validate the transition through the state machine, as promote_to_ready
+    # and finish_job_run do. The bulk update below is the efficient form of
+    # `transition(READY, FIRST_PUBLISH)` per row, and its WHERE clause repeats
+    # the machine's guard so a row that moved on in the meantime is skipped
+    # rather than overwritten — but the machine is what makes an illegal
+    # promotion a loud error instead of a silent schema change.
+    item_transition(PublishStatus.READY, ItemEvent.FIRST_PUBLISH)
     ids = [item.id for item in items]
     stamp = timestamp(at)
     # session.execute is typed as returning Result[Any], but a DML statement
