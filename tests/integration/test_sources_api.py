@@ -383,6 +383,43 @@ async def test_delete_is_soft_and_keeps_items(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_readding_a_deleted_source_reactivates_it(
+    writer: httpx.AsyncClient,
+) -> None:
+    """Re-subscribing restores the source instead of returning a dead one.
+
+    Regression: the identity is deterministic from the canonical URL, so the
+    re-add found the deleted row and answered 201 with a source that would
+    never be collected again.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "readd-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+    deleted = await writer.delete(
+        f"/v1/sources/{source_id}", headers={"Idempotency-Key": "readd-del"}
+    )
+    assert deleted.json()["status"] == "deleted"
+
+    readded = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "readd-2"},
+        json={
+            "url": FEED_URL,
+            "schedule_policy": {"type": "fixed", "interval": "2h"},
+        },
+    )
+    assert readded.status_code == 201
+    body = readded.json()
+    assert body["id"] == source_id, "the same identity, revived"
+    assert body["status"] == "active"
+    assert body["schedule_policy"] == {"type": "fixed", "interval": "2h"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_pagination_walks_and_terminates(writer: httpx.AsyncClient) -> None:
     for index in range(3):
         await writer.post(

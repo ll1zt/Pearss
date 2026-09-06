@@ -602,12 +602,25 @@ def create_source(
     Returning the existing row rather than raising is what makes a retried
     create answer with the same body instead of a 409: the caller's intent was
     "this source should exist", and after the first request it does.
+
+    A soft-deleted row is reactivated rather than returned as-is. Answering
+    201 with a `deleted` source would claim success for a subscription that
+    will never be collected again. Reactivation applies the request's url and
+    policy, because the operator is subscribing anew; an existing live source
+    keeps its stored configuration, which is what makes a retried create a
+    no-op rather than a policy change.
     """
     source_id = derive_source_id(
         tenant_id=tenant_id, source_type=source_type, canonical_url=canonical_url
     )
     existing = session.get(SourceRow, source_id)
     if existing is not None:
+        if existing.status == SourceStatus.DELETED.value:
+            existing.status = SourceStatus.ACTIVE.value
+            existing.url = url
+            existing.schedule_policy = schedule_policy
+            existing.updated_at = at
+            session.flush()
         return existing
 
     row = SourceRow(
