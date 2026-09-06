@@ -65,3 +65,4 @@ docs/adr/
 | [0012](0012-authenticated-collectors.md) | 登录型采集器：允许使用用户自供凭据 | accepted（**修订 collector-guide 第 14 行**） | 2026-09-05 |
 | [0013](0013-get-item-body-tool.md) | 允许 get_item_body 工具，以截断为条件 | accepted（**修订 AGENTS.md 第 99 行**） | 2026-09-05 |
 | [0014](0014-zhihu-collector-fetch-hook.md) | 知乎采集器与注册表的可选 fetch 钩子 | accepted | 2026-09-06 |
+| [0015](0015-zsxq-collector-scope-query-param.md) | 知识星球采集器：scope 即 URL 查询参数 | accepted | 2026-09-06 |

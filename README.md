@@ -31,7 +31,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - **Reader API（FreshRSS/Google Reader 兼容）**：NNW 可用 FreshRSS 账号登录，已读/星标多端同步（原定 P3，提前到 P1，见 ADR 0004）
 - **Core API `/v1`**：`/v1/sources` 增删改查 + `:trigger` 立即采集；`/v1/items` 紧凑查询（keyset 分页、字段选择、sort 白名单）+ `/v1/items/{id}/body` 独立取正文；写操作强制 `Idempotency-Key`，统一错误 envelope，审计中间件与 scope 分离的 token 鉴权
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
-- **采集器（4 个）**：`rss`（RSS 2.0 + Atom）、`telegram`（公开频道预览页）、`twitter`（X Following 时间线，**登录型**，见 ADR 0012）、`zhihu`（知乎用户动态/回答/文章，**登录型**，Cookie 或 CookieCloud，见 ADR 0014）。按 URL 选，但**声明类型优先**于 URL 猜测
+- **采集器（4 个）**：`rss`（RSS 2.0 + Atom）、`telegram`（公开频道预览页）、`twitter`（X Following 时间线，**登录型**，见 ADR 0012）、`zhihu`（知乎用户动态/回答/文章，**登录型**，Cookie 或 CookieCloud，见 ADR 0014）、`zsxq`（知识星球群组，**登录型**，见 ADR 0015）。按 URL 选，但**声明类型优先**于 URL 猜测
 - **MCP 控制平面**：11 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数；正文优先走 `item://{item_id}` Resource，不支持 Resource 的客户端可用 `get_item_body`（带截断，ADR 0013）；工具面 snapshot 由 `just contract` 校验
 - **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
@@ -43,7 +43,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - `just e2e`：**未接**，需要 `compose.yaml` 与镜像
 
 其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
-**备份与恢复演练**（§7.5）。采集器 A2 已交付 4 个（RSS / Telegram / X / Zhihu）。
+**备份与恢复演练**（§7.5）。采集器 A2 已交付 5 个（RSS / Telegram / X / Zhihu / zsxq）。
 见 `architecture-spec.md` §5/§6。
 
 ## 快速开始
