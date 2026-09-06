@@ -39,6 +39,10 @@ pending <---------------------------------------------- published
 - `published` 不得回退；不得替换正文、译文主版本、标题、URL、GUID 或 `content_hash`
 - `ready` 在首次输出前可以被撤回为 `pending`，仅限尚未暴露给任一客户端且系统明确记录撤回原因
 - “发布”由可观察的首次对外输出触发，而不是 SQL update 的时间；输出适配器必须可靠写入 `first_publish`
+- **“输出适配器”是复数，三条路径都算**：RSS 渲染、Reader API 的 `stream/items/contents`、
+  MCP 的 `get_item_body`。此前只有 RSS 写，于是**只用 NNW 消费的条目永远停在 `ready`**
+  （实测 4576 条）—— 而不可变性规则存在的理由正是“客户端会缓存”，偏偏在客户端真正缓存的
+  那条路径上失效。这是本条不变量被违反的实例，不是设计选择
 
 ## JobRun 状态机
 

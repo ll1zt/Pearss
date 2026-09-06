@@ -119,10 +119,31 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 
 ## 八、传输与挂载
 
-- 传输：**Streamable HTTP**（§9），与 Core API 同进程挂载
-- 鉴权：MCP server 作为**可信内部客户端**持有服务端 token 调 `/v1`，因此审计里
+- 传输：**Streamable HTTP**（§9），与 Core API 同进程挂载，端点 `/mcp/mcp`
+
+**入站鉴权（客户端 → `/mcp`）**
+
+- `PEARSS_MCP_TOKEN`，**独立于** Core API token：撤销一个笔记本上的 MCP 客户端不应连带
+  登出 Core API，反之亦然。它认证的是**边缘**，不是**行为者**
+- **fail-closed**：未配置时端点返回 503 并拒绝一切，启动记 warning —— 「未配置」不得读作
+  「未鉴权」
+- **elicitation 不是安全边界**。它要求*配合的*客户端向用户展示确认；想写入的客户端自己
+  回答「确认」即可。它约束的是误操作，不是对抗 —— 真正的边界是这个 token
+
+**出站鉴权（MCP server → `/v1`）**
+
+- MCP server 作为**可信内部客户端**持有服务端 token 调 `/v1`，因此审计里
   actor 记为 `api:full`；agent 身份通过 session/correlation id 关联，不通过伪造
   actor 表达
+
+**Host 白名单**
+
+- MCP SDK 默认开 DNS-rebinding 防护，未知 Host 返回 **421** `Invalid Host header`。
+  不设 `PEARSS_MCP_ALLOWED_HOSTS` 则**只有回环可达**
+- 条目需 `host:*` 形式：SDK 只做精确匹配或 `host:*` 通配，而客户端总带端口发送，
+  裸 `host` 匹配不上 `host:8000`
+- 远程访问因此需要**两个显式选择**（token + Host），都不是默认值
+
 - 未来 P3 拆分子模块 server + Gateway 时，本规范继续适用，只是挂载点变化
 
 ## 九、验收清单（改工具面时逐条过）
