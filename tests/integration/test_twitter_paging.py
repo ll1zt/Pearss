@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import Source
 from adapters.repository import paging_state, save_paging_state
-from app.pipeline import CollectionResult, collect_authenticated_pages
+from app import collector_registry
+from app.pipeline import CollectionResult, collect_paged
 from core.enums import ErrorClass
 from plugins.collectors.twitter.paging import should_drop_resume
 
@@ -150,9 +151,12 @@ def test_missing_credentials_fail_as_auth_without_requesting(
     def never(request: httpx.Request) -> httpx.Response:
         raise AssertionError("an unauthenticated request must not be attempted")
 
-    result = collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    result = collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(transport=httpx.MockTransport(never)),
     )
     assert result.succeeded is False
@@ -169,9 +173,12 @@ def test_a_rejected_request_keeps_its_classification(
     monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
     monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
 
-    result = collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    result = collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(
             transport=httpx.MockTransport(lambda request: httpx.Response(429))
         ),
@@ -197,9 +204,12 @@ def test_a_successful_walk_records_the_frontier(
     def route(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=timeline(["900", "800"], None))
 
-    result = collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    result = collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(transport=httpx.MockTransport(route)),
     )
     session.commit()
@@ -235,17 +245,19 @@ def test_the_second_walk_stops_at_the_frontier(
             return httpx.Response(200, content=timeline(["900", "800"], "DEEPER"))
         return httpx.Response(200, content=timeline(["700", "600"], None))
 
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
     client = httpx.Client(transport=httpx.MockTransport(route))
-    first = collect_authenticated_pages(
-        session, source=source_row(session), client=client
+    first = collect_paged(
+        session, source=source_row(session), registration=registration, client=client
     )
     session.commit()
     assert first.inserted == 4
     assert calls == [None, "DEEPER"]
 
     calls.clear()
-    second = collect_authenticated_pages(
-        session, source=source_row(session), client=client
+    second = collect_paged(
+        session, source=source_row(session), registration=registration, client=client
     )
     session.commit()
 
@@ -343,9 +355,12 @@ def test_a_dropped_resume_lets_the_walk_restart_from_the_newest(
         requested.append(cursor or "NEWEST")
         return httpx.Response(200, content=timeline(["2000"], None))
 
-    collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(transport=httpx.MockTransport(route)),
     )
     session.commit()
@@ -392,9 +407,12 @@ def test_a_rejected_session_is_refreshed_and_the_page_retried(
             return httpx.Response(401)
         return httpx.Response(200, content=timeline(["900"], None))
 
-    result = collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    result = collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(transport=httpx.MockTransport(route)),
     )
     session.commit()
@@ -427,9 +445,12 @@ def test_a_persistent_rejection_does_not_retry_forever(
         calls["n"] += 1
         return httpx.Response(401)
 
-    result = collect_authenticated_pages(
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    result = collect_paged(
         session,
         source=source_row(session),
+        registration=registration,
         client=httpx.Client(transport=httpx.MockTransport(route)),
     )
     assert result.succeeded is False

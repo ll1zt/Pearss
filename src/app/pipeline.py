@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
 from sqlalchemy.orm import Session
@@ -21,7 +22,6 @@ from sqlalchemy.orm import Session
 from adapters import filestore
 from adapters.db_models import Source as SourceRow
 from adapters.http import FetchError
-from adapters.raw_payload import RawPayload
 from adapters.repository import (
     StoreOutcome,
     last_conditional_state,
@@ -33,6 +33,7 @@ from adapters.repository import (
 )
 from adapters.sanitize import sanitize_html
 from app import collector_registry
+from app.collector_registry import Registration as CollectorRegistration
 from core.enums import ErrorClass
 from core.models import Item, ItemDraft
 from core.normalize import (
@@ -235,8 +236,12 @@ def _collect_one_page(
         return CollectionResult(succeeded=True, not_modified=True)
 
     if registration.paged:
-        return collect_authenticated_pages(
-            session, source=source, client=client, tenant_id=tenant_id
+        return collect_paged(
+            session,
+            source=source,
+            registration=registration,
+            client=client,
+            tenant_id=tenant_id,
         )
 
     try:
@@ -274,168 +279,101 @@ def _collect_one_page(
     )
 
 
-def collect_authenticated_pages(
+if TYPE_CHECKING:
+
+    class PagedCollector(Protocol):
+        """A collector registered with `paged=True` (capability contract)."""
+
+        def collect_pages(
+            self,
+            *,
+            source_id: str,
+            source_url: str,
+            client: httpx.Client,
+            state: Any,
+            max_pages: int = 20,
+        ) -> Any: ...
+
+
+def collect_paged(
     session: Session,
     *,
     source: SourceRow,
+    registration: CollectorRegistration,
     client: httpx.Client,
     tenant_id: str = TENANT,
     max_pages: int = 20,
 ) -> CollectionResult:
     """Collect a source whose origin is walked a page at a time.
 
-    Used when the collector exposes a cursor -- today that is X's timeline.
-    Kept separate from `_collect_one_page` rather than folded into it because
-    the two differ in kind, not degree: this one reads and writes paging state,
-    filters pages against a frontier, and can return a partial result after a
-    mid-walk failure.
-
-    The collector supplies the page shape and the parsing; the walk policy
-    lives in `paging.py`; the state lives in the database. Nothing here knows
-    anything specific about X.
+    The walk itself is collector knowledge — credentials, page shape, origin
+    recovery quirks — and lives in the collector (`collect_pages`). The host
+    owns everything durable: it reads the paging state, hands it in, stores
+    the resulting drafts and writes the frontier back. A collector never
+    touches SQLAlchemy, and this module never imports a collector module.
     """
-    from plugins.collectors.twitter import client as x_client
-    from plugins.collectors.twitter import collector as x_collector
-    from plugins.collectors.twitter import paging
-
-    if not x_client.credentials_configured():
-        # ADR 0012: a missing credential stops as `auth`. It is not worked
-        # around by trying anonymously, which would only produce a 403 that
-        # looks like a different problem.
-        return CollectionResult(
-            succeeded=False,
-            error_class=ErrorClass.AUTH.value,
-            detail="X session credentials are not configured",
-        )
+    from adapters.repository import PagingState
 
     state = paging_state(session, source_id=source.id)
-    credentials = x_client.Credentials.from_env(client)
-    query_id = x_client.current_query_id()
-    count = x_client.configured_count()
-    # Set when X rejects the session, so the walk can retry once with a fresh
-    # pair instead of failing the cycle.
-    refreshed = False
-
-    def fetch_page(cursor: str | None) -> paging.Page:
-        payload = x_client.fetch_page(
-            client=client,
-            credentials=credentials,
-            query_id=query_id,
-            cursor=cursor,
-            count=count,
-            source_id=source.id,
-        )
-        body = payload.body
-        return paging.Page(
-            body=body,
-            ids=x_collector.page_ids(body),
-            next_cursor=x_collector.page_cursor(body),
-            sort_span=x_collector.page_sort_span(body),
-        )
-
-    def fetch_with_recovery(cursor: str | None) -> paging.Page:
-        """Recover from a rotated queryId or a rejected session, once each.
-
-        X rotates the queryId without notice and answers 400; re-extracting it
-        from the site's own bundle is the difference between a self-healing
-        source and one that needs a human every few weeks.
-
-        A 401/403 means the session itself went stale -- X rotates `ct0` on
-        login, so the cached CookieCloud copy is exactly what was rejected.
-        Re-resolving bypasses the cache and picks up what the browser synced.
-        Both retries are once-only: looping on a rejection would hammer the
-        origin while the real problem is that nobody can authorise us.
-        """
-        nonlocal query_id, credentials, refreshed
-        try:
-            return fetch_page(cursor)
-        except x_client.QueryIdRejected:
-            fresh = x_client.refresh_query_id(client)
-            if fresh is None or fresh == query_id:
-                raise
-            query_id = fresh
-            return fetch_page(cursor)
-        except FetchError as exc:
-            if exc.error_class is not ErrorClass.AUTH or refreshed:
-                raise
-            refreshed = True
-            credentials = x_client.Credentials.refresh(client)
-            return fetch_page(cursor)
-
-    try:
-        result = paging.two_phase_walk(
-            fetch_page=fetch_with_recovery,
-            max_pages=max_pages,
+    # `paged=True` on the registration is the capability contract; the
+    # Protocol above gives that attribute a static home.
+    walker = cast("PagedCollector", registration.collector).collect_pages
+    walk = walker(
+        source_id=source.id,
+        source_url=source.canonical_url,
+        client=client,
+        state=PagingState(
             seen_frontier=state.seen_frontier,
-            resume=None
-            if paging.should_drop_resume(state.resume_rounds)
-            else state.resume_cursor,
-        )
-    except x_client.CredentialError as exc:
-        # A credential problem, not a transport one: the operator has to act,
-        # and `network` would tell them to wait instead.
-        return CollectionResult(
-            succeeded=False,
-            error_class=ErrorClass.AUTH.value,
-            detail=str(exc),
-        )
-    except Exception as exc:  # classified below; nothing retrieved
-        error_class = getattr(exc, "error_class", None)
-        return CollectionResult(
-            succeeded=False,
-            error_class=(
-                error_class.value
-                if isinstance(error_class, ErrorClass)
-                else ErrorClass.NETWORK.value
-            ),
-            detail=str(exc),
-        )
+            resume_cursor=state.resume_cursor,
+            resume_rounds=state.resume_rounds,
+        ),
+        max_pages=max_pages,
+    )
 
-    keep = {str(value) for value in result.keep_ids}
-    drafts: list[ItemDraft] = []
-    for body in result.pages:
-        for draft in x_collector.parse(
-            RawPayload(
-                url=source.canonical_url,
-                status_code=200,
-                body=body,
-                source_id=source.id,
-            )
-        ):
-            # The walk decided what is new; a page below the frontier is read
-            # for continuity checking, not for ingestion.
-            if draft.external_id.removeprefix("twitter:") in keep:
-                drafts.append(draft)
-
-    set_source_title_if_absent(session, source_id=source.id, title="X Following")
+    set_source_title_if_absent(
+        session, source_id=source.id, title=_paged_source_title(registration)
+    )
     save_paging_state(
         session,
         source_id=source.id,
-        newest_id=result.newest_id,
-        resume_cursor=result.resume,
+        newest_id=walk.newest_id,
+        resume_cursor=walk.resume_cursor,
     )
 
-    if not result.ok:
+    if walk.failed:
+        # The walk's own classification: the detail already carries the
+        # error-class prefix the reference diagnostics expect.
+        error_class = walk.failed.split(":", 1)[0]
+        if error_class not in {member.value for member in ErrorClass}:
+            error_class = ErrorClass.NETWORK.value
         return CollectionResult(
             succeeded=False,
-            error_class=ErrorClass.BLOCKED.value,
-            detail=result.failed or "no page could be retrieved",
+            error_class=error_class,
+            detail=walk.failed,
         )
 
-    ingested = normalise_and_store(session, drafts, tenant_id=tenant_id)
+    ingested = normalise_and_store(session, walk.drafts, tenant_id=tenant_id)
     inserted = sum(
         1
         for entry in ingested
         if entry.outcome.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED)
     )
     return CollectionResult(
-        succeeded=result.failed is None,
-        error_class=None if result.failed is None else ErrorClass.NETWORK.value,
-        detail=result.failed,
-        drafts=len(drafts),
+        succeeded=True,
+        drafts=len(walk.drafts),
         inserted=inserted,
-        skipped=len(drafts) - inserted,
+        skipped=len(walk.drafts) - inserted,
     )
+
+
+def _paged_source_title(registration: CollectorRegistration) -> str:
+    """The display title a paged origin reports for itself.
+
+    Page-based origins are timelines, not feeds: no payload carries a channel
+    title, so the collector's manifest id is the honest label. (The feed path
+    learns titles from the payload itself; see _collect_one_page.)
+    """
+    return str(getattr(registration.collector, "collector_id", registration.name))
 
 
 def _merge(first: CollectionResult, page: CollectionResult) -> CollectionResult:

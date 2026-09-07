@@ -35,6 +35,8 @@ import re
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+import httpx
+
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
@@ -748,3 +750,28 @@ __all__ = [
     "page_sort_span",
     "parse",
 ]
+
+
+def collect_pages(
+    *,
+    source_id: str,
+    source_url: str,
+    client: httpx.Client,
+    state: Any,
+    max_pages: int = 20,
+) -> Any:
+    """The paged-collection capability (registry `paged=True`).
+
+    Thin binding: the walk logic lives in `walk.py`, which the pipeline used
+    to inline. Exposed here so the registry's paged dispatch finds it on the
+    collector module the registration points at.
+    """
+    from plugins.collectors.twitter import walk
+
+    return walk.collect_pages(
+        source_id=source_id,
+        source_url=source_url,
+        client=client,
+        state=state,
+        max_pages=max_pages,
+    )
