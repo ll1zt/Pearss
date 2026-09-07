@@ -66,7 +66,12 @@ class FetchingCollector(Protocol):
     """
 
     def fetch(
-        self, url: str, *, client: httpx.Client, source_id: str
+        self,
+        url: str,
+        *,
+        client: httpx.Client,
+        source_id: str,
+        conditional: ConditionalState | None = None,
     ) -> RawPayload: ...
 
 
@@ -109,7 +114,10 @@ REGISTRY: tuple[Registration, ...] = (
     Registration(name="twitter", collector=twitter, paged=True),
     Registration(name="zhihu", collector=zhihu, fetches=True),
     Registration(name="zsxq", collector=zsxq, fetches=True),
-    Registration(name="rss", collector=rss),
+    # The rss collector fetches too: its hook upgrades WordPress summary
+    # feeds to full text via the origin's REST API, falling back to the
+    # plain payload on anything it cannot upgrade.
+    Registration(name="rss", collector=rss, fetches=True),
 )
 
 
@@ -177,13 +185,16 @@ def fetch_page_with(
 ) -> RawPayload:
     """Fetch through the collector's own hook, or the plain adapter.
 
-    The conditional state is only meaningful to the plain path: a signed API
-    fetch replays no ETag, so the hook's signature omits it rather than
-    accepting an argument it would have to ignore.
+    `conditional` is forwarded into fetching hooks as well: a hook that
+    starts from the plain adapter (the rss collector's WordPress upgrade
+    does) replays the ETag on its first leg, while hooks that never use it
+    — a signed API answers no 304 — simply ignore the argument.
     """
     if registration.fetches:
         fetcher = cast("FetchingCollector", registration.collector)
-        return fetcher.fetch(url, client=client, source_id=source_id)
+        return fetcher.fetch(
+            url, client=client, source_id=source_id, conditional=conditional
+        )
     return plain_fetch(url, client=client, source_id=source_id, conditional=conditional)
 
 

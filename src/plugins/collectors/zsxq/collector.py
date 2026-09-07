@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 import httpx
 
 from adapters.http import FetchError
-from adapters.raw_payload import RawPayload
+from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.zsxq import client as zsxq_client
@@ -143,7 +143,13 @@ def topics_api_path(route: SourceRoute) -> str:
 # --------------------------------------------------------------------------
 
 
-def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
+def fetch(
+    url: str,
+    *,
+    client: httpx.Client,
+    source_id: str,
+    conditional: ConditionalState | None = None,
+) -> RawPayload:
     """Fetch a group feed (the registry's fetch hook).
 
     Two API calls — the group meta names the feed, the topics list is the
@@ -152,6 +158,7 @@ def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
     the pipeline classifies FetchError, and an uncaught credential failure
     would surface as an unexplained 500 instead of a readable run.
     """
+    del conditional
     route = resolve_source(url)
     topics_path = topics_api_path(route)
     try:

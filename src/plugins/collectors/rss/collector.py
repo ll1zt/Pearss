@@ -27,7 +27,8 @@ import feedparser
 import httpx
 
 from adapters.http import FetchError
-from adapters.raw_payload import RawPayload
+from adapters.http import fetch as plain_fetch
+from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.rss import wordpress
@@ -64,7 +65,13 @@ def match_url(url: str) -> bool:
     )
 
 
-def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
+def fetch(
+    url: str,
+    *,
+    client: httpx.Client,
+    source_id: str,
+    conditional: ConditionalState | None = None,
+) -> RawPayload:
     """Fetch the feed, upgrading WordPress summary feeds to full text.
 
     The plain fetch runs first: its ETag/Last-Modified replay is what makes
@@ -73,9 +80,7 @@ def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
     failure there logs and falls back, because this path must never turn a
     working summary feed into a failing source.
     """
-    from adapters.http import fetch as plain_fetch
-
-    raw = plain_fetch(url, client=client, source_id=source_id)
+    raw = plain_fetch(url, client=client, source_id=source_id, conditional=conditional)
     if raw.not_modified or not wordpress.looks_like_summary_feed(raw):
         return raw
 
