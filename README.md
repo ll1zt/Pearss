@@ -232,6 +232,10 @@ curl -sS "http://127.0.0.1:8000/v1/sources?limit=20" -H "Authorization: Bearer $
 - **URL 去重**：`canonical_url` 剔掉追踪参数后作为唯一键，同一 feed 带不同 `?utm_*` 不会重复入库
 - **`schedule_policy` 严格校验**：未知键会被拒（`interwal` 这种拼错不会静默变成无间隔）
 - **删除是软删**：已发布条目的 GUID 冻结且客户端已缓存，不能随源一起消失
+- **WordPress 摘要 feed 自动升级全文**：源站把 feed 配成摘要输出时（`more-link`
+  截断特征），采集器自动改从该站点的 REST API 取完整正文（`content.rendered`），
+  条目身份不变、不会产生重复；REST 不可用时静默降级回摘要。见
+  `docs/guides/collector-guide.md` 的 WordPress 小节
 
 ## MCP 控制平面
 
