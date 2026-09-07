@@ -207,7 +207,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（836 测试）。未达成：「发现」环节与 OPML 迁移 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（850 测试）。未达成：「发现」环节与 OPML 迁移 |
 | P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + hookspec 冻结 + 注册表/manifest/沙箱 + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
 | P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |

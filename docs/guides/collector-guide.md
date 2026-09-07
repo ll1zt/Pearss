@@ -114,3 +114,27 @@ external_id/guid, title, canonical_url, published_at, content, source_id, raw_fe
 
 不要将所有 exception 粗暴归类为 `parse`；保留结构化 evidence（HTTP 状态、选择器、命中数），但不可把完整外部页面/错误正文写进普通日志。
 
+
+
+## WordPress 摘要 feed 的全文升级（rss 采集器内置）
+
+WordPress 站点把 feed 输出配成「摘要」时，feed 里只有 ~200-500 字符的截断
+description（`&#8230;` + `more-link` 截断标记）且没有 `content:encoded`。
+该站点的 REST API（`content.rendered`）不受这个设置影响，默认返回完整正文。
+
+rss 采集器的 fetch 钩子已内置升级路径（ADR 0016 之后的增量，见
+`plugins/collectors/rss/wordpress.py`）：
+
+1. 普通 fetch 先行（保留 ETag/Last-Modified 条件请求语义）；
+2. 载荷字节内检测截断标记（`more-link` / `screen-reader-text`）；未命中直接
+   返回，零额外请求；
+3. 命中则从 feed URL 推导 REST 端点（`{install_prefix}/wp-json/wp/v2/posts`，
+   子目录安装自动带上前缀），按条目数定窗口取 `content.rendered`；
+4. **按 permalink 匹配**回 feed 条目（REST id 与 feed GUID 是不同身份体系），
+   替换截断 description；纯文本长度不优于摘要的条目保留摘要；
+5. REST 任何失败（404/禁用/非 JSON）静默降级回摘要 feed——升级路径绝不把
+   能工作的源变成失败源。
+
+给新采集器的启示：当源存在「同一内容的更完整公开通道」时，优先换数据源而非
+抓页面做正文提取——后者脆弱且贵。合并回 feed 载荷（而不是改 parse）意味着
+normalize/dedupe/闸门零改动，条目身份保持稳定。
