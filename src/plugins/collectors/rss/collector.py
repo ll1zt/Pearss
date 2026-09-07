@@ -5,6 +5,14 @@ docs/guides/collector-guide.md but is registered explicitly rather than
 discovered. It produces ItemDraft and nothing else — no database access, no
 RSS output, no scheduling. Every entry, whatever its origin, converges on
 ItemDraft -> normalize -> Item.
+
+The optional fetch hook (registry `fetches=True`) exists for one upgrade:
+WordPress summary feeds. A site that configured "summary" output ships a
+truncated feed, while its REST API still serves the full rendered article to
+everyone — `wordpress.py` detects the truncation, swaps the data source and
+merges the full text back into the payload `parse` already understands. Any
+failure on that path falls back to the plain feed: a summary is strictly
+better than a failed collection.
 """
 
 from __future__ import annotations
@@ -16,10 +24,13 @@ from time import struct_time
 from typing import Any
 
 import feedparser
+import httpx
 
+from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from plugins.collectors.rss import wordpress
 
 LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +62,55 @@ def match_url(url: str) -> bool:
         token in lowered
         for token in ("/feed", "/rss", "/atom", "feed.xml", "rss.xml", "atom.xml")
     )
+
+
+def fetch(url: str, *, client: httpx.Client, source_id: str) -> RawPayload:
+    """Fetch the feed, upgrading WordPress summary feeds to full text.
+
+    The plain fetch runs first: its ETag/Last-Modified replay is what makes
+    unchanged feeds cheap, and the summary detection is memory-only over its
+    bytes. Only a detected truncation triggers the REST round-trip — and a
+    failure there logs and falls back, because this path must never turn a
+    working summary feed into a failing source.
+    """
+    from adapters.http import fetch as plain_fetch
+
+    raw = plain_fetch(url, client=client, source_id=source_id)
+    if raw.not_modified or not wordpress.looks_like_summary_feed(raw):
+        return raw
+
+    try:
+        rest_raw = wordpress.fetch_fulltext(
+            url, client=client, source_id=source_id, feed_entries=_feed_entry_count(raw)
+        )
+        posts = wordpress.parse_rest_posts(rest_raw)
+    except FetchError as exc:
+        LOGGER.info(
+            "wordpress fulltext unavailable for %s (%s); keeping summaries",
+            url.split("?", 1)[0],
+            exc.detail,
+        )
+        return raw
+
+    merged = wordpress.merge_fulltext(raw, wordpress.fulltext_by_link(posts))
+    # The plain fetch's ETag describes the *summary* payload; serving it on a
+    # fulltext body would replay stale state. Drop the conditional state so
+    # the next fetch revalidates against the origin.
+    return RawPayload(
+        url=merged.url,
+        status_code=merged.status_code,
+        body=merged.body,
+        source_id=merged.source_id,
+        raw_fetch_id=merged.raw_fetch_id,
+        headers=merged.headers,
+        correlation_id=merged.correlation_id,
+    )
+
+
+def _feed_entry_count(raw: RawPayload) -> int:
+    """How many entries the feed carries, to size the REST query window."""
+    parsed = feedparser.parse(raw.body)
+    return max(1, len(parsed.get("entries") or []))
 
 
 def parse(raw: RawPayload) -> list[ItemDraft]:
