@@ -20,6 +20,9 @@ exception contracts).
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 import pluggy
@@ -48,6 +51,67 @@ class CollectorError(Exception):
         super().__init__(f"{error_class.value}: {detail}")
         self.error_class = error_class
         self.detail = detail
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ConfigRequirement:
+    """One environment setting a collector needs, per its manifest.
+
+    `required=False` marks optional tuning knobs. Names only — values are
+    read from the environment by the host, never carried in the manifest
+    (a manifest lands in the plugin table and the MCP tool surface).
+    """
+
+    env_name: str
+    description: str
+    required: bool = True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Manifest:
+    """The declarative identity of a collector (E2: 声明式清单).
+
+    The registry verifies at startup that a manifest's `features` match the
+    collector's actual hookimpls — a declared capability without an
+    implementation is a startup failure, not a silent gap. `checksum` is
+    computed over the canonical JSON of everything else, so any edit to a
+    shipped manifest is visible.
+    """
+
+    id: str
+    version: str
+    name: str
+    description: str
+    example_url: str
+    features: frozenset[str]
+    required_config: tuple[ConfigRequirement, ...]
+    # Populated by the registry, not declared by the collector.
+    checksum: str = ""
+
+    def canonical_json(self) -> str:
+        payload = {
+            "id": self.id,
+            "version": self.version,
+            "name": self.name,
+            "description": self.description,
+            "example_url": self.example_url,
+            "features": sorted(self.features),
+            "required_config": [
+                {
+                    "env_name": req.env_name,
+                    "description": req.description,
+                    "required": req.required,
+                }
+                for req in self.required_config
+            ],
+        }
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+
+    def with_checksum(self) -> Manifest:
+        digest = hashlib.sha256(self.canonical_json().encode()).hexdigest()
+        return replace(self, checksum=digest)
 
 
 class BackfillHooks:
@@ -95,11 +159,12 @@ class CollectorSpec(Protocol):
         ...
 
     @HOOKSPEC
-    def source_config(self) -> dict[str, Any]:
-        """The collector's manifest (P2b fills the full shape).
+    def source_config(self) -> Manifest:
+        """The collector's manifest: identity, capabilities, config needs.
 
-        Required so the registry can verify declared capabilities against
-        what the implementation actually provides.
+        The registry verifies declared capabilities against what the
+        implementation actually provides, computes the checksum, and records
+        the manifest in the plugin table at startup.
         """
         ...
 

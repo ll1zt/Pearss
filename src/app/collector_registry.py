@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 import httpx
 import pluggy
@@ -23,6 +23,18 @@ from core.enums import ErrorClass
 from core.models import ItemDraft
 from core.plugins.hooks import CollectorError as SpecCollectorError
 from core.plugins.hooks import CollectorSpec as spec
+from core.plugins.hooks import Manifest
+
+__all__ = [
+    "REGISTRY",
+    "Manifest",
+    "Registration",
+    "by_name",
+    "plugins_for_surface",
+    "select",
+    "select_for",
+    "sync_plugin_table",
+]
 from plugins.collectors.rss import collector as rss
 from plugins.collectors.telegram import collector as telegram
 from plugins.collectors.twitter import collector as twitter
@@ -106,6 +118,8 @@ class Registration:
     # The collector fetches its own pages (signed or cookie-authenticated
     # origins). Same reasoning as `paged`: declared here rather than probed.
     fetches: bool = False
+    # The verified manifest (checksum computed by the registry at startup).
+    manifest: Manifest
 
 
 _PM = pluggy.PluginManager("pearss")
@@ -114,7 +128,7 @@ _PM.add_hookspecs(spec)
 # The shipped set. Registration records which optional capabilities each
 # collector declared — the registry verifies at import time that a collector
 # declaring a capability actually implements it (ADR 0017).
-_BUILTIN_MODULES: tuple[tuple[str, object, frozenset[str]], ...] = (
+_BUILTIN_MODULES: tuple[tuple[str, Any, frozenset[str]], ...] = (
     ("telegram", telegram, frozenset()),
     ("twitter", twitter, frozenset({"paged"})),
     ("zhihu", zhihu, frozenset({"fetches"})),
@@ -129,25 +143,50 @@ _BUILTIN_MODULES: tuple[tuple[str, object, frozenset[str]], ...] = (
 def _build_registry() -> tuple[Registration, ...]:
     """Register every builtin module with pluggy and derive registrations.
 
-    Capability verification is the point of this pass: a manifest that
-    declares `paged` without a `collect_pages` implementation (or vice
-    versa) is a contract violation, and a violated contract must fail at
-    startup rather than at the first collection that needs the missing half.
+    Capability verification is the point of this pass, in both directions:
+    a manifest declaring `paged` without a `collect_pages` implementation
+    (or an implementation without the declaration) is a contract violation,
+    and a violated contract must fail at startup rather than at the first
+    collection that needs the missing half. The verified manifest leaves
+    with its checksum computed.
     """
     registrations: list[Registration] = []
     for name, module, declared in _BUILTIN_MODULES:
         _PM.register(module, name=f"collector-{name}")
-        probe = _PM.hook
         impls = {
-            "fetches": bool(getattr(module, "fetch", None)),
-            "paged": bool(getattr(module, "collect_pages", None)),
+            "fetch": bool(getattr(module, "fetch", None)),
+            "collect_pages": bool(getattr(module, "collect_pages", None)),
             "backfill": bool(getattr(module, "backfill", None)),
         }
-        for capability in declared:
-            if not impls[capability]:
+        manifest: Manifest = module.source_config()
+        if manifest.id != name:
+            raise RuntimeError(
+                f"collector {name!r} declares manifest id {manifest.id!r}"
+            )
+        # Two feature kinds: structural ones map to a hookimpl that must
+        # exist; descriptive ones (signed, cookie, wordpress-upgrade)
+        # characterise *how* the fetch hook works and require it.
+        structural = {
+            "fetch": impls["fetch"],
+            "paged": impls["collect_pages"],
+            "backfill": impls["backfill"],
+        }
+        descriptive = {"signed", "cookie", "wordpress-upgrade"}
+        for feature in manifest.features:
+            if feature in structural:
+                if not structural[feature]:
+                    raise RuntimeError(
+                        f"collector {name!r} declares feature {feature!r} "
+                        "without implementing it"
+                    )
+            elif feature not in descriptive:
                 raise RuntimeError(
-                    f"collector {name!r} declares capability {capability!r} "
-                    "without implementing it"
+                    f"collector {name!r} declares unknown feature {feature!r}"
+                )
+            elif feature in descriptive and not impls["fetch"]:
+                raise RuntimeError(
+                    f"collector {name!r} declares descriptive feature "
+                    f"{feature!r} without a fetch hook"
                 )
         registrations.append(
             Registration(
@@ -155,9 +194,9 @@ def _build_registry() -> tuple[Registration, ...]:
                 collector=cast("Collector", module),
                 paged="paged" in declared,
                 fetches="fetches" in declared,
+                manifest=manifest.with_checksum(),
             )
         )
-    del probe
     return tuple(registrations)
 
 
@@ -272,3 +311,75 @@ def matchers() -> tuple[tuple[str, Callable[[str], bool]], ...]:
         (registration.name, registration.collector.match_url)
         for registration in REGISTRY
     )
+
+
+def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> None:
+    """Record every verified manifest in the plugin table at startup.
+
+    Startup discovers; it does not decide. A collector the operator disabled
+    stays disabled — only the manifest and checksum are refreshed, so an
+    edited manifest is visibly different from the one the status decision
+    was made on.
+    """
+    import json
+    from datetime import UTC, datetime
+
+    from adapters.repository import upsert_plugin
+
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    with session_factory() as session:
+        for registration in REGISTRY:
+            manifest = registration.manifest
+            upsert_plugin(
+                session,
+                plugin_id=manifest.id,
+                manifest_json=json.dumps(
+                    {
+                        "id": manifest.id,
+                        "version": manifest.version,
+                        "name": manifest.name,
+                        "description": manifest.description,
+                        "example_url": manifest.example_url,
+                        "features": sorted(manifest.features),
+                        "required_config": [
+                            {
+                                "env_name": req.env_name,
+                                "description": req.description,
+                                "required": req.required,
+                            }
+                            for req in manifest.required_config
+                        ],
+                    },
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                checksum=manifest.checksum,
+                trust="builtin",
+                tenant_id=tenant_id,
+                at=stamp,
+            )
+        session.commit()
+
+
+def plugins_for_surface() -> list[dict[str, object]]:
+    """Manifest summaries for the MCP/API surface (list_plugins)."""
+    return [
+        {
+            "id": r.manifest.id,
+            "version": r.manifest.version,
+            "name": r.manifest.name,
+            "description": r.manifest.description,
+            "example_url": r.manifest.example_url,
+            "features": sorted(r.manifest.features),
+            "required_config": [
+                {
+                    "env_name": req.env_name,
+                    "description": req.description,
+                    "required": req.required,
+                }
+                for req in r.manifest.required_config
+            ],
+            "checksum": r.manifest.checksum,
+        }
+        for r in REGISTRY
+    ]

@@ -39,7 +39,7 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError
+from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
 from plugins.collectors.zhihu import client as zhihu_client
 
 BASE: Final = zhihu_client.BASE
@@ -750,10 +750,19 @@ def _unix_to_dt(value: Any) -> datetime | None:
 
 
 @HOOKIMPL
-def source_config() -> dict[str, object]:
-    """The declared manifest (full shape lands with the plugin table)."""
-    return {
-        "id": "zhihu",
-        "version": "0.1.0",
-        "features": ["fetch", "signed", "cookie"],
-    }
+def source_config() -> Manifest:
+    """The zhihu collector's manifest."""
+    return Manifest(
+        id="zhihu",
+        version="0.1.0",
+        name="知乎用户内容",
+        description="知乎用户动态/回答/文章（登录型 + x-zse-96 签名，ADR 0014）。",
+        example_url="https://www.zhihu.com/people/example",
+        features=frozenset({"fetch", "signed", "cookie"}),
+        required_config=(
+            ConfigRequirement(
+                env_name="PEARSS_ZHIHU_COOKIES",
+                description="知乎 Cookie（须含 d_c0；或经 CookieCloud）",
+            ),
+        ),
+    )

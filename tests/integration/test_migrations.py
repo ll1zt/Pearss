@@ -39,7 +39,9 @@ READER_TABLES = {"read_state", "reader_credential"}
 # Added by migration 0003 for the Core API.
 API_TABLES = {"idempotency_record"}
 
-EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES
+# The plugin table arrives with migration 0010 (P2 lifecycle, ADR 0017);
+# item_enrichment stays P3 and its absence is pinned separately below.
+EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES | {"plugin"}
 
 
 @pytest.fixture
@@ -123,11 +125,12 @@ def test_p2_p3_tables_are_absent(alembic_config: Config) -> None:
     url = alembic_config.get_main_option("sqlalchemy.url") or ""
     db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
     tables = _tables(db_path)
-    # These arrive with their own migration in P2/P3 rather than being
-    # pre-created empty and altered later. read_state used to be here, but the
-    # Reader API moved to P1 (ADR 0004), so it is now expected to exist.
+    # These arrive with their own migration rather than being pre-created
+    # empty and altered later. read_state used to be here, but the Reader API
+    # moved to P1 (ADR 0004); plugin moved out of this assertion when P2
+    # delivered it (migration 0010, ADR 0017).
     assert "item_enrichment" not in tables
-    assert "plugin" not in tables
+    assert "plugin" in tables
     assert tables >= READER_TABLES
 
 

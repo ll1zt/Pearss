@@ -40,7 +40,7 @@ import httpx
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError
+from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
 
 # X's own title budget is 100 characters; longer than that and a feed list
 # becomes unreadable rather than more informative.
@@ -772,10 +772,23 @@ def collect_pages(
 
 
 @HOOKIMPL
-def source_config() -> dict[str, object]:
-    """The declared manifest (full shape lands with the plugin table)."""
-    return {
-        "id": "twitter",
-        "version": "0.1.0",
-        "features": ["fetch", "paged", "cookie"],
-    }
+def source_config() -> Manifest:
+    """The twitter collector's manifest."""
+    return Manifest(
+        id="twitter",
+        version="0.1.0",
+        name="X Following 时间线",
+        description="读取你自己的 X Following 时间线（登录型，ADR 0012）。",
+        example_url="https://x.com/home",
+        features=frozenset({"paged"}),
+        required_config=(
+            ConfigRequirement(
+                env_name="PEARSS_X_AUTH_TOKEN",
+                description="X 会话 auth_token cookie（或经 CookieCloud）",
+            ),
+            ConfigRequirement(
+                env_name="PEARSS_X_CT0",
+                description="X 会话 ct0 cookie（或经 CookieCloud）",
+            ),
+        ),
+    )

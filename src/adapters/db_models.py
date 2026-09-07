@@ -410,6 +410,36 @@ class IdempotencyRecord(Base):
     expires_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
 
 
+class Plugin(Base):
+    """A registered collector's identity and lifecycle state (P2, ADR 0017).
+
+    Fact source: backed up. One row per collector per tenant; the registry
+    upserts manifests at startup, and `:enable`/`:disable` flip `status`.
+    The checksum pins the manifest content the status decision was made on.
+    """
+
+    __tablename__ = "plugin"
+
+    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
+    # Canonical-JSON manifest with its sha256 (the registry computes both).
+    manifest_json: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    checksum: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    status: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["source_status"]), nullable=False
+    )
+    trust: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["trust_level"]), nullable=False
+    )
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        enum_check("pluginstatus", "status", ("enabled", "disabled")),
+        enum_check("plugintrust", "trust", ("builtin", "third-party")),
+    )
+
+
 class AuditLog(Base):
     """An immutable record of one meaningful operation."""
 

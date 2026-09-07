@@ -31,7 +31,7 @@ from adapters.http import fetch as plain_fetch
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError
+from core.plugins.hooks import HOOKIMPL, CollectorError, Manifest
 from plugins.collectors.rss import wordpress
 
 LOGGER = logging.getLogger(__name__)
@@ -340,10 +340,14 @@ def _text(value: object) -> str:
 
 
 @HOOKIMPL
-def source_config() -> dict[str, object]:
-    """The declared manifest (full shape lands with the plugin table)."""
-    return {
-        "id": "rss",
-        "version": "0.1.0",
-        "features": ["fetch", "wordpress-upgrade"],
-    }
+def source_config() -> Manifest:
+    """The rss collector's manifest."""
+    return Manifest(
+        id="rss",
+        version="0.1.0",
+        name="RSS/Atom 采集",
+        description="标准 RSS/Atom feed；WordPress 摘要 feed 自动升级全文。",
+        example_url="https://hnrss.org/frontpage",
+        features=frozenset({"fetch", "wordpress-upgrade"}),
+        required_config=(),
+    )

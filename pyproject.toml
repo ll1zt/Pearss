@@ -83,8 +83,11 @@ ignore = []
 # Zhihu feed content is Chinese prose: fullwidth punctuation in titles and
 # bodies is the product, not an ambiguous ASCII lookalike. The MD5 in the
 # signature module is Zhihu's own web-API protocol, not a password hash.
+# The other collectors' manifests carry the same Chinese prose.
 "src/plugins/collectors/zhihu/**" = ["RUF001", "S324"]
 "src/plugins/collectors/zsxq/**" = ["RUF001"]
+"src/plugins/collectors/rss/**" = ["RUF001"]
+"src/plugins/collectors/twitter/**" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]

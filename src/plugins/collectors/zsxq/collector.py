@@ -38,7 +38,7 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError
+from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
 from plugins.collectors.zsxq import client as zsxq_client
 
 LIMIT_TOPICS: Final = 20
@@ -441,10 +441,19 @@ def _escape_text(value: Any) -> str:
 
 
 @HOOKIMPL
-def source_config() -> dict[str, object]:
-    """The declared manifest (full shape lands with the plugin table)."""
-    return {
-        "id": "zsxq",
-        "version": "0.1.0",
-        "features": ["fetch", "cookie"],
-    }
+def source_config() -> Manifest:
+    """The zsxq collector's manifest."""
+    return Manifest(
+        id="zsxq",
+        version="0.1.0",
+        name="知识星球群组",
+        description="知识星球群组主题（登录型，ADR 0015）。",
+        example_url="https://wx.zsxq.com/dweb2/index/group/88855458825252",
+        features=frozenset({"fetch", "cookie"}),
+        required_config=(
+            ConfigRequirement(
+                env_name="PEARSS_ZSXQ_ACCESS_TOKEN",
+                description="zsxq_access_token（或 PEARSS_ZSXQ_COOKIE/CookieCloud）",
+            ),
+        ),
+    )

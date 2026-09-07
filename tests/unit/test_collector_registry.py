@@ -134,7 +134,18 @@ def test_fetching_registration_uses_its_own_hook(
             return []
 
     registration = collector_registry.Registration(
-        name="fake", collector=FakeCollector(), fetches=True
+        name="fake",
+        collector=FakeCollector(),
+        fetches=True,
+        manifest=collector_registry.Manifest(
+            id="fake",
+            version="0.1.0",
+            name="Fake",
+            description="test",
+            example_url="https://signed.example/page",
+            features=frozenset({"fetch"}),
+            required_config=(),
+        ),
     )
 
     def boom(*args: object, **kwargs: object) -> RawPayload:

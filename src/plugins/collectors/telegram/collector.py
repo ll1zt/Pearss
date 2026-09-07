@@ -32,7 +32,7 @@ from lxml.html import HtmlElement, fromstring, tostring
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError
+from core.plugins.hooks import HOOKIMPL, BackfillHooks, CollectorError, Manifest
 
 LOGGER = logging.getLogger(__name__)
 
@@ -496,10 +496,30 @@ __all__ = [
 
 
 @HOOKIMPL
-def source_config() -> dict[str, object]:
-    """The declared manifest (full shape lands with the plugin table)."""
-    return {
-        "id": "telegram",
-        "version": "0.1.0",
-        "features": ["backfill"],
-    }
+def source_config() -> Manifest:
+    """The telegram collector's manifest."""
+    return Manifest(
+        id="telegram",
+        version="0.1.0",
+        name="Telegram 公开频道",
+        description="读取 t.me 公开频道的网页预览。",
+        example_url="https://t.me/durov",
+        features=frozenset({"backfill"}),
+        required_config=(),
+    )
+
+
+@HOOKIMPL
+def backfill() -> BackfillHooks | None:
+    """Telegram previews carry a `?before=` cursor; declare the walk."""
+    return _TelegramBackfill()
+
+
+class _TelegramBackfill(BackfillHooks):
+    """Binds the module-level backfill functions to the declared capability."""
+
+    def before_url(self, url: str, cursor: str) -> str | None:
+        return before_url(url, cursor)
+
+    def oldest_cursor(self, drafts: list[ItemDraft]) -> str | None:
+        return oldest_cursor(drafts)
