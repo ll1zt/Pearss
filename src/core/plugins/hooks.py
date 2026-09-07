@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 import pluggy
 
 if TYPE_CHECKING:
-    from adapters.raw_payload import RawPayload
     from core.models import ItemDraft
 
 HOOKSPEC = pluggy.HookspecMarker("pearss")
@@ -150,7 +149,7 @@ class CollectorSpec(Protocol):
         ...
 
     @HOOKSPEC
-    def parse(self, raw: RawPayload) -> list[ItemDraft]:
+    def parse(self, raw: Any) -> list[ItemDraft]:
         """Turn a fetched payload into ItemDrafts.
 
         Raises CollectorError with a classified reason; an empty list means
@@ -178,7 +177,7 @@ class CollectorSpec(Protocol):
         client: Any,
         source_id: str,
         conditional: Any = None,
-    ) -> RawPayload:
+    ) -> Any:
         """Fetch a page through the collector's own transport path.
 
         Implemented by collectors whose origins need signed or

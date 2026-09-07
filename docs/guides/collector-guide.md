@@ -44,7 +44,7 @@ plugins/collectors/<pattern_name>/
   test_collector.py
 ```
 
-在 `app/collector_registry.py` 的显式注册表硬编码注册，不使用动态 import。P2 依据多个真实采集器的共同模式冻结 hookspec，再引入 pluggy、manifest 与插件生命周期。
+经 `app/collector_registry.py` 注册到 pluggy（合约冻结于 `core/plugins/hooks.py`，ADR 0017）：每个采集器以 `@HOOKIMPL` 声明 `match_url` / `parse` / `source_config`，可选声明 `fetch` / `collect_pages` / `backfill`。manifest 的 features 与实际 hookimpl 在启动时双向校验——声明了没有的能力即启动失败。失败契约：`fetch` 只抛 `FetchError(ErrorClass)`，`parse` 只抛 `CollectorError(ErrorClass)`（从 `core.plugins.hooks` 导入，不得自定义）。
 
 注册表按 URL 选采集器，但**声明类型优先于 URL 猜测**（`select_for`）：`hnrss.org/frontpage`
 是真 RSS feed 却不含任何 feed 形状的路径，纯 URL 路由会拒绝采集一个运维明确建成 `rss` 的源。
