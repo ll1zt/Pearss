@@ -38,6 +38,7 @@ from app.mcp_guard import MCPAuthMiddleware, warn_if_unconfigured
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import normalise_and_store
+from app.plugins_routes import router as plugins_router
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
@@ -144,6 +145,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = scheduler
 
     async with mcp_inner.router.lifespan_context(mcp_inner):
+        from app.collector_registry import sync_plugin_table
+
+        sync_plugin_table(app.state.session_factory)
         if scheduler_enabled():
             await scheduler.start()
         else:
@@ -232,6 +236,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.include_router(sources_router)
     app.include_router(items_router)
     app.include_router(system_router)
+    app.include_router(plugins_router)
 
     @app.exception_handler(RequestValidationError)
     def on_validation(request: Request, exc: RequestValidationError) -> JSONResponse:

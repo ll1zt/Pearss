@@ -118,6 +118,13 @@ class SourceStatus(StrEnum):
     DELETED = "deleted"
 
 
+class PluginStatus(StrEnum):
+    """Lifecycle of a registered plugin (P2, ADR 0017)."""
+
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
 class SourceType(StrEnum):
     """How a source is acquired."""
 

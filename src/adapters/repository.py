@@ -721,12 +721,37 @@ def plugin_status(session: Session, plugin_id: str, *, tenant_id: str) -> str:
 
 
 def set_plugin_status(
-    session: Session, plugin_id: str, *, status: str, tenant_id: str, at: str
+    session: Session,
+    plugin_id: str,
+    *,
+    status: str,
+    current_manifest_json: str,
+    current_checksum: str,
+    trust: str,
+    tenant_id: str,
+    at: str,
 ) -> bool:
-    """Persist an operator's enable/disable decision. True when changed."""
+    """Persist an operator's enable/disable decision. True when changed.
+
+    A missing row (the operator acted before the startup sync, or the sync
+    was skipped) is created in the target state rather than rejected: the
+    registry holds the authoritative manifest, so there is nothing to lose.
+    """
     row = session.get(PluginRow, plugin_id)
     if row is None or row.tenant_id != tenant_id:
-        return False
+        session.add(
+            PluginRow(
+                id=plugin_id,
+                manifest_json=current_manifest_json,
+                checksum=current_checksum,
+                status=status,
+                trust=trust,
+                tenant_id=tenant_id,
+                created_at=at,
+                updated_at=at,
+            )
+        )
+        return True
     if row.status == status:
         return False
     row.status = status

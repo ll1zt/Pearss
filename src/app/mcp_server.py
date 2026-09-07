@@ -647,6 +647,59 @@ def build_mcp_server(app: Any) -> MCPServer:
             return _error_from(payload, status)
         return _truncate(payload)
 
+    # -------------------------------------------------------- plugin surface
+
+    @server.tool(
+        description=(
+            "List registered collector plugins with their manifest, version "
+            "and lifecycle status. Read-only."
+        )
+    )
+    async def list_plugins(limit: int = 20) -> dict[str, Any]:
+        status, payload = await core.get("/v1/plugins")
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Enable or disable a collector plugin. Requires confirmation: a "
+            "disabled plugin stops collecting every source it serves."
+        )
+    )
+    async def set_plugin_status(
+        plugin_id: str, status: str, ctx: Context
+    ) -> dict[str, Any]:
+        data = await _confirm(
+            ctx,
+            f"Set plugin {plugin_id} status to {status}?",
+            _confirmation_schema({"plugin_id": plugin_id, "status": status}),
+        )
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        if not (
+            _matches(data["plugin_id"], plugin_id) and _matches(data["status"], status)
+        ):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        operation = ":enable" if status == "enabled" else ":disable"
+        core_status, payload = await core.request(
+            "POST",
+            f"/v1/plugins/{plugin_id}{operation}",
+            idempotency_key=_fresh_key(),
+        )
+        if core_status not in (200, 409):
+            return _error_from(payload, core_status)
+        return _truncate({**payload, "status_code": core_status})
+
     # -------------------------------------------------------------- resources
 
     @server.resource(

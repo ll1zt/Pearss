@@ -267,6 +267,9 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "get_system_snapshot",
         "list_jobs",
         "list_runs",
+        # P2 plugin lifecycle (ADR 0017).
+        "list_plugins",
+        "set_plugin_status",
         "add_source",
         "update_schedule_policy",
         "set_source_status",
