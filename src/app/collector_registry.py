@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from typing import Protocol, cast
 
 import httpx
+import pluggy
 
 from adapters.http import fetch as plain_fetch
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import CollectorError as SpecCollectorError
+from core.plugins.hooks import CollectorSpec as spec
 from plugins.collectors.rss import collector as rss
 from plugins.collectors.telegram import collector as telegram
 from plugins.collectors.twitter import collector as twitter
@@ -105,20 +108,60 @@ class Registration:
     fetches: bool = False
 
 
-# Order matters: the first match wins, so the more specific matcher goes first.
-# Telegram is checked before RSS because a t.me URL is unambiguous, whereas the
-# RSS matcher looks for path fragments that a channel URL could theoretically
-# contain. Zhihu is host-scoped and unambiguous for the same reason.
-REGISTRY: tuple[Registration, ...] = (
-    Registration(name="telegram", collector=telegram),
-    Registration(name="twitter", collector=twitter, paged=True),
-    Registration(name="zhihu", collector=zhihu, fetches=True),
-    Registration(name="zsxq", collector=zsxq, fetches=True),
-    # The rss collector fetches too: its hook upgrades WordPress summary
-    # feeds to full text via the origin's REST API, falling back to the
-    # plain payload on anything it cannot upgrade.
-    Registration(name="rss", collector=rss, fetches=True),
+_PM = pluggy.PluginManager("pearss")
+_PM.add_hookspecs(spec)
+
+# The shipped set. Registration records which optional capabilities each
+# collector declared — the registry verifies at import time that a collector
+# declaring a capability actually implements it (ADR 0017).
+_BUILTIN_MODULES: tuple[tuple[str, object, frozenset[str]], ...] = (
+    ("telegram", telegram, frozenset()),
+    ("twitter", twitter, frozenset({"paged"})),
+    ("zhihu", zhihu, frozenset({"fetches"})),
+    ("zsxq", zsxq, frozenset({"fetches"})),
+    # rss fetches too: its hook upgrades WordPress summary feeds to full text
+    # via the origin's REST API, falling back to the plain payload on anything
+    # it cannot upgrade.
+    ("rss", rss, frozenset({"fetches"})),
 )
+
+
+def _build_registry() -> tuple[Registration, ...]:
+    """Register every builtin module with pluggy and derive registrations.
+
+    Capability verification is the point of this pass: a manifest that
+    declares `paged` without a `collect_pages` implementation (or vice
+    versa) is a contract violation, and a violated contract must fail at
+    startup rather than at the first collection that needs the missing half.
+    """
+    registrations: list[Registration] = []
+    for name, module, declared in _BUILTIN_MODULES:
+        _PM.register(module, name=f"collector-{name}")
+        probe = _PM.hook
+        impls = {
+            "fetches": bool(getattr(module, "fetch", None)),
+            "paged": bool(getattr(module, "collect_pages", None)),
+            "backfill": bool(getattr(module, "backfill", None)),
+        }
+        for capability in declared:
+            if not impls[capability]:
+                raise RuntimeError(
+                    f"collector {name!r} declares capability {capability!r} "
+                    "without implementing it"
+                )
+        registrations.append(
+            Registration(
+                name=name,
+                collector=cast("Collector", module),
+                paged="paged" in declared,
+                fetches="fetches" in declared,
+            )
+        )
+    del probe
+    return tuple(registrations)
+
+
+REGISTRY: tuple[Registration, ...] = _build_registry()
 
 
 def select(url: str) -> Registration | None:
@@ -164,14 +207,11 @@ def parse_with(registration: Registration, raw: RawPayload) -> list[ItemDraft]:
     caller would otherwise need to catch both. Translating here keeps that
     duplication out of the pipeline, and is the seam a P2 hookspec replaces.
     """
+    # The frozen spec's single CollectorError is what parse impls raise;
+    # re-raised as the registry's own type so callers keep one import.
     try:
         return registration.collector.parse(raw)
-    except (
-        rss.CollectorError,
-        telegram.CollectorError,
-        zsxq.CollectorError,
-        zhihu.CollectorError,
-    ) as exc:
+    except SpecCollectorError as exc:
         raise CollectorError(exc.error_class, exc.detail) from exc
 
 
@@ -215,19 +255,15 @@ def backfiller(registration: Registration) -> BackfillingCollector | None:
 
 
 def supports_backfill(registration: Registration) -> bool:
-    """Whether this collector can walk backwards through its origin's history.
+    """Whether this collector declared the backward-walk capability.
 
-    Probed rather than declared beside each registry entry, because a flag
-    there would have to be kept in sync with the module it describes, and the
-    one place that must agree is the module itself.
-
-    Both helpers are required: a cursor reader without a URL builder would
-    stall on the first page, and a URL builder with nothing to build from can
-    only repeat the page it started on.
+    Declared via the hookspec's `backfill()` (returning BackfillHooks), not
+    probed: the hasattr probe this replaces could not tell "declares the
+    capability" from "happens to define the names".
     """
-    return hasattr(registration.collector, "before_url") and hasattr(
-        registration.collector, "oldest_cursor"
-    )
+    if not hasattr(registration.collector, "backfill"):
+        return False
+    return registration.collector.backfill() is not None
 
 
 def matchers() -> tuple[tuple[str, Callable[[str], bool]], ...]:

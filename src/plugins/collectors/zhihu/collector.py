@@ -39,6 +39,7 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import HOOKIMPL, CollectorError
 from plugins.collectors.zhihu import client as zhihu_client
 
 BASE: Final = zhihu_client.BASE
@@ -75,15 +76,6 @@ _QUESTION_CREATED_MARKERS: Final = ("提出了问题", "提出问题", "QUESTION
 _ACTION_TAGS: Final = {"like": "赞同", "collect": "收藏", "create": "创作"}
 
 
-class CollectorError(Exception):
-    """A parse that failed, carrying its ErrorClass."""
-
-    def __init__(self, error_class: ErrorClass, detail: str) -> None:
-        super().__init__(f"{error_class.value}: {detail}")
-        self.error_class = error_class
-        self.detail = detail
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SourceRoute:
     """Which feed a source URL names, and whose it is."""
@@ -98,6 +90,7 @@ class SourceRoute:
 # --------------------------------------------------------------------------
 
 
+@HOOKIMPL
 def match_url(url: str) -> bool:
     """Whether this collector should handle `url`.
 
@@ -209,6 +202,7 @@ def fetch(
         raise FetchError(ErrorClass.AUTH, str(exc)) from exc
 
 
+@HOOKIMPL
 def parse(raw: RawPayload) -> list[ItemDraft]:
     """Turn a fetched API payload into drafts.
 
@@ -753,3 +747,13 @@ def _unix_to_dt(value: Any) -> datetime | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         return None
     return datetime.fromtimestamp(int(value), tz=UTC)
+
+
+@HOOKIMPL
+def source_config() -> dict[str, object]:
+    """The declared manifest (full shape lands with the plugin table)."""
+    return {
+        "id": "zhihu",
+        "version": "0.1.0",
+        "features": ["fetch", "signed", "cookie"],
+    }

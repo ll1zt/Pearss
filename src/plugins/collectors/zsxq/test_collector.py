@@ -17,9 +17,9 @@ import pytest
 
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
+from core.plugins.hooks import CollectorError
 from plugins.collectors.zsxq import client as zsxq_client
 from plugins.collectors.zsxq import collector
-from plugins.collectors.zsxq.collector import CollectorError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_ID = "src-zsxq-1"

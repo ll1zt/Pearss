@@ -18,6 +18,7 @@ import pytest
 
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
+from core.plugins.hooks import CollectorError
 from plugins.collectors.rss import collector as rss
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -145,7 +146,7 @@ def test_valid_feed_with_no_entries_is_not_an_error() -> None:
 @pytest.mark.fixture
 def test_entries_without_links_are_structure_changed() -> None:
     # The document still parses as valid RSS; only the expected shape is gone.
-    with pytest.raises(rss.CollectorError) as excinfo:
+    with pytest.raises(CollectorError) as excinfo:
         rss.parse(payload("changed.xml"))
     assert excinfo.value.error_class is ErrorClass.STRUCTURE_CHANGED
 
@@ -154,7 +155,7 @@ def test_entries_without_links_are_structure_changed() -> None:
 def test_no_non_url_becomes_a_canonical_url() -> None:
     # Regression: a urn:uuid guid was accepted as the canonical URL, which
     # would have put a non-fetchable identifier into a feed as <link>.
-    with pytest.raises(rss.CollectorError):
+    with pytest.raises(CollectorError):
         rss.parse(payload("changed.xml"))
 
 
@@ -163,7 +164,7 @@ def test_truncated_feed_is_parse_not_silently_published() -> None:
     # Regression: feedparser salvages partial entries from truncated XML, so
     # the feed yielded a usable-looking draft instead of failing. Publishing
     # half-parsed content is worse than reporting the error.
-    with pytest.raises(rss.CollectorError) as excinfo:
+    with pytest.raises(CollectorError) as excinfo:
         rss.parse(payload("malformed.xml"))
     assert excinfo.value.error_class is ErrorClass.PARSE
 
@@ -171,7 +172,7 @@ def test_truncated_feed_is_parse_not_silently_published() -> None:
 @pytest.mark.fixture
 def test_empty_payload_is_rejected() -> None:
     raw = RawPayload(url=FEED_URL, status_code=200, body=b"", source_id=SOURCE_ID)
-    with pytest.raises(rss.CollectorError) as excinfo:
+    with pytest.raises(CollectorError) as excinfo:
         rss.parse(raw)
     assert excinfo.value.error_class is ErrorClass.PARSE
 
@@ -185,7 +186,7 @@ def test_non_feed_xml_is_structure_changed() -> None:
         body=b'<?xml version="1.0"?><html><body>Not a feed</body></html>',
         source_id=SOURCE_ID,
     )
-    with pytest.raises(rss.CollectorError) as excinfo:
+    with pytest.raises(CollectorError) as excinfo:
         rss.parse(raw)
     assert excinfo.value.error_class is ErrorClass.STRUCTURE_CHANGED
 

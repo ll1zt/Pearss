@@ -40,6 +40,7 @@ import httpx
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import HOOKIMPL, CollectorError
 
 # X's own title budget is 100 characters; longer than that and a feed list
 # becomes unreadable rather than more informative.
@@ -58,15 +59,6 @@ _MONTHS = {
 }  # fmt: skip
 
 
-class CollectorError(Exception):
-    """A parse that failed, carrying its ErrorClass."""
-
-    def __init__(self, error_class: ErrorClass, detail: str) -> None:
-        super().__init__(f"{error_class.value}: {detail}")
-        self.error_class = error_class
-        self.detail = detail
-
-
 Json = dict[str, Any]
 
 
@@ -75,6 +67,7 @@ Json = dict[str, Any]
 # --------------------------------------------------------------------------
 
 
+@HOOKIMPL
 def match_url(url: str) -> bool:
     """Whether this collector handles the URL.
 
@@ -86,6 +79,7 @@ def match_url(url: str) -> bool:
     return url.strip().lower().startswith(("x.com/home", "https://x.com/home"))
 
 
+@HOOKIMPL
 def parse(raw: RawPayload) -> list[ItemDraft]:
     """Turn one HomeLatestTimeline page into drafts.
 
@@ -775,3 +769,13 @@ def collect_pages(
         state=state,
         max_pages=max_pages,
     )
+
+
+@HOOKIMPL
+def source_config() -> dict[str, object]:
+    """The declared manifest (full shape lands with the plugin table)."""
+    return {
+        "id": "twitter",
+        "version": "0.1.0",
+        "features": ["fetch", "paged", "cookie"],
+    }

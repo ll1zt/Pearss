@@ -32,6 +32,7 @@ from lxml.html import HtmlElement, fromstring, tostring
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import HOOKIMPL, CollectorError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,15 +62,7 @@ MEDIA_ONLY_TITLE = "(photo)"
 EMPTY_TITLE = "(media)"
 
 
-class CollectorError(Exception):
-    """A parse that failed, carrying its ErrorClass."""
-
-    def __init__(self, error_class: ErrorClass, detail: str) -> None:
-        super().__init__(f"{error_class.value}: {detail}")
-        self.error_class = error_class
-        self.detail = detail
-
-
+@HOOKIMPL
 def match_url(url: str) -> bool:
     """Whether this collector should handle `url`.
 
@@ -112,6 +105,7 @@ def before_url(url: str, message_id: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
 
 
+@HOOKIMPL
 def parse(raw: RawPayload) -> list[ItemDraft]:
     """Turn a fetched preview page into drafts.
 
@@ -499,3 +493,13 @@ __all__ = [
     "parse",
     "username_of",
 ]
+
+
+@HOOKIMPL
+def source_config() -> dict[str, object]:
+    """The declared manifest (full shape lands with the plugin table)."""
+    return {
+        "id": "telegram",
+        "version": "0.1.0",
+        "features": ["backfill"],
+    }

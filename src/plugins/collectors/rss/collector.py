@@ -31,6 +31,7 @@ from adapters.http import fetch as plain_fetch
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import HOOKIMPL, CollectorError
 from plugins.collectors.rss import wordpress
 
 LOGGER = logging.getLogger(__name__)
@@ -43,15 +44,7 @@ FeedData = Any
 _DATE_FIELDS = ("published_parsed", "updated_parsed", "created_parsed")
 
 
-class CollectorError(Exception):
-    """A parse that failed, carrying its ErrorClass."""
-
-    def __init__(self, error_class: ErrorClass, detail: str) -> None:
-        super().__init__(f"{error_class.value}: {detail}")
-        self.error_class = error_class
-        self.detail = detail
-
-
+@HOOKIMPL
 def match_url(url: str) -> bool:
     """Whether this collector should handle `url`.
 
@@ -118,6 +111,7 @@ def _feed_entry_count(raw: RawPayload) -> int:
     return max(1, len(parsed.get("entries") or []))
 
 
+@HOOKIMPL
 def parse(raw: RawPayload) -> list[ItemDraft]:
     """Turn a fetched feed into drafts.
 
@@ -343,3 +337,13 @@ def _text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+@HOOKIMPL
+def source_config() -> dict[str, object]:
+    """The declared manifest (full shape lands with the plugin table)."""
+    return {
+        "id": "rss",
+        "version": "0.1.0",
+        "features": ["fetch", "wordpress-upgrade"],
+    }

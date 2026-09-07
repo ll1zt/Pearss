@@ -38,6 +38,7 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.plugins.hooks import HOOKIMPL, CollectorError
 from plugins.collectors.zsxq import client as zsxq_client
 
 LIMIT_TOPICS: Final = 20
@@ -73,15 +74,6 @@ _TYPE_FALLBACK_TITLES: Final = {
 }
 
 
-class CollectorError(Exception):
-    """A parse that failed, carrying its ErrorClass."""
-
-    def __init__(self, error_class: ErrorClass, detail: str) -> None:
-        super().__init__(f"{error_class.value}: {detail}")
-        self.error_class = error_class
-        self.detail = detail
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SourceRoute:
     """Which group feed a source URL names, and at which scope."""
@@ -95,6 +87,7 @@ class SourceRoute:
 # --------------------------------------------------------------------------
 
 
+@HOOKIMPL
 def match_url(url: str) -> bool:
     """Whether this collector should handle `url`.
 
@@ -191,6 +184,7 @@ def fetch(
     )
 
 
+@HOOKIMPL
 def parse(raw: RawPayload) -> list[ItemDraft]:
     """Turn a merged group+topics payload into drafts.
 
@@ -444,3 +438,13 @@ def _escape_attr(value: Any) -> str:
 
 def _escape_text(value: Any) -> str:
     return html_module.escape(str(value if value is not None else ""), quote=False)
+
+
+@HOOKIMPL
+def source_config() -> dict[str, object]:
+    """The declared manifest (full shape lands with the plugin table)."""
+    return {
+        "id": "zsxq",
+        "version": "0.1.0",
+        "features": ["fetch", "cookie"],
+    }
