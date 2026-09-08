@@ -15,6 +15,7 @@ fresh one, to do what is already done.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from fastapi import APIRouter, Depends, Request
@@ -130,7 +131,7 @@ def _set_status(
             message=f"No plugin with id {plugin_id!r}.",
             suggestion="List plugins to see what is registered.",
         )
-    surface = registration.manifest.as_dict()
+    surface = registration.manifest
 
     # The API-wide idempotency contract: a retried write replays the first
     # result instead of colliding with the 409 below. A key the caller has
@@ -147,8 +148,10 @@ def _set_status(
             session,
             plugin_id,
             status=status.value,
-            current_manifest_json=registration.manifest.canonical_json(),
-            current_checksum=registration.manifest.checksum,
+            current_manifest_json=json.dumps(
+                registration.manifest, sort_keys=True, ensure_ascii=False
+            ),
+            current_checksum=registration.checksum,
             trust=registration.trust,
             tenant_id="default",
             at=timestamp(_now()),

@@ -38,7 +38,13 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
+from core.plugins.hooks import (
+    HOOKIMPL,
+    BackfillHooks,
+    CollectorError,
+    ConfigRequirement,
+    Manifest,
+)
 from plugins.collectors.zsxq import client as zsxq_client
 
 LIMIT_TOPICS: Final = 20
@@ -457,3 +463,15 @@ def source_config() -> Manifest:
             ),
         ),
     )
+
+
+@HOOKIMPL
+def collector_id() -> str:
+    """The stable registration key (ADR 0017)."""
+    return "zsxq"
+
+
+@HOOKIMPL
+def backfill() -> BackfillHooks | None:
+    """This origin has no backward walk."""
+    return None

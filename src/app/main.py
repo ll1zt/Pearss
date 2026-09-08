@@ -145,8 +145,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = scheduler
 
     async with mcp_inner.router.lifespan_context(mcp_inner):
-        from app.collector_registry import sync_plugin_table
+        from app.collector_registry import (
+            for_each_sandboxed_collector,
+            sync_plugin_table,
+        )
 
+        # The sandboxed collectors' egress is host-proxied (ADR 0017): the
+        # child's reverse http calls ride back here and run through the same
+        # shared client the scheduler uses - which is where the SSRF
+        # private-address guard (ADR 0016) and the fetch-timeout/size bounds
+        # live. Without this injection every proxied request is refused, so
+        # the wiring is load-bearing, not cosmetic.
+        for_each_sandboxed_collector(
+            lambda name, child: child.set_http_transport(client)
+        )
         sync_plugin_table(app.state.session_factory)
         if scheduler_enabled():
             await scheduler.start()

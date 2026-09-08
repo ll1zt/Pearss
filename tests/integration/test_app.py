@@ -563,3 +563,29 @@ async def test_reader_login_is_rate_limited_too(
             data={"Email": "reader", "Passwd": "wrong-password"},
         )
         assert blocked.status_code == 429
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lifespan_wires_the_sandboxed_egress_transport(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app's lifespan must inject egress into every sandboxed child.
+
+    Without the wiring each child's reverse http call is answered
+    egress_denied and the four third-party collectors cannot fetch at all.
+    The injected transport is the app's own shared client, so the SSRF
+    guard covers sandboxed egress too.
+    """
+    from app import collector_registry
+
+    collector_registry._registry()  # build children (they spawn lazily)
+    # Run the lifespan by hand: ASGITransport does not enter it, and this
+    # test needs the wiring that happens inside, not the routes.
+    async with app.router.lifespan_context(app):
+        for name in ("telegram", "twitter", "zhihu", "zsxq"):
+            child = collector_registry._SANDBOX_CHILDREN[name]
+            assert child._http_transport is app.state.http_client, (
+                f"sandboxed collector {name!r} must egress through the "
+                "host's shared client"
+            )

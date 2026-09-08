@@ -153,11 +153,12 @@ def test_missing_credentials_fail_as_auth_without_requesting(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(never))
     result = collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(transport=httpx.MockTransport(never)),
+        client=httpx.Client(),
     )
     assert result.succeeded is False
     assert result.error_class == ErrorClass.AUTH.value
@@ -175,13 +176,14 @@ def test_a_rejected_request_keeps_its_classification(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport(
+        "twitter", httpx.MockTransport(lambda request: httpx.Response(429))
+    )
     result = collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(
-            transport=httpx.MockTransport(lambda request: httpx.Response(429))
-        ),
+        client=httpx.Client(),
     )
     assert result.succeeded is False
     assert result.error_class == ErrorClass.BLOCKED.value
@@ -206,11 +208,12 @@ def test_a_successful_walk_records_the_frontier(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
     result = collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(transport=httpx.MockTransport(route)),
+        client=httpx.Client(),
     )
     session.commit()
 
@@ -247,7 +250,8 @@ def test_the_second_walk_stops_at_the_frontier(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
-    client = httpx.Client(transport=httpx.MockTransport(route))
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    client = httpx.Client()
     first = collect_paged(
         session, source=source_row(session), registration=registration, client=client
     )
@@ -357,11 +361,12 @@ def test_a_dropped_resume_lets_the_walk_restart_from_the_newest(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
     collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(transport=httpx.MockTransport(route)),
+        client=httpx.Client(),
     )
     session.commit()
 
@@ -409,11 +414,12 @@ def test_a_rejected_session_is_refreshed_and_the_page_retried(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
     result = collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(transport=httpx.MockTransport(route)),
+        client=httpx.Client(),
     )
     session.commit()
 
@@ -447,11 +453,12 @@ def test_a_persistent_rejection_does_not_retry_forever(
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
     result = collect_paged(
         session,
         source=source_row(session),
         registration=registration,
-        client=httpx.Client(transport=httpx.MockTransport(route)),
+        client=httpx.Client(),
     )
     assert result.succeeded is False
     assert result.error_class == ErrorClass.AUTH.value

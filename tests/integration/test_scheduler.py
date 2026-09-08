@@ -806,3 +806,57 @@ def test_audit_retention_prunes_only_old_rows(
     with session_factory() as session:
         remaining = session.execute(sa.text("select id from audit_log")).fetchall()
     assert [row[0] for row in remaining] == ["audit-new"]
+
+
+@pytest.mark.integration
+def test_an_escaped_exception_closes_the_run_and_does_not_wedge_the_source(
+    session_factory: sessionmaker[Session], fake_feed: httpx.Client, monkeypatch
+) -> None:
+    """A raise inside the collection path must leave no open run behind.
+
+    The run is claimed in its own transaction before collection starts, so an
+    exception that escapes `collect_source` used to leave the row in
+    `running` forever - and the schema's unique partial index over active
+    runs then refused every future collection of this source. The run has to
+    reach a terminal state here, not wait for a reaper.
+    """
+    import app.scheduler as scheduler_module
+    from app.pipeline import collect_source as real_collect_source
+
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+
+    def raising_collect_source(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("the collection path exploded")
+
+    monkeypatch.setattr(scheduler_module, "collect_source", raising_collect_source)
+    status, result = collect_now(
+        session_factory(),
+        source_id="s1",
+        policy_json='{"type":"fixed","interval":"30m"}',
+        client=fake_feed,
+        now=NOW,
+    )
+    assert status is JobRunStatus.FAILED
+    assert result is None
+
+    # The source must be collectable again immediately: no open run holding
+    # the only active-run slot. (Not monkeypatch.undo(): that would also tear
+    # down the autouse hermetic-DNS fixture and turn the second fetch into a
+    # DNS failure unrelated to what this test exercises.)
+    monkeypatch.setattr(scheduler_module, "collect_source", real_collect_source)
+    status, _ = collect_now(
+        session_factory(),
+        source_id="s1",
+        policy_json='{"type":"fixed","interval":"30m"}',
+        client=fake_feed,
+        now=NOW,
+    )
+    assert status is JobRunStatus.SUCCEEDED
+
+    with session_factory() as session:
+        rows = session.execute(
+            sa.text("select status, error_class from job_run order by started_at")
+        ).fetchall()
+    assert ("failed", "parse") in [tuple(row) for row in rows]
+    assert rows[-1][0] == "succeeded"

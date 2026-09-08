@@ -24,6 +24,7 @@ import logging
 import os
 import secrets
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,12 @@ TENANT = "default"
 DEFAULT_TICK_SECONDS = 60.0
 DEFAULT_TICKS = 60.0
 PRUNE_INTERVAL_SECONDS = 3600.0
+# Per-tick reaping grace. A live run of *this* process must never be reaped:
+# timing out a run that is actually still collecting loses its result and
+# frees the active-run slot for a duplicate. Routine collection is one page;
+# even a full 20-page backfill against the slowest policy finishes far inside
+# an hour, so anything running longer than that is genuinely orphaned.
+REAP_GRACE_SECONDS = 3600.0
 
 
 def audit_retention_days() -> int:
@@ -171,7 +178,28 @@ def collect_now(
         session.commit()
         return JobRunStatus.FAILED, None
 
-    result = collect_source(session, source=source, client=client, tenant_id=TENANT)
+    try:
+        result = collect_source(session, source=source, client=client, tenant_id=TENANT)
+    except Exception:
+        # Failures are normally values, but an exception can still escape the
+        # collection path (a plugin child answering unintelligibly, a bug in
+        # the pipeline itself). The run must not survive it open: the schema's
+        # unique partial index over active runs would then block every future
+        # collection of this source until a reaper noticed. An escaped
+        # exception is not any one origin's fault, so it classifies as parse
+        # and carries the traceback for the operator.
+        LOGGER.exception("collection raised for source %s", source_id)
+        status = finish_job_run(
+            session,
+            run_id=run_id,
+            event=JobRunEvent.FAIL,
+            correlation_id=correlation_id,
+            error_class=ErrorClass.PARSE,
+            metrics={"detail": f"collection raised: {traceback.format_exc()[:200]}"},
+            at=_iso(datetime.now(UTC)),
+        )
+        session.commit()
+        return status, None
 
     # The caller's clock throughout. Stamping the run with the wall clock while
     # deciding with an injected one makes the two disagree, and a source whose
@@ -296,8 +324,10 @@ class Scheduler:
         self._on_tick = on_tick
         self._prune_every = prune_every
         # Zero means the first loop pass prunes immediately: booting after a
-        # long outage is exactly when stale rows should go.
+        # long outage is exactly when stale rows should go. The same holds for
+        # reaping orphaned runs - see _reap_orphaned_runs_if_due.
         self._next_prune_at = 0.0
+        self._next_reap_at = 0.0
         self._task: asyncio.Task[None] | None = None
         # Guards against a slow tick overlapping the next one. Without it a
         # fetch longer than the interval would stack up runs indefinitely.
@@ -309,8 +339,10 @@ class Scheduler:
 
         # Reap first: a run left `running` by a crashed process is never closed
         # by anyone, so the history would keep showing work in progress that
-        # stopped existing hours ago. Anything still running after one full
-        # interval plus slack is genuinely gone.
+        # stopped existing hours ago. At startup no run of *this* process can
+        # exist yet, so the tight window (one tick plus slack) is safe here;
+        # the per-tick pass uses the wide grace instead, because there a live
+        # run of this very process is exactly what must not be reaped.
         def reap() -> int:
             with self._session_factory() as session:
                 reaped = reap_orphaned_runs(
@@ -344,7 +376,42 @@ class Scheduler:
         while True:
             await asyncio.sleep(self._tick_seconds)
             await self.tick_once()
+            await self._reap_orphaned_runs_if_due()
             await self._prune_audit_if_due()
+
+    async def _reap_orphaned_runs_if_due(self) -> None:
+        """Close runs left `running`, on every tick (with a wide grace).
+
+        Startup-only reaping (the old behaviour) meant a run abandoned
+        *inside* this process - an escaped exception that slipped every
+        guard - held the source's only active-run slot until restart. The
+        per-tick pass bounds that to REAP_GRACE_SECONDS: long enough that a
+        live run of this process can never be reaped, short enough that a
+        leaked slot costs the source its next few cycles, not its whole
+        week. Startup reaping keeps the tight window - see start().
+        """
+        now = time.monotonic()
+        if now < self._next_reap_at:
+            return
+        self._next_reap_at = now + self._tick_seconds * 4
+
+        def reap() -> int:
+            with self._session_factory() as session:
+                reaped = reap_orphaned_runs(
+                    session,
+                    older_than=datetime.now(UTC)
+                    - timedelta(seconds=REAP_GRACE_SECONDS),
+                )
+                session.commit()
+            return reaped
+
+        reaped = await asyncio.to_thread(reap)
+        if reaped:
+            LOGGER.warning(
+                "timed out %d run(s) left running past the %ds grace window",
+                reaped,
+                REAP_GRACE_SECONDS,
+            )
 
     async def _prune_audit_if_due(self) -> None:
         now = time.monotonic()

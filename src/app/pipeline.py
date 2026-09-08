@@ -163,10 +163,11 @@ def collect_source(
         source.type, source.url or source.canonical_url or ""
     )
     if registration is not None and _plugin_disabled(
-        session, registration.manifest.id, tenant_id=tenant_id
+        session, str(registration.manifest["id"]), tenant_id=tenant_id
     ):
         LOGGER.info(
-            "collection skipped: plugin %s is disabled", registration.manifest.id
+            "collection skipped: plugin %s is disabled",
+            registration.manifest["id"],
         )
         return CollectionResult(succeeded=True, skipped_plugin=True)
 
@@ -395,7 +396,8 @@ def _paged_source_title(registration: CollectorRegistration) -> str:
     title, so the manifest's display_title is the honest label. (The feed
     path learns titles from the payload itself; see _collect_one_page.)
     """
-    return registration.manifest.display_title or registration.manifest.id
+    title = registration.manifest["display_title"] or registration.manifest["id"]
+    return str(title)
 
 
 def _merge(first: CollectionResult, page: CollectionResult) -> CollectionResult:
