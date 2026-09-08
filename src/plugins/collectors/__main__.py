@@ -24,6 +24,8 @@ from typing import Any, cast
 
 import httpx
 
+from adapters.http import FetchError
+from core.enums import ErrorClass
 from core.plugins import protocol
 from core.plugins.hooks import CollectorError
 
@@ -31,6 +33,21 @@ from core.plugins.hooks import CollectorError
 # which one this child serves.
 _COLLECTORS: dict[str, Any] = {}
 _CHILD_CLIENT: httpx.Client | None = None
+
+
+class EgressRefusal(Exception):
+    """The host refused or could not answer a reverse http call.
+
+    Carries the host's classification code so the transport handler can
+    re-raise it as the same classified failure the in-process path would
+    have produced, instead of flattening every refusal into a connect
+    error.
+    """
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
 
 
 class HostProxy:
@@ -53,9 +70,9 @@ class HostProxy:
             raise RuntimeError("host closed the reverse-call channel")
         response = protocol.decode_response(line.encode())
         if response.error is not None:
-            raise RuntimeError(
-                f"{response.error.get('code', 'error')}: "
-                f"{response.error.get('message', '')}"
+            raise EgressRefusal(
+                str(response.error.get("code", "error")),
+                str(response.error.get("message", "")),
             )
         return dict(response.result)
 
@@ -131,8 +148,6 @@ def handle(
         # a response-level error object the host proxy re-raises as
         # FetchError. Returning an error_result as a *result* would lose the
         # result/error distinction the protocol defines.
-        from adapters.http import FetchError
-
         try:
             payload = module.fetch(
                 str(params["url"]),
@@ -177,7 +192,20 @@ def _host_proxied_client(host_http: Any) -> httpx.Client:
             "headers": [[k.decode(), v.decode()] for k, v in request.headers.raw],
             "content_b64": base64.b64encode(request.read()).decode("ascii"),
         }
-        result = host_http("http", params)
+        try:
+            result = host_http("http", params)
+        except EgressRefusal as exc:
+            if exc.code in {member.value for member in ErrorClass}:
+                # The host classified the refusal (its SSRF guard, a blocked
+                # origin); re-raise it as that same classified failure so the
+                # collector's HTTP layer passes it through unchanged.
+                raise FetchError(ErrorClass(exc.code), exc.detail) from exc
+            # No classification (egress denied, channel trouble): a transport
+            # error, which the collector's HTTP layer maps to a
+            # network-classified FetchError rather than a child crash.
+            raise httpx.ConnectError(f"host egress failed: {exc}") from exc
+        except Exception as exc:  # pragma: no cover - HostProxy wraps all errors
+            raise httpx.ConnectError(f"host egress failed: {exc}") from exc
         headers = [(str(k), str(v)) for k, v in (result.get("headers") or {}).items()]
         body = base64.b64decode(str(result.get("body_b64", "")))
         return httpx.Response(int(result["status"]), headers=headers, content=body)

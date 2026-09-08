@@ -245,9 +245,17 @@ class PluginChild:
             if message.error is not None:
                 code = str(message.error.get("code", "error"))
                 text = str(message.error.get("message", ""))
-                if code in {"auth", "blocked", "parse", "structure_changed"}:
-                    # The child is healthy; the origin refused or the payload
-                    # moved. A classified value, not a child fault.
+                if code in {
+                    "auth",
+                    "blocked",
+                    "network",
+                    "parse",
+                    "structure_changed",
+                }:
+                    # A classified origin failure: the child is healthy (the
+                    # origin refused, the payload moved, or the proxied
+                    # egress could not connect), so a restart would only
+                    # reproduce it. A value, not a child fault.
                     raise ClassifiedChildError(code, text)
                 raise PluginChildError(f"{code}: {text}")
             result: dict[str, Any] = message.result
@@ -285,7 +293,18 @@ class PluginChild:
                 }
                 error = None
             except Exception as exc:  # transport-level failure
-                error = protocol.error_result("network", f"{type(exc).__name__}: {exc}")
+                # A policy refusal (the egress transport's SSRF guard raises
+                # FetchError) keeps its classification; anything else is a
+                # plain transport failure. Both are answered as *values* —
+                # the child stays healthy either way.
+                from adapters.http import FetchError
+
+                if isinstance(exc, FetchError):
+                    error = protocol.error_result(exc.error_class.value, exc.detail)
+                else:
+                    error = protocol.error_result(
+                        "network", f"{type(exc).__name__}: {exc}"
+                    )
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 0}
         payload["result" if error is None else "error"] = (
             response_body if error is None else error

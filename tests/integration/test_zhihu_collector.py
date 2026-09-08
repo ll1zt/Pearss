@@ -181,3 +181,76 @@ def test_a_missing_session_is_an_auth_run_not_a_crash(
     assert not result.succeeded
     assert result.error_class == "auth"
     assert "d_c0" in (result.detail or "")
+
+
+@pytest.mark.integration
+def test_a_transport_failure_stays_network_and_keeps_the_child(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """An unreachable origin is a classified value, not a child fault.
+
+    The egress transport failing must not cost the child its life: the child
+    is healthy, the origin (or the network) is not, and a restart would only
+    reproduce the failure — after putting the source's run slot in a state
+    only the reaper could clear.
+    """
+
+    collector_registry._registry()
+    registration = collector_registry.by_name("zhihu")
+    assert registration is not None
+    registration.collector.start()
+    child = collector_registry._SANDBOX_CHILDREN["zhihu"]
+    assert child._proc is not None
+    pid = child._proc.pid
+    collector_registry.set_http_transport(
+        "zhihu",
+        httpx.MockTransport(
+            lambda request: (_ for _ in ()).throw(httpx.ConnectError("refused"))
+        ),
+    )
+
+    with session_factory() as session:
+        _add_source(session, "s4", "https://www.zhihu.com/people/example/answers")
+        source = session.get(Source, "s4")
+        assert source is not None
+        result = collect_source(session, source=source, client=httpx.Client())
+        session.commit()
+
+    assert not result.succeeded
+    assert result.error_class == "network"
+    assert child._proc is not None and child._proc.pid == pid, (
+        "a transport failure must not restart a healthy child"
+    )
+
+
+@pytest.mark.integration
+def test_a_policy_refusal_keeps_its_blocked_classification(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The egress transport's SSRF refusal survives the RPC round trip."""
+    from adapters.http import FetchError
+    from core.enums import ErrorClass
+
+    collector_registry._registry()
+    registration = collector_registry.by_name("zhihu")
+    assert registration is not None
+    registration.collector.start()
+    child = collector_registry._SANDBOX_CHILDREN["zhihu"]
+    assert child._proc is not None
+    pid = child._proc.pid
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise FetchError(ErrorClass.BLOCKED, "private-address fetch refused")
+
+    collector_registry.set_http_transport("zhihu", httpx.MockTransport(refuse))
+
+    with session_factory() as session:
+        _add_source(session, "s5", "https://www.zhihu.com/people/example/answers")
+        source = session.get(Source, "s5")
+        assert source is not None
+        result = collect_source(session, source=source, client=httpx.Client())
+        session.commit()
+
+    assert not result.succeeded
+    assert result.error_class == "blocked"
+    assert child._proc is not None and child._proc.pid == pid
