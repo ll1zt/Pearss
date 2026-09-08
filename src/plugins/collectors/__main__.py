@@ -133,12 +133,34 @@ def handle(
         hooks = module.backfill()
         return hooks is not None
 
+    if method in {"before_url", "oldest_cursor"}:
+        # The BackfillHooks surface, one method per RPC call. The collector
+        # declared the capability (its `backfill()` returned hooks), so the
+        # hooks object exists here; "declared but absent" is a contract
+        # violation and crashes the request rather than pretending no
+        # cursor exists.
+        from core.models import ItemDraft
+
+        hooks = module.backfill()
+        if hooks is None:
+            raise protocol.ProtocolError(
+                f"collector {collector_id!r} did not declare backfill"
+            )
+        if method == "before_url":
+            page_url = hooks.before_url(str(params["url"]), str(params["cursor"]))
+            return {"page_url": page_url}
+        cursor = hooks.oldest_cursor(
+            [ItemDraft.from_rpc_dict(d) for d in params["drafts"]]
+        )
+        return {"cursor": cursor}
+
     if method == "match_url":
         return module.match_url(str(params["url"]))
 
     if method == "parse":
         # The raw payload arrives as its field dict; rebuild the value.
         from adapters.raw_payload import RawPayload
+        from core.models import ItemDraft
 
         raw = RawPayload.from_rpc_dict(params["raw"])
         return [draft.as_rpc_dict() for draft in module.parse(raw)]

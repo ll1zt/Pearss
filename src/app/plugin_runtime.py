@@ -38,6 +38,7 @@ from typing import Any, Final
 
 from core.enums import ErrorClass
 from core.plugins import protocol
+from core.plugins.hooks import BackfillHooks
 from core.plugins.protocol import ProtocolError
 
 LOGGER = logging.getLogger(__name__)
@@ -454,8 +455,18 @@ class SandboxedCollector:
     def source_config(self) -> Any:
         return self._ensure_running().call("source_config", {})
 
-    def backfill(self) -> Any:
-        return self._ensure_running().call("backfill", {})
+    def backfill(self) -> BackfillHooks | None:
+        """The declared backward-walk capability, as an RPC-backed object.
+
+        Returns a hooks object whose every method is an RPC call — the same
+        shape the in-process collectors return — so the registry's
+        `backfiller()` narrowing works unchanged over the sandbox. None
+        means the origin has no backward walk.
+        """
+        self._ensure_running()
+        if not bool(self._child.call("backfill", {})):
+            return None
+        return _SandboxedBackfillHooks(self._child)
 
     def fetch(self, url: str, **kwargs: Any) -> Any:
         from adapters.http import FetchError
@@ -539,3 +550,29 @@ class SandboxedCollector:
             ),
             detail=result.get("detail"),
         )
+
+
+class _SandboxedBackfillHooks:
+    """BackfillHooks whose every method is one RPC call.
+
+    Lives on the host, talks to the child's declared hooks object. It
+    satisfies the registry's `backfiller()` narrowing (before_url +
+    oldest_cursor) without the host importing the collector.
+    """
+
+    def __init__(self, child: PluginChild) -> None:
+        self._child = child
+
+    def before_url(self, url: str, cursor: str) -> str | None:
+        result = self._child.call("before_url", {"url": url, "cursor": cursor})
+        page_url = result.get("page_url")
+        return str(page_url) if page_url is not None else None
+
+    def oldest_cursor(self, drafts: list[Any]) -> str | None:
+
+        result = self._child.call(
+            "oldest_cursor",
+            {"drafts": [draft.as_rpc_dict() for draft in drafts]},
+        )
+        cursor = result.get("cursor")
+        return str(cursor) if cursor is not None else None

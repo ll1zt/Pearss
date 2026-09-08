@@ -65,3 +65,53 @@ def test_an_unknown_collector_fails_at_start() -> None:
     sandbox = PluginChild("no-such-collector")
     with pytest.raises(PluginChildError):
         sandbox.start()
+
+
+@pytest.mark.integration
+def test_the_backfill_surface_round_trips_over_rpc(child: PluginChild) -> None:
+    """The declared backward walk is callable, not just declarable.
+
+    The registry's backfiller() narrowing needs before_url/oldest_cursor on
+    the collector; over the sandbox these are RPC methods against the
+    child's hooks object. A bool-only `backfill()` used to make the
+    capability undetectably inert.
+    """
+    from app.plugin_runtime import SandboxedCollector
+
+    proxy = SandboxedCollector(child)
+    hooks = proxy.backfill()
+    assert hooks is not None, "telegram declares the backward walk"
+
+    page_url = hooks.before_url("https://t.me/s/durov", "1234")
+    assert page_url is not None
+    assert "before=1234" in page_url
+
+    from core.models import ItemDraft
+
+    def draft(external_id: str) -> ItemDraft:
+        return ItemDraft(
+            source_id="s1",
+            external_id=external_id,
+            title="n",
+            canonical_url=f"https://t.me/durov/{external_id.removeprefix('telegram:')}",
+            published_at=None,
+            content="",
+        )
+
+    # Real telegram external ids are permalink-shaped; the cursor extractor
+    # takes the trailing path segment.
+    drafts = [draft("telegram:/durov/99"), draft("telegram:/durov/55")]
+    cursor = hooks.oldest_cursor(drafts)
+    assert cursor == "99", "the preview page lists ascending; the top one is oldest"
+
+
+@pytest.mark.integration
+def test_a_collector_without_a_walk_returns_none(child: PluginChild) -> None:
+    from app.plugin_runtime import PluginChild, SandboxedCollector
+
+    rss_child = PluginChild("rss")
+    rss_child.start()
+    try:
+        assert SandboxedCollector(rss_child).backfill() is None
+    finally:
+        rss_child.stop()

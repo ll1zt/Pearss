@@ -27,6 +27,8 @@ METHODS: Final[frozenset[str]] = frozenset(
         "collect_pages",
         "source_config",
         "backfill",
+        "before_url",
+        "oldest_cursor",
         "http",
         "ping",
     }

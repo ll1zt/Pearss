@@ -92,9 +92,10 @@ class BackfillingCollector(Protocol):
 
     Separate from `Collector` because most cannot. An RSS feed has no cursor
     beyond what it happens to include, so demanding these of every collector
-    would make the common case implement two methods that raise. Capability is
-    probed with `supports_backfill` instead of declared, so the module that has
-    to agree with the check is the module itself.
+    would make the common case implement two methods that raise. Capability
+    is declared via the collector's `backfill()` returning a hooks object
+    (core.plugins.hooks.BackfillHooks), which is also what `backfiller()`
+    returns narrowed to.
     """
 
     def before_url(self, url: str, cursor: str) -> str | None: ...
@@ -382,19 +383,20 @@ def fetch_page_with(
 
 
 def backfiller(registration: Registration) -> BackfillingCollector | None:
-    """The collector as a backfiller, or None when its origin has no cursor.
+    """The collector's backward-walk hooks, or None when it has no cursor.
 
-    Returning the narrowed view rather than a boolean means the caller cannot
-    forget to check: to use the cursor methods it must first hold this value.
+    The hooks object `backfill()` returns is the declaration of record
+    (core.plugins.hooks.BackfillHooks): an in-process collector binds its
+    module functions into one, and a sandboxed proxy returns an RPC-backed
+    one, so the same narrowing serves both without probing module attributes
+    that a proxy structurally cannot have.
     """
-    if not supports_backfill(registration):
+    if not hasattr(registration.collector, "backfill"):
         return None
-    collector = registration.collector
-    before_url = getattr(collector, "before_url", None)
-    oldest_cursor = getattr(collector, "oldest_cursor", None)
-    if not callable(before_url) or not callable(oldest_cursor):
+    hooks = registration.collector.backfill()
+    if hooks is None:
         return None
-    return cast("BackfillingCollector", collector)
+    return cast("BackfillingCollector", hooks)
 
 
 def supports_backfill(registration: Registration) -> bool:
