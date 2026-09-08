@@ -51,10 +51,18 @@ def app(
 
 @pytest_asyncio.fixture
 async def writer(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """Write-scoped client with a per-request Idempotency-Key.
+
+    Each test's writes are distinct logical operations, so a fresh UUID per
+    request satisfies the contract without colliding across tests.
+    """
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
-        headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+        headers={
+            "Authorization": f"Bearer {WRITE_TOKEN}",
+            "Idempotency-Key": "test-key",
+        },
     ) as opened:
         yield opened
 
@@ -88,7 +96,9 @@ async def test_login_type_sources_declare_required_config(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_disable_then_enable_round_trip(writer: httpx.AsyncClient) -> None:
-    disabled = await writer.post("/v1/plugins/telegram:disable")
+    disabled = await writer.post(
+        "/v1/plugins/telegram:disable", headers={"Idempotency-Key": "tg-off"}
+    )
     assert disabled.status_code == 200
     assert disabled.json()["status"] == "disabled"
 
@@ -97,29 +107,66 @@ async def test_disable_then_enable_round_trip(writer: httpx.AsyncClient) -> None
     telegram = next(row for row in listed["data"] if row["id"] == "telegram")
     assert telegram["status"] == "disabled"
 
-    enabled = await writer.post("/v1/plugins/telegram:enable")
+    enabled = await writer.post(
+        "/v1/plugins/telegram:enable", headers={"Idempotency-Key": "tg-on"}
+    )
     assert enabled.status_code == 200
     assert enabled.json()["status"] == "enabled"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_disabling_an_disabled_plugin_conflicts(
+async def test_disable_replays_with_the_same_key_conflicts_with_a_fresh_one(
     writer: httpx.AsyncClient,
 ) -> None:
-    first = await writer.post("/v1/plugins/rss:disable")
+    """The two no-op semantics, pinned apart.
+
+    Same key = a retry of the original write: replay its 200. A fresh key on
+    an already-done operation = a deliberate no-op: 409.
+    """
+    first = await writer.post(
+        "/v1/plugins/rss:disable", headers={"Idempotency-Key": "rss-off"}
+    )
     assert first.status_code == 200
-    second = await writer.post("/v1/plugins/rss:disable")
-    assert second.status_code == 409
-    assert second.json()["detail"]["error"]["code"] == "plugin_status_unchanged"
+
+    replay = await writer.post(
+        "/v1/plugins/rss:disable", headers={"Idempotency-Key": "rss-off"}
+    )
+    assert replay.status_code == 200
+    assert replay.headers["Idempotent-Replay"] == "true"
+    assert replay.json()["status"] == "disabled"
+
+    fresh = await writer.post(
+        "/v1/plugins/rss:disable", headers={"Idempotency-Key": "rss-off-again"}
+    )
+    assert fresh.status_code == 409
+    assert fresh.json()["detail"]["error"]["code"] == "plugin_status_unchanged"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_unknown_plugin_is_404(writer: httpx.AsyncClient) -> None:
-    response = await writer.post("/v1/plugins/missing:disable")
+    response = await writer.post(
+        "/v1/plugins/missing:disable", headers={"Idempotency-Key": "missing"}
+    )
     assert response.status_code == 404
     assert response.json()["detail"]["error"]["code"] == "plugin_not_found"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_write_without_idempotency_key_is_refused(
+    app: FastAPI, session_factory: sessionmaker[Session]
+) -> None:
+    """The API-wide idempotency contract covers the plugin surface too."""
+    bare = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+    )
+    response = await bare.post("/v1/plugins/rss:disable")
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "idempotency_key_required"
 
 
 @pytest.mark.integration
@@ -206,7 +253,11 @@ async def test_a_disabled_plugin_collects_nothing(
     from adapters.db_models import Source
     from app.pipeline import collect_source
 
-    assert (await writer.post("/v1/plugins/zhihu:disable")).status_code == 200
+    assert (
+        await writer.post(
+            "/v1/plugins/zhihu:disable", headers={"Idempotency-Key": "zh-off"}
+        )
+    ).status_code == 200
 
     with session_factory() as session:
         source = session.get(Source, zhihu_source)
@@ -273,7 +324,11 @@ async def test_startup_sync_preserves_the_operator_decision(
     """
     from app.collector_registry import sync_plugin_table
 
-    assert (await writer.post("/v1/plugins/zhihu:disable")).status_code == 200
+    assert (
+        await writer.post(
+            "/v1/plugins/zhihu:disable", headers={"Idempotency-Key": "zh-off"}
+        )
+    ).status_code == 200
 
     # A restart (lifespan) runs the sync again.
     sync_plugin_table(session_factory)
@@ -299,7 +354,9 @@ async def test_disable_persists_across_a_fresh_app_instance(
         base_url="http://test",
         headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
     ) as aclient:
-        await aclient.post("/v1/plugins/rss:disable")
+        await aclient.post(
+            "/v1/plugins/rss:disable", headers={"Idempotency-Key": "rss-off-1"}
+        )
 
     # A brand-new app instance over the same database (simulated restart).
     second_app = create_app(session_factory)

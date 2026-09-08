@@ -44,12 +44,32 @@ POST /v1/jobs/{job_id}:pause            # 改变任务生命周期        ❌ �
 POST /v1/items/{item_id}:force-publish  # 需显式授权与审计        ❌ P3（处理器链）
 ```
 
+POST /v1/plugins/{plugin_id}:enable    # 生命周期：启用插件       ✅ P2
+POST /v1/plugins/{plugin_id}:disable   # 生命周期：禁用插件       ✅ P2
+POST /v1/plugins/{plugin_id}:import    # 安装第三方插件           ⏸ P2b（loader）
+DELETE /v1/plugins/{plugin_id}         # 卸载                    ⏸ P2b（loader）
+POST /v1/plugins/{plugin_id}:reload    # 热重载（仅子进程插件）    ⏸ P2b
+```
+
 已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`、
 `POST /v1/sources/{id}:trigger`、`GET /v1/items`、`GET /v1/items/{id}`、
 `GET /v1/items/{id}/body`、`GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、
-`GET /v1/system/snapshot`。
+`GET /v1/system/snapshot`、`GET /v1/plugins`、`GET /v1/plugins/{id}`、
+`POST /v1/plugins/{id}:enable|:disable`。
 
 动作 endpoint 必须：说明副作用、接受幂等键、返回 correlation ID；如果是异步操作，返回 `202 Accepted` 和 job/run 标识。
+
+### 幂等与冲突（写动作的两条 no-op 语义）
+
+写动作的幂等键决定重复请求的语义，两种情况必须区分：
+
+- **同 key 重试**：返回**首次结果的重放**（200，`Idempotent-Replay: true`）——
+  重试不是错误；
+- **新 key 的重复操作**（资源已处于目标状态）：409 `*_unchanged`——调用方
+  在没有重放凭证的情况下要求执行一个已完成的动作，是请求本身的冲突。
+
+不得把前者改写成 409，也不得让后者伪装成 200：前者保护网络重试，后者
+暴露真实状态。参考实现：`/v1/plugins/{id}:enable|:disable`。
 
 ## 请求与响应
 

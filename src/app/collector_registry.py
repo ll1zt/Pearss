@@ -120,6 +120,9 @@ class Registration:
     fetches: bool = False
     # The verified manifest (checksum computed by the registry at startup).
     manifest: Manifest
+    # The trust level the loader asserted for this collector: `builtin` for
+    # the shipped set; the P2b third-party loader asserts per-package trust.
+    trust: str = "builtin"
 
 
 _PM = pluggy.PluginManager("pearss")

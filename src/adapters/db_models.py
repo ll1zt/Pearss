@@ -38,6 +38,9 @@ ENUM_LENGTHS = {
     "source_type": 16,
     "audit_outcome": 16,
     "trust_level": 16,
+    # The plugin table's own taxonomies; not source/trust borrowings.
+    "plugin_status": 16,
+    "plugin_trust": 16,
 }
 
 
@@ -425,10 +428,10 @@ class Plugin(Base):
     manifest_json: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     checksum: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.String(ENUM_LENGTHS["source_status"]), nullable=False
+        sa.String(ENUM_LENGTHS["plugin_status"]), nullable=False
     )
     trust: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.String(ENUM_LENGTHS["trust_level"]), nullable=False
+        sa.String(ENUM_LENGTHS["plugin_trust"]), nullable=False
     )
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
     created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
