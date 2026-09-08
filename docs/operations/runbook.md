@@ -85,7 +85,10 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 - ErrorClass 分布；特别是 `structure_changed` 是否突然增加
 - `pending` Item 的数量与最久等待时长
 - JobRun 队列深度、超时率、重试率
-- 插件崩溃/超时率（P2）
+- 插件子进程信号：`GET /v1/plugins` 看启用状态；日志中
+  `plugin child … failed; restarting once`（崩溃重启）、
+  `plugin child … environment changed; rotating`（凭据轮换）、
+  `PEARSS_* environment changed` 出现频率异常 = 凭据在频繁变动
 - Reader API 可访问性、最近 GUID 是否稳定
 - 备份最近一次成功时间与最近恢复演练日期
 
@@ -128,6 +131,9 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 | NNW 里条目**全被标星** | `read_state.is_starred`、`s=.../starred` 流的返回 | 检查 Reader API 的状态流是否被正确过滤；数据库里 0 条星标却全部显示星标 = 状态流返回了全库 | 把「客户端显示」当成「数据库状态」 |
 | 经 NNW 消费的条目**永不冻结** | `item.publish_status` 是否停在 `ready` | 三条输出路径都必须写 `first_publish`；此前只有 RSS 写，Reader API 不写 → 不可变性保证在客户端实际缓存的那条路径上失效 | 只修 RSS 渲染 |
 | 应用日志**突然全部消失** | 是否执行过 alembic 迁移 | `fileConfig` 默认 `disable_existing_loggers=True`；已改为 `False` | 以为是代码没打日志 |
+| 沙箱插件日志出现 `child_error` / `failed; restarting once` | `journalctl --user -u pearss` 中 child 的 traceback（stderr 已继承宿主流） | 单次崩溃会被自动重启自愈；反复出现 = 插件代码/环境问题，先看 traceback 再决定是否 disable 该插件 | 在宿主进程内"顺手修"插件代码 |
+| 沙箱插件持续 `egress_denied` | 部署是否经 app lifespan 启动（egress 由 lifespan 注入） | 正常 systemd/`just run` 启动即已接线；自查脚本/手工调用 collector_registry 时需手动注入 transport | 给 child 直接放开网络（绕过 SSRF 拦截） |
+| 插件相关错误里 `auth` 但凭据已配置 | 凭据前缀是否在 `_COLLECTOR_ENV_PREFIXES` 登记（ADR 0017 env allowlist） | 补登记后重启服务 | 把宿主全量环境透传给 child |
 
 ## Source/采集器问题操作步骤
 

@@ -46,9 +46,9 @@ POST /v1/items/{item_id}:force-publish  # 需显式授权与审计        ❌ P3
 
 POST /v1/plugins/{plugin_id}:enable    # 生命周期：启用插件       ✅ P2
 POST /v1/plugins/{plugin_id}:disable   # 生命周期：禁用插件       ✅ P2
-POST /v1/plugins/{plugin_id}:import    # 安装第三方插件           ⏸ P2b（loader）
-DELETE /v1/plugins/{plugin_id}         # 卸载                    ⏸ P2b（loader）
-POST /v1/plugins/{plugin_id}:reload    # 热重载（仅子进程插件）    ⏸ P2b
+POST /v1/plugins/{plugin_id}:import    # 安装第三方插件           ⏸ 第三方 loader（独立 ADR）
+DELETE /v1/plugins/{plugin_id}         # 卸载                    ⏸ 第三方 loader（独立 ADR）
+POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）⏸ 随 loader
 ```
 
 已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`、

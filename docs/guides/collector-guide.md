@@ -17,20 +17,52 @@
 
 登录型采集器**自己声明它需要哪个域名**（如 `COOKIE_DOMAIN = "x.com"`），不读全局配置：域名是站点的固有属性，一个共享值会让第二个采集器静默拿到第一个的 cookie。
 
-## P1 准插件结构
+## 插件结构与执行模型
 
-> **实现现状**：已交付 3 个准插件，均为 `collectors/<name>/collector.py` 包形态：
-> - `rss`（RSS 2.0 + Atom）：5 套 fixture
-> - `telegram`（公开频道预览页）：5 套 fixture
-> - `twitter`（X 时间线，**登录型**，见 ADR 0012）：9 套 fixture
+> **实现现状**：已交付 5 个采集器（ADR 0011/0012/0014/0015），均为
+> `collectors/<name>/collector.py` 包形态：
+> - `rss`（RSS 2.0 + Atom，**内置，进程内**）：5 套 fixture，fetch 钩子含 WordPress 全文升级
+> - `telegram`（公开频道预览页）：5 套 fixture，声明 backfill
+> - `twitter`（X 时间线，**登录型**，见 ADR 0012）：9 套 fixture，paged 走读
+> - `zhihu`（**登录型 + 签名**，见 ADR 0014）
+> - `zsxq`（**登录型**，见 ADR 0015）
 >
-> 三个齐了，§3「第三个爬虫接入且未改动前两个」这一 P2 hookspec 冻结前提
-> （Rule of Three）**已满足**——但需实际核对第三个是否迫使前两个改过代码。
->
-> 选择在 `src/app/collector_registry.py`：按 URL 选采集器（`match_url`），而非 pipeline
-> 硬编码调某一个。`fetch` 不在采集器内，由 `adapters/http.py` 统一负责。
+> 选择在 `src/app/collector_registry.py`：按 URL 选采集器（`match_url`），但
+> **声明类型优先于 URL 猜测**（`select_for`）——`hnrss.org/frontpage` 是真
+> RSS feed 却不含任何 feed 形状的路径，纯 URL 路由会拒绝采集一个运维明确
+> 建成 `rss` 的源。
 
-P1 不做动态安装/manifest；每个采集器仍按统一目录和接口形态编写：
+合约冻结于 `core/plugins/hooks.py`（ADR 0017）：每个采集器以 `@HOOKIMPL`
+声明 `collector_id` / `match_url` / `parse` / `source_config`，可选声明
+`fetch` / `collect_pages` / `backfill`。manifest 的 features 与实际
+hookimpl 在启动时双向校验——声明了没有的能力即启动失败。失败契约：
+`fetch` 只抛 `FetchError(ErrorClass)`，`parse` 只抛
+`CollectorError(ErrorClass)`（从 `core.plugins.hooks` 导入，不得自定义）。
+
+### 执行模型：进程内 vs 子进程沙箱（ADR 0017）
+
+| | rss（内置） | telegram / twitter / zhihu / zsxq（第三方） |
+|---|---|---|
+| 进程 | 宿主进程内直接调用 | `python -m plugins.collectors <id>` 独立子进程 |
+| 通信 | 函数调用 | JSON-RPC 2.0 over stdio（合约：`core/plugins/protocol.py`） |
+| 网络 | `adapters/http.py` | 经反向调用代理回宿主，走同一 SSRF 拦截与超时/限额 |
+| 凭据 | 环境变量 | env allowlist 注入（见下） |
+| 崩溃影响 | 宿主 | 宿主自动重启 child 一次；分类失败（auth/blocked/network/parse/structure_changed）是**值**，不重启 |
+
+写新第三方采集器时的硬性约束：
+
+- **凭据前缀必须登记**：`app/plugin_runtime.py` 的
+  `_COLLECTOR_ENV_PREFIXES` 按采集器 id 列出它可读的 `PEARSS_*` 前缀。
+  未登记的变量不会进入子进程——child 读不到凭据会归 `auth`，这是
+  allowlist 生效的表现，不是 bug。
+- **child 不 import `adapters`/`app`**：子进程只从请求参数与环境取值，
+  不碰数据库与文件存储。SQLAlchemy 等宿主持久化机器不进沙箱。
+- **child 的 stderr 继承宿主流**：崩溃 traceback 由 journald 收集，排查
+  插件故障先看 `journalctl --user -u pearss`。
+- **网络一律经代理**：child 内的 `httpx` 客户端由入口注入（反向调用回
+  宿主），child 不直接出网；fixture 测试经 `set_http_transport` 注入。
+
+目录与 fixture 约定不变：
 
 ```text
 plugins/collectors/<pattern_name>/
@@ -43,11 +75,6 @@ plugins/collectors/<pattern_name>/
     expected-items.json
   test_collector.py
 ```
-
-经 `app/collector_registry.py` 注册到 pluggy（合约冻结于 `core/plugins/hooks.py`，ADR 0017）：每个采集器以 `@HOOKIMPL` 声明 `match_url` / `parse` / `source_config`，可选声明 `fetch` / `collect_pages` / `backfill`。manifest 的 features 与实际 hookimpl 在启动时双向校验——声明了没有的能力即启动失败。失败契约：`fetch` 只抛 `FetchError(ErrorClass)`，`parse` 只抛 `CollectorError(ErrorClass)`（从 `core.plugins.hooks` 导入，不得自定义）。
-
-注册表按 URL 选采集器，但**声明类型优先于 URL 猜测**（`select_for`）：`hnrss.org/frontpage`
-是真 RSS feed 却不含任何 feed 形状的路径，纯 URL 路由会拒绝采集一个运维明确建成 `rss` 的源。
 
 ## Collector 职责
 
@@ -76,9 +103,11 @@ RSS / Web Collector / Ingest -> ItemDraft -> normalize -> Item
 
 ## 抓取规则
 
-- 使用 httpx；设置连接/读取/总超时，禁止无限等待
-- 限制最大响应体大小，流式读取并在超限时停止
-- 对 RSS 使用 ETag / Last-Modified 条件请求；网页可按站点能力使用
+- 使用 httpx；超时/大小上限由 `adapters/http.py` 统一实施，采集器自带
+  的 HTTP 层不得绕过（沙箱采集器的出网经宿主代理，天然受限）
+- 对 RSS 使用 ETag / Last-Modified 条件请求；网页可按站点能力使用。
+  已知缺口：ETag 写回 RawFetch 的持久化回路未接线
+  （ADR 0017「已知缺口」），条件重放暂不可达
 - 每域名设置并发上限和速率限制；读取并遵守 `Retry-After`
 - 使用清晰、可联系的 User-Agent（由部署配置提供）
 - URL 需 canonicalize：移除已知追踪参数、规范化 host/scheme、保留确有语义的 query

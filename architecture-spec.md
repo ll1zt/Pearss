@@ -56,8 +56,8 @@
 |---|---|---|
 | E1 | 两类插件 | CollectorPlugin（**5 个已注册**，rss 内置、其余第三方（ADR 0017））、ProcessorPlugin（P3） |
 | E2 | 声明式清单 | manifest：id、版本、类型、hooks、权限、配置 schema、校验和（**P1→P2 ✅**，启动双向校验） |
-| E3 | 生命周期 | 注册 → 启用/禁用 ✅（全程审计）；导入校验/卸载/热重载 → P2b loader（内置热重载永久裁剪，ADR 0017） |
-| E4 | 沙箱与权限 | 内置进程内 ✅；第三方子进程隔离 + 资源限额 + 网络白名单 → P2b |
+| E3 | 生命周期 | 注册 → 启用/禁用 ✅（全程审计）；`:import`/`:uninstall` → 第三方 loader（独立 ADR）；子进程插件重载 = 杀进程重 spawn（安全），内置进程内热重载永久裁剪（ADR 0017） |
+| E4 | 沙箱与权限 | rss 进程内 ✅；第三方（telegram/twitter/zhihu/zsxq）**子进程沙箱 ✅**：`python -m plugins.collectors <id>` + JSON-RPC over stdio + RLIMIT 限额 + egress 经宿主代理（SSRF 拦截覆盖沙箱出网）+ env allowlist（ADR 0017） |
 | E5 | 干跑测试 | 采样输入 dry-run，不伤生产数据 |
 | E6 | 配置即数据 | Source 绑定 parser 插件；FeedOut 绑定处理器链 |
 
@@ -179,7 +179,7 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
 
 **P1：准插件阶段**——写 2–3 个真实爬虫，遵循接口形态但硬编码注册。每个爬虫配 fixture 测试（§7.3）。
 
-**P2：合约固化（已落地，ADR 0017）**——hookspec 冻结于 `core/plugins/hooks.py`（pluggy），manifest 双向校验 + Plugin 表，生命周期 API/MCP（enable/disable；import/uninstall/reload 为 P2b loader 占位）。用户裁决：telegram/twitter/zhihu/zsxq 为第三方插件，rss 内置；内置热重载永久裁剪，进程沙箱 P2b。ProcessorPlugin 框架 P3 随翻译/TTS 参考实现落地。
+**P2：合约固化（已落地，ADR 0017）**——hookspec 冻结于 `core/plugins/hooks.py`（pluggy），manifest 双向校验 + Plugin 表，生命周期 API/MCP（enable/disable；`:import`/`:uninstall`/`:reload` 为第三方 loader 占位，独立 ADR）。用户裁决：telegram/twitter/zhihu/zsxq 为第三方插件，rss 内置；内置热重载永久裁剪。**子进程沙箱（原 P2b，已落地）**：第三方采集器运行于 `python -m plugins.collectors <id>` 子进程（JSON-RPC 2.0 over stdio，RLIMIT 限额，egress 经宿主代理，env allowlist，env 指纹轮换，延迟 spawn），实现与评审加固记录见 ADR 0017。ProcessorPlugin 框架 P3 随翻译/TTS 参考实现落地。
 
 hookspec 草案（P2 冻结前的靶子）：
 
@@ -207,8 +207,8 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（867 测试）。未达成：「发现」环节与 OPML 迁移 |
-| P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + **hookspec 冻结 + pluggy 注册表 + manifest/生命周期（已落地，ADR 0017）** + 沙箱（P2b） + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（879 测试）。未达成：「发现」环节与 OPML 迁移 |
+| P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + **hookspec 冻结 + pluggy 注册表 + manifest/生命周期（已落地，ADR 0017）** + **子进程沙箱（已落地，ADR 0017）** + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
 | P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
 
