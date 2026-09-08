@@ -134,8 +134,8 @@ _PM.add_hookspecs(spec)
 
 # The shipped set, in routing priority order (first match wins). Third-party
 # collectors (everything but rss) are *not imported by the host*: their
-# hookimpls are declared on lightweight shims and executed in sandboxed
-# child processes, so a crash or memory leak in one costs the host nothing.
+# implementations execute in sandboxed child processes, so a crash or memory
+# leak in one costs the host nothing.
 _SANDBOXED: tuple[str, ...] = ("telegram", "twitter", "zhihu", "zsxq")
 
 # Declaration records: (id, sandboxed?, declared capabilities). The manifest
@@ -166,9 +166,11 @@ def _build_registry(
     collection that needs the missing half. The verified manifest leaves
     with its checksum computed.
 
-    `overrides` swaps a collector's implementation for a test double keyed
-    by id; the verification runs against the override exactly as it would
-    against the real module.
+    `overrides` swaps the in-process rss implementation for a test double;
+    the verification runs against the override exactly as it would against
+    the real module. (The sandboxed collectors are process boundaries, not
+    importable modules, so they take doubles through the injected egress
+    transport instead.)
     """
     overrides = overrides or {}
 

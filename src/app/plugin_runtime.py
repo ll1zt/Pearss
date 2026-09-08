@@ -181,7 +181,11 @@ class PluginChild:
             [sys.executable, "-m", "plugins.collectors", self._collector_id],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            # Inherit the host's stderr: the pipes are the protocol, but a
+            # crashing child's traceback is diagnostics, and DEVNULL would
+            # lose it while a host-read PIPE could deadlock on a full one.
+            # The deployment's service manager (journald) collects it.
+            stderr=None,
             env=child_env,
             preexec_fn=apply_limits if sys.platform != "win32" else None,
         )
@@ -225,12 +229,12 @@ class PluginChild:
             except subprocess.TimeoutExpired:
                 LOGGER.error("plugin child %s would not die", self._collector_id)
         finally:
-            # The child is gone; its pipe fds leak ResourceWarnings and, in a
-            # long-lived host, file descriptors.
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    with contextlib.suppress(OSError, ValueError):
-                        pipe.close()
+            # The child is gone; its stdout pipe would leak a ResourceWarning
+            # and, in a long-lived host, a file descriptor. (stderr is the
+            # host's own stream, inherited at spawn.)
+            if proc.stdout is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stdout.close()
         LOGGER.info("plugin child %s stopped", self._collector_id)
 
     def restart(self) -> None:
@@ -390,9 +394,11 @@ class PluginChild:
                 http_response = self._http_transport.handle_request(request)
                 response_body = {
                     "status": http_response.status_code,
-                    "headers": {
-                        k.decode(): v.decode() for k, v in http_response.headers.raw
-                    },
+                    # Pair lists, not dicts: Set-Cookie repeats, and folding
+                    # it would silently drop every cookie after the first.
+                    "headers": [
+                        [k.decode(), v.decode()] for k, v in http_response.headers.raw
+                    ],
                     "body_b64": base64.b64encode(http_response.content).decode("ascii"),
                 }
                 error = None
@@ -549,11 +555,6 @@ class SandboxedCollector:
             # origin failure surfaces as FetchError, and pipeline's existing
             # handling records it on the run.
             raise FetchError(ErrorClass(exc.code), exc.detail) from exc
-        if result.get("error"):
-            raise FetchError(
-                ErrorClass(str(result["error"]["code"])),
-                str(result["error"]["message"]),
-            )
         return RawPayload.from_rpc_dict(result["raw"])
 
     def parse(self, raw: Any) -> Any:

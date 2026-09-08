@@ -164,3 +164,47 @@ def test_a_child_that_freezes_mid_line_is_not_waited_on_forever() -> None:
         assert elapsed < 5, f"the read stalled {elapsed:.1f}s past the deadline"
     finally:
         child.stop()  # kills and reaps, closing the pipes
+
+
+@pytest.mark.unit
+def test_the_child_fetch_branch_forwards_conditional_params_verbatim() -> None:
+    """The child's fetch branch forwards conditional params verbatim.
+
+    The branch used to hardcode conditional=None. Zhihu's and zsxq's own
+    hooks ignore conditional (signed APIs answer no 304), so the contract
+    is pinned at the dispatcher: whatever the host sent, the collector's
+    hook receives.
+    """
+    from adapters.raw_payload import ConditionalState, RawPayload
+    from plugins.collectors import __main__ as entry
+
+    seen: list[ConditionalState | None] = []
+    real_collector_for = entry._collector_for
+
+    class _StubCollector:
+        @staticmethod
+        def fetch(url, *, client, source_id, conditional=None):
+            seen.append(conditional)
+            return RawPayload(
+                url=url, status_code=200, body=b"<rss/>", source_id=source_id
+            )
+
+    entry._collector_for = lambda collector_id: _StubCollector()
+    try:
+        result = entry.handle(
+            "stub",
+            "fetch",
+            {
+                "url": "https://example.com/feed",
+                "source_id": "s9",
+                "conditional": {"etag": '"v1"', "last_modified": "yesterday"},
+            },
+            host_http=None,
+        )
+    finally:
+        entry._collector_for = real_collector_for
+
+    assert result["raw"]["status_code"] == 200
+    assert seen == [ConditionalState(etag='"v1"', last_modified="yesterday")], (
+        "conditional state was dropped or reshaped on the way to the hook"
+    )

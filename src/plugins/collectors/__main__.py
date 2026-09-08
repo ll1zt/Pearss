@@ -170,26 +170,50 @@ def handle(
         # a response-level error object the host proxy re-raises as
         # FetchError. Returning an error_result as a *result* would lose the
         # result/error distinction the protocol defines.
+        from adapters.raw_payload import ConditionalState
+
+        conditional_params = params.get("conditional")
         try:
             payload = module.fetch(
                 str(params["url"]),
                 client=child_client(host_http),
                 source_id=str(params.get("source_id", "")),
-                conditional=None,  # conditional state rides in params if sent
+                conditional=(
+                    ConditionalState(
+                        etag=conditional_params.get("etag"),
+                        last_modified=conditional_params.get("last_modified"),
+                    )
+                    if conditional_params
+                    else None
+                ),
             )
         except FetchError as exc:
             raise CollectorError(exc.error_class, exc.detail) from exc
         return {"raw": payload.as_rpc_dict()}
 
     if method == "collect_pages":
-        from adapters.repository import PagingState
+        from dataclasses import dataclass
+
         from plugins.collectors.twitter import walk
+
+        @dataclass(frozen=True, slots=True)
+        class _WalkState:
+            """Duck-typed PagingState: the walk reads three attributes.
+
+            Shaped locally rather than imported from adapters.repository —
+            importing that would pull SQLAlchemy into every child, for a
+            value the host could have passed as three plain fields.
+            """
+
+            seen_frontier: int | None
+            resume_cursor: str | None
+            resume_rounds: int
 
         result = walk.collect_pages(
             source_id=str(params["source_id"]),
             source_url=str(params["source_url"]),
             client=child_client(host_http),
-            state=PagingState(**params["state"]),
+            state=_WalkState(**params["state"]),
             max_pages=int(params.get("max_pages", 20)),
         )
         return {
@@ -228,7 +252,9 @@ def _host_proxied_client(host_http: Any) -> httpx.Client:
             raise httpx.ConnectError(f"host egress failed: {exc}") from exc
         except Exception as exc:  # pragma: no cover - HostProxy wraps all errors
             raise httpx.ConnectError(f"host egress failed: {exc}") from exc
-        headers = [(str(k), str(v)) for k, v in (result.get("headers") or {}).items()]
+        # Pair lists on both directions: Set-Cookie repeats, and a dict
+        # would drop every cookie after the first.
+        headers = [(str(k), str(v)) for k, v in (result.get("headers") or [])]
         body = base64.b64decode(str(result.get("body_b64", "")))
         return httpx.Response(int(result["status"]), headers=headers, content=body)
 
