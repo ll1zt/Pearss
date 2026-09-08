@@ -100,7 +100,9 @@ def _iso(value: datetime | None) -> str | None:
     """
     if value is None:
         return None
-    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    from adapters.timestamps import fixed_width_utc
+
+    return fixed_width_utc(value)
 
 
 def _field_map(item: Item) -> dict[str, Any]:

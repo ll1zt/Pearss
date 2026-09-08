@@ -433,8 +433,9 @@ def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> No
     from datetime import UTC, datetime
 
     from adapters.repository import upsert_plugin
+    from adapters.timestamps import fixed_width_utc
 
-    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+    stamp = fixed_width_utc(datetime.now(UTC))
     with session_factory() as session:
         for registration in _registry():
             manifest = registration.manifest  # surface dict

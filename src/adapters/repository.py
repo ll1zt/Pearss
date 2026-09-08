@@ -30,6 +30,10 @@ from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
 from adapters.raw_payload import ConditionalState
+
+# The invariant's single definition lives in adapters.timestamps; this
+# alias keeps every existing `repository.timestamp` caller working.
+from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     ErrorClass,
     ItemEvent,
@@ -63,22 +67,6 @@ class StoreOutcome:
 # Sentinel for an absent publication time. Chosen so that COALESCE against it
 # puts undated items last under a descending sort.
 EPOCH_FLOOR = "0000-01-01T00:00:00.000000Z"
-
-
-def timestamp(moment: datetime) -> str:
-    """Store timestamps as fixed-width RFC 3339 UTC text.
-
-    Fixed width is the point, not cosmetics. These values are compared as text
-    by the database — every ORDER BY and every keyset cursor relies on it — and
-    `isoformat()` omits the fractional part entirely when microseconds happen to
-    be zero. A column mixing `...T00:00:00Z` with `...T00:00:00.500000Z` sorts
-    `00.5` *before* `00`, because '.' (0x2E) is less than 'Z' (0x5A), so half a
-    second would order before the top of the second it falls inside.
-
-    Always emitting six fractional digits keeps lexicographic order equal to
-    chronological order, which is what the query API's pagination assumes.
-    """
-    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def _optional_timestamp(moment: datetime | None) -> str | None:
