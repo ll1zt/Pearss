@@ -261,8 +261,9 @@ _SANDBOX_CHILDREN: dict[str, Any] = {}
 def set_http_transport(collector_id: str, transport: Any) -> None:
     """Inject the egress transport for one sandboxed collector.
 
-    Tests pass a MockTransport here so fixtures flow to the child; a
-    production deployment can pass a whitelist-enforcing transport (E4).
+    The app's lifespan passes the shared host client here so the child's
+    reverse http calls run through the SSRF guard; tests pass a
+    MockTransport so fixtures flow to the child.
     """
     from app.plugin_runtime import PluginChild
 
@@ -270,6 +271,19 @@ def set_http_transport(collector_id: str, transport: Any) -> None:
     if not isinstance(child, PluginChild):
         raise ValueError(f"no sandboxed collector {collector_id!r}")
     child.set_http_transport(transport)
+
+
+def for_each_sandboxed_collector(apply: Callable[[str, Any], None]) -> None:
+    """Run `apply(id, child)` over every sandboxed collector.
+
+    A name-and-child callback rather than exposing the registry's internal
+    dict: callers wire egress transports, and the dict's shape is not part
+    of any contract. Builds the registry if it is not built yet, matching
+    how every other entry point behaves.
+    """
+    _registry()
+    for collector_id, child in _SANDBOX_CHILDREN.items():
+        apply(collector_id, child)
 
 
 _REGISTRY: tuple[Registration, ...] | None = None

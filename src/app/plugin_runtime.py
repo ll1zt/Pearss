@@ -15,10 +15,13 @@ Lifecycle:
   crash-recovery path and the future `:reload` operation.
 
 Resource limits are applied at spawn via `resource.setrlimit` in the child
-(CPU seconds, address space); network egress is the child's own business —
-the host never proxies plugin fetches in P2b, which keeps the trust
-boundary honest: the child cannot reach anything the host machine cannot,
-and it sees only the config the host injected at spawn.
+(CPU seconds, address space). Network egress is host-proxied: the child's
+HTTP requests ride back over the RPC stream as reverse calls and run through
+a transport the host injects (`set_http_transport` / the registry's
+`for_each_sandboxed_collector`). The app's lifespan wires the shared client
+there, so the SSRF private-address guard and the fetch bounds apply to
+sandboxed egress exactly as they do to the host's own fetches. The child
+sees only the environment the host injected at spawn.
 """
 
 from __future__ import annotations
