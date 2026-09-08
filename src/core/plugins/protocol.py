@@ -20,7 +20,16 @@ from typing import Any, Final
 # Methods the child serves. Frozen set: the protocol is versioned as a whole,
 # and an unknown method is a protocol violation, not a feature probe.
 METHODS: Final[frozenset[str]] = frozenset(
-    {"match_url", "fetch", "parse", "collect_pages", "ping"}
+    {
+        "match_url",
+        "fetch",
+        "parse",
+        "collect_pages",
+        "source_config",
+        "backfill",
+        "http",
+        "ping",
+    }
 )
 
 PROTOCOL_VERSION: Final = 1
@@ -95,6 +104,42 @@ def decode_request(line: bytes) -> Request:
     if not isinstance(params, dict):
         raise ProtocolError("params must be an object")
     return Request(id=request_id, method=str(method), params=params)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReverseCall:
+    """A child -> host reverse call (e.g. host-proxied HTTP)."""
+
+    method: str
+    params: dict[str, Any]
+
+
+def decode_message(line: bytes) -> Response | ReverseCall:
+    """Parse one line as either a response or a reverse call.
+
+    A reverse call carries `method` + `params` (a Request shape) with id=0;
+    a response carries `result` or `error`. The host routes on this.
+    """
+    try:
+        payload = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ProtocolError(f"undecodable message: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ProtocolError("message is not a JSON object")
+    if (
+        payload.get("method") is not None
+        and "result" not in payload
+        and "error" not in payload
+    ):
+        method = payload["method"]
+        if method not in METHODS:
+            raise ProtocolError(f"unknown method {method!r}")
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            raise ProtocolError("params must be an object")
+        return ReverseCall(method=str(method), params=params)
+    response = decode_response(line)
+    return response
 
 
 def decode_response(line: bytes) -> Response:

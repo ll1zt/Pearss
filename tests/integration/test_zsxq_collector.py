@@ -22,6 +22,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source
+from app import collector_registry
 from app.pipeline import collect_source
 from core.enums import SourceStatus, TrustLevel
 
@@ -71,7 +72,7 @@ def _add_source(session: Session, source_id: str, url: str) -> None:
     session.commit()
 
 
-def _zsxq_client() -> httpx.Client:
+def _zsxq_transport() -> httpx.MockTransport:
     """Serve the fixtures, but only to requests carrying the session token."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -92,19 +93,24 @@ def _zsxq_client() -> httpx.Client:
             headers={"content-type": "application/json"},
         )
 
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return httpx.MockTransport(handler)
 
 
 @pytest.mark.integration
 def test_topics_flow_from_source_url_to_stored_items(
     session_factory: sessionmaker[Session],
 ) -> None:
+    collector_registry._registry()  # build children (lazy before first use)
+    collector_registry.set_http_transport("zsxq", _zsxq_transport())
     with session_factory() as session:
         _add_source(session, "s1", GROUP_URL)
         source = session.get(Source, "s1")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zsxq_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 
@@ -116,12 +122,17 @@ def test_topics_flow_from_source_url_to_stored_items(
 def test_the_feed_name_comes_from_the_group(
     session_factory: sessionmaker[Session],
 ) -> None:
+    collector_registry._registry()  # build children (lazy before first use)
+    collector_registry.set_http_transport("zsxq", _zsxq_transport())
     with session_factory() as session:
         _add_source(session, "s2", GROUP_URL)
         source = session.get(Source, "s2")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zsxq_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 
@@ -137,13 +148,19 @@ def test_the_feed_name_comes_from_the_group(
 def test_a_missing_token_is_an_auth_run_not_a_crash(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from app.collector_registry import refresh_registry
+
     monkeypatch.delenv("PEARSS_ZSXQ_ACCESS_TOKEN", raising=False)
+    refresh_registry()  # respawn the child so it inherits the emptied env
     with session_factory() as session:
         _add_source(session, "s3", GROUP_URL)
         source = session.get(Source, "s3")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zsxq_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 

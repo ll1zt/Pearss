@@ -18,6 +18,7 @@ crash inside the child end the loop.
 
 from __future__ import annotations
 
+import base64
 import sys
 from typing import Any, cast
 
@@ -32,12 +33,47 @@ _COLLECTORS: dict[str, Any] = {}
 _CHILD_CLIENT: httpx.Client | None = None
 
 
-def child_client() -> httpx.Client:
-    """The child's own HTTP client, shared across calls in this process."""
+class HostProxy:
+    """The child's view of the host: synchronous reverse "http" calls.
+
+    Reverse calls ride id=0 (the host routes them by the marker before
+    matching the outer request id) and block until the host answers.
+    """
+
+    def __init__(self, stdin: Any, stdout: Any) -> None:
+        self._stdin = stdin
+        self._stdout = stdout
+
+    def __call__(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request = protocol.Request(id=0, method=method, params=params)
+        self._stdin.write(request.encode().decode() + "\n")
+        self._stdin.flush()
+        line = self._stdout.readline()
+        if not line:
+            raise RuntimeError("host closed the reverse-call channel")
+        response = protocol.decode_response(line.encode())
+        if response.error is not None:
+            raise RuntimeError(
+                f"{response.error.get('code', 'error')}: "
+                f"{response.error.get('message', '')}"
+            )
+        return dict(response.result)
+
+
+def child_client(host_http: Any = None) -> httpx.Client:
+    """The client the collector's HTTP layer runs through.
+
+    Without a host callback this is a plain client (direct egress). With
+    one, egress is *proxied back to the host* over the RPC stream: the host
+    enforces the network whitelist (E4) and test fixtures inject
+    MockTransports exactly as they do for the in-process path.
+    """
     global _CHILD_CLIENT
-    if _CHILD_CLIENT is None:
-        _CHILD_CLIENT = httpx.Client(follow_redirects=True)
-    return _CHILD_CLIENT
+    if host_http is None:
+        if _CHILD_CLIENT is None:
+            _CHILD_CLIENT = httpx.Client(follow_redirects=True)
+        return _CHILD_CLIENT
+    return _host_proxied_client(host_http)
 
 
 def _collector_for(collector_id: str) -> Any:
@@ -57,7 +93,12 @@ def _collector_for(collector_id: str) -> Any:
     return cast(Any, module)
 
 
-def handle(collector_id: str, method: str, params: dict[str, Any]) -> Any:
+def handle(
+    collector_id: str,
+    method: str,
+    params: dict[str, Any],
+    host_http: Any = None,
+) -> Any:
     """Dispatch one RPC call against the collector's plain functions.
 
     Classified failures become error objects (values); the exceptions that
@@ -68,6 +109,13 @@ def handle(collector_id: str, method: str, params: dict[str, Any]) -> Any:
     if method == "ping":
         return {"collector_id": collector_id, "alive": True}
 
+    if method == "source_config":
+        return module.source_config().as_dict()
+
+    if method == "backfill":
+        hooks = module.backfill()
+        return hooks is not None
+
     if method == "match_url":
         return module.match_url(str(params["url"]))
 
@@ -75,24 +123,25 @@ def handle(collector_id: str, method: str, params: dict[str, Any]) -> Any:
         # The raw payload arrives as its field dict; rebuild the value.
         from adapters.raw_payload import RawPayload
 
-        raw = RawPayload(**params["raw"])
+        raw = RawPayload.from_rpc_dict(params["raw"])
         return [draft.as_rpc_dict() for draft in module.parse(raw)]
 
     if method == "fetch":
+        # Classified failures raise CollectorError; serve() turns that into
+        # a response-level error object the host proxy re-raises as
+        # FetchError. Returning an error_result as a *result* would lose the
+        # result/error distinction the protocol defines.
         from adapters.http import FetchError
-        from adapters.raw_payload import RawPayload
 
         try:
             payload = module.fetch(
                 str(params["url"]),
-                client=child_client(),
+                client=child_client(host_http),
                 source_id=str(params.get("source_id", "")),
                 conditional=None,  # conditional state rides in params if sent
             )
         except FetchError as exc:
-            return protocol.error_result(exc.error_class.value, exc.detail)
-        except CollectorError as exc:
-            return protocol.error_result(exc.error_class.value, exc.detail)
+            raise CollectorError(exc.error_class, exc.detail) from exc
         return {"raw": payload.as_rpc_dict()}
 
     if method == "collect_pages":
@@ -102,7 +151,7 @@ def handle(collector_id: str, method: str, params: dict[str, Any]) -> Any:
         result = walk.collect_pages(
             source_id=str(params["source_id"]),
             source_url=str(params["source_url"]),
-            client=child_client(),
+            client=child_client(host_http),
             state=PagingState(**params["state"]),
             max_pages=int(params.get("max_pages", 20)),
         )
@@ -117,9 +166,37 @@ def handle(collector_id: str, method: str, params: dict[str, Any]) -> Any:
     raise protocol.ProtocolError(f"unhandled method {method!r}")
 
 
+def _host_proxied_client(host_http: Any) -> httpx.Client:
+    """A client whose every request round-trips to the host over the RPC."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = {
+            "method": request.method,
+            "url": str(request.url),
+            # .raw yields bytes pairs by httpx's type; decode directly.
+            "headers": [[k.decode(), v.decode()] for k, v in request.headers.raw],
+            "content_b64": base64.b64encode(request.read()).decode("ascii"),
+        }
+        result = host_http("http", params)
+        headers = [(str(k), str(v)) for k, v in (result.get("headers") or {}).items()]
+        body = base64.b64decode(str(result.get("body_b64", "")))
+        return httpx.Response(int(result["status"]), headers=headers, content=body)
+
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+
+
 def serve(collector_id: str) -> None:
-    """The read-eval loop: one request line from stdin, one response to stdout."""
+    """The read-eval loop: one request line from stdin, one response to stdout.
+
+    `handle` may make synchronous reverse calls (host-proxied HTTP) through
+    the HostProxy while processing one request; the loop itself stays the
+    only reader/writer outside those windows.
+    """
     out = sys.stdout
+    # Reverse-call direction: the child *writes* the reverse request to its
+    # stdout (which the host reads) and reads the answer from its stdin
+    # (which the host writes). Same two pipes as normal RPC, opposite use.
+    host_proxy = HostProxy(sys.stdout, sys.stdin)
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -141,7 +218,7 @@ def serve(collector_id: str) -> None:
             return
 
         try:
-            result = handle(collector_id, request.method, request.params)
+            result = handle(collector_id, request.method, request.params, host_proxy)
             response = protocol.Response(id=request.id, result=result)
         except CollectorError as exc:
             response = protocol.Response(

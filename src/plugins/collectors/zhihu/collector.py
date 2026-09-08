@@ -39,7 +39,13 @@ from adapters.http import FetchError
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
+from core.plugins.hooks import (
+    HOOKIMPL,
+    BackfillHooks,
+    CollectorError,
+    ConfigRequirement,
+    Manifest,
+)
 from plugins.collectors.zhihu import client as zhihu_client
 
 BASE: Final = zhihu_client.BASE
@@ -772,3 +778,9 @@ def source_config() -> Manifest:
 def collector_id() -> str:
     """The stable registration key (ADR 0017)."""
     return "zhihu"
+
+
+@HOOKIMPL
+def backfill() -> BackfillHooks | None:
+    """This origin has no backward walk."""
+    return None

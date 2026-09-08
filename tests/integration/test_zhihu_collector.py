@@ -21,6 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source
+from app import collector_registry
 from app.pipeline import collect_source
 from core.enums import SourceStatus, TrustLevel
 
@@ -76,7 +77,7 @@ def _add_source(session: Session, source_id: str, url: str) -> None:
     session.commit()
 
 
-def _zhihu_client() -> httpx.Client:
+def _zhihu_transport() -> httpx.MockTransport:
     """Serve the fixtures, but only to requests the signed client produces."""
     fixture_by_suffix = {
         "answers": "answers_valid.json",
@@ -99,19 +100,24 @@ def _zhihu_client() -> httpx.Client:
                 )
         return httpx.Response(404, json={})
 
-    return httpx.Client(transport=httpx.MockTransport(handler))
+    return httpx.MockTransport(handler)
 
 
 @pytest.mark.integration
 def test_answers_flow_from_source_url_to_stored_items(
     session_factory: sessionmaker[Session],
 ) -> None:
+    collector_registry._registry()  # force build (spawns children lazily)
+    collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s1", "https://www.zhihu.com/people/example/answers")
         source = session.get(Source, "s1")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zhihu_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 
@@ -123,12 +129,17 @@ def test_answers_flow_from_source_url_to_stored_items(
 def test_activities_flow_names_the_source_and_opens_the_gate(
     session_factory: sessionmaker[Session],
 ) -> None:
+    collector_registry._registry()  # force build (spawns children lazily)
+    collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s2", "https://www.zhihu.com/people/example/activities")
         source = session.get(Source, "s2")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zhihu_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 
@@ -151,12 +162,19 @@ def test_a_missing_session_is_an_auth_run_not_a_crash(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("PEARSS_ZHIHU_COOKIES", raising=False)
+    from app.collector_registry import refresh_registry
+
+    refresh_registry()  # respawn the child so it inherits the emptied env
+    collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s3", "https://www.zhihu.com/people/example/answers")
         source = session.get(Source, "s3")
         assert source is not None
         result = collect_source(
-            session, source=source, client=_zhihu_client(), tenant_id="default"
+            session,
+            source=source,
+            client=httpx.Client(),  # egress via injected transport
+            tenant_id="default",
         )
         session.commit()
 

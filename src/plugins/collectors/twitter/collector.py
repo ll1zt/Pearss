@@ -40,7 +40,13 @@ import httpx
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError, ConfigRequirement, Manifest
+from core.plugins.hooks import (
+    HOOKIMPL,
+    BackfillHooks,
+    CollectorError,
+    ConfigRequirement,
+    Manifest,
+)
 
 # X's own title budget is 100 characters; longer than that and a feed list
 # becomes unreadable rather than more informative.
@@ -799,3 +805,9 @@ def source_config() -> Manifest:
 def collector_id() -> str:
     """The stable registration key (ADR 0017)."""
     return "twitter"
+
+
+@HOOKIMPL
+def backfill() -> BackfillHooks | None:
+    """This origin has no backward walk."""
+    return None

@@ -31,7 +31,7 @@ from adapters.http import fetch as plain_fetch
 from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
-from core.plugins.hooks import HOOKIMPL, CollectorError, Manifest
+from core.plugins.hooks import HOOKIMPL, BackfillHooks, CollectorError, Manifest
 from plugins.collectors.rss import wordpress
 
 LOGGER = logging.getLogger(__name__)
@@ -357,3 +357,9 @@ def source_config() -> Manifest:
 def collector_id() -> str:
     """The stable registration key (ADR 0017)."""
     return "rss"
+
+
+@HOOKIMPL
+def backfill() -> BackfillHooks | None:
+    """This origin has no backward walk."""
+    return None

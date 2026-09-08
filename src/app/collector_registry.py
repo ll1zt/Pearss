@@ -10,6 +10,8 @@ fetch is scheduled, so it must not touch the network or the database.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -26,7 +28,6 @@ from core.plugins.hooks import CollectorSpec as spec
 from core.plugins.hooks import Manifest
 
 __all__ = [
-    "REGISTRY",
     "Manifest",
     "Registration",
     "by_name",
@@ -36,10 +37,6 @@ __all__ = [
     "sync_plugin_table",
 ]
 from plugins.collectors.rss import collector as rss
-from plugins.collectors.telegram import collector as telegram
-from plugins.collectors.twitter import collector as twitter
-from plugins.collectors.zhihu import collector as zhihu
-from plugins.collectors.zsxq import collector as zsxq
 
 
 class CollectorError(Exception):
@@ -107,44 +104,59 @@ class BackfillingCollector(Protocol):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Registration:
+    """One registered collector and how the host reaches it.
+
+    `collector` is either the in-process module (builtin rss) or a
+    `SandboxedCollector` proxy (third-party): both satisfy the same
+    Protocol surface, so the pipeline and routes never branch on trust.
+    """
+
     name: str
     collector: Collector
-    # A paged collector is walked a page at a time against stored cursor state,
-    # which is a different collection path, not a loop around the same one.
-    # Declared here rather than probed from the module: the presence of a
-    # `page_ids` attribute says a collector happens to define a function, not
-    # that collection should persist a frontier.
+    # A paged collector is walked a page at a time against stored cursor
+    # state, which is a different collection path, not a loop around the
+    # same one. Declared, not probed (ADR 0017).
     paged: bool = False
     # The collector fetches its own pages (signed or cookie-authenticated
-    # origins). Same reasoning as `paged`: declared here rather than probed.
+    # origins). Declared, not probed.
     fetches: bool = False
-    # The verified manifest (checksum computed by the registry at startup).
-    manifest: Manifest
-    # The trust level the loader asserted for this collector: `builtin` for
-    # the shipped set; the P2b third-party loader asserts per-package trust.
+    # The verified manifest as its surface dict; `checksum` is the registry
+    # computed sha256 of its canonical JSON (ADR 0017).
+    manifest: dict[str, Any]
+    checksum: str
+    # The trust level the loader asserted: `builtin` for the shipped set.
     trust: str = "builtin"
 
 
 _PM = pluggy.PluginManager("pearss")
 _PM.add_hookspecs(spec)
 
-# The shipped set. Registration records which optional capabilities each
-# collector declared — the registry verifies at import time that a collector
-# declaring a capability actually implements it (ADR 0017).
-_BUILTIN_MODULES: tuple[tuple[str, Any, frozenset[str]], ...] = (
-    ("telegram", telegram, frozenset()),
-    ("twitter", twitter, frozenset({"paged"})),
-    ("zhihu", zhihu, frozenset({"fetches"})),
-    ("zsxq", zsxq, frozenset({"fetches"})),
-    # rss fetches too: its hook upgrades WordPress summary feeds to full text
-    # via the origin's REST API, falling back to the plain payload on anything
-    # it cannot upgrade.
-    ("rss", rss, frozenset({"fetches"})),
+# The shipped set, in routing priority order (first match wins). Third-party
+# collectors (everything but rss) are *not imported by the host*: their
+# hookimpls are declared on lightweight shims and executed in sandboxed
+# child processes, so a crash or memory leak in one costs the host nothing.
+_SANDBOXED: tuple[str, ...] = ("telegram", "twitter", "zhihu", "zsxq")
+
+# Declaration records: (id, sandboxed?, declared capabilities). The manifest
+# itself comes from the implementation (`source_config`), verified against
+# these declared capabilities at startup (ADR 0017).
+_DECLARATIONS: tuple[tuple[str, bool, frozenset[str]], ...] = (
+    ("telegram", True, frozenset()),
+    ("twitter", True, frozenset({"paged"})),
+    ("zhihu", True, frozenset({"fetches"})),
+    ("zsxq", True, frozenset({"fetches"})),
+    # rss stays in-process: it handles the host's own protocol and needs no
+    # credentials. Its fetch hook upgrades WordPress summary feeds to full
+    # text via the origin's REST API, falling back to the plain payload.
+    ("rss", False, frozenset({"fetches"})),
 )
 
 
-def _build_registry() -> tuple[Registration, ...]:
-    """Register every builtin module with pluggy and derive registrations.
+def _build_registry(
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> tuple[Registration, ...]:
+    """Build the registration set: sandboxed proxies + the in-process rss.
 
     Capability verification is the point of this pass, in both directions:
     a manifest declaring `paged` without a `collect_pages` implementation
@@ -152,19 +164,54 @@ def _build_registry() -> tuple[Registration, ...]:
     and a violated contract must fail at startup rather than at the first
     collection that needs the missing half. The verified manifest leaves
     with its checksum computed.
+
+    `overrides` swaps a collector's implementation for a test double keyed
+    by id; the verification runs against the override exactly as it would
+    against the real module.
     """
-    registrations: list[Registration] = []
-    for name, module, declared in _BUILTIN_MODULES:
-        _PM.register(module, name=f"collector-{name}")
-        impls = {
-            "fetch": bool(getattr(module, "fetch", None)),
-            "collect_pages": bool(getattr(module, "collect_pages", None)),
-            "backfill": bool(getattr(module, "backfill", None)),
+    overrides = overrides or {}
+
+    def _impls(executor: Any) -> dict[str, bool]:
+        return {
+            "fetch": bool(getattr(executor, "fetch", None)),
+            "collect_pages": bool(getattr(executor, "collect_pages", None)),
+            "backfill": bool(getattr(executor, "backfill", None)),
         }
-        manifest: Manifest = module.source_config()
-        if manifest.id != name:
+
+    registrations: list[Registration] = []
+    for name, sandboxed, declared in _DECLARATIONS:
+        if sandboxed:
+            from app.plugin_runtime import (
+                PluginChild,
+                SandboxedCollector,
+                SandboxLimits,
+            )
+
+            # The child spawns lazily on first use: importing this module
+            # (which every test and CLI entry does) must not fork processes.
+            child = PluginChild(
+                name,
+                env={"PEARSS_SANDBOXED": "1"},
+                limits=SandboxLimits(),
+            )
+            _SANDBOX_CHILDREN[name] = child
+            executor: Any = SandboxedCollector(child)
+        else:
+            executor = overrides.get(name, rss)
+            existing = _PM.get_plugin(f"collector-{name}")
+            if existing is not None:
+                _PM.unregister(existing)
+            _PM.register(executor, name=f"collector-{name}")
+
+        impls = _impls(executor)
+        manifest_data: dict[str, Any] = (
+            executor.source_config().as_dict()
+            if hasattr(executor.source_config(), "as_dict")
+            else dict(executor.source_config())
+        )
+        if manifest_data["id"] != name:
             raise RuntimeError(
-                f"collector {name!r} declares manifest id {manifest.id!r}"
+                f"collector {name!r} declares manifest id {manifest_data['id']!r}"
             )
         # Two feature kinds: structural ones map to a hookimpl that must
         # exist; descriptive ones (signed, cookie, wordpress-upgrade)
@@ -175,7 +222,7 @@ def _build_registry() -> tuple[Registration, ...]:
             "backfill": impls["backfill"],
         }
         descriptive = {"signed", "cookie", "wordpress-upgrade"}
-        for feature in manifest.features:
+        for feature in manifest_data["features"]:
             if feature in structural:
                 if not structural[feature]:
                     raise RuntimeError(
@@ -191,19 +238,61 @@ def _build_registry() -> tuple[Registration, ...]:
                     f"collector {name!r} declares descriptive feature "
                     f"{feature!r} without a fetch hook"
                 )
+        checksum = hashlib.sha256(
+            json.dumps(manifest_data, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
         registrations.append(
             Registration(
                 name=name,
-                collector=cast("Collector", module),
+                collector=cast("Collector", executor),
                 paged="paged" in declared,
                 fetches="fetches" in declared,
-                manifest=manifest.with_checksum(),
+                manifest=manifest_data,
+                checksum=checksum,
+                trust="third-party" if sandboxed else "builtin",
             )
         )
     return tuple(registrations)
 
 
-REGISTRY: tuple[Registration, ...] = _build_registry()
+_SANDBOX_CHILDREN: dict[str, Any] = {}
+
+
+def set_http_transport(collector_id: str, transport: Any) -> None:
+    """Inject the egress transport for one sandboxed collector.
+
+    Tests pass a MockTransport here so fixtures flow to the child; a
+    production deployment can pass a whitelist-enforcing transport (E4).
+    """
+    from app.plugin_runtime import PluginChild
+
+    child = _SANDBOX_CHILDREN.get(collector_id)
+    if not isinstance(child, PluginChild):
+        raise ValueError(f"no sandboxed collector {collector_id!r}")
+    child.set_http_transport(transport)
+
+
+_REGISTRY: tuple[Registration, ...] | None = None
+
+
+def _registry() -> tuple[Registration, ...]:
+    """Lazy build: the first access spawns the sandboxed children."""
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = _build_registry()
+    return _REGISTRY
+
+
+def refresh_registry() -> tuple[Registration, ...]:
+    """Tear down all children and rebuild (:reload support, P2b)."""
+    global _REGISTRY
+    if _REGISTRY is not None:
+        for registration in _REGISTRY:
+            stop = getattr(registration.collector, "stop", None)
+            if callable(stop):
+                stop()
+    _REGISTRY = _build_registry()
+    return _REGISTRY
 
 
 def select(url: str) -> Registration | None:
@@ -212,7 +301,7 @@ def select(url: str) -> Registration | None:
     URL matching alone is a heuristic: it looks for path fragments that a feed
     often but not always carries. Use `select_for` when a source type is known.
     """
-    for registration in REGISTRY:
+    for registration in _registry():
         if registration.collector.match_url(url):
             return registration
     return None
@@ -237,7 +326,7 @@ def select_for(source_type: str, url: str) -> Registration | None:
 
 def by_name(name: str) -> Registration | None:
     return next(
-        (registration for registration in REGISTRY if registration.name == name),
+        (registration for registration in _registry() if registration.name == name),
         None,
     )
 
@@ -312,7 +401,7 @@ def matchers() -> tuple[tuple[str, Callable[[str], bool]], ...]:
     """Every registered matcher, for diagnostics and tests."""
     return tuple(
         (registration.name, registration.collector.match_url)
-        for registration in REGISTRY
+        for registration in _registry()
     )
 
 
@@ -331,15 +420,13 @@ def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> No
 
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
     with session_factory() as session:
-        for registration in REGISTRY:
-            manifest = registration.manifest
+        for registration in _registry():
+            manifest = registration.manifest  # surface dict
             upsert_plugin(
                 session,
-                plugin_id=manifest.id,
-                manifest_json=json.dumps(
-                    manifest.as_dict(), sort_keys=True, ensure_ascii=False
-                ),
-                checksum=manifest.checksum,
+                plugin_id=str(manifest["id"]),
+                manifest_json=json.dumps(manifest, sort_keys=True, ensure_ascii=False),
+                checksum=registration.checksum,
                 trust="builtin",
                 tenant_id=tenant_id,
                 at=stamp,
@@ -349,4 +436,4 @@ def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> No
 
 def plugins_for_surface() -> list[dict[str, object]]:
     """Manifest summaries for the MCP/API surface (list_plugins)."""
-    return [{**r.manifest.as_dict(), "checksum": r.manifest.checksum} for r in REGISTRY]
+    return [{**r.manifest, "checksum": r.checksum} for r in _registry()]
