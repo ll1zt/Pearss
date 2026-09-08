@@ -334,24 +334,7 @@ def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> No
                 session,
                 plugin_id=manifest.id,
                 manifest_json=json.dumps(
-                    {
-                        "id": manifest.id,
-                        "version": manifest.version,
-                        "name": manifest.name,
-                        "description": manifest.description,
-                        "example_url": manifest.example_url,
-                        "features": sorted(manifest.features),
-                        "required_config": [
-                            {
-                                "env_name": req.env_name,
-                                "description": req.description,
-                                "required": req.required,
-                            }
-                            for req in manifest.required_config
-                        ],
-                    },
-                    sort_keys=True,
-                    ensure_ascii=False,
+                    manifest.as_dict(), sort_keys=True, ensure_ascii=False
                 ),
                 checksum=manifest.checksum,
                 trust="builtin",
@@ -363,23 +346,4 @@ def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> No
 
 def plugins_for_surface() -> list[dict[str, object]]:
     """Manifest summaries for the MCP/API surface (list_plugins)."""
-    return [
-        {
-            "id": r.manifest.id,
-            "version": r.manifest.version,
-            "name": r.manifest.name,
-            "description": r.manifest.description,
-            "example_url": r.manifest.example_url,
-            "features": sorted(r.manifest.features),
-            "required_config": [
-                {
-                    "env_name": req.env_name,
-                    "description": req.description,
-                    "required": req.required,
-                }
-                for req in r.manifest.required_config
-            ],
-            "checksum": r.manifest.checksum,
-        }
-        for r in REGISTRY
-    ]
+    return [{**r.manifest.as_dict(), "checksum": r.manifest.checksum} for r in REGISTRY]

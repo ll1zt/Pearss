@@ -9,7 +9,7 @@ beats pretending the endpoint exists.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -152,7 +152,7 @@ def reload_plugin(plugin_id: str) -> dict[str, str]:
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _unavailable(plugin_id: str, operation: str) -> None:
+def _unavailable(plugin_id: str, operation: str) -> NoReturn:
     """P2b placeholder: honest about what does not exist yet."""
     raise api_error(
         status_code=409,

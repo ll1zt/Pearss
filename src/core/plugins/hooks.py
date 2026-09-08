@@ -80,6 +80,9 @@ class Manifest:
     id: str
     version: str
     name: str
+    # What a source of this collector calls itself when the origin carries no
+    # title (paged timelines have no channel element). None = derive from id.
+    display_title: str | None = None
     description: str
     example_url: str
     features: frozenset[str]
@@ -87,11 +90,13 @@ class Manifest:
     # Populated by the registry, not declared by the collector.
     checksum: str = ""
 
-    def canonical_json(self) -> str:
-        payload = {
+    def as_dict(self) -> dict[str, Any]:
+        """The surface form of the manifest (API, MCP, stored JSON)."""
+        return {
             "id": self.id,
             "version": self.version,
             "name": self.name,
+            "display_title": self.display_title,
             "description": self.description,
             "example_url": self.example_url,
             "features": sorted(self.features),
@@ -104,8 +109,11 @@ class Manifest:
                 for req in self.required_config
             ],
         }
+
+    def canonical_json(self) -> str:
+        """The checksummed form: `as_dict` serialised deterministically."""
         return json.dumps(
-            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            self.as_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
         )
 
     def with_checksum(self) -> Manifest:

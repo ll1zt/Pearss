@@ -118,10 +118,21 @@ class CollectionResult:
     inserted: int = 0
     skipped: int = 0
     not_modified: bool = False
+    # Set when the source's plugin is disabled: nothing was attempted, and
+    # the run is not an incident (ADR 0017 — an operator decision, not a
+    # failure). Callers treat it like not_modified.
+    skipped_plugin: bool = False
     # Where to continue a backfill from, when the collector exposes a cursor.
     # Carried on the result rather than returned separately so a caller that
     # ignores backfill does not have to handle a second value.
     last_cursor: str | None = None
+
+
+def _plugin_disabled(session: Session, plugin_id: str, *, tenant_id: str) -> bool:
+    """Whether the operator has disabled this collector (ADR 0017)."""
+    from adapters.repository import plugin_status
+
+    return plugin_status(session, plugin_id, tenant_id=tenant_id) == "disabled"
 
 
 def collect_source(
@@ -144,6 +155,21 @@ def collect_source(
     request against someone else's server, and routine collection only needs
     what the origin shows as current.
     """
+    # The plugin lifecycle gate (ADR 0017): a disabled collector collects
+    # nothing. Skipped rather than failed — the same semantics as a paused
+    # source, an operator decision that must not masquerade as an incident
+    # (a failed run here would page the operator for a state they chose).
+    registration = collector_registry.select_for(
+        source.type, source.url or source.canonical_url or ""
+    )
+    if registration is not None and _plugin_disabled(
+        session, registration.manifest.id, tenant_id=tenant_id
+    ):
+        LOGGER.info(
+            "collection skipped: plugin %s is disabled", registration.manifest.id
+        )
+        return CollectionResult(succeeded=True, skipped_plugin=True)
+
     url = source.url or source.canonical_url
     if not url:
         return CollectionResult(
@@ -340,16 +366,12 @@ def collect_paged(
         resume_cursor=walk.resume_cursor,
     )
 
-    if walk.failed:
-        # The walk's own classification: the detail already carries the
-        # error-class prefix the reference diagnostics expect.
-        error_class = walk.failed.split(":", 1)[0]
-        if error_class not in {member.value for member in ErrorClass}:
-            error_class = ErrorClass.NETWORK.value
+    if walk.error_class is not None:
+        # The walk classifies itself; the host just carries it onto the run.
         return CollectionResult(
             succeeded=False,
-            error_class=error_class,
-            detail=walk.failed,
+            error_class=walk.error_class.value,
+            detail=walk.detail,
         )
 
     ingested = normalise_and_store(session, walk.drafts, tenant_id=tenant_id)
@@ -370,10 +392,10 @@ def _paged_source_title(registration: CollectorRegistration) -> str:
     """The display title a paged origin reports for itself.
 
     Page-based origins are timelines, not feeds: no payload carries a channel
-    title, so the collector's manifest id is the honest label. (The feed path
-    learns titles from the payload itself; see _collect_one_page.)
+    title, so the manifest's display_title is the honest label. (The feed
+    path learns titles from the payload itself; see _collect_one_page.)
     """
-    return str(getattr(registration.collector, "collector_id", registration.name))
+    return registration.manifest.display_title or registration.manifest.id
 
 
 def _merge(first: CollectionResult, page: CollectionResult) -> CollectionResult:

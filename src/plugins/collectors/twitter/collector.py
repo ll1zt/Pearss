@@ -778,6 +778,7 @@ def source_config() -> Manifest:
         id="twitter",
         version="0.1.0",
         name="X Following 时间线",
+        display_title="X Following",
         description="读取你自己的 X Following 时间线（登录型，ADR 0012）。",
         example_url="https://x.com/home",
         features=frozenset({"paged"}),

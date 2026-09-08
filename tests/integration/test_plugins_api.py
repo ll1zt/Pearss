@@ -155,3 +155,160 @@ async def test_read_token_can_list_but_not_disable(
 
     refused = await reader.post("/v1/plugins/rss:disable")
     assert refused.status_code == 403
+
+
+# --------------------------------------------------------------------------
+# The lifecycle gate on the collection path (ADR 0017)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def zhihu_source(session_factory: sessionmaker[Session]) -> Iterator[str]:
+    source_id = "s-zhihu"
+    with session_factory() as session:
+        session.execute(
+            sa.text(
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, trust_level, tenant_id, created_at, updated_at)"
+                " values (:id, 'web', :u, :u, '{}', 'active', 'standard',"
+                " 'default', '2026-01-01T00:00:00.000000Z',"
+                " '2026-01-01T00:00:00.000000Z')"
+            ),
+            {
+                "id": source_id,
+                "u": "https://www.zhihu.com/people/example",
+            },
+        )
+        session.commit()
+    yield source_id
+
+
+def _never_network() -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a disabled plugin must not touch the network")
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_disabled_plugin_collects_nothing(
+    app: FastAPI,
+    session_factory: sessionmaker[Session],
+    writer: httpx.AsyncClient,
+    zhihu_source: str,
+) -> None:
+    """Disabling a collector stops its sources — by skipping, not failing.
+
+    The skip must not touch the network, must not store items, and must not
+    record a failed run: an operator decision is not an incident.
+    """
+    from adapters.db_models import Source
+    from app.pipeline import collect_source
+
+    assert (await writer.post("/v1/plugins/zhihu:disable")).status_code == 200
+
+    with session_factory() as session:
+        source = session.get(Source, zhihu_source)
+        assert source is not None
+        result = collect_source(
+            session,
+            source=source,
+            client=_never_network(),
+            tenant_id="default",
+        )
+        session.commit()
+
+    assert result.succeeded is True
+    assert result.skipped_plugin is True
+    assert result.drafts == 0
+
+    with session_factory() as session:
+        items = session.execute(
+            sa.text("select count(*) from item where source_id = :i"),
+            {"i": zhihu_source},
+        ).scalar()
+        runs = session.execute(sa.text("select status from job_run")).fetchall()
+    assert items == 0
+    assert runs == [], "a skipped plugin must not look like a failed run"
+
+
+@pytest.mark.integration
+def test_an_enabled_plugin_collects_normally(
+    session_factory: sessionmaker[Session], zhihu_source: str
+) -> None:
+    """Default state (no plugin row yet) is enabled: collection proceeds."""
+    from adapters.db_models import Source
+    from app.pipeline import collect_source
+
+    with session_factory() as session:
+        source = session.get(Source, zhihu_source)
+        assert source is not None
+        result = collect_source(
+            session,
+            source=source,
+            client=_never_network(),
+            tenant_id="default",
+        )
+        session.commit()
+
+    # No plugin row exists -> enabled -> the gate lets it through (the walk
+    # itself fails on the never-network client, which is not this test's
+    # concern).
+    assert result.skipped_plugin is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_startup_sync_preserves_the_operator_decision(
+    app: FastAPI,
+    session_factory: sessionmaker[Session],
+    writer: httpx.AsyncClient,
+) -> None:
+    """Startup refreshes manifests; it must not resurrect a disabled plugin.
+
+    The whole point of separating discovery from decision: a restart after
+    editing a collector silently re-enabling it would undo an operator's
+    choice they cannot see happening.
+    """
+    from app.collector_registry import sync_plugin_table
+
+    assert (await writer.post("/v1/plugins/zhihu:disable")).status_code == 200
+
+    # A restart (lifespan) runs the sync again.
+    sync_plugin_table(session_factory)
+
+    listed = (await writer.get("/v1/plugins")).json()
+    zhihu = next(row for row in listed["data"] if row["id"] == "zhihu")
+    assert zhihu["status"] == "disabled"
+    assert zhihu["checksum"], "the manifest is still refreshed"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_disable_persists_across_a_fresh_app_instance(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decision lives in the database, not in registry memory."""
+    monkeypatch.setenv("PEARSS_API_TOKEN", WRITE_TOKEN)
+    first_app = create_app(session_factory)
+    transport = httpx.ASGITransport(app=first_app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+    ) as aclient:
+        await aclient.post("/v1/plugins/rss:disable")
+
+    # A brand-new app instance over the same database (simulated restart).
+    second_app = create_app(session_factory)
+    transport2 = httpx.ASGITransport(app=second_app)
+    async with httpx.AsyncClient(
+        transport=transport2,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+    ) as aclient:
+        listed = (await aclient.get("/v1/plugins")).json()
+    rss = next(row for row in listed["data"] if row["id"] == "rss")
+    assert rss["status"] == "disabled"

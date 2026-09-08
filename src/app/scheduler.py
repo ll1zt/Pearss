@@ -189,6 +189,7 @@ def collect_now(
                 "inserted": result.inserted,
                 "skipped": result.skipped,
                 "not_modified": result.not_modified,
+                "skipped_plugin": result.skipped_plugin,
             },
             at=finished,
         )

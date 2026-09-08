@@ -38,13 +38,20 @@ class PagedWalkResult:
     """What one walk contributed, before the host stores anything.
 
     The host owns `normalise_and_store` and the paging-state write; this
-    result carries everything those need and nothing else.
+    result carries everything those need and nothing else. A failed walk
+    carries `error_class` plus a human `detail` — typed fields, not a
+    string protocol the host would have to re-parse.
     """
 
     drafts: list[ItemDraft]
     newest_id: int | None
     resume_cursor: str | None
-    failed: str | None
+    error_class: ErrorClass | None = None
+    detail: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error_class is None
 
 
 def collect_pages(
@@ -69,7 +76,8 @@ def collect_pages(
             drafts=[],
             newest_id=None,
             resume_cursor=None,
-            failed="auth: X session credentials are not configured",
+            error_class=ErrorClass.AUTH,
+            detail="X session credentials are not configured",
         )
 
     credentials = x_client.Credentials.from_env(client)
@@ -138,17 +146,24 @@ def collect_pages(
         # A credential problem, not a transport one: the operator has to act,
         # and `network` would tell them to wait instead.
         return PagedWalkResult(
-            drafts=[], newest_id=None, resume_cursor=None, failed=f"auth: {exc}"
+            drafts=[],
+            newest_id=None,
+            resume_cursor=None,
+            error_class=ErrorClass.AUTH,
+            detail=str(exc),
         )
     except Exception as exc:  # classified below; nothing retrieved
         error_class = getattr(exc, "error_class", None)
-        detail = (
-            f"{error_class.value}: {exc}"
-            if isinstance(error_class, ErrorClass)
-            else f"network: {exc}"
-        )
         return PagedWalkResult(
-            drafts=[], newest_id=None, resume_cursor=None, failed=detail
+            drafts=[],
+            newest_id=None,
+            resume_cursor=None,
+            error_class=(
+                error_class
+                if isinstance(error_class, ErrorClass)
+                else ErrorClass.NETWORK
+            ),
+            detail=str(exc),
         )
 
     keep = {str(value) for value in result.keep_ids}
@@ -167,10 +182,12 @@ def collect_pages(
             if draft.external_id.removeprefix("twitter:") in keep:
                 drafts.append(draft)
 
-    failed = result.failed or ("no page could be retrieved" if not result.ok else None)
+    walk_failed = result.failed is not None or not result.ok
     return PagedWalkResult(
         drafts=drafts,
         newest_id=result.newest_id,
         resume_cursor=result.resume,
-        failed=failed,
+        error_class=ErrorClass.BLOCKED if walk_failed else None,
+        detail=result.failed
+        or ("no page could be retrieved" if not result.ok else None),
     )
