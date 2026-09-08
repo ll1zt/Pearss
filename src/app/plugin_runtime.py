@@ -35,12 +35,20 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
+import httpx
+
+from adapters.raw_payload import ConditionalState, RawPayload
+from adapters.repository import PagingState
 from core.enums import ErrorClass
 from core.plugins import protocol
 from core.plugins.hooks import BackfillHooks
 from core.plugins.protocol import ProtocolError
+
+if TYPE_CHECKING:
+    from core.models import ItemDraft
+    from plugins.collectors.twitter.walk import PagedWalkResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -138,7 +146,7 @@ class PluginChild:
         limits: SandboxLimits | None = None,
         call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
-        http_transport: Any = None,
+        http_transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._collector_id = collector_id
         self._env = env
@@ -190,7 +198,7 @@ class PluginChild:
             preexec_fn=apply_limits if sys.platform != "win32" else None,
         )
 
-    def set_http_transport(self, transport: Any) -> None:
+    def set_http_transport(self, transport: httpx.BaseTransport | None) -> None:
         """Swap the egress transport; applies to the next spawned child."""
         self._http_transport = transport
 
@@ -514,8 +522,10 @@ class SandboxedCollector:
     def match_url(self, url: str) -> bool:
         return bool(self._ensure_running().call("match_url", {"url": url}))
 
-    def source_config(self) -> Any:
-        return self._ensure_running().call("source_config", {})
+    def source_config(self) -> dict[str, Any]:
+        """The manifest as its surface dict (the child JSON-encodes it)."""
+        result = self._ensure_running().call("source_config", {})
+        return dict(result)
 
     def backfill(self) -> BackfillHooks | None:
         """The declared backward-walk capability, as an RPC-backed object.
@@ -530,20 +540,29 @@ class SandboxedCollector:
             return None
         return _SandboxedBackfillHooks(self._child)
 
-    def fetch(self, url: str, **kwargs: Any) -> Any:
+    def fetch(
+        self,
+        url: str,
+        *,
+        client: httpx.Client,
+        source_id: str,
+        conditional: ConditionalState | None = None,
+    ) -> RawPayload:
+        """The FetchingCollector shape: the hookspec's fetch, over RPC.
+
+        `client` is accepted for hook-signature uniformity and unused - the
+        child's egress is host-proxied, so the caller's client never leaves
+        this process.
+        """
+        del client
         from adapters.http import FetchError
-        from adapters.raw_payload import RawPayload
 
         self._ensure_running()
-        conditional = kwargs.get("conditional")
         params: dict[str, Any] = {
             "url": url,
-            "source_id": str(kwargs.get("source_id", "")),
+            "source_id": source_id,
             "conditional": (
-                {
-                    "etag": conditional.etag,
-                    "last_modified": conditional.last_modified,
-                }
+                {"etag": conditional.etag, "last_modified": conditional.last_modified}
                 if conditional is not None
                 else None
             ),
@@ -557,20 +576,39 @@ class SandboxedCollector:
             raise FetchError(ErrorClass(exc.code), exc.detail) from exc
         return RawPayload.from_rpc_dict(result["raw"])
 
-    def parse(self, raw: Any) -> Any:
+    def parse(self, raw: RawPayload) -> list[ItemDraft]:
         from core.models import ItemDraft
 
         self._ensure_running()
         result = self._child.call("parse", {"raw": raw.as_rpc_dict()})
         return [ItemDraft.from_rpc_dict(d) for d in result]
 
-    def collect_pages(self, **kwargs: Any) -> Any:
+    def collect_pages(
+        self,
+        *,
+        source_id: str,
+        source_url: str,
+        client: httpx.Client,
+        state: PagingState,
+        max_pages: int = 20,
+    ) -> PagedWalkResult:
+        """The paged-walk hook over RPC; failures come back as values.
+
+        `client` is accepted for hook-signature uniformity and unused (the
+        child's egress is host-proxied).
+        """
+        del client
         from core.enums import ErrorClass as _EC
-        from plugins.collectors.twitter import walk  # re-exported result shape
+        from plugins.collectors.twitter import walk
 
         self._ensure_running()
         try:
-            return self._collect_pages_inner(**kwargs)
+            return self._collect_pages_inner(
+                source_id=source_id,
+                source_url=source_url,
+                state=state,
+                max_pages=max_pages,
+            )
         except ClassifiedChildError as exc:
             return walk.PagedWalkResult(
                 drafts=[],
@@ -580,22 +618,28 @@ class SandboxedCollector:
                 detail=exc.detail,
             )
 
-    def _collect_pages_inner(self, **kwargs: Any) -> Any:
-        from core.enums import ErrorClass
+    def _collect_pages_inner(
+        self,
+        *,
+        source_id: str,
+        source_url: str,
+        state: PagingState,
+        max_pages: int,
+    ) -> PagedWalkResult:
         from core.models import ItemDraft
         from plugins.collectors.twitter import walk
 
         result = self._child.call(
             "collect_pages",
             {
-                "source_id": str(kwargs["source_id"]),
-                "source_url": str(kwargs["source_url"]),
+                "source_id": source_id,
+                "source_url": source_url,
                 "state": {
-                    "seen_frontier": kwargs["state"].seen_frontier,
-                    "resume_cursor": kwargs["state"].resume_cursor,
-                    "resume_rounds": kwargs["state"].resume_rounds,
+                    "seen_frontier": state.seen_frontier,
+                    "resume_cursor": state.resume_cursor,
+                    "resume_rounds": state.resume_rounds,
                 },
-                "max_pages": int(kwargs.get("max_pages", 20)),
+                "max_pages": max_pages,
             },
         )
         return walk.PagedWalkResult(
@@ -625,7 +669,7 @@ class _SandboxedBackfillHooks:
         page_url = result.get("page_url")
         return str(page_url) if page_url is not None else None
 
-    def oldest_cursor(self, drafts: list[Any]) -> str | None:
+    def oldest_cursor(self, drafts: list[ItemDraft]) -> str | None:
 
         result = self._child.call(
             "oldest_cursor",

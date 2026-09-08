@@ -46,6 +46,10 @@ from adapters.repository import (
     reap_orphaned_runs,
     update_gaps_for_source,
 )
+
+# The fixed-width format has one definition (adapters.timestamps); the
+# alias keeps the call sites in this module short.
+from adapters.repository import timestamp as _iso
 from app.pipeline import CollectionResult, collect_source
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import JobRunEvent
@@ -91,10 +95,6 @@ class TickReport:
     @property
     def ran(self) -> int:
         return len(self.collected) + len(self.failed)
-
-
-def _iso(moment: datetime) -> str:
-    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 def evaluate_source(
