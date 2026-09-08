@@ -82,3 +82,27 @@ rss 内置。划分依据是信任与耦合，不是代码放哪个目录：这�
   停车场"注册表元数据层"兑现。
 - plugin 表进事实源备份清单；item_enrichment 仍是唯一缺席的 P3 表。
 - P2b 边界：四采集器迁子进程后，未信代码零进程内 import 才算兑现 E4。
+
+## P2b 落地记录（同日实施）
+
+E4 的子进程隔离按本 ADR 兑现，要点：
+
+- **协议**：JSON-RPC 2.0 over stdio，行分隔（`core/plugins/protocol.py`）。
+  正向方法：`match_url / fetch / parse / collect_pages / source_config /
+  backfill / ping`。**反向调用**：子进程以 id=0 行发起 `http` 方法，宿主经
+  注入的 transport 应答后以同 id 返回——网络白名单与 fixture 注入都住在宿主。
+- **执行模型**：telegram/twitter/zhihu/zsxq 的 hookimpl 在
+  `python -m plugins.collectors <id>` 子进程中运行；宿主只持有
+  `SandboxedCollector` 代理。rss 仍进程内（builtin）。
+- **延迟 spawn**：child 在首次使用时 fork，而非 registry 构建时——测试的
+  monkeypatch.setenv 与部署的凭据注入都发生在 import 之后。env 指纹
+  （PEARSS_* 键值）变化时 child 自动轮换（restart）。
+- **限额**：RLIMIT_CPU 全平台；RLIMIT_AS 仅 Linux（macOS 在 preexec_fn
+  中对 AS 限额 raise，Python 分配器预留大虚拟地址空间）。
+- **分类失败 vs child 故障**：child 返回的 `auth/blocked/parse/
+  structure_changed` 是**值**（ClassifiedChildError），宿主不重启 child；
+  只有 `network/child_error/protocol` 才触发重启一次的重试。
+- **egress**：默认经宿主代理（child 不直接持有网络白名单）；直接 egress
+  模式保留给无宿主代理的部署。
+
+后续：第三方加载器（:import/:uninstall 的文件落盘与校验）在独立 ADR 中设计。
