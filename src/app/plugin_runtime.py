@@ -34,7 +34,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from core.enums import ErrorClass
 from core.plugins import protocol
@@ -45,6 +45,51 @@ LOGGER = logging.getLogger(__name__)
 # Defaults, overridable per deployment via env (read by the factory).
 DEFAULT_CALL_TIMEOUT_SECONDS = 120.0
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 15.0
+
+# Variables every child needs to run Python and talk to its origin at all.
+# Everything else in the host environment is withheld: a child must not be
+# able to read another collector's credentials or the host's own secrets
+# (database URLs, API tokens) by executing `os.environ`, however unlikely
+# that misuse is.
+_BASE_ENV_VARS: Final[frozenset[str]] = frozenset(
+    {"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "PYTHONHASHSEED"}
+)
+_SSL_ENV_PREFIXES: Final[tuple[str, ...]] = (
+    "SSL_",
+    "REQUESTS_CA_BUNDLE",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+)
+# Credential/config prefixes each collector may see. CookieCloud is shared:
+# zhihu and zsxq both resolve sessions through it.
+_COLLECTOR_ENV_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
+    "telegram": (),
+    "twitter": ("PEARSS_X_", "PEARSS_COOKIECLOUD_"),
+    "zhihu": ("PEARSS_ZHIHU_", "PEARSS_COOKIECLOUD_"),
+    "zsxq": ("PEARSS_ZSXQ_", "PEARSS_COOKIECLOUD_"),
+}
+
+
+def child_environment(collector_id: str) -> dict[str, str]:
+    """The narrowed environment a sandboxed child may see.
+
+    An allowlist, not a deny-list: base runtime variables, the TLS/proxy
+    passthroughs, the collector's own credential prefixes, and the sandbox
+    marker. The parent's PEARSS_* variables that name *other* collectors'
+    credentials are exactly what this exists to withhold.
+    """
+    own_prefixes = _COLLECTOR_ENV_PREFIXES.get(collector_id, ())
+    narrowed: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if (
+            key in _BASE_ENV_VARS
+            or key.startswith(_SSL_ENV_PREFIXES)
+            or key.startswith(own_prefixes)
+        ):
+            narrowed[key] = value
+    narrowed["PEARSS_SANDBOXED"] = "1"
+    return narrowed
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -109,15 +154,14 @@ class PluginChild:
 
     def _spawn(self) -> subprocess.Popen[bytes]:
         limits = self._limits
-        # None = inherit the host environment (which carries the injected
-        # credentials the tests and the deployment set); an explicit dict
-        # replaces it entirely — the credential-narrowing step composes with
-        # `os.environ` explicitly.
-        child_env = (
-            {**os.environ, "PEARSS_SANDBOXED": "1"}
-            if self._env is None
-            else {**os.environ, **self._env}
-        )
+        # The child never inherits the host environment wholesale: the env is
+        # an allowlist (base runtime + this collector's credential prefixes),
+        # so one compromised collector cannot read another's session or the
+        # host's own secrets. An explicit dict overrides entries on top of
+        # the allowlist; None is the plain allowlist.
+        child_env = child_environment(self._collector_id)
+        if self._env is not None:
+            child_env = {**child_env, **self._env}
 
         def apply_limits() -> None:  # runs inside the forked child
             import resource
@@ -372,19 +416,18 @@ class SandboxedCollector:
     def _ensure_running(self) -> PluginChild:
         """Spawn on first use, and respawn if the credential env changed.
 
-        Late spawn is load-bearing: the child inherits the host environment
-        at fork time, and tests (monkeypatch.setenv) and deployments set
-        credentials *after* this module is imported. A child forked at
-        import would freeze an empty environment and answer every request
-        `auth`. Comparing a fingerprint of the PEARSS_* environment catches
-        that change and rotates the child.
+        Late spawn is load-bearing: the child inherits the (narrowed)
+        environment at fork time, and tests (monkeypatch.setenv) and
+        deployments set credentials *after* this module is imported. A child
+        forked at import would freeze an empty environment and answer every
+        request `auth`. The fingerprint is of the environment the child
+        would actually receive (`child_environment`), so a change to another
+        collector's credentials correctly does not rotate this one.
         """
-        current = {
-            key: value for key, value in os.environ.items() if key.startswith("PEARSS_")
-        }
+        current = child_environment(self._child._collector_id)
         if self._env_fingerprint is not None and current != self._env_fingerprint:
             LOGGER.info(
-                "PEARSS_* environment changed; rotating plugin child %s",
+                "plugin child %s environment changed; rotating it",
                 self._child._collector_id,
             )
             self._child.restart()

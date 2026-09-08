@@ -189,11 +189,9 @@ def _build_registry(
 
             # The child spawns lazily on first use: importing this module
             # (which every test and CLI entry does) must not fork processes.
-            child = PluginChild(
-                name,
-                env={"PEARSS_SANDBOXED": "1"},
-                limits=SandboxLimits(),
-            )
+            # No env override: the child environment is the runtime's own
+            # allowlist (base vars + this collector's credential prefixes).
+            child = PluginChild(name, limits=SandboxLimits())
             _SANDBOX_CHILDREN[name] = child
             executor: Any = SandboxedCollector(child)
         else:
