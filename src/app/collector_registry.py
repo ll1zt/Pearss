@@ -135,8 +135,8 @@ _PM.add_hookspecs(spec)
 # The shipped set, in routing priority order (first match wins). Third-party
 # collectors (everything but rss) are *not imported by the host*: their
 # implementations execute in sandboxed child processes, so a crash or memory
-# leak in one costs the host nothing.
-_SANDBOXED: tuple[str, ...] = ("telegram", "twitter", "zhihu", "zsxq")
+# leak in one costs the host nothing. The sandboxed/in-process split is
+# declared once, in _DECLARATIONS below — derive from it, never re-list ids.
 
 # Declaration records: (id, sandboxed?, declared capabilities). The manifest
 # itself comes from the implementation (`source_config`), verified against
