@@ -6,7 +6,9 @@ network client: collectors receive this, never a `Response`.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.enums import ErrorClass
 
@@ -43,6 +45,45 @@ class RawPayload:
     def ok(self) -> bool:
         """Whether this payload can be handed to a parser."""
         return self.error_class is None and not self.not_modified and self.body != b""
+
+    def as_rpc_dict(self) -> dict[str, Any]:
+        """The wire form for the plugin RPC (P2b): fields the child needs."""
+        return {
+            "url": self.url,
+            "status_code": self.status_code,
+            "body": base64.b64encode(self.body).decode("ascii"),
+            "source_id": self.source_id,
+            "raw_fetch_id": self.raw_fetch_id,
+            "headers": dict(self.headers),
+            "not_modified": self.not_modified,
+            "etag": self.etag,
+            "last_modified": self.last_modified,
+            "error_class": (
+                self.error_class.value if self.error_class is not None else None
+            ),
+            "correlation_id": self.correlation_id,
+        }
+
+    @classmethod
+    def from_rpc_dict(cls, data: dict[str, Any]) -> RawPayload:
+        """Rebuild a payload from `as_rpc_dict` output."""
+        return cls(
+            url=str(data["url"]),
+            status_code=int(data["status_code"]),
+            body=base64.b64decode(str(data["body"])),
+            source_id=str(data.get("source_id", "")),
+            raw_fetch_id=data.get("raw_fetch_id"),
+            headers={str(k): str(v) for k, v in (data.get("headers") or {}).items()},
+            not_modified=bool(data.get("not_modified", False)),
+            etag=data.get("etag"),
+            last_modified=data.get("last_modified"),
+            error_class=(
+                ErrorClass(str(data["error_class"]))
+                if data.get("error_class")
+                else None
+            ),
+            correlation_id=str(data.get("correlation_id", "")),
+        )
 
     def text(self, encoding: str | None = None) -> str:
         """Decode the body.

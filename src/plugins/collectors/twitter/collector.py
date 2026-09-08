@@ -793,3 +793,9 @@ def source_config() -> Manifest:
             ),
         ),
     )
+
+
+@HOOKIMPL
+def collector_id() -> str:
+    """The stable registration key (ADR 0017)."""
+    return "twitter"

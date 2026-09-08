@@ -523,3 +523,9 @@ class _TelegramBackfill(BackfillHooks):
 
     def oldest_cursor(self, drafts: list[ItemDraft]) -> str | None:
         return oldest_cursor(drafts)
+
+
+@HOOKIMPL
+def collector_id() -> str:
+    """The stable registration key (ADR 0017)."""
+    return "telegram"
