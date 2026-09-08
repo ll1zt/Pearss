@@ -99,10 +99,41 @@ E4 的子进程隔离按本 ADR 兑现，要点：
   （PEARSS_* 键值）变化时 child 自动轮换（restart）。
 - **限额**：RLIMIT_CPU 全平台；RLIMIT_AS 仅 Linux（macOS 在 preexec_fn
   中对 AS 限额 raise，Python 分配器预留大虚拟地址空间）。
-- **分类失败 vs child 故障**：child 返回的 `auth/blocked/parse/
+- **分类失败 vs child 故障**：child 返回的 `auth/blocked/network/parse/
   structure_changed` 是**值**（ClassifiedChildError），宿主不重启 child；
-  只有 `network/child_error/protocol` 才触发重启一次的重试。
-- **egress**：默认经宿主代理（child 不直接持有网络白名单）；直接 egress
-  模式保留给无宿主代理的部署。
+  只有 `child_error/protocol` 及传输层失步才触发重启一次的重试。
+  （network 属分类值：源站不可达是 origin 的状态，child 本身健康。）
+- **egress**：经宿主代理（child 不直接持有网络）；app lifespan 把共享
+  http client 注入每个 child，SSRF 私网拦截与 fetch 超时/限额对沙箱
+  出网同样生效。
+
+## P2b 评审加固记录（同日第二轮 review 后）
+
+针对首轮实现评审出的问题逐项修复，要点修正：
+
+- **生产 egress 接线**：`set_http_transport` 原本只有测试调用，lifespan
+  现通过 `for_each_sandboxed_collector` 注入宿主共享 client——否则沙箱
+  采集器在部署上一律 egress_denied。
+- **环境收窄**：child env 从继承宿主全量改为 allowlist
+  （`child_environment`）：基础运行变量 + TLS/proxy 透传 + 本采集器的
+  凭据前缀（CookieCloud 为 zhihu/zsxq 共享）。轮换指纹同步改为比较
+  child 实际可见的环境。
+- **协议方法扩充**：`backfill` 原只回 bool，registry 的 `backfiller()`
+  又在采集器对象上探测 `before_url/oldest_cursor`（代理结构性不具
+  备）——telegram 的 backfill 能力静默失效。协议补 `before_url/
+  oldest_cursor` 两方法，代理返回 RPC-backed hooks 对象，registry 收窄
+  走声明对象本身。
+- **读取加固**：超时只护首字节的缺陷改为 deadline + 原始 fd 分块读 +
+  每读限额；不可解码行 / id 失配按 child 故障处理（重建流），不再留下
+  永久失步的缓冲。
+- **wire 保真**：`published_at` 原样 isoformat 往返（naive 不再被宿主
+  本地时区平移）；反向调用 headers 双向均为 pair list（Set-Cookie 不丢）；
+  child fetch 分支透传 conditional 参数。
+- **杂项**：child 不再 import adapters.repository（SQLAlchemy 不进沙箱）；
+  child stderr 继承宿主流（journald 可收崩溃栈）；collect_now 对逃逸
+  异常落 FAIL 终态 + reaper 每 tick 宽限扫描（防 run 行泄漏锁死源）。
+
+已知缺口（另案）：`record_raw_fetch` 生产代码零调用——ETag/Last-Modified
+写回 RawFetch 的回路未接线，`not_modified` 路径目前对所有采集器不可达。
 
 后续：第三方加载器（:import/:uninstall 的文件落盘与校验）在独立 ADR 中设计。
