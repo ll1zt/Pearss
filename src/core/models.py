@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from core.enums import ErrorClass, PublishStatus, SourceStatus, SourceType, TrustLevel
@@ -54,16 +54,22 @@ class ItemDraft:
             )
 
     def as_rpc_dict(self) -> dict[str, Any]:
-        """The wire form for the plugin RPC (P2b): JSON-safe fields only."""
+        """The wire form for the plugin RPC (P2b): JSON-safe fields only.
+
+        `published_at` serialises verbatim: a naive datetime encodes without
+        an offset and rebuilds naive. (Applying `.astimezone(UTC)` here would
+        interpret naive values in the host's local zone and shift every
+        zone-less feed timestamp across the RPC — a silent divergence from
+        the in-process path, where the draft is the raw ingest boundary and
+        zone-less values are recorded as evidence, never guessed.)
+        """
         return {
             "source_id": self.source_id,
             "external_id": self.external_id,
             "title": self.title,
             "canonical_url": self.canonical_url,
             "published_at": (
-                self.published_at.astimezone(UTC).isoformat()
-                if self.published_at is not None
-                else None
+                self.published_at.isoformat() if self.published_at is not None else None
             ),
             "content": self.content,
             "raw_fetch_id": self.raw_fetch_id,
