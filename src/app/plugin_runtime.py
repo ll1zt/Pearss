@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -256,29 +257,81 @@ class PluginChild:
         except (BrokenPipeError, OSError) as exc:
             raise PluginChildError(f"child stdin closed: {exc}") from exc
 
+        deadline = time.monotonic() + timeout
+        # Raw fd reads only: mixing them with the BufferedReader's methods
+        # would let the same bytes land in whichever buffer is checked last
+        # and tear the framing. Everything below reads `fd` exclusively.
+        fd = stdout.fileno()
+
         def read_line() -> bytes:
+            """One line, bounded by the deadline and the message-size cap.
+
+            `select` alone only guards the first byte: a child that wrote
+            half a line and hung would hold the host's lock forever with an
+            unbounded `readline`, and a child flooding bytes without a
+            newline would exhaust memory before any length check. Raw reads
+            against the deadline bound both, and draining whatever the pipe
+            already holds per call keeps the fast path a handful of syscalls
+            rather than one per byte.
+            """
             import selectors
 
-            selector = selectors.DefaultSelector()
-            selector.register(stdout, selectors.EVENT_READ)
-            ready = selector.select(timeout)
-            if not ready:
-                raise PluginChildError(
-                    f"plugin child {self._collector_id!r} timed out after {timeout}s"
-                )
-            line: bytes = stdout.readline()
-            return line
+            pending = b""
+            total = 0
+            while True:
+                newline = pending.find(b"\n")
+                if newline != -1:
+                    return pending[:newline]
+                total += len(pending)
+                if total > protocol.MAX_MESSAGE_BYTES:
+                    raise PluginChildError(
+                        "child message exceeds the size cap (no newline)"
+                    )
+                chunks = [pending]
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise PluginChildError(
+                            f"plugin child {self._collector_id!r} timed out "
+                            f"after {timeout}s"
+                        )
+                    selector = selectors.DefaultSelector()
+                    try:
+                        selector.register(fd, selectors.EVENT_READ)
+                        if not selector.select(remaining):
+                            raise PluginChildError(
+                                f"plugin child {self._collector_id!r} timed "
+                                f"out after {timeout}s"
+                            )
+                    finally:
+                        selector.close()
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        raise PluginChildError(
+                            f"plugin child {self._collector_id!r} closed "
+                            f"stdout (rc={proc.poll()})"
+                        )
+                    chunks.append(chunk)
+                    total += len(chunk)
+                    newline = chunk.find(b"\n")
+                    if newline != -1:
+                        break
+                joined = b"".join(chunks)
+                newline = joined.find(b"\n")
+                if newline != -1:
+                    return joined[:newline]
+                pending = joined
 
         while True:
             line = read_line()
-            if not line:
-                raise PluginChildError(
-                    f"plugin child {self._collector_id!r} closed stdout "
-                    f"(rc={proc.poll()})"
-                )
-            if len(line) > protocol.MAX_MESSAGE_BYTES:
-                raise PluginChildError("child message exceeds the size cap")
-            message = protocol.decode_message(line)
+            try:
+                message = protocol.decode_message(line)
+            except ProtocolError as exc:
+                # Everything the child writes on stdout is protocol; a line
+                # we cannot decode means the stream has lost framing (a
+                # foreign print, a torn write). The buffer is desynchronised
+                # past repair, so this ends the child like any other crash.
+                raise PluginChildError(f"undecodable child message: {exc}") from exc
             if isinstance(message, protocol.ReverseCall):
                 # A reverse "http" call: the child proxies its egress through
                 # us (network whitelist lives at the host, E4).
@@ -287,7 +340,10 @@ class PluginChild:
             if not isinstance(message, protocol.Response):
                 raise PluginChildError("unexpected message type from child")
             if message.id != request.id:
-                raise ProtocolError(
+                # Same framing loss: an id that is not ours means the stream
+                # is carrying someone else's answer, so nothing after this
+                # line can be trusted either.
+                raise PluginChildError(
                     f"response id {message.id} does not match request {request.id}"
                 )
             if message.error is not None:

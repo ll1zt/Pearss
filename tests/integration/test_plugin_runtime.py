@@ -115,3 +115,52 @@ def test_a_collector_without_a_walk_returns_none(child: PluginChild) -> None:
         assert SandboxedCollector(rss_child).backfill() is None
     finally:
         rss_child.stop()
+
+
+@pytest.mark.integration
+def test_a_child_that_freezes_mid_line_is_not_waited_on_forever() -> None:
+    """The read timeout must bound a stalled write, not just silence.
+
+    A child that answered a byte or two and then hung used to hold the
+    host's per-plugin lock forever: the selector only guarded the first
+    byte, and `readline` blocked past it.
+    """
+    import subprocess
+    import sys
+    import time
+
+    frozen = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('{'); sys.stdout.flush(); "
+            "import time; time.sleep(600)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    from app.plugin_runtime import PluginChild, PluginChildError
+
+    child = PluginChild.__new__(PluginChild)
+    child._collector_id = "frozen"
+    child._env = None
+    child._limits = None
+    child._call_timeout = 1.0
+    child._startup_timeout = 1.0
+    child._http_transport = None
+    import threading
+
+    child._lock = threading.Lock()
+    child._proc = frozen
+    child._next_id = 0
+    try:
+        started = time.monotonic()
+        try:
+            child._roundtrip("ping", {}, timeout=1.0)
+            raise AssertionError("a frozen child must not answer")
+        except PluginChildError as exc:
+            assert "timed out" in str(exc)
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, f"the read stalled {elapsed:.1f}s past the deadline"
+    finally:
+        child.stop()  # kills and reaps, closing the pipes
