@@ -174,6 +174,36 @@ async def categories_for(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_repeated_logins_do_not_invalidate_outstanding_tokens(
+    client: httpx.AsyncClient,
+) -> None:
+    """A ClientLogin must not kill the token a previous login minted.
+
+    The auth token is derived from the stored scrypt hash, and scrypt salts
+    are random - so the credential sync that rehashed on every login minted
+    a fresh token each time, and NNW's login-then-parallel-requests flow
+    answered its own requests with 401s. The sync now rehashes only when
+    the password actually changed.
+    """
+    first = await login(client)
+    assert first, "first login failed"
+    second = await login(client)
+    assert second, "second login failed"
+
+    assert second == first, "each login minted a different token"
+
+    # The first token must still authenticate after the second login.
+    check = await client.get(
+        "/api/greader.php/reader/api/0/tag/list?output=json",
+        headers={"Authorization": f"GoogleLogin auth={first}"},
+    )
+    assert check.status_code == 200
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_client_login_returns_a_token(client: httpx.AsyncClient) -> None:
     token = await login(client)
     assert len(token) == 64
