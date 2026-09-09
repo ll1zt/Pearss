@@ -131,18 +131,68 @@ def process(
         if not title_text:
             return str(store(""))
         source_text = title_text
-    if len(source_text) > MAX_CHARS:
-        # Silent truncation would make the translation disagree with the
-        # original below the merge rule; log it so the gap is visible.
-        LOGGER.warning(
-            "item %s: %d chars exceed the %d-char budget; the tail is not translated",
+    chunks = _segment(source_text)
+    if len(chunks) > 1:
+        LOGGER.info(
+            "item %s: %d chars split into %d segments for translation",
             item_ctx.get("item_id", "?"),
             len(source_text),
-            MAX_CHARS,
+            len(chunks),
         )
-        source_text = source_text[:MAX_CHARS]
     language = _LANG_NAMES.get(target_lang, target_lang)
 
+    translated: list[str] = []
+    for chunk in chunks:
+        translated.append(
+            _translate_one(
+                chunk, language=language, base=base, key=key, models=models
+            )
+        )
+    paragraphs = "".join(
+        f"<p>{html.escape(p)}</p>"
+        for segment in translated
+        for p in segment.splitlines()
+        if p.strip()
+    )
+    ref: str = store(paragraphs)
+    return ref
+
+
+def _segment(text_to_split: str) -> list[str]:
+    """Split into chunks no larger than MAX_CHARS, preferring paragraph
+    boundaries. No truncation: every character survives (ADR 0018 review)."""
+    if len(text_to_split) <= MAX_CHARS:
+        return [text_to_split]
+    chunks: list[str] = []
+    current = ""
+    for paragraph in text_to_split.split("\n\n"):
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) <= MAX_CHARS:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(paragraph) > MAX_CHARS:
+            cut = paragraph.rfind(". ", 0, MAX_CHARS)
+            cut = cut + 1 if cut > 0 else MAX_CHARS
+            chunks.append(paragraph[:cut].rstrip())
+            paragraph = paragraph[cut:].lstrip()
+        current = paragraph
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _translate_one(
+    source_text: str,
+    *,
+    language: str,
+    base: str,
+    key: str,
+    models: list[str],
+) -> str:
+    """One chat completion through the model fallback chain."""
     for index, model in enumerate(models):
         body = {
             "model": model,
@@ -213,11 +263,7 @@ def process(
                 ErrorClass.PARSE, f"provider reply was not JSON: {exc}"
             ) from exc
 
-        paragraphs = "".join(
-            f"<p>{html.escape(p)}</p>" for p in reply.splitlines() if p.strip()
-        )
-        ref: str = store(paragraphs)
-        return ref
+        return reply
     raise ProcessorError(
         ErrorClass.NETWORK, "model chain exhausted"
     )  # pragma: no cover
