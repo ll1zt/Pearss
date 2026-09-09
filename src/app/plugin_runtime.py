@@ -690,7 +690,7 @@ class SandboxedCollector:
         )
 
 
-class _SandboxedBackfillHooks:
+class _SandboxedBackfillHooks(BackfillHooks):
     """BackfillHooks whose every method is one RPC call.
 
     Lives on the host, talks to the child's declared hooks object. It

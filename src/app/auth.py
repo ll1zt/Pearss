@@ -21,9 +21,9 @@ from __future__ import annotations
 import hmac
 import logging
 import os
-from collections.abc import Callable, MutableMapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -109,8 +109,25 @@ def _matches(presented: str, expected: str) -> bool:
     return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
-def authenticate(request: Request) -> Principal | None:
-    """Resolve the caller from `Authorization: Bearer <token>`, or None."""
+class _HasHeaders(Protocol):
+    """The slice of a request that `authenticate` actually reads.
+
+    `headers` is spelled as a property so both Starlette's Request (where it
+    is one) and the ASGI scope's plain dict-shaped view satisfy it.
+    """
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+
+def authenticate(request: _HasHeaders) -> Principal | None:
+    """Resolve the caller from `Authorization: Bearer <token>`, or None.
+
+    Takes any headers-bearing view — a full Starlette Request at the route,
+    or the raw scope's headers in ASGI middleware (EarlyAuth authenticates
+    before a Request object exists, since building one would touch the
+    receive channel that belongs to the body the route will read).
+    """
     header = request.headers.get("authorization", "")
     scheme, _, presented = header.partition(" ")
     if scheme.lower() != "bearer" or not presented.strip():

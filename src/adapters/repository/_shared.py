@@ -20,6 +20,9 @@ from core.enums import (
 from core.models import Item
 from core.normalize import DedupeAction
 
+# Explicit re-exports: the package __init__ pulls `timestamp` from here.
+__all__ = ["EPOCH_FLOOR", "StoreOutcome", "dumps", "row_to_item", "timestamp"]
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StoreOutcome:

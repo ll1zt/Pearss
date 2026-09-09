@@ -192,28 +192,15 @@ def handle(
         return {"raw": payload.as_rpc_dict()}
 
     if method == "collect_pages":
-        from dataclasses import dataclass
-
+        from core.paging import WalkState
         from plugins.collectors.twitter import walk
-
-        @dataclass(frozen=True, slots=True)
-        class _WalkState:
-            """Duck-typed PagingState: the walk reads three attributes.
-
-            Shaped locally rather than imported from adapters.repository —
-            importing that would pull SQLAlchemy into every child, for a
-            value the host could have passed as three plain fields.
-            """
-
-            seen_frontier: int | None
-            resume_cursor: str | None
-            resume_rounds: int
 
         result = walk.collect_pages(
             source_id=str(params["source_id"]),
             source_url=str(params["source_url"]),
             client=child_client(host_http),
-            state=_WalkState(**params["state"]),
+            # WalkState lives in core: the child keeps zero adapters imports.
+            state=WalkState(**params["state"]),
             max_pages=int(params.get("max_pages", 20)),
         )
         return {

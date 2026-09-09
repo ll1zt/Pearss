@@ -8,6 +8,7 @@ same answer to, which is what makes it domain policy.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 
 # Consecutive cycles a resume cursor may stay unresolved before it is dropped.
@@ -17,3 +18,18 @@ from typing import Final
 # piles up behind it. Dropping the cursor accepts a bounded gap in deep history
 # instead of an unbounded slide.
 MAX_RESUME_ROUNDS: Final = 3
+
+
+@dataclass(frozen=True, slots=True)
+class WalkState:
+    """What a paged walk needs to know about the host's paging position.
+
+    The host owns persistence (adapters.repository.PagingState is the stored
+    view of this); the walk and the sandboxed child only ever read these
+    three fields, so the child may pass any object with this shape — no
+    adapters import required.
+    """
+
+    seen_frontier: int | None = None
+    resume_cursor: str | None = None
+    resume_rounds: int = 0

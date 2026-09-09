@@ -21,17 +21,17 @@ from core.enums import (
     SourceStatus,
 )
 from core.normalize import source_display_label
-from core.paging import MAX_RESUME_ROUNDS
+from core.paging import MAX_RESUME_ROUNDS, WalkState
 from core.scheduling import observed_gaps
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class PagingState:
-    """Where the last walk of this source's origin left off."""
+class PagingState(WalkState):
+    """Where the last walk of this source's origin left off.
 
-    seen_frontier: int | None = None
-    resume_cursor: str | None = None
-    resume_rounds: int = 0
+    The stored view of core.paging.WalkState — the same three fields, so a
+    persisted state passes anywhere a walk state is expected.
+    """
 
 
 def paging_state(session: Session, *, source_id: str) -> PagingState:

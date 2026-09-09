@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import httpx
 
@@ -23,12 +22,10 @@ from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
+from core.paging import WalkState
 from plugins.collectors.twitter import client as x_client
 from plugins.collectors.twitter import collector as x_collector
 from plugins.collectors.twitter import paging
-
-if TYPE_CHECKING:
-    from adapters.repository import PagingState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,7 +56,7 @@ def collect_pages(
     source_url: str,
     *,
     client: httpx.Client,
-    state: PagingState,
+    state: WalkState,
     max_pages: int = 20,
 ) -> PagedWalkResult:
     """Walk the Following timeline newest-first, honoring the host's state.
