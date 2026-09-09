@@ -42,6 +42,9 @@ LOGGER = logging.getLogger(__name__)
 BASE_URL_ENV: Final = "PEARSS_TRANSLATE_BASE_URL"
 API_KEY_ENV: Final = "PEARSS_TRANSLATE_API_KEY"
 MODEL_ENV: Final = "PEARSS_TRANSLATE_MODEL"
+# Optional comma-separated fallback chain, tried in order when a model hits
+# a rate limit or a server error: PEARSS_TRANSLATE_MODELS="m1,m2,m3".
+MODELS_ENV: Final = "PEARSS_TRANSLATE_MODELS"
 MAX_CHARS: Final = 24_000
 
 _LANG_NAMES: Final[dict[str, str]] = {
@@ -51,11 +54,16 @@ _LANG_NAMES: Final[dict[str, str]] = {
 }
 
 
-def _configured() -> tuple[str, str, str]:
+def _configured() -> tuple[str, str, list[str]]:
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     key = os.environ.get(API_KEY_ENV, "").strip()
-    model = os.environ.get(MODEL_ENV, "").strip()
-    if not (base and key and model):
+    models_env = os.environ.get(MODELS_ENV, "").strip()
+    if models_env:
+        models = [m.strip() for m in models_env.split(",") if m.strip()]
+    else:
+        single = os.environ.get(MODEL_ENV, "").strip()
+        models = [single] if single else []
+    if not (base and key and models):
         # Configuration gap, not a session failure: it classifies as parse
         # (the "this cannot be processed as things stand" family) rather than
         # auth, so an operator debugging a held item reads "set the env vars",
@@ -65,7 +73,7 @@ def _configured() -> tuple[str, str, str]:
             "translation provider not configured; set PEARSS_TRANSLATE_BASE_URL, "
             "PEARSS_TRANSLATE_API_KEY and PEARSS_TRANSLATE_MODEL",
         )
-    return base, key, model
+    return base, key, models
 
 
 def _strip_to_text(content_html: str) -> str:
@@ -112,7 +120,7 @@ def process(
     The item body keeps its HTML; the translation carries the same prose in
     simple paragraphs, so the reader can render both faithfully.
     """
-    base, key, model = _configured()
+    base, key, models = _configured()
     source_text = _strip_to_text(item_ctx.get("content", ""))
     if not source_text:
         # Title-only items (common in announcement feeds) still have the
@@ -127,8 +135,7 @@ def process(
         # Silent truncation would make the translation disagree with the
         # original below the merge rule; log it so the gap is visible.
         LOGGER.warning(
-            "item %s: %d chars exceed the %d-char budget; the tail is not "
-            "translated",
+            "item %s: %d chars exceed the %d-char budget; the tail is not translated",
             item_ctx.get("item_id", "?"),
             len(source_text),
             MAX_CHARS,
@@ -136,54 +143,81 @@ def process(
         source_text = source_text[:MAX_CHARS]
     language = _LANG_NAMES.get(target_lang, target_lang)
 
-    body = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    f"Translate the user's text into {language}. Reply with "
-                    "the translation only: no preamble, no notes, keep the "
-                    "original paragraph breaks."
-                ),
-            },
-            {"role": "user", "content": source_text},
-        ],
-        "temperature": 0,
-    }
-    try:
-        response = httpx.post(
-            f"{base}/chat/completions",
-            headers={"authorization": f"Bearer {key}"},
-            json=body,
-            # LLM completions through a relayed endpoint regularly take
-            # minutes: the read bound is what bounds a slow generation, and
-            # cutting it at 120s killed real requests (observed: a
-            # gemini-flash reply took 126s end to end).
-            timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
-        )
-    except httpx.HTTPError as exc:
-        raise ProcessorError(
-            ErrorClass.NETWORK, f"translation provider unreachable: {exc!r}"
-        ) from exc
+    for index, model in enumerate(models):
+        body = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        f"Translate the user's text into {language}. Reply with "
+                        "the translation only: no preamble, no notes, keep the "
+                        "original paragraph breaks."
+                    ),
+                },
+                {"role": "user", "content": source_text},
+            ],
+            "temperature": 0,
+        }
+        try:
+            response = httpx.post(
+                f"{base}/chat/completions",
+                headers={"authorization": f"Bearer {key}"},
+                json=body,
+                # LLM completions through a relayed endpoint regularly take
+                # minutes: the read bound is what bounds a slow generation,
+                # and cutting it at 120s killed real requests (observed: a
+                # gemini-flash reply took 126s end to end).
+                timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
+            )
+        except httpx.HTTPError as exc:
+            if index + 1 < len(models):
+                LOGGER.warning(
+                    "model %s unreachable (%r); falling back to %s",
+                    model,
+                    exc,
+                    models[index + 1],
+                )
+                continue
+            raise ProcessorError(
+                ErrorClass.NETWORK, f"translation provider unreachable: {exc!r}"
+            ) from exc
 
-    if response.status_code == 401:
-        raise ProcessorError(ErrorClass.AUTH, "provider rejected the API key")
-    if response.status_code == 429:
-        raise ProcessorError(ErrorClass.BLOCKED, "provider rate limit hit")
-    if response.status_code != 200:
-        raise ProcessorError(
-            ErrorClass.NETWORK, f"provider returned HTTP {response.status_code}"
-        )
-    try:
-        reply = _parse_reply(response.json())
-    except ValueError as exc:
-        raise ProcessorError(
-            ErrorClass.PARSE, f"provider reply was not JSON: {exc}"
-        ) from exc
+        if response.status_code == 401:
+            raise ProcessorError(ErrorClass.AUTH, "provider rejected the API key")
+        if response.status_code in (429, 500, 502, 503, 504):
+            # Rate limit / server error: the fallback chain exists exactly
+            # for this. The last model re-raises as blocked/network.
+            if index + 1 < len(models):
+                LOGGER.warning(
+                    "model %s returned %d; falling back to %s",
+                    model,
+                    response.status_code,
+                    models[index + 1],
+                )
+                continue
+            raise ProcessorError(
+                ErrorClass.BLOCKED
+                if response.status_code == 429
+                else ErrorClass.NETWORK,
+                f"all models exhausted; last HTTP {response.status_code}",
+            )
+        if response.status_code != 200:
+            raise ProcessorError(
+                ErrorClass.NETWORK, f"provider returned HTTP {response.status_code}"
+            )
+        try:
+            reply = _parse_reply(response.json())
+        except ValueError as exc:
+            raise ProcessorError(
+                ErrorClass.PARSE, f"provider reply was not JSON: {exc}"
+            ) from exc
 
-    paragraphs = "".join(
-        f"<p>{html.escape(p)}</p>" for p in reply.splitlines() if p.strip()
-    )
-    ref: str = store(paragraphs)
-    return ref
+        paragraphs = "".join(
+            f"<p>{html.escape(p)}</p>" for p in reply.splitlines() if p.strip()
+        )
+        ref: str = store(paragraphs)
+        return ref
+    raise ProcessorError(
+        ErrorClass.NETWORK, "model chain exhausted"
+    )  # pragma: no cover
