@@ -208,3 +208,52 @@ def test_the_child_fetch_branch_forwards_conditional_params_verbatim() -> None:
     assert seen == [ConditionalState(etag='"v1"', last_modified="yesterday")], (
         "conditional state was dropped or reshaped on the way to the hook"
     )
+
+
+@pytest.mark.integration
+def test_telegram_fetch_rewrites_the_url_to_the_preview(child: PluginChild) -> None:
+    """The collector must request t.me/s/<name>, not the bare t.me/<name>.
+
+    The bare URL serves Telegram's app-install page, which carries no
+    messages; the first real subscription answered it and parse classified
+    the page as structure_changed. The rewrite now lives in a fetch hook,
+    exercised here through the real child.
+    """
+    import httpx
+
+    from adapters.raw_payload import RawPayload
+    from app.plugin_runtime import SandboxedCollector
+    from plugins.collectors.telegram.collector import parse as tg_parse
+
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        assert "/s/" in str(request.url), (
+            f"the child requested {request.url}; the preview rewrite did not run"
+        )
+        return httpx.Response(
+            200,
+            content=b"<html><body><div class='tgme_widget_message' "
+            b"data-post='chan/1'>post</div></body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    child.set_http_transport(httpx.MockTransport(handler))
+    proxy = SandboxedCollector(child)
+    payload = proxy.fetch(
+        "https://t.me/journey_of_someone",
+        client=httpx.Client(),
+        source_id="s-tg",
+    )
+    assert payload.ok
+    assert seen_urls == ["https://t.me/s/journey_of_someone"]
+    drafts = tg_parse(
+        RawPayload(
+            url="https://t.me/s/journey_of_someone",
+            status_code=200,
+            body=payload.body,
+            source_id="s-tg",
+        )
+    )
+    assert len(drafts) == 1

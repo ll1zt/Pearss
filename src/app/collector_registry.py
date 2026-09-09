@@ -142,7 +142,9 @@ _PM.add_hookspecs(spec)
 # itself comes from the implementation (`source_config`), verified against
 # these declared capabilities at startup (ADR 0017).
 _DECLARATIONS: tuple[tuple[str, bool, frozenset[str]], ...] = (
-    ("telegram", True, frozenset()),
+    # telegram fetches: the source URL names the channel, the readable page
+    # lives at /s/<name> — a rewrite only the collector knows.
+    ("telegram", True, frozenset({"fetches"})),
     ("twitter", True, frozenset({"paged"})),
     ("zhihu", True, frozenset({"fetches"})),
     ("zsxq", True, frozenset({"fetches"})),

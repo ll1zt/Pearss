@@ -29,14 +29,17 @@ def _plain_payload() -> RawPayload:
 
 @pytest.mark.unit
 def test_fetch_hook_is_declared_not_probed() -> None:
-    # telegram and twitter keep the plain path: a module defining a `fetch`
-    # function later must not change collection without a registry decision.
-    for name in ("telegram", "twitter"):
-        registration = collector_registry.by_name(name)
-        assert registration is not None
-        assert registration.fetches is False
+    # twitter keeps the plain path: a module defining a `fetch` function later
+    # must not change collection without a registry decision. telegram now
+    # declares fetches deliberately - the preview rewrite (t.me/<name> to
+    # t.me/s/<name>) is collector knowledge, learned when a real channel
+    # subscription answered the app-install page with no messages in it.
+    telegram = collector_registry.by_name("telegram")
+    assert telegram is not None and telegram.fetches is True
     twitter = collector_registry.by_name("twitter")
-    assert twitter is not None and twitter.paged is True
+    assert twitter is not None
+    assert twitter.fetches is False
+    assert twitter.paged is True
 
 
 @pytest.mark.unit

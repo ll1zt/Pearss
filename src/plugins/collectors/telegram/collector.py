@@ -27,9 +27,11 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from lxml.html import HtmlElement, fromstring, tostring
 
-from adapters.raw_payload import RawPayload
+from adapters.http import fetch as plain_fetch
+from adapters.raw_payload import ConditionalState, RawPayload
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from core.plugins.hooks import HOOKIMPL, BackfillHooks, CollectorError, Manifest
@@ -103,6 +105,32 @@ def before_url(url: str, message_id: str) -> str:
     parts = urlsplit(url)
     query = f"before={message_id}"
     return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
+
+
+@HOOKIMPL
+def fetch(
+    url: str,
+    *,
+    client: httpx.Client,
+    source_id: str,
+    conditional: ConditionalState | None = None,
+) -> RawPayload:
+    """Fetch the channel's web preview, not the source URL itself.
+
+    A subscriber writes `https://t.me/<name>`; the readable, scraping-friendly
+    page lives at `https://t.me/s/<name>`. Without this hook the pipeline's
+    plain fetch requested the bare URL — whose page is the app-install
+    interstitial, carrying no messages — and parse classified the result as
+    structure_changed. The preview rewrite is collection knowledge, which is
+    why it lives in the collector as a fetch hook (the same shape zhihu uses
+    to reach its signed API).
+    """
+    return plain_fetch(
+        channel_url(username_of(url)),
+        client=client,
+        source_id=source_id,
+        conditional=conditional,
+    )
 
 
 @HOOKIMPL
