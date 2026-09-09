@@ -109,6 +109,113 @@ class BodySizeLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+class EarlyAuthMiddleware:
+    """Authenticate /v1 requests before any request-body parsing.
+
+    FastAPI resolves dependencies (the auth dependency included) *after*
+    the request body has been read and validated, so an unauthenticated
+    caller could otherwise probe the validation behaviour of every write
+    endpoint for free, and an oversized invalid body would spend the
+    application's parse budget before anyone checked credentials. This
+    middleware resolves the bearer token straight off the ASGI scope -
+    no body access - and refuses unauthenticated or under-scoped requests
+    up front.
+
+    Method decides the required scope (reads for GET/HEAD/OPTIONS, write
+    otherwise), mirroring the per-route dependencies. Those stay in place:
+    they document the bearer scheme in the OpenAPI spec and publish the
+    principal shape; against a pre-authenticated scope they simply pass.
+    """
+
+    # Only the Core API is bearer-token territory. The Reader API speaks
+    # ClientLogin and the MCP endpoint has its own guard; neither should
+    # see this middleware's error shape.
+    _PROTECTED_PREFIXES: Final[tuple[str, ...]] = ("/v1",)
+    _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS"})
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if not scope.get("path", "").startswith(self._PROTECTED_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        from app.auth import (
+            READ_SCOPE,
+            SCOPE_PRINCIPAL_KEY,
+            WRITE_SCOPE,
+            authenticate,
+        )
+
+        method = scope.get("method", "GET")
+        needed = READ_SCOPE if method in self._READ_METHODS else WRITE_SCOPE
+        principal = authenticate(_ScopeHeaders(scope))
+        if principal is None:
+            LOGGER.info("early auth refused: unauthenticated, method=%s", method)
+            await _send_auth_error(send, status=401, code="unauthenticated")
+            return
+        if not principal.may(needed):
+            LOGGER.info(
+                "early auth refused: scope=%s to principal=%s", needed, principal.name
+            )
+            await _send_auth_error(send, status=403, code="insufficient_scope")
+            return
+        # Published for the audit middleware and the route dependency's
+        # short-circuit.
+        scope[SCOPE_PRINCIPAL_KEY] = principal
+        await self.app(scope, receive, send)
+
+
+class _ScopeHeaders:
+    """The header-only view of a request that `authenticate()` needs.
+
+    auth.authenticate takes a Starlette Request; a full one cannot be built
+    from a raw scope without touching the receive channel, which must be
+    left untouched for the body the route will read. Header dict only.
+    """
+
+    def __init__(self, scope: Scope) -> None:
+        self.headers = {
+            name.decode("latin-1").lower(): value.decode("latin-1")
+            for name, value in scope.get("headers", [])
+        }
+
+
+async def _send_auth_error(send: Send, *, status: int, code: str) -> None:
+    """The documented error envelope, sent without entering the app."""
+    body = json.dumps(
+        {
+            "error": {
+                "code": code,
+                "message": (
+                    "A valid bearer token is required."
+                    if status == 401
+                    else "This endpoint requires a broader scope."
+                ),
+                "suggestion": (
+                    "Send 'Authorization: Bearer <token>' with a token that "
+                    "grants the required scope (PEARSS_API_TOKEN or "
+                    "PEARSS_API_READ_TOKEN)."
+                ),
+                "details": [],
+            }
+        }
+    ).encode()
+    headers: list[tuple[bytes, bytes]] = [
+        (b"content-type", b"application/json"),
+        (b"x-content-type-options", b"nosniff"),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    if status == 401:
+        headers.append((b"www-authenticate", b"Bearer"))
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
 class SecurityHeadersMiddleware:
     """Stamp every response with `X-Content-Type-Options: nosniff`.
 
