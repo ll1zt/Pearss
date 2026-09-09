@@ -54,7 +54,19 @@ _LANG_NAMES: Final[dict[str, str]] = {
 }
 
 
+_CONFIG_CACHE: tuple[str, str, list[str]] | None = None
+
+
 def _configured() -> tuple[str, str, list[str]]:
+    """Provider config, cached per-process.
+
+    The environment is stable for the worker's lifetime (the sandbox's env
+    fingerprint rotation handles changes by respawning); re-reading os.environ
+    per item was a fixed per-translation cost for a value that never changes.
+    """
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     key = os.environ.get(API_KEY_ENV, "").strip()
     models_env = os.environ.get(MODELS_ENV, "").strip()
@@ -73,7 +85,8 @@ def _configured() -> tuple[str, str, list[str]]:
             "translation provider not configured; set PEARSS_TRANSLATE_BASE_URL, "
             "PEARSS_TRANSLATE_API_KEY and PEARSS_TRANSLATE_MODEL",
         )
-    return base, key, models
+    _CONFIG_CACHE = (base, key, models)
+    return _CONFIG_CACHE
 
 
 def _strip_to_text(content_html: str) -> str:

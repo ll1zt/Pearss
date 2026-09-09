@@ -142,6 +142,15 @@ def sweep_queue(
     claimed: list[tuple[str, str]] = []
     for row_id, item_id, plugin_id in claimable:
         if plugin_id not in processors:
+            # Defense in depth: chains naming unregistered processors are
+            # refused at config time now, but a processor removed after a
+            # chain was configured would land here - visible, not silent.
+            LOGGER.error(
+                "enrichment %s names unregistered processor %r; the item "
+                "cannot be processed until the chain is reconfigured",
+                row_id,
+                plugin_id,
+            )
             report["skipped"] += 1
             continue
         claim = (
@@ -392,4 +401,14 @@ def default_processors() -> dict[str, Any]:
     return {"translate": sys.modules[translate.__name__]}
 
 
-__all__ = ["EnrichmentWorker", "default_processors", "sweep_queue"]
+def registered_processor_ids() -> frozenset[str]:
+    """Ids of the processors this deployment can actually run."""
+    return frozenset(default_processors())
+
+
+__all__ = [
+    "EnrichmentWorker",
+    "default_processors",
+    "registered_processor_ids",
+    "sweep_queue",
+]

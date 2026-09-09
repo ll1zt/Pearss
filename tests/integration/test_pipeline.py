@@ -1032,3 +1032,36 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
         )
     ).first()
     assert row[0] == "failed" and row[1] == 0, "auth must not retry"
+
+
+@pytest.mark.integration
+def test_a_chain_naming_an_unregistered_processor_is_refused(
+    session: Session,
+) -> None:
+    """The deadlock guard: unknown plugin_id raises at config time.
+
+    Before this guard, a chain naming a processor the deployment could not
+    run queued rows the worker skipped silently - the item stayed pending
+    forever with no diagnostic anywhere.
+    """
+    import json as jsonlib
+
+    import pytest as _pytest
+
+    from adapters.repository import parse_chain
+
+    with _pytest.raises(ValueError, match="unregistered processor"):
+        parse_chain(
+            jsonlib.dumps(
+                [{"plugin_id": "no-such-processor", "kind": "translation"}]
+            ),
+            target_lang="en",
+            known_plugins=frozenset({"translate"}),
+        )
+    # The legit processor still parses.
+    specs = parse_chain(
+        jsonlib.dumps([{"plugin_id": "translate", "kind": "translation"}]),
+        target_lang="en",
+        known_plugins=frozenset({"translate"}),
+    )
+    assert specs[0].plugin_id == "translate"

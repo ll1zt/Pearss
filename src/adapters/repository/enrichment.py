@@ -28,13 +28,21 @@ TENANT = "default"
 
 
 def parse_chain(
-    raw: str | None, *, target_lang: str | None
+    raw: str | None,
+    *,
+    target_lang: str | None,
+    known_plugins: frozenset[str] | None = None,
 ) -> tuple[EnrichmentSpec, ...]:
     """The source's chain, or an empty tuple when none is configured.
 
     Each entry: {plugin_id, kind, lang?, required?}. `lang` falls back to the
     source's `target_lang` for language products — the per-source default the
     operator set once, instead of repeating it per spec.
+
+    `known_plugins` is the set of registered processor ids; when given, a
+    spec naming an unregistered plugin raises here — at configuration time —
+    instead of deadlocking the gate silently at runtime (a row the worker
+    can never claim, skipped without a trace every sweep).
     """
     if not raw:
         return ()
@@ -43,11 +51,16 @@ def parse_chain(
         raise ValueError(f"pipeline_chain must be a JSON list, got: {raw[:80]}")
     specs: list[EnrichmentSpec] = []
     for entry in entries:
-        kind = entry["kind"]
+        plugin_id = str(entry["plugin_id"])
+        if known_plugins is not None and plugin_id not in known_plugins:
+            raise ValueError(
+                f"pipeline_chain names unregistered processor {plugin_id!r}; "
+                f"registered: {sorted(known_plugins)}"
+            )
         specs.append(
             EnrichmentSpec(
-                plugin_id=str(entry["plugin_id"]),
-                kind=EnrichmentKind(kind),
+                plugin_id=plugin_id,
+                kind=EnrichmentKind(str(entry["kind"])),
                 lang=entry.get("lang") or target_lang,
                 required=bool(entry.get("required", True)),
             )
