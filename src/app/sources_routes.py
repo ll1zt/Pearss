@@ -448,6 +448,29 @@ def add_source(
                 "{type: adaptive, min: '15m', max: '24h'}."
             ),
         ) from exc
+    if body.pipeline_chain:
+        # Same gate-time deadlock guard as PATCH: a chain naming a processor
+        # this deployment cannot run must be refused at configuration time.
+        from adapters.repository import parse_chain as _parse_chain
+        from app.enrichment_worker import registered_processor_ids
+
+        try:
+            _parse_chain(
+                json.dumps(body.pipeline_chain),
+                target_lang=body.target_lang,
+                known_plugins=registered_processor_ids(),
+            )
+        except (ValueError, KeyError) as exc:
+            raise api_error(
+                status_code=422,
+                code="invalid_pipeline_chain",
+                message=str(exc),
+                suggestion=(
+                    "Use a list of {plugin_id, kind, lang?, required?} naming "
+                    "registered processors; kinds: translation, summary, "
+                    "tts_audio."
+                ),
+            ) from exc
 
     with factory() as session:
         row = create_source(
@@ -530,12 +553,15 @@ def update_source(
         # Validate the pair against the enrichment domain before writing:
         # a chain that parse_chain rejects would gate every future item on
         # nothing and surface as a surprise at collection time.
+        from app.enrichment_worker import registered_processor_ids
+
         try:
             parse_chain(
                 json.dumps(body.pipeline_chain)
                 if body.pipeline_chain is not None
                 else None,
                 target_lang=body.target_lang,
+                known_plugins=registered_processor_ids(),
             )
         except (ValueError, KeyError) as exc:
             raise api_error(
