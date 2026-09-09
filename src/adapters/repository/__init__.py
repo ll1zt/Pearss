@@ -20,6 +20,12 @@ from adapters.repository._shared import (
     row_to_item,
     timestamp,
 )
+from adapters.repository.enrichment import (
+    chain_for_source,
+    enqueue_chain,
+    parse_chain,
+    statuses_for_item,
+)
 from adapters.repository.feed import (
     FEED_WINDOW,
     items_ready_for_feed,
@@ -103,6 +109,7 @@ __all__ = [
     "ItemPage",
     "PagingState",
     "StoreOutcome",
+    "chain_for_source",
     "claim_job_run",
     "collectable_sources",
     "consecutive_failures",
@@ -111,6 +118,7 @@ __all__ = [
     "create_source",
     "derive_source_id",
     "dumps",
+    "enqueue_chain",
     "ensure_collect_job",
     "escape_like",
     "existing_items_for_source",
@@ -131,6 +139,7 @@ __all__ = [
     "mark_all_read",
     "mark_published",
     "paging_state",
+    "parse_chain",
     "plugin_status",
     "promote_to_ready",
     "prune_audit_log",
@@ -145,6 +154,7 @@ __all__ = [
     "set_plugin_status",
     "set_source_title_if_absent",
     "source_display_labels",
+    "statuses_for_item",
     "store_idempotent",
     "store_item",
     "system_snapshot",

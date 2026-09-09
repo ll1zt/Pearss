@@ -4,9 +4,9 @@ Persistence lives in adapters/, not core/: core owns what an Item *means*,
 this module owns how it is stored. The enum columns reuse the core enums
 directly so the database, the API and the MCP tool schema cannot drift apart.
 
-Every table here mirrors docs/domain/data-model.md. The P2/P3 tables
-(ItemEnrichment, ReadState, Plugin) are deliberately absent — they arrive with
-their own migration rather than being pre-created empty.
+Every table here mirrors docs/domain/data-model.md. P2/P3 tables arrive with
+their own migration rather than being pre-created empty; ItemEnrichment is
+the P3 processor-chain fact source (migration 0011).
 """
 
 from __future__ import annotations
@@ -112,6 +112,17 @@ class Source(Base):
     # Per-source scheduling: fixed interval or adaptive bounds, plus the
     # consecutive-failure count that drives backoff.
     schedule_policy: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # Processing chain the source's items must complete before the gate opens.
+    # JSON list of {plugin_id, kind, lang, required}; NULL means no chain (P1
+    # behaviour: items go ready straight after normalisation).
+    pipeline_chain: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    # Target language for language products (translation); default for the
+    # chain's language specs that omit their own.
+    target_lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(16), nullable=True
+    )
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.String(ENUM_LENGTHS["source_status"]), nullable=False
     )
@@ -471,5 +482,61 @@ class AuditLog(Base):
             "auditoutcome",
             "outcome",
             ("succeeded", "rejected", "failed"),
+        ),
+    )
+
+
+class ItemEnrichment(Base):
+    """One processor product for an Item: translation, summary, TTS audio.
+
+    Products never rewrite the original Item. The unique constraint over
+    (item, plugin, version, kind, lang, input_hash) is the idempotency key:
+    re-processing the same content version replaces the row instead of
+    accumulating copies, and a changed content_hash produces a new
+    input_hash, i.e. a new product.
+    """
+
+    __tablename__ = "item_enrichment"
+
+    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
+    item_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("item.id", ondelete="CASCADE"), nullable=False
+    )
+    plugin_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    plugin_version: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(32), nullable=False
+    )
+    kind: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(32), nullable=False)
+    lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(16), nullable=True
+    )
+    payload_ref: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    input_hash: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(128), nullable=False
+    )
+    status: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(16), nullable=False)
+    error_class: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(32), nullable=True
+    )
+    detail: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')",
+            name="enrichmentstatus",
+        ),
+        sa.UniqueConstraint(
+            "item_id",
+            "plugin_id",
+            "plugin_version",
+            "kind",
+            "lang",
+            "input_hash",
+            name="uq_enrichment_product",
         ),
     )

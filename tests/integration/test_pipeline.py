@@ -700,3 +700,59 @@ def test_a_failed_fetch_is_recorded_and_resets_validators(session: Session) -> N
     assert row[0] == "failed"
     assert row[1] == "network"
     assert row[2] is None
+
+
+@pytest.mark.integration
+def test_a_chained_source_holds_the_gate_until_processing_completes(
+    session: Session,
+) -> None:
+    """A source with a pipeline chain queues enrichments and stays pending.
+
+    The gate's whole point: with a required translation configured, the item
+    must not reach ready — not here (the pipeline), not via any output path.
+    The enrichment worker's success is what opens it.
+    """
+    import json as jsonlib
+
+    from adapters.repository import parse_chain
+
+    chain = [{"plugin_id": "translate", "kind": "translation", "required": True}]
+    raw_chain = jsonlib.dumps(chain)
+    session.execute(
+        text(
+            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            " where id = :sid"
+        ),
+        {"chain": raw_chain, "sid": SOURCE},
+    )
+    session.commit()
+    specs = parse_chain(raw_chain, target_lang="en")
+    assert specs[0].lang == "en", "the source-level target_lang fills the spec"
+
+    drafts = collect(SOURCE, "valid.xml")
+    assert drafts
+
+    # Store through the pipeline path with the chain: items stay pending and
+    # one enrichment row per spec is queued.
+    from app.pipeline import normalise_and_store
+
+    ingested = normalise_and_store(session, drafts, chain=specs)
+    session.commit()
+    assert ingested
+
+    statuses = session.execute(
+        text("select publish_status from item where source_id = :s"), {"s": SOURCE}
+    ).fetchall()
+    assert all(row[0] == "pending" for row in statuses), (
+        "a chained item must not open the gate at store time"
+    )
+
+    rows = session.execute(
+        text(
+            "select status, kind, lang from item_enrichment"
+            " where item_id = (select id from item where source_id = :s limit 1)"
+        ),
+        {"s": SOURCE},
+    ).fetchall()
+    assert rows and rows[0][0] == "queued" and rows[0][1] == "translation"
+    assert rows[0][2] == "en"
