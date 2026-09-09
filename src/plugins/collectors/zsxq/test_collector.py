@@ -20,6 +20,7 @@ from core.enums import ErrorClass
 from core.plugins.hooks import CollectorError
 from plugins.collectors.zsxq import client as zsxq_client
 from plugins.collectors.zsxq import collector
+from plugins.collectors.zsxq.collector import match_url, resolve_source
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SOURCE_ID = "src-zsxq-1"
@@ -228,3 +229,21 @@ def test_only_unusable_topics_is_not_a_quiet_empty() -> None:
     with pytest.raises(CollectorError) as exc_info:
         collector.parse(broken)
     assert exc_info.value.error_class is ErrorClass.STRUCTURE_CHANGED
+
+
+def test_resolve_accepts_the_bare_group_form() -> None:
+    """The address-bar form /group/<id> resolves like the dweb2 one.
+
+    Users paste the URL the web app shows; both spellings address the same
+    page, and refusing the short form made the type inference fall back to
+    rss and the rss collector try to parse the login page as a feed.
+    """
+    route = resolve_source("https://wx.zsxq.com/group/28888555855451")
+    assert route.group_id == "28888555855451"
+    assert route.scope == "all"
+    assert match_url("https://wx.zsxq.com/group/28888555855451")
+    # The dweb2 form and its scope parameter keep working.
+    scoped = resolve_source(
+        "https://wx.zsxq.com/dweb2/index/group/28888555855451?scope=digests"
+    )
+    assert scoped.scope == "digests"

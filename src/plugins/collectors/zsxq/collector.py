@@ -53,7 +53,9 @@ MAX_TOPICS: Final = 30
 SCOPES: Final = ("all", "digests", "by_owner", "questions", "tasks")
 
 _HOSTS: Final = frozenset({"wx.zsxq.com"})
-_GROUP_PATH_RE: Final = re.compile(r"^/dweb2/index/group/(?P<group_id>\d{3,32})$")
+# Both `/dweb2/index/group/<id>` (the app's own routing) and the bare
+# `/group/<id>` people paste from the address bar address the same page.
+_GROUP_PATH_RE: Final = re.compile(r"^/(?:dweb2/index/)?group/(?P<group_id>\d{3,32})$")
 _TOPIC_URL_RE: Final = re.compile(
     r"^https://api\.zsxq\.com/v2/groups/(?P<group_id>\d+)/topics"
 )
