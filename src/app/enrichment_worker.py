@@ -126,12 +126,16 @@ def sweep_queue(
             )
             report["failed"] += 1
             continue
-        # Claim inside this transaction: a second sweep seeing `running`
-        # stands down. A crashed worker leaves the row running; the sweep
-        # re-claims rows that have been running past a generous budget.
+        # Claim visible to other workers BEFORE the provider call: the claim
+        # commits here, so a second sweep sees `running` and stands down, and
+        # the SQLite write lock is not held across a 150s LLM round trip
+        # (NNW's read-state writes would hit `database is locked`). A crashed
+        # worker leaves the row running; the sweep re-claims rows that have
+        # been running past a generous budget.
         if row.status == EnrichmentStatus.QUEUED.value:
             row.status = EnrichmentStatus.RUNNING.value
             row.updated_at = timestamp(now)
+            session.commit()
         elif (
             datetime.now(UTC) - _parse(row.updated_at)
         ).total_seconds() < DEFAULT_CALL_TIMEOUT * 2:

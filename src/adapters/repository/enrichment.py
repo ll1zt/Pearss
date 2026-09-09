@@ -9,6 +9,7 @@ content version upserts, a content change is a new row.
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -98,7 +99,11 @@ def enqueue_chain(
             continue
         session.add(
             ItemEnrichment(
-                id=f"enr-{item_id[:8]}-{spec.plugin_id[:8]}-{spec.kind.value[:8]}-{queued}",
+                # Random id, like raw_fetch: the row's identity is the unique
+                # constraint (item, plugin, version, kind, lang, input_hash),
+                # so a content change re-queues a NEW row. An id derived from
+                # item+spec collided exactly there (proven in review).
+                id=f"enr-{secrets.token_hex(8)}",
                 item_id=item_id,
                 plugin_id=spec.plugin_id,
                 plugin_version=plugin_version,

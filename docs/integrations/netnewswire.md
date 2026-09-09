@@ -37,6 +37,12 @@ Item ready   -> 可经 Reader API / body 端点输出
 处理超时默认 `hold`；仅在用户明确决定并经审计后，使用 `publish_original` 或
 `force_publish`。
 
+## 翻译输出的缓存注意（P3）
+
+启用了处理链的源，Reader API 的条目内容是**译文 + 原文合并**（译文在上，
+一条 `<hr>` 分隔）。但 NNW 按 GUID 缓存条目：GUID 未变时，**已拉取过的
+条目可能不会更新显示**——合并版通常只对翻译完成后首次拉取的客户端完整
+呈现。需要重看译文的场景以 MCP `get_item_body` 或直接查询为准。
 ## 富媒体（P3）
 
 TTS 音频以 enclosure 形式输出到条目：
