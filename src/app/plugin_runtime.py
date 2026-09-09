@@ -493,13 +493,16 @@ class HostClientTransport(httpx.BaseTransport):
         # then try to gunzip plain bytes and die with zlib -3. Drop the
         # transfer-state headers and restate the true length.
         headers = [
-            (name, value)
-            for name, value in response.headers.raw
-            if name.lower() not in (b"content-encoding", b"content-length")
+            *(
+                (name, value)
+                for name, value in response.headers.raw
+                if name.lower() not in (b"content-encoding", b"content-length")
+            ),
+            (b"content-length", str(len(response.content)).encode()),
         ]
         return httpx.Response(
             response.status_code,
-            headers=headers + [(b"content-length", str(len(response.content)).encode())],
+            headers=headers,
             content=response.content,
         )
 

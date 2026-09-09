@@ -171,6 +171,32 @@ class CoreAPIClient:
         return await self.request("GET", path, params=params or None)
 
 
+def _infer_source_type(url: str) -> str:
+    """Suggest a source type from the URL, before the operator overrides it.
+
+    A URL a sandboxed collector claims (zhihu, telegram, x.com/home) cannot
+    be collected by the rss collector - routing it as `rss` sends the rss
+    collector at an HTML page and the origin answers 403 (observed when
+    subscribing a Zhihu profile). So: a collector match means `web`; anything
+    else stays `rss`, the default for a feed URL. `parser_plugin_id` exists
+    for finer targeting; this inference only picks between rss and web.
+    """
+    from app import collector_registry
+
+    for name, matcher in collector_registry.matchers():
+        if name != "rss" and _safe_match(matcher, url):
+            return "web"
+    return "rss"
+
+
+def _safe_match(matcher: Any, url: str) -> bool:
+    """A matcher that raises (a malformed candidate URL) simply does not match."""
+    try:
+        return bool(matcher(url))
+    except Exception:
+        return False
+
+
 def _confirmation_schema(fields: dict[str, Any]) -> type[Confirmation]:
     """Build an elicitation schema prefilled with the values about to run.
 
@@ -449,20 +475,34 @@ def build_mcp_server(app: Any) -> MCPServer:
 
     @server.tool(
         description=(
-            "Add a feed source. Requires user confirmation: this makes real "
+            "Add a source. Requires user confirmation: this makes real "
             "outbound requests to a third party. schedule_policy is "
             "{type: fixed, interval: '30m'} or "
-            "{type: adaptive, min: '15m', max: '24h'}."
+            "{type: adaptive, min: '15m', max: '24h'}. source type is "
+            "'rss' (a feed URL), 'web' (a page a login-type collector "
+            "serves, e.g. zhihu/telegram), or 'auto' (default): the URL is "
+            "checked against the collectors and a non-rss match suggests "
+            "'web'. Pass type explicitly when auto would guess wrong."
         )
     )
     async def add_source(
-        url: str, schedule_policy: dict[str, Any], ctx: Context
+        url: str,
+        schedule_policy: dict[str, Any],
+        ctx: Context,
+        type: str = "auto",
     ) -> dict[str, Any]:
+        requested = type.strip().lower()
+        source_type = _infer_source_type(url) if requested == "auto" else requested
         data = await _confirm(
             ctx,
-            f"Add {url} as a source with policy {_render(schedule_policy)}?",
+            f"Add {url} as a {source_type} source with policy "
+            f"{_render(schedule_policy)}?",
             _confirmation_schema(
-                {"url": url, "schedule_policy": _render(schedule_policy)}
+                {
+                    "url": url,
+                    "type": source_type,
+                    "schedule_policy": _render(schedule_policy),
+                }
             ),
         )
         if data is None:
@@ -478,6 +518,7 @@ def build_mcp_server(app: Any) -> MCPServer:
         # rubber stamp.
         if not (
             _matches(data["url"], url)
+            and _matches(data["type"], source_type)
             and _matches(data["schedule_policy"], schedule_policy)
         ):
             return {
@@ -487,7 +528,11 @@ def build_mcp_server(app: Any) -> MCPServer:
         status, payload = await core.request(
             "POST",
             "/v1/sources",
-            json_body={"url": url, "schedule_policy": schedule_policy},
+            json_body={
+                "url": url,
+                "type": source_type,
+                "schedule_policy": schedule_policy,
+            },
             idempotency_key=_fresh_key(),
         )
         if status not in (200, 201):

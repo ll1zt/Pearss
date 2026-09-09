@@ -816,3 +816,57 @@ async def test_tool_surface_matches_the_snapshot(mcp_url: str) -> None:
         "the MCP tool surface changed; review the difference, then run "
         "MCP_SNAPSHOT_UPDATE=1 just contract and commit the new snapshot"
     )
+
+
+@pytest.mark.asyncio
+async def test_add_source_infers_web_type_for_a_collector_url(mcp_url: str) -> None:
+    """A URL a non-rss collector claims defaults to type=web, not rss.
+
+    Subscribing a Zhihu profile used to create an rss-typed source; the rss
+    collector then fetched the origin's HTML page and answered 403. The
+    matchers know which collector claims the URL, so the inference uses
+    them - and the elicitation dialog carries the inferred type so the user
+    confirms what will actually run.
+    """
+    payload = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://www.zhihu.com/people/someone",
+            "schedule_policy": {"type": "fixed", "interval": "2h"},
+        },
+        confirm=True,
+    )
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+    assert payload["type"] == "web", payload
+    # Clean up for the rest of the suite (list_sources shape assertions).
+    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+
+
+@pytest.mark.asyncio
+async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> None:
+    """A URL no non-rss collector claims stays type=rss (the explicit form
+    too: an operator passing type='rss' gets rss even for a zhihu URL)."""
+    feed = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://plain.example/feed.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    assert feed["type"] == "rss", feed
+    explicit = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://www.zhihu.com/people/other",
+            "type": "rss",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    assert explicit["type"] == "rss", explicit
+    await _call(mcp_url, "remove_source", {"source_id": feed["id"]}, confirm=True)
+    await _call(mcp_url, "remove_source", {"source_id": explicit["id"]}, confirm=True)
