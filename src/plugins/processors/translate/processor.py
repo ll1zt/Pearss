@@ -115,7 +115,14 @@ def process(
     base, key, model = _configured()
     source_text = _strip_to_text(item_ctx.get("content", ""))
     if not source_text:
-        raise ProcessorError(ErrorClass.PARSE, "item carries no text to translate")
+        # Title-only items (common in announcement feeds) still have the
+        # title to translate; a genuinely empty item produces an empty
+        # artifact as a SUCCESS — failing here would deadlock the gate on
+        # content shapes the chain can never act on.
+        title_text = _strip_to_text(item_ctx.get("title", ""))
+        if not title_text:
+            return str(store(""))
+        source_text = title_text
     if len(source_text) > MAX_CHARS:
         # Silent truncation would make the translation disagree with the
         # original below the merge rule; log it so the gap is visible.
