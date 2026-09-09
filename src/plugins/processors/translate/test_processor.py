@@ -36,6 +36,9 @@ def test_title_only_items_translate_their_title(
     Failing on empty content would deadlock the gate on items the chain can
     never act on - the exact failure an naist subscription produced live.
     """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
     monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
     monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
@@ -74,6 +77,9 @@ def test_a_genuinely_empty_item_succeeds_with_an_empty_artifact(
 ) -> None:
     """No text anywhere: the chain completes with an empty product rather
     than failing forever - 'nothing to process' is a completion."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
     monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
     monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
@@ -95,7 +101,13 @@ def test_a_genuinely_empty_item_succeeds_with_an_empty_artifact(
 def test_an_unconfigured_provider_is_parse_not_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from plugins.processors.translate.processor import _reset_config_cache
+
     monkeypatch.delenv("PEARSS_TRANSLATE_BASE_URL", raising=False)
+    monkeypatch.delenv("PEARSS_TRANSLATE_API_KEY", raising=False)
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    _reset_config_cache()
     with pytest.raises(ProcessorError) as excinfo:
         process({"title": "t", "content": "c"}, target_lang="zh", store=lambda c: "x")
     assert excinfo.value.error_class is ErrorClass.PARSE
@@ -106,6 +118,9 @@ def test_a_gzipped_provider_reply_is_decoded(
 ) -> None:
     """Fixture realism (2026-09-09): real providers send gzip; a handler that
     forgets the header pair would have hidden the double-decompression bug."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
     monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
     monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
     monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")

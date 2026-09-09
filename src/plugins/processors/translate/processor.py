@@ -57,6 +57,12 @@ _LANG_NAMES: Final[dict[str, str]] = {
 _CONFIG_CACHE: tuple[str, str, list[str]] | None = None
 
 
+def _reset_config_cache() -> None:
+    """Forget the cached provider config (tests; env never changes in-process)."""
+    global _CONFIG_CACHE
+    _CONFIG_CACHE = None
+
+
 def _configured() -> tuple[str, str, list[str]]:
     """Provider config, cached per-process.
 
