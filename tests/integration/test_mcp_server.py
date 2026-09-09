@@ -275,6 +275,8 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "set_source_status",
         "remove_source",
         "trigger_job",
+        # P3 processor chain (ADR 0018): one-off backfill for legacy items.
+        "backfill_source",
     }
 
 

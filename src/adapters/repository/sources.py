@@ -34,6 +34,8 @@ def create_source(
     tenant_id: str,
     trust_level: str = "standard",
     parser_plugin_id: str | None = None,
+    pipeline_chain: str | None = None,
+    target_lang: str | None = None,
     at: str,
 ) -> SourceRow:
     """Insert a source, or return the existing one for this identity.
@@ -58,6 +60,8 @@ def create_source(
             existing.status = SourceStatus.ACTIVE.value
             existing.url = url
             existing.schedule_policy = schedule_policy
+            existing.pipeline_chain = pipeline_chain
+            existing.target_lang = target_lang
             existing.updated_at = at
             session.flush()
         return existing
@@ -69,6 +73,8 @@ def create_source(
         canonical_url=canonical_url,
         parser_plugin_id=parser_plugin_id,
         schedule_policy=schedule_policy,
+        pipeline_chain=pipeline_chain,
+        target_lang=target_lang,
         status=SourceStatus.ACTIVE.value,
         trust_level=trust_level,
         tenant_id=tenant_id,
