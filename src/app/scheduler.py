@@ -23,9 +23,11 @@ import contextlib
 import logging
 import os
 import secrets
+import threading
 import time
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -60,6 +62,11 @@ LOGGER = logging.getLogger(__name__)
 
 TENANT = "default"
 DEFAULT_TICK_SECONDS = 60.0
+# How many due sources one tick collects in parallel. Each source runs
+# collect_now with its own session and its own active-run claim, so sources
+# are independent by construction; the parallelism only shortens the wall
+# clock of a pass when several slow origins come due at once.
+DEFAULT_TICK_CONCURRENCY = 3
 DEFAULT_TICKS = 60.0
 PRUNE_INTERVAL_SECONDS = 3600.0
 # Per-tick reaping grace. A live run of *this* process must never be reaped:
@@ -240,18 +247,40 @@ def run_tick(
     *,
     client: httpx.Client,
     now: datetime | None = None,
+    concurrency: int | None = None,
 ) -> TickReport:
-    """One scheduler pass: evaluate every active source, collect those due."""
+    """One scheduler pass: evaluate every active source, collect those due.
+
+    Due sources are collected in parallel (bounded by `concurrency`, from
+    PEARSS_TICK_CONCURRENCY, default 3): each runs `collect_now` with its
+    own session, and the schema's unique partial index over active runs is
+    what makes a source internally exclusive - sources are independent by
+    construction, so parallelism here only shortens the wall clock of a
+    pass. Requires WAL mode (set at engine creation) so the parallel row
+    writes from collection do not block readers.
+    """
     moment = now or datetime.now(UTC)
-    collected: list[str] = []
-    failed: list[str] = []
-    skipped: list[str] = []
-    due_count = 0
+    raw = str(
+        os.environ.get("PEARSS_TICK_CONCURRENCY", "")
+    ).strip()
+    if concurrency is None:
+        try:
+            concurrency = max(1, int(raw)) if raw else DEFAULT_TICK_CONCURRENCY
+        except ValueError:
+            concurrency = DEFAULT_TICK_CONCURRENCY
+    concurrency = max(1, concurrency)
 
     with session_factory() as session:
         sources = collectable_sources(session, tenant_id=TENANT)
 
-    for source_id, policy_json in sources:
+    collected: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
+    due_count = 0
+    lock = threading.Lock()
+
+    def evaluate_and_collect(source_id: str, policy_json: str) -> str | None:
+        """One source's due-check + collection. Returns outcome category."""
         try:
             with session_factory() as session:
                 decision = evaluate_source(
@@ -263,10 +292,8 @@ def run_tick(
                 session.commit()
 
             if not decision.due:
-                skipped.append(source_id)
-                continue
+                return "skipped"
 
-            due_count += 1
             with session_factory() as session:
                 status, _ = collect_now(
                     session,
@@ -276,16 +303,30 @@ def run_tick(
                     now=moment,
                 )
                 session.commit()
-            if status is JobRunStatus.SUCCEEDED:
-                collected.append(source_id)
-            else:
-                failed.append(source_id)
+            return "collected" if status is JobRunStatus.SUCCEEDED else "failed"
         except Exception:
             # One broken source must not end the pass: the remaining sources
             # would silently stop being collected, which looks like a quiet
             # scheduler rather than a failing one.
             LOGGER.exception("collection failed for source %s", source_id)
-            failed.append(source_id)
+            return "failed"
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = {
+            pool.submit(evaluate_and_collect, source_id, policy_json): source_id
+            for source_id, policy_json in sources
+        }
+        for future in as_completed(futures):
+            source_id = futures[future]
+            outcome = future.result()
+            if outcome == "collected":
+                due_count += 1
+                collected.append(source_id)
+            elif outcome == "failed":
+                due_count += 1
+                failed.append(source_id)
+            else:
+                skipped.append(source_id)
 
     report = TickReport(
         considered=len(sources),
@@ -317,12 +358,20 @@ class Scheduler:
         tick_seconds: float = DEFAULT_TICK_SECONDS,
         on_tick: Callable[[TickReport], None] | None = None,
         prune_every: float = PRUNE_INTERVAL_SECONDS,
+        concurrency: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
         self._tick_seconds = tick_seconds
         self._on_tick = on_tick
         self._prune_every = prune_every
+        raw = os.environ.get("PEARSS_TICK_CONCURRENCY", "").strip()
+        try:
+            self._concurrency = (
+                max(1, int(raw)) if raw else (concurrency or DEFAULT_TICK_CONCURRENCY)
+            )
+        except ValueError:
+            self._concurrency = concurrency or DEFAULT_TICK_CONCURRENCY
         # Zero means the first loop pass prunes immediately: booting after a
         # long outage is exactly when stale rows should go. The same holds for
         # reaping orphaned runs - see _reap_orphaned_runs_if_due.
@@ -439,7 +488,10 @@ class Scheduler:
         """Run one pass off the event loop, at most one at a time."""
         async with self._lock:
             report = await asyncio.to_thread(
-                run_tick, self._session_factory, client=self._client
+                run_tick,
+                self._session_factory,
+                client=self._client,
+                concurrency=self._concurrency,
             )
         if self._on_tick is not None:
             self._on_tick(report)

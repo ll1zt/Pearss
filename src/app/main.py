@@ -17,6 +17,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from fastapi import Depends, FastAPI, Request
@@ -97,8 +98,32 @@ def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
     """Build the session factory, creating the database directory if needed."""
     resolved = url or database_url()
     _ensure_parent_directory(resolved)
-    engine = create_engine(resolved)
+    engine = create_engine(
+        resolved,
+        # WAL lets readers (NNW pulls, MCP queries) proceed while the
+        # enrichment worker or the scheduler writes - the default journal
+        # (delete) makes every writer take an exclusive lock and was the
+        # main concurrency hazard for parallel collection.
+        connect_args={"timeout": 30.0},
+    )
+
+    if url_is_sqlite(resolved):
+        from sqlalchemy import event
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
+
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def url_is_sqlite(url: str) -> bool:
+    """Whether the database URL addresses a SQLite file."""
+    return url.startswith("sqlite")
 
 
 @asynccontextmanager
