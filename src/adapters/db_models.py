@@ -521,6 +521,17 @@ class ItemEnrichment(Base):
         sa.String(32), nullable=True
     )
     detail: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
+    # Retry bookkeeping (transient classes requeue; MAX_ATTEMPTS bounds it).
+    attempt_count: sa.orm.Mapped[int] = sa.orm.mapped_column(
+        sa.Integer, nullable=False, default=0
+    )
+    next_attempt_at: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    # The model that actually produced the artifact (multi-model fallback).
+    model: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
     created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)

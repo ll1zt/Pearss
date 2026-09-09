@@ -43,6 +43,7 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_READER_PASSWORD",
         "PEARSS_BACKFILL_SOURCE_ID",  # enrichment-backfill CLI plumbing
         "PEARSS_BACKFILL_LIMIT",
+        "PEARSS_ENRICHMENT_CONCURRENCY",  # worker sweep concurrency
     }
 )
 

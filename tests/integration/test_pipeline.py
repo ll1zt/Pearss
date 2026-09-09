@@ -22,7 +22,7 @@ from alembic import command
 from alembic.config import Config
 from lxml import etree
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source
 from adapters.raw_payload import RawPayload
@@ -802,7 +802,12 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
         def process(item_ctx: dict, *, target_lang: str, store):
             return store(f"<p>Translated: {item_ctx['title']}</p>")
 
-    report = sweep_queue(session, processors={"translate": FakeTranslate})
+    row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
+    report = sweep_queue(
+        session,
+        processors={"translate": FakeTranslate},
+        row_session_factory=row_sessions,
+    )
     assert report["succeeded"] == len(drafts), report
 
     status = session.execute(
@@ -867,7 +872,12 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
         def process(item_ctx: dict, *, target_lang: str, store):
             raise ProcessorError(ErrorClass.AUTH, "provider rejected the key")
 
-    report = sweep_queue(session, processors={"translate": FailingTranslate})
+    row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
+    report = sweep_queue(
+        session,
+        processors={"translate": FailingTranslate},
+        row_session_factory=row_sessions,
+    )
     assert report["failed"] == len(drafts), report
 
     rows = session.execute(
@@ -885,3 +895,140 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     assert all(row[0] == "pending" for row in statuses), (
         "a failed required enrichment must keep the gate shut"
     )
+
+
+@pytest.mark.integration
+def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
+    session: Session, tmp_path: Path
+) -> None:
+    """network failures requeue (attempt_count + backoff) up to the limit,
+    then the row stops in `failed` for manual/agent re-trigger. auth fails
+    immediately with no retry."""
+    import json as jsonlib
+
+    from adapters.db_models import Source as SourceRow
+    from adapters.repository import backfill_chain
+    from app.enrichment_worker import sweep_queue
+
+    session.add(
+        SourceRow(
+            id="src-retry",
+            tenant_id="default",
+            type="rss",
+            url="https://retry.example/feed",
+            canonical_url="https://retry.example/feed",
+            status="active",
+            trust_level="standard",
+            schedule_policy="{}",
+            pipeline_chain=jsonlib.dumps(
+                [{"plugin_id": "translate", "kind": "translation"}]
+            ),
+            target_lang="en",
+            created_at="2026-01-01T00:00:00.000000Z",
+            updated_at="2026-01-01T00:00:00.000000Z",
+        )
+    )
+    from adapters.db_models import Item as ItemRow
+
+    session.add(
+        ItemRow(
+            id="retry-item",
+            source_id="src-retry",
+            guid="g-retry",
+            content_hash="hash-retry",
+            title="Retry me",
+            url="https://retry.example/1",
+            publish_status="pending",
+            tenant_id="default",
+            created_at="2026-01-01T00:00:00.000000Z",
+            updated_at="2026-01-01T00:00:00.000000Z",
+        )
+    )
+    session.commit()
+    backfill_chain(session, source_id="src-retry")
+    session.commit()
+
+    row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
+
+    class NetworkFailure:
+        @staticmethod
+        def process(item_ctx: dict, *, target_lang: str, store):
+            import httpx
+
+            raise httpx.ConnectError("provider down")
+
+    # Sweeps 1..MAX_ATTEMPTS: attempts 1..2 requeue; the MAX_ATTEMPTS-th
+    # failure stops the row as failed. (MAX_ATTEMPTS counts *tries*.)
+    from app.enrichment_worker import MAX_ATTEMPTS
+
+    for attempt in range(MAX_ATTEMPTS - 1):
+        report = sweep_queue(
+            session,
+            processors={"translate": NetworkFailure},
+            row_session_factory=row_sessions,
+            concurrency=1,
+        )
+        assert report["retried"] == 1, (attempt, report)
+        session.execute(text("update item_enrichment set next_attempt_at = null"))
+        session.commit()
+        row = session.execute(
+            text(
+                "select status, attempt_count from item_enrichment"
+                " where item_id = 'retry-item'"
+            )
+        ).first()
+        assert row[0] == "queued", row
+        assert row[1] == attempt + 1
+
+    # The MAX_ATTEMPTS-th failure exceeds the retries: the row stops failed.
+    report = sweep_queue(
+        session,
+        processors={"translate": NetworkFailure},
+        row_session_factory=row_sessions,
+        concurrency=1,
+    )
+    assert report["failed"] == 1, report
+    row = session.execute(
+        text(
+            "select status, attempt_count, error_class from item_enrichment"
+            " where item_id = 'retry-item'"
+        )
+    ).first()
+    assert row[0] == "failed" and row[2] == "network"
+
+    # auth failures skip retries entirely: a fresh row fails in one sweep.
+    session.execute(
+        text(
+            "insert into item (id, source_id, guid, content_hash, title, url,"
+            " publish_status, tenant_id, created_at, updated_at)"
+            " values ('auth-item', 'src-retry', 'g-auth', 'hash-auth', 'A',"
+            " 'https://retry.example/2', 'pending', 'default',"
+            " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
+        )
+    )
+    session.commit()
+    backfill_chain(session, source_id="src-retry")
+    session.commit()
+
+    from core.enums import ErrorClass as _EC
+    from core.plugins.hooks import ProcessorError
+
+    class AuthFailure:
+        @staticmethod
+        def process(item_ctx: dict, *, target_lang: str, store):
+            raise ProcessorError(_EC.AUTH, "bad key")
+
+    report = sweep_queue(
+        session,
+        processors={"translate": AuthFailure},
+        row_session_factory=row_sessions,
+        concurrency=1,
+    )
+    assert report["failed"] == 1, report
+    row = session.execute(
+        text(
+            "select status, attempt_count from item_enrichment"
+            " where item_id = 'auth-item'"
+        )
+    ).first()
+    assert row[0] == "failed" and row[1] == 0, "auth must not retry"

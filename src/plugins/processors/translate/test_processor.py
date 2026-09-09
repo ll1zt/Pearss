@@ -83,7 +83,9 @@ def test_a_genuinely_empty_item_succeeds_with_an_empty_artifact(
         called = True
         return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
 
-    ref = process({"title": "", "content": ""}, target_lang="zh", store=lambda c: "cas://empty")
+    ref = process(
+        {"title": "", "content": ""}, target_lang="zh", store=lambda c: "cas://empty"
+    )
     assert ref == "cas://empty"
     assert called is False, "no provider call for an empty item"
 
@@ -118,6 +120,9 @@ def test_a_gzipped_provider_reply_is_decoded(
 
     def fake_post(url: str, **kwargs: object) -> httpx.Response:
         return origin(httpx.Request("POST", url))
+
     monkeypatch.setattr(httpx, "post", fake_post)
-    ref = process({"title": "t", "content": "本文"}, target_lang="ja", store=lambda c: "cas://ok")
+    ref = process(
+        {"title": "t", "content": "本文"}, target_lang="ja", store=lambda c: "cas://ok"
+    )
     assert ref == "cas://ok"
