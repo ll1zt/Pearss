@@ -38,8 +38,10 @@ TENANT: Final = "default"
 # Poll cadence: queued rows appear at collection time, so a minute of lag is
 # invisible next to the fetch interval that produced them.
 DEFAULT_SWEEP_SECONDS: Final = 60.0
-# Generous: an LLM completion regularly takes tens of seconds.
-DEFAULT_CALL_TIMEOUT: Final = 150.0
+# Generous: an LLM completion regularly takes minutes through a relayed
+# endpoint (observed 126s for one gemini-flash reply). Matches the
+# processor's read budget; the reclaim window is twice this.
+DEFAULT_CALL_TIMEOUT: Final = 360.0
 
 
 def _mark(

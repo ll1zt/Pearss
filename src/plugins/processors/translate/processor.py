@@ -149,7 +149,11 @@ def process(
             f"{base}/chat/completions",
             headers={"authorization": f"Bearer {key}"},
             json=body,
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=15.0, pool=150.0),
+            # LLM completions through a relayed endpoint regularly take
+            # minutes: the read bound is what bounds a slow generation, and
+            # cutting it at 120s killed real requests (observed: a
+            # gemini-flash reply took 126s end to end).
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
         )
     except httpx.HTTPError as exc:
         raise ProcessorError(
