@@ -628,3 +628,57 @@ async def test_trigger_without_a_lifespan_says_what_is_missing(
     )
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["code"] == "http_client_unavailable"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_replayed_response_redacts_url_queries(
+    writer: httpx.AsyncClient,
+) -> None:
+    """The replay strips URL queries; the fresh response carried them.
+
+    Source URLs routinely embed access tokens in their query string. The
+    fresh execution's response echoes the URL as given (the operator needs
+    to see what they sent), but the idempotency store keeps that body for a
+    week - long enough for a leaked key to matter. A replay therefore hands
+    back the URL without its query: a caller that needs it again fetches the
+    resource under its own authenticated request.
+    """
+    token_url = "https://example.com/feed?token=secret-token-value"
+    body = {"url": token_url, "schedule_policy": policy()}
+    first = await writer.post(
+        "/v1/sources", headers={"Idempotency-Key": "redact-1"}, json=body
+    )
+    assert first.status_code == 201
+    assert first.json()["url"] == token_url, (
+        "the fresh response must echo the URL as sent"
+    )
+
+    replay = await writer.post(
+        "/v1/sources", headers={"Idempotency-Key": "redact-1"}, json=body
+    )
+    assert replay.headers.get("idempotent-replay") == "true"
+    assert replay.json()["url"] == "https://example.com/feed"
+    assert "secret-token-value" not in replay.text
+    assert replay.json()["canonical_url"] == "https://example.com/feed"
+
+    # Non-URL strings with a question mark are data, not addresses.
+    replayed_policy = replay.json()["schedule_policy"]
+    assert replayed_policy == first.json()["schedule_policy"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_redaction_leaves_queryless_urls_and_nested_values_alone(
+    writer: httpx.AsyncClient,
+) -> None:
+    """Only `scheme://...?query` shapes are touched."""
+    body = {"url": "https://example.com/plain-feed", "schedule_policy": policy()}
+    first = await writer.post(
+        "/v1/sources", headers={"Idempotency-Key": "redact-2"}, json=body
+    )
+    replay = await writer.post(
+        "/v1/sources", headers={"Idempotency-Key": "redact-2"}, json=body
+    )
+    assert first.json()["url"] == replay.json()["url"]
+    assert replay.json()["url"] == "https://example.com/plain-feed"
