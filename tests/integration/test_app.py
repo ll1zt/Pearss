@@ -587,12 +587,19 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
     collector_registry._registry()  # build children (they spawn lazily)
     # Run the lifespan by hand: ASGITransport does not enter it, and this
     # test needs the wiring that happens inside, not the routes.
+    from app.plugin_runtime import HostClientTransport
+
     async with app.router.lifespan_context(app):
         for name in ("telegram", "twitter", "zhihu", "zsxq"):
             child = collector_registry._SANDBOX_CHILDREN[name]
-            assert child._http_transport is app.state.http_client, (
-                f"sandboxed collector {name!r} must egress through the "
-                "host's shared client"
+            transport = child._http_transport
+            assert isinstance(transport, HostClientTransport), (
+                f"sandboxed collector {name!r} must egress through a "
+                "HostClientTransport"
+            )
+            assert transport._client is app.state.http_client, (
+                f"sandboxed collector {name!r} must wrap the host's shared "
+                "client"
             )
 
 
