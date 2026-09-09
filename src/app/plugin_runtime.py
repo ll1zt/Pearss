@@ -470,6 +470,40 @@ class PluginChild:
         return bool(self.call("backfill", {}))
 
 
+class HostClientTransport(httpx.BaseTransport):
+    """Present the host's `httpx.Client` as a transport for reverse calls.
+
+    The lifespan owns one shared `httpx.Client` (connection pool, timeouts);
+    the sandbox expects `httpx.BaseTransport.handle_request`. This adapter
+    forwards into the client's send path. Egress policy note: the SSRF
+    private-address guard lives in `adapters.http._request`, the path
+    *host-initiated* fetches take; reverse-proxied child egress through this
+    adapter is gated by whatever fronts the client (a proxy, a firewall), or
+    by wrapping it in a policy transport at wiring time.
+    """
+
+    def __init__(self, client: httpx.Client) -> None:
+        self._client = client
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        response = self._client.send(request)
+        response.read()
+        # `send` returns content already decompressed, but the original
+        # content-encoding header travels with it; a child-side httpx would
+        # then try to gunzip plain bytes and die with zlib -3. Drop the
+        # transfer-state headers and restate the true length.
+        headers = [
+            (name, value)
+            for name, value in response.headers.raw
+            if name.lower() not in (b"content-encoding", b"content-length")
+        ]
+        return httpx.Response(
+            response.status_code,
+            headers=headers + [(b"content-length", str(len(response.content)).encode())],
+            content=response.content,
+        )
+
+
 class SandboxedCollector:
     """The collector-shaped proxy over a sandboxed child process.
 

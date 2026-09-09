@@ -157,8 +157,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # private-address guard (ADR 0016) and the fetch-timeout/size bounds
         # live. Without this injection every proxied request is refused, so
         # the wiring is load-bearing, not cosmetic.
+        from app.plugin_runtime import HostClientTransport
+
         for_each_sandboxed_collector(
-            lambda name, child: child.set_http_transport(client)
+            lambda name, child: child.set_http_transport(HostClientTransport(client))
         )
         sync_plugin_table(app.state.session_factory)
         if scheduler_enabled():
