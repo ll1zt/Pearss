@@ -62,6 +62,33 @@ hookimpl 在启动时双向校验——声明了没有的能力即启动失败�
 - **网络一律经代理**：child 内的 `httpx` 客户端由入口注入（反向调用回
   宿主），child 不直接出网；fixture 测试经 `set_http_transport` 注入。
 
+### 各站点的环境事实（为什么代码长这样）
+
+这些是真实订阅暴露后沉淀的约束。改动相关代码前先读这里——每一条都对应
+一次线上失败和一个回归测试：
+
+1. **telegram 的预览页重写**：订阅者写 `t.me/<name>`，可读页面在
+   `t.me/s/<name>`。裸 URL 是应用安装引导页，没有任何消息——fetch 钩子
+   必须做这个重写（回归测试：child 必须请求 `/s/` 路径）。
+2. **zsxq 接受两种 URL 形式**：`/dweb2/index/group/<id>`（应用内部路由）
+   与 `/group/<id>`（地址栏形式）指向同一页面，`resolve_source` 两者都要
+   认；scope 查询参数在两种形式下都保留。只认一种会让 MCP 类型推断回落
+   成 rss，rss 采集器再把登录页当 feed 解析。
+3. **zhihu 的签名绑定 d_c0**：x-zse-96 签名以 `d_c0` cookie 为输入，
+   CookieCloud 导出的 session 必须含它；签名与发送的 percent-encoding
+   必须逐字节一致。
+4. **Reader API 的 token 由存储哈希派生**：scrypt 盐随机，凭据同步若在
+   密码未变时重哈希，每次登录都会铸造新 token、作废旧 token（NNW 的
+   登录后并发请求互相 401）。同步只在密码真正变化时重哈希；改密码踢掉
+   全部客户端是 ADR 0005 的语义，不是缺陷。
+5. **沙箱 egress 的解压语义**：`HostClientTransport` 把宿主 client 适配成
+   transport 时，httpx 的 `send` 已解压 body 而 `content-encoding` 头还在——
+   必须剥掉传输态头再交给子进程，否则子进程 httpx 对明文做 gunzip 直接
+   zlib -3。
+6. **MCP `add_source` 的类型推断边界**：推断只查非 rss 采集器的
+   `match_url`；它认不出的 URL（新站点、新 URL 形式）会回落 rss。新增
+   URL 形式时同步扩展对应采集器的 `resolve_source`/`match_url` 测试。
+
 ### 小助手函数的重复是有意的
 
 `_text` / `_name_of` / `_id_of` 这类三五行的小助手在各采集器里**各有一份**，
