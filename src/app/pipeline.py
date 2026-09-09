@@ -26,6 +26,8 @@ from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from adapters.repository import (
     StoreOutcome,
+    chain_for_source,
+    enqueue_chain,
     last_conditional_state,
     paging_state,
     promote_to_ready,
@@ -36,6 +38,7 @@ from adapters.repository import (
 from adapters.sanitize import sanitize_html
 from app import collector_registry
 from app.collector_registry import Registration as CollectorRegistration
+from core.enrichment import EnrichmentSpec
 from core.enums import ErrorClass
 from core.models import Item, ItemDraft
 from core.normalize import (
@@ -64,6 +67,7 @@ def normalise_and_store(
     *,
     tenant_id: str = TENANT,
     now: datetime | None = None,
+    chain: tuple[EnrichmentSpec, ...] = (),
 ) -> list[Ingested]:
     """Persist each draft: body to the file store, item to the database.
 
@@ -71,6 +75,10 @@ def normalise_and_store(
     a reference to a file that does not exist yet; a crash between the two
     leaves an item with no body, which degrades to a title-only entry, rather
     than a reference that resolves to nothing.
+
+    With a non-empty `chain`, each stored item gets its enrichment rows
+    queued and stays pending — the enrichment worker opens the gate when the
+    chain completes. Without one (P1 behaviour) items are promoted here.
 
     Returns one entry per draft, including those deduped away, so a caller can
     report what happened to each.
@@ -96,12 +104,21 @@ def normalise_and_store(
             DedupeAction.INSERT_RELATED,
             DedupeAction.UPDATE_PENDING,
         ):
-            # P1 has no processor chain, so the gate has nothing to wait for
-            # and items are promoted immediately. When P3 adds a chain, this
-            # call moves to the end of that chain; the gate itself is unchanged.
             # UPDATE_PENDING belongs here too: the row is still unseen, so it
             # advances on the new content rather than waiting for nothing.
-            promote_to_ready(session, [item])
+            # With a chain the gate stays closed here — promotion is the
+            # enrichment worker's job once every required product exists.
+            if chain:
+                enqueue_chain(
+                    session,
+                    item_id=item.id,
+                    content_hash=item.content_hash,
+                    chain=chain,
+                    tenant_id=tenant_id,
+                    now=now,
+                )
+            else:
+                promote_to_ready(session, [item])
         results.append(Ingested(result=result, outcome=outcome))
 
     session.commit()
@@ -297,7 +314,12 @@ def _collect_one_page(
             title=drafts[0].metadata.get("feed_title"),
         )
 
-    ingested = normalise_and_store(session, drafts, tenant_id=tenant_id)
+    ingested = normalise_and_store(
+        session,
+        drafts,
+        tenant_id=tenant_id,
+        chain=chain_for_source(session, source_id=source.id),
+    )
     inserted = sum(
         1
         for entry in ingested
@@ -458,7 +480,12 @@ def collect_paged(
             detail=walk.detail,
         )
 
-    ingested = normalise_and_store(session, walk.drafts, tenant_id=tenant_id)
+    ingested = normalise_and_store(
+        session,
+        walk.drafts,
+        tenant_id=tenant_id,
+        chain=chain_for_source(session, source_id=source.id),
+    )
     inserted = sum(
         1
         for entry in ingested

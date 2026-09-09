@@ -203,3 +203,17 @@ rss 采集器的 fetch 钩子已内置升级路径（ADR 0016 之后的增量，
 给新采集器的启示：当源存在「同一内容的更完整公开通道」时，优先换数据源而非
 抓页面做正文提取——后者脆弱且贵。合并回 feed 载荷（而不是改 parse）意味着
 normalize/dedupe/闸门零改动，条目身份保持稳定。
+
+## 处理器（P3）：翻译参考实现
+
+处理器消费已存储条目、产出派生物（`item_enrichment` 表），与采集器共享
+沙箱/egress 基础设施但合约独立（`core/plugins/hooks.py` 的
+`ProcessorSpec`：`processor_id` / `processor_version` / `process`，失败
+以 `ProcessorError(ErrorClass)` 为值）。环境事实：
+
+- **token 派生/会话语义对处理器同样适用**——AGENTS.md「首次真实使用检查单」
+  的三问逐条过。
+- 翻译器凭据走 `PEARSS_TRANSLATE_*`（已进 env allowlist 的
+  `translate` 前缀）。
+- 产物不回写 Item；NNW 的 Reader API 输出为译文+原文合并
+  （ADR 0018）。

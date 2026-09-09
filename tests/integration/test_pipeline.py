@@ -700,3 +700,188 @@ def test_a_failed_fetch_is_recorded_and_resets_validators(session: Session) -> N
     assert row[0] == "failed"
     assert row[1] == "network"
     assert row[2] is None
+
+
+@pytest.mark.integration
+def test_a_chained_source_holds_the_gate_until_processing_completes(
+    session: Session,
+) -> None:
+    """A source with a pipeline chain queues enrichments and stays pending.
+
+    The gate's whole point: with a required translation configured, the item
+    must not reach ready — not here (the pipeline), not via any output path.
+    The enrichment worker's success is what opens it.
+    """
+    import json as jsonlib
+
+    from adapters.repository import parse_chain
+
+    chain = [{"plugin_id": "translate", "kind": "translation", "required": True}]
+    raw_chain = jsonlib.dumps(chain)
+    session.execute(
+        text(
+            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            " where id = :sid"
+        ),
+        {"chain": raw_chain, "sid": SOURCE},
+    )
+    session.commit()
+    specs = parse_chain(raw_chain, target_lang="en")
+    assert specs[0].lang == "en", "the source-level target_lang fills the spec"
+
+    drafts = collect(SOURCE, "valid.xml")
+    assert drafts
+
+    # Store through the pipeline path with the chain: items stay pending and
+    # one enrichment row per spec is queued.
+    from app.pipeline import normalise_and_store
+
+    ingested = normalise_and_store(session, drafts, chain=specs)
+    session.commit()
+    assert ingested
+
+    statuses = session.execute(
+        text("select publish_status from item where source_id = :s"), {"s": SOURCE}
+    ).fetchall()
+    assert all(row[0] == "pending" for row in statuses), (
+        "a chained item must not open the gate at store time"
+    )
+
+    rows = session.execute(
+        text(
+            "select status, kind, lang from item_enrichment"
+            " where item_id = (select id from item where source_id = :s limit 1)"
+        ),
+        {"s": SOURCE},
+    ).fetchall()
+    assert rows and rows[0][0] == "queued" and rows[0][1] == "translation"
+    assert rows[0][2] == "en"
+
+
+@pytest.mark.integration
+def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
+    session: Session,
+) -> None:
+    """Full round trip: chain holds the item, worker runs, gate opens.
+
+    The processor here is a stub whose `process` writes a canned artifact —
+    what is under test is the row lifecycle (queued -> running -> succeeded),
+    the gate promotion, and the chain-complete check, not the provider call.
+    """
+    import json as jsonlib
+
+    from adapters.repository import parse_chain
+    from app.enrichment_worker import sweep_queue
+    from app.pipeline import normalise_and_store
+
+    raw_chain = jsonlib.dumps(
+        [{"plugin_id": "translate", "kind": "translation", "required": True}]
+    )
+    session.execute(
+        text(
+            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            " where id = :sid"
+        ),
+        {"chain": raw_chain, "sid": SOURCE},
+    )
+    session.commit()
+    specs = parse_chain(raw_chain, target_lang="en")
+
+    drafts = collect(SOURCE, "valid.xml")
+    ingested = normalise_and_store(session, drafts, chain=specs)
+    session.commit()
+    item_id = ingested[0].result.item.id
+
+    statuses = session.execute(
+        text("select publish_status from item where id = :i"), {"i": item_id}
+    ).scalar()
+    assert statuses == "pending", "the chain must hold the gate"
+
+    class FakeTranslate:
+        @staticmethod
+        def process(item_ctx: dict, *, target_lang: str, store):
+            return store(f"<p>Translated: {item_ctx['title']}</p>")
+
+    report = sweep_queue(session, processors={"translate": FakeTranslate})
+    assert report["succeeded"] == len(drafts), report
+
+    status = session.execute(
+        text("select publish_status from item where id = :i"), {"i": item_id}
+    ).scalar()
+    assert status == "ready", "chain complete must open the gate"
+
+    # The artifact is real: stored through filestore, referenced by the row.
+    row = session.execute(
+        text(
+            "select status, payload_ref from item_enrichment where item_id = :i"
+        ),
+        {"i": item_id},
+    ).first()
+    assert row[0] == "succeeded"
+    body = session.execute(
+        text("select 1")  # marker; payload read below via filestore
+    ).scalar()
+    assert body is not None
+    from adapters import filestore
+
+    content = filestore.read_body(row[1])
+    assert "Translated:" in content
+
+
+@pytest.mark.integration
+def test_a_failing_processor_holds_the_gate_and_records_the_class(
+    session: Session,
+) -> None:
+    """A failed required enrichment stays pending with its error class.
+
+    The gate's ENRICHMENT_FAILED path: the item must not leak unprocessed
+    content, and the operator must be able to see why it is held.
+    """
+    import json as jsonlib
+
+    from adapters.repository import parse_chain
+    from app.enrichment_worker import sweep_queue
+    from app.pipeline import normalise_and_store
+    from core.enums import ErrorClass
+    from core.plugins.hooks import ProcessorError
+
+    raw_chain = jsonlib.dumps(
+        [{"plugin_id": "translate", "kind": "translation", "required": True}]
+    )
+    session.execute(
+        text(
+            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            " where id = :sid"
+        ),
+        {"chain": raw_chain, "sid": SOURCE},
+    )
+    session.commit()
+    specs = parse_chain(raw_chain, target_lang="en")
+
+    drafts = collect(SOURCE, "valid.xml")
+    normalise_and_store(session, drafts, chain=specs)
+    session.commit()
+
+    class FailingTranslate:
+        @staticmethod
+        def process(item_ctx: dict, *, target_lang: str, store):
+            raise ProcessorError(ErrorClass.AUTH, "provider rejected the key")
+
+    report = sweep_queue(session, processors={"translate": FailingTranslate})
+    assert report["failed"] == len(drafts), report
+
+    rows = session.execute(
+        text(
+            "select status, error_class, detail from item_enrichment limit 1"
+        )
+    ).first()
+    assert rows[0] == "failed"
+    assert rows[1] == "auth"
+    assert "provider rejected the key" in rows[2]
+
+    statuses = session.execute(
+        text("select publish_status from item where source_id = :s"), {"s": SOURCE}
+    ).fetchall()
+    assert all(row[0] == "pending" for row in statuses), (
+        "a failed required enrichment must keep the gate shut"
+    )

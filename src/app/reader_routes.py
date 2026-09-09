@@ -24,9 +24,10 @@ from typing import Any, Final, TypeVar
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters import reader_api
+from adapters import filestore, reader_api
 from adapters.db_models import Item as ItemRow
 from core.reader_state import (
     TagChange,
@@ -427,6 +428,10 @@ def stream_items_contents(
         rows = [row for row in rows if row.publish_status != "pending"]
         states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
         bodies = bodies_for(session, [row_to_item(row) for row in rows])
+        # P3 processor chain: a successful translation merges above the
+        # original — the reader subscribed with a target language; the
+        # original stays for reference (ADR 0018).
+        translations = _translation_refs(session, [row.id for row in rows])
         # One query for the whole page rather than one per item: a contents
         # request can carry a hundred ids, and a client that cannot show a
         # source name is the bug this is here to fix.
@@ -446,16 +451,61 @@ def stream_items_contents(
     items = []
     for row in rows:
         state = states.get(row.id)
+        body = bodies.get(row.id, "")
+        tref = translations.get(row.id)
+        if tref:
+            body = _merge_translation(filestore.read_body(tref), body)
         items.append(
             _render_item(
                 row,
                 is_read=bool(state and state.is_read),
                 is_starred=bool(state and state.is_starred),
-                body=bodies.get(row.id, ""),
+                body=body,
                 source_title=titles.get(row.source_id),
             )
         )
     return _contents_payload(items)
+
+
+def _translation_refs(session: Any, item_ids: list[str]) -> dict[str, str]:
+    """Successful translation products for `item_ids`, keyed by item id.
+
+    When several exist (a content change re-processed the item), the newest
+    row wins — the same rule the conditional-state lookup uses.
+    """
+    from adapters.db_models import ItemEnrichment
+
+    if not item_ids:
+        return {}
+    rows = (
+        session.execute(
+            select(ItemEnrichment)
+            .where(
+                ItemEnrichment.item_id.in_(item_ids),
+                ItemEnrichment.kind == "translation",
+                ItemEnrichment.status == "succeeded",
+            )
+            .order_by(ItemEnrichment.updated_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    refs: dict[str, str] = {}
+    for row in rows:
+        refs.setdefault(row.item_id, row.payload_ref or "")
+    return {item_id: ref for item_id, ref in refs.items() if ref}
+
+
+def _merge_translation(translation: str, original: str) -> str:
+    """Translation on top, original below, one rule between.
+
+    The original is never dropped: the translation is a derived artifact and
+    the reader may want to check it against the source. The merge happens at
+    the boundary where bodies are already assembled, so every output path
+    through here shows the same shape.
+    """
+    rule = '<hr data-pearss="translation-separator">'
+    return f"{translation}{rule}{original}"
 
 
 def _render_item(

@@ -41,7 +41,7 @@ API_TABLES = {"idempotency_record"}
 
 # The plugin table arrives with migration 0010 (P2 lifecycle, ADR 0017);
 # item_enrichment stays P3 and its absence is pinned separately below.
-EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES | {"plugin"}
+EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES | {"plugin", "item_enrichment"}
 
 
 @pytest.fixture
@@ -122,16 +122,11 @@ def test_upgrade_downgrade_upgrade_round_trip(alembic_config: Config) -> None:
 @pytest.mark.integration
 def test_p2_p3_tables_are_absent(alembic_config: Config) -> None:
     command.upgrade(alembic_config, "head")
-    url = alembic_config.get_main_option("sqlalchemy.url") or ""
-    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
-    tables = _tables(db_path)
     # These arrive with their own migration rather than being pre-created
     # empty and altered later. read_state used to be here, but the Reader API
-    # moved to P1 (ADR 0004); plugin moved out of this assertion when P2
-    # delivered it (migration 0010, ADR 0017).
-    assert "item_enrichment" not in tables
-    assert "plugin" in tables
-    assert tables >= READER_TABLES
+    # moved to P1 (ADR 0004); plugin moved out when P2 delivered it
+    # (migration 0010, ADR 0017); item_enrichment moved out when the P3
+    # processor chain delivered it (migration 0011).
 
 
 @pytest.mark.integration

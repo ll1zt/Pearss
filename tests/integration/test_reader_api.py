@@ -851,3 +851,65 @@ async def test_writes_still_require_the_form_token(
         data={"i": [ids[0]], "a": [READ_TAG]},
     )
     assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_translation_merges_above_the_original_in_contents(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """NNW receives translation + original, separated by a marker rule.
+
+    The reader subscribed to a translated source: the translation leads, the
+    original stays below for reference and is never replaced — products do
+    not rewrite items.
+    """
+    from datetime import UTC, datetime
+
+    from adapters import filestore
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    assert ids
+
+    # The seed item that the ids resolve to: attach a successful product.
+    with app.state.session_factory() as session:
+        from adapters.repository import resolve_reader_ids
+
+        internal = list(resolve_reader_ids(session, [int(x) for x in ids]).values())
+        target_internal = internal[0] if internal else None
+        ref = filestore.store_body("<p>Translated body.</p>")
+        session.add(
+            ItemEnrichment(
+                id="enr-merge-1",
+                item_id=target_internal,
+                plugin_id="translate",
+                plugin_version="0.1.0",
+                kind="translation",
+                lang="en",
+                payload_ref=ref,
+                input_hash="any-version",
+                status="succeeded",
+                tenant_id="default",
+                created_at=timestamp(datetime.now(UTC)),
+                updated_at=timestamp(datetime.now(UTC)),
+            )
+        )
+        session.commit()
+
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids[:1]},
+    )
+    body = response.json()["items"][0]["summary"]["content"]
+    assert body.startswith("<p>Translated body.</p>"), body[:120]
+    assert 'data-pearss="translation-separator"' in body
+    # The original body is below the rule, not replaced.
+    assert (
+        body.rstrip().endswith("</p>")
+        and len(body) > len("<p>Translated body.</p>") + 40
+    )

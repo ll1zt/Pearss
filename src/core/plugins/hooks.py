@@ -1,4 +1,5 @@
-"""The frozen collector hookspec (P2 contract, ADR 0017).
+"""The frozen collector hookspec (P2 contract, ADR 0017) and the P3
+processor contract.
 
 This module is the contract between the host and every collector. It is
 frozen: breaking any signature here is a breaking API change and requires a
@@ -223,3 +224,66 @@ class CollectorSpec(Protocol):
 
 # The real verification happens at startup: the registry registers five
 # implementations against this spec, which the suite exercises on every run.
+
+
+# --------------------------------------------------------------------------
+# Processor contract (P3): derived artifacts such as translation.
+#
+# Separate from CollectorSpec on purpose: a processor consumes stored items
+# and produces side files, has no URL, and fails on provider/auth terms the
+# collector taxonomy already covers. Same freezing rules apply — the registry
+# verifies hookimpls against this spec at startup.
+# --------------------------------------------------------------------------
+
+
+class ProcessorError(Exception):
+    """A classified processor failure: a value the gate can act on.
+
+    Same shape as CollectorError: the class drives the run record and the
+    operator's diagnostics, not the stack trace.
+    """
+
+    def __init__(self, error_class: Any, detail: str) -> None:
+        from core.enums import ErrorClass
+
+        if not isinstance(error_class, ErrorClass):
+            raise TypeError("ProcessorError requires an ErrorClass")
+        super().__init__(f"{error_class.value}: {detail}")
+        self.error_class = error_class
+        self.detail = detail
+
+
+class ProcessorSpec(Protocol):
+    """The processor contract: item context in, artifact path out.
+
+    `process` writes its product to the file store through the injected
+    store callable and returns the resulting reference, or raises
+    ProcessorError. It never touches the database — the worker owns the
+    row's lifecycle (queued -> running -> succeeded/failed) exactly as the
+    pipeline owns the item's.
+    """
+
+    @HOOKSPEC
+    def processor_id(self) -> str:
+        """The stable registration key."""
+        ...
+
+    @HOOKSPEC
+    def processor_version(self) -> str:
+        """Semver of the implementation; changes re-process everything."""
+        ...
+
+    @HOOKSPEC
+    def process(
+        self,
+        item_ctx: Any,
+        *,
+        target_lang: str,
+        store: Any,
+    ) -> str:
+        """Produce the artifact; return its storage reference.
+
+        `item_ctx` carries the fields the processor may read (title,
+        content HTML, url, lang hints); `store` is the file-store callable.
+        """
+        ...
