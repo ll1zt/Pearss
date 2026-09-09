@@ -41,6 +41,8 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_SANDBOXED",  # set by the allowlist itself, a marker
         "PEARSS_READER_USERNAME",  # Reader API credentials (app-side)
         "PEARSS_READER_PASSWORD",
+        "PEARSS_BACKFILL_SOURCE_ID",  # enrichment-backfill CLI plumbing
+        "PEARSS_BACKFILL_LIMIT",
     }
 )
 

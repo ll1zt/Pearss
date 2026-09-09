@@ -11,8 +11,8 @@ from __future__ import annotations
 import os
 import sys
 
-from adapters.repository import backfill_chain
 from adapters.db_models import Source
+from adapters.repository import backfill_chain
 from adapters.repository.enrichment import parse_chain
 
 
