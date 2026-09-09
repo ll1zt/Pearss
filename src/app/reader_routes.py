@@ -642,6 +642,8 @@ def configure_reader_credentials(
         return False
 
     try:
+        from adapters.db_models import ReaderCredential
+
         with session_factory() as session:
             # Starting up must not depend on the schema being current: a fresh
             # clone has credentials set but an unmigrated database, and failing
@@ -653,13 +655,23 @@ def configure_reader_credentials(
                     "before using the Reader API"
                 )
                 return False
-            upsert_reader_credential(
-                session,
-                username=username,
-                password_hash=hash_password(password),
-                at=at or datetime.now(UTC),
-            )
-            session.commit()
+            # Rehash only when the password actually changed. The auth token
+            # is derived from the stored hash, and scrypt salts are random,
+            # so an unconditional rehash would mint a fresh token on every
+            # login - each ClientLogin invalidating the token it had just
+            # handed the same client's concurrent requests (observed as
+            # alternating 200/401 in NNW's refresh). verify_password keeps
+            # the check honest: a changed password rehashes, an unchanged
+            # one keeps its hash and every outstanding token stays valid.
+            row = session.get(ReaderCredential, username)
+            if row is None or not verify_password(password, row.password_hash):
+                upsert_reader_credential(
+                    session,
+                    username=username,
+                    password_hash=hash_password(password),
+                    at=at or datetime.now(UTC),
+                )
+                session.commit()
     except (OperationalError, ProgrammingError) as exc:
         LOGGER.warning("could not sync reader credential at startup: %s", exc)
         return False
