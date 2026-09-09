@@ -13,7 +13,15 @@ time, exactly as credentials do for collectors:
 The processor never touches the database; the worker owns the row's
 lifecycle. Failures are ProcessorError values with the standard taxonomy:
 a 401 from the provider is `auth`, a 429 is `blocked`, a malformed reply
-is `parse`.
+is `parse`, an unconfigured provider is `parse` (a configuration gap, not
+a session failure).
+
+Prompt-injection trade-off, recorded: item content is untrusted and goes
+into the user message as-is. The injection surface is bounded by the
+system prompt's narrow task (translate only, no instructions followed)
+and by the output being stored as a derived artifact, never executed —
+the same trust decision as ADR 0007's store-time sanitising, applied to
+a different boundary.
 """
 
 from __future__ import annotations
@@ -48,8 +56,12 @@ def _configured() -> tuple[str, str, str]:
     key = os.environ.get(API_KEY_ENV, "").strip()
     model = os.environ.get(MODEL_ENV, "").strip()
     if not (base and key and model):
+        # Configuration gap, not a session failure: it classifies as parse
+        # (the "this cannot be processed as things stand" family) rather than
+        # auth, so an operator debugging a held item reads "set the env vars",
+        # not "rotate the key".
         raise ProcessorError(
-            ErrorClass.AUTH,
+            ErrorClass.PARSE,
             "translation provider not configured; set PEARSS_TRANSLATE_BASE_URL, "
             "PEARSS_TRANSLATE_API_KEY and PEARSS_TRANSLATE_MODEL",
         )
@@ -104,7 +116,17 @@ def process(
     source_text = _strip_to_text(item_ctx.get("content", ""))
     if not source_text:
         raise ProcessorError(ErrorClass.PARSE, "item carries no text to translate")
-    source_text = source_text[:MAX_CHARS]
+    if len(source_text) > MAX_CHARS:
+        # Silent truncation would make the translation disagree with the
+        # original below the merge rule; log it so the gap is visible.
+        LOGGER.warning(
+            "item %s: %d chars exceed the %d-char budget; the tail is not "
+            "translated",
+            item_ctx.get("item_id", "?"),
+            len(source_text),
+            MAX_CHARS,
+        )
+        source_text = source_text[:MAX_CHARS]
     language = _LANG_NAMES.get(target_lang, target_lang)
 
     body = {
