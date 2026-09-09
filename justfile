@@ -191,3 +191,16 @@ ci: lint test test-integration migrate-check contract
 ci-nix:
     nix flake check
     nix develop --command just ci
+
+
+# Backfill processor products for items stored before a chain was enabled.
+# Usage: just enrichment-backfill <source_id> [limit]
+enrichment-backfill source_id limit="":
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    export PEARSS_BACKFILL_SOURCE_ID="{{source_id}}"
+    export PEARSS_BACKFILL_LIMIT="{{limit}}"
+    exec uv run python -m app.enrichment_backfill

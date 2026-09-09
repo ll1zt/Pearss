@@ -149,3 +149,75 @@ def is_source_chain_complete(
     return chain_complete(
         chain, statuses_for_item(session, item_id=item_id, content_hash=content_hash)
     )
+
+
+def backfill_chain(
+    session: Session,
+    *,
+    source_id: str,
+    tenant_id: str = TENANT,
+    limit: int | None = None,
+) -> int:
+    """Queue translations for a source's already-stored items.
+
+    Enabling a chain gates *new* items at collection time; items stored
+    before the chain existed are already through the gate (usually
+    published, their content cached by clients). This one-off pass queues
+    products for those items so the merged view fills in — idempotent by
+    the same (item, plugin, version, kind, lang, input_hash) identity the
+    pipeline uses, so re-running costs nothing for items already queued.
+    """
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import Source as SourceRow
+
+    source = session.get(SourceRow, source_id)
+    if source is None:
+        raise ValueError(f"no source {source_id!r}")
+    chain = parse_chain(source.pipeline_chain, target_lang=source.target_lang)
+    if not chain:
+        raise ValueError(
+            f"source {source_id!r} has no pipeline_chain; nothing to backfill"
+        )
+
+    query = (
+        select(ItemRow)
+        .where(ItemRow.source_id == source_id)
+        .order_by(ItemRow.published_at.desc())
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    items = session.execute(query).scalars().all()
+
+    queued = 0
+    now = datetime.now(UTC)
+    stamp = timestamp(now)
+    for item in items:
+        for spec in chain:
+            exists = session.execute(
+                select(ItemEnrichment).where(
+                    ItemEnrichment.item_id == item.id,
+                    ItemEnrichment.plugin_id == spec.plugin_id,
+                    ItemEnrichment.kind == spec.kind.value,
+                    ItemEnrichment.lang == spec.lang,
+                    ItemEnrichment.input_hash == item.content_hash,
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                continue
+            session.add(
+                ItemEnrichment(
+                    id=f"enr-{secrets.token_hex(8)}",
+                    item_id=item.id,
+                    plugin_id=spec.plugin_id,
+                    plugin_version="0.1.0",
+                    kind=spec.kind.value,
+                    lang=spec.lang,
+                    input_hash=item.content_hash,
+                    status=EnrichmentStatus.QUEUED.value,
+                    tenant_id=tenant_id,
+                    created_at=stamp,
+                    updated_at=stamp,
+                )
+            )
+            queued += 1
+    return queued

@@ -21,6 +21,7 @@ from adapters.repository._shared import (
     timestamp,
 )
 from adapters.repository.enrichment import (
+    backfill_chain,
     chain_for_source,
     enqueue_chain,
     parse_chain,
@@ -109,6 +110,7 @@ __all__ = [
     "ItemPage",
     "PagingState",
     "StoreOutcome",
+    "backfill_chain",
     "chain_for_source",
     "claim_job_run",
     "collectable_sources",
