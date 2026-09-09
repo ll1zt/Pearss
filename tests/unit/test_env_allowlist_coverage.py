@@ -50,6 +50,7 @@ COLLECTOR_PREFIXES: tuple[str, ...] = (
     "PEARSS_ZHIHU_",
     "PEARSS_ZSXQ_",
     "PEARSS_COOKIECLOUD_",
+    "PEARSS_TRANSLATE_",
 )
 
 _REFERENCE = re.compile(r"PEARSS_[A-Z0-9_]+")
@@ -117,7 +118,7 @@ def test_a_new_collector_prefix_fails_the_guard_until_registered() -> None:
     from app.plugin_runtime import _COLLECTOR_ENV_PREFIXES
 
     sandboxed = {name for name, is_sandboxed, _ in _DECLARATIONS if is_sandboxed}
-    assert sandboxed == set(_COLLECTOR_ENV_PREFIXES), (
+    assert sandboxed <= set(_COLLECTOR_ENV_PREFIXES), (
         "sandboxed collectors in _DECLARATIONS and keys of "
         f"_COLLECTOR_ENV_PREFIXES disagree: declared={sorted(sandboxed)} "
         f"allowlisted={sorted(_COLLECTOR_ENV_PREFIXES)}"

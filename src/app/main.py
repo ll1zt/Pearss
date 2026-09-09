@@ -145,6 +145,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.scheduler = scheduler
 
+    # The enrichment worker runs beside the scheduler: queued processor jobs
+    # (P3 chains) and gate promotion. Started/stopped with the app; the
+    # PEARSS_SCHEDULER_ENABLED switch governs both, one flag per deployment.
+    from app.enrichment_worker import EnrichmentWorker, default_processors
+
+    worker = EnrichmentWorker(
+        app.state.session_factory, processors=default_processors()
+    )
+    app.state.enrichment_worker = worker
+
     async with mcp_inner.router.lifespan_context(mcp_inner):
         from app.collector_registry import (
             for_each_sandboxed_collector,
@@ -165,12 +175,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         sync_plugin_table(app.state.session_factory)
         if scheduler_enabled():
             await scheduler.start()
+            await worker.start()
         else:
             LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
         try:
             yield
         finally:
             await scheduler.stop()
+            await worker.stop()
             client.close()
 
 

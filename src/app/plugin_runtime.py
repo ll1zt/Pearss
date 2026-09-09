@@ -78,6 +78,9 @@ _COLLECTOR_ENV_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     "twitter": ("PEARSS_X_", "PEARSS_COOKIECLOUD_"),
     "zhihu": ("PEARSS_ZHIHU_", "PEARSS_COOKIECLOUD_"),
     "zsxq": ("PEARSS_ZSXQ_", "PEARSS_COOKIECLOUD_"),
+    # The translate processor (P3) may run in a child; its provider config
+    # arrives the same way collectors' credentials do.
+    "translate": ("PEARSS_TRANSLATE_",),
 }
 
 

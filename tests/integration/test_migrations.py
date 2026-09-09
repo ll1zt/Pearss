@@ -122,8 +122,6 @@ def test_upgrade_downgrade_upgrade_round_trip(alembic_config: Config) -> None:
 @pytest.mark.integration
 def test_p2_p3_tables_are_absent(alembic_config: Config) -> None:
     command.upgrade(alembic_config, "head")
-    url = alembic_config.get_main_option("sqlalchemy.url") or ""
-    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
     # These arrive with their own migration rather than being pre-created
     # empty and altered later. read_state used to be here, but the Reader API
     # moved to P1 (ADR 0004); plugin moved out when P2 delivered it
