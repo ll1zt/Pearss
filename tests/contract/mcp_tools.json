@@ -1,12 +1,33 @@
 {
   "add_source": {
-    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. source type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram), or 'auto' (default): the URL is checked against the collectors and a non-rss match suggests 'web'. Pass type explicitly when auto would guess wrong.",
+    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. source type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram), or 'auto' (default): the URL is checked against the collectors and a non-rss match suggests 'web'. Pass type explicitly when auto would guess wrong. pipeline_chain (a list of {plugin_id, kind, lang?, required?}) plus target_lang gates items until the chain completes: e.g. one translate/translation spec with target_lang 'en'.",
     "input_schema": {
       "properties": {
+        "pipeline_chain": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline Chain"
+        },
         "schedule_policy": {
           "additionalProperties": true,
           "title": "Schedule Policy",
           "type": "object"
+        },
+        "target_lang": {
+          "default": "",
+          "title": "Target Lang",
+          "type": "string"
         },
         "type": {
           "default": "auto",
@@ -23,6 +44,22 @@
         "schedule_policy"
       ],
       "title": "add_sourceArguments",
+      "type": "object"
+    }
+  },
+  "backfill_source": {
+    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. Requires confirmation: it spends provider budget per item. The source must have a pipeline_chain configured.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "backfill_sourceArguments",
       "type": "object"
     }
   },

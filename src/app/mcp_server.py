@@ -482,7 +482,10 @@ def build_mcp_server(app: Any) -> MCPServer:
             "'rss' (a feed URL), 'web' (a page a login-type collector "
             "serves, e.g. zhihu/telegram), or 'auto' (default): the URL is "
             "checked against the collectors and a non-rss match suggests "
-            "'web'. Pass type explicitly when auto would guess wrong."
+            "'web'. Pass type explicitly when auto would guess wrong. "
+            "pipeline_chain (a list of {plugin_id, kind, lang?, required?}) "
+            "plus target_lang gates items until the chain completes: e.g. "
+            "one translate/translation spec with target_lang 'en'."
         )
     )
     async def add_source(
@@ -490,18 +493,23 @@ def build_mcp_server(app: Any) -> MCPServer:
         schedule_policy: dict[str, Any],
         ctx: Context,
         type: str = "auto",
+        pipeline_chain: list[dict[str, Any]] | None = None,
+        target_lang: str = "",
     ) -> dict[str, Any]:
         requested = type.strip().lower()
         source_type = _infer_source_type(url) if requested == "auto" else requested
         data = await _confirm(
             ctx,
             f"Add {url} as a {source_type} source with policy "
-            f"{_render(schedule_policy)}?",
+            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
+            f"(lang {target_lang or 'none'})?",
             _confirmation_schema(
                 {
                     "url": url,
                     "type": source_type,
                     "schedule_policy": _render(schedule_policy),
+                    "pipeline_chain": _render(pipeline_chain),
+                    "target_lang": target_lang,
                 }
             ),
         )
@@ -520,6 +528,8 @@ def build_mcp_server(app: Any) -> MCPServer:
             _matches(data["url"], url)
             and _matches(data["type"], source_type)
             and _matches(data["schedule_policy"], schedule_policy)
+            and _matches(data["pipeline_chain"], pipeline_chain)
+            and _matches(data["target_lang"], target_lang)
         ):
             return {
                 "aborted": True,
@@ -532,6 +542,8 @@ def build_mcp_server(app: Any) -> MCPServer:
                 "url": url,
                 "type": source_type,
                 "schedule_policy": schedule_policy,
+                "pipeline_chain": pipeline_chain,
+                "target_lang": target_lang or None,
             },
             idempotency_key=_fresh_key(),
         )
@@ -689,6 +701,42 @@ def build_mcp_server(app: Any) -> MCPServer:
             idempotency_key=_fresh_key(),
         )
         if status not in (200, 502):
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Queue processing-chain products (e.g. translations) for items "
+            "stored before the chain was enabled. Requires confirmation: it "
+            "spends provider budget per item. The source must have a "
+            "pipeline_chain configured."
+        )
+    )
+    async def backfill_source(source_id: str, ctx: Context) -> dict[str, Any]:
+        data = await _confirm(
+            ctx,
+            f"Backfill processing products for source {source_id}?",
+            _confirmation_schema({"source_id": source_id}),
+        )
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        if not _matches(data["source_id"], source_id):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        status, payload = await core.request(
+            "POST",
+            f"/v1/sources/{source_id}:backfill-chain",
+            idempotency_key=_fresh_key(),
+        )
+        if status not in (200, 201):
             return _error_from(payload, status)
         return _truncate(payload)
 

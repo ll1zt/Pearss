@@ -32,6 +32,7 @@ from adapters.repository import (
     find_idempotent,
     get_source,
     list_sources,
+    parse_chain,
     store_idempotent,
     timestamp,
 )
@@ -251,13 +252,20 @@ def remember(
 
 
 class SourceCreate(BaseModel):
-    """Body for creating a source."""
+    """Body for creating a source.
+
+    `pipeline_chain` + `target_lang` enable the processing chain at creation
+    time — the correct ordering: first source with chain, then first fetch,
+    so no item is ever cached unprocessed.
+    """
 
     url: str = Field(min_length=1, max_length=4096)
     type: SourceType = SourceType.RSS
     schedule_policy: dict[str, Any]
     trust_level: TrustLevel = TrustLevel.STANDARD
     parser_plugin_id: str | None = Field(default=None, max_length=128)
+    pipeline_chain: list[dict[str, Any]] | None = None
+    target_lang: str | None = None
 
     @field_validator("url")
     @classmethod
@@ -275,11 +283,24 @@ class SourceCreate(BaseModel):
 
 
 class SourcePatch(BaseModel):
-    """Body for updating a source. Absent fields are left alone."""
+    """Body for updating a source. Absent fields are left alone.
+
+    `pipeline_chain` is a JSON list of {plugin_id, kind, lang?, required?}
+    specs the source's items must complete before the gate opens; an explicit
+    `null` clears the chain (items go ready straight after normalisation).
+    Absent vs explicit-null is decided by `model_fields_set`, the pydantic v2
+    way to give PATCH bodies three-state fields.
+    """
 
     schedule_policy: dict[str, Any] | None = None
     status: SourceStatus | None = None
     trust_level: TrustLevel | None = None
+    pipeline_chain: list[dict[str, Any]] | None = None
+    target_lang: str | None = None
+
+    def sent(self, field: str) -> bool:
+        """Whether the caller sent this field at all (even as null)."""
+        return field in self.model_fields_set
 
 
 def _shared_client(request: Request) -> httpx.Client:
@@ -324,6 +345,10 @@ def _source_payload(row: SourceRow) -> dict[str, Any]:
         "title": row.title,
         "parser_plugin_id": row.parser_plugin_id,
         "schedule_policy": json.loads(row.schedule_policy),
+        "pipeline_chain": (
+            json.loads(row.pipeline_chain) if row.pipeline_chain else None
+        ),
+        "target_lang": row.target_lang,
         "status": row.status,
         "trust_level": row.trust_level,
         "tenant_id": row.tenant_id,
@@ -434,6 +459,10 @@ def add_source(
             tenant_id=TENANT,
             trust_level=body.trust_level.value,
             parser_plugin_id=body.parser_plugin_id,
+            pipeline_chain=(
+                json.dumps(body.pipeline_chain) if body.pipeline_chain else None
+            ),
+            target_lang=body.target_lang,
             at=timestamp(_now()),
         )
         session.commit()
@@ -477,7 +506,7 @@ def update_source(
     if replayed is not None:
         return replayed
 
-    changes: dict[str, str] = {}
+    changes: dict[str, str | None] = {}
     if body.schedule_policy is not None:
         try:
             changes["schedule_policy"] = schedule_policy_to_json(
@@ -497,13 +526,45 @@ def update_source(
         changes["status"] = body.status.value
     if body.trust_level is not None:
         changes["trust_level"] = body.trust_level.value
+    if body.sent("pipeline_chain") or body.sent("target_lang"):
+        # Validate the pair against the enrichment domain before writing:
+        # a chain that parse_chain rejects would gate every future item on
+        # nothing and surface as a surprise at collection time.
+        try:
+            parse_chain(
+                json.dumps(body.pipeline_chain)
+                if body.pipeline_chain is not None
+                else None,
+                target_lang=body.target_lang,
+            )
+        except (ValueError, KeyError) as exc:
+            raise api_error(
+                status_code=422,
+                code="invalid_pipeline_chain",
+                message=str(exc),
+                suggestion=(
+                    'Use a list of {plugin_id, kind, lang?, required?}; kinds: '
+                    "translation, summary, tts_audio."
+                ),
+            ) from exc
+        # json.dumps of None clears the chain; a chain forces the lang to
+        # something explicit so the worker never has to guess.
+        changes["pipeline_chain"] = (
+            json.dumps(body.pipeline_chain)
+            if body.pipeline_chain is not None
+            else None
+        )
+        changes["target_lang"] = body.target_lang
 
     if not changes:
         raise api_error(
             status_code=400,
             code="empty_patch",
             message="The request body changed nothing.",
-            suggestion="Supply at least one of schedule_policy, status, trust_level.",
+            suggestion=(
+                "Supply at least one of schedule_policy, status, trust_level, "
+                "pipeline_chain, target_lang."
+            ),
         )
 
     with factory() as session:
@@ -514,6 +575,65 @@ def update_source(
         session.commit()
         payload = _source_payload(row)
 
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
+@router.post("/sources/{source_id}:backfill-chain", operation_id="backfillChain")
+def backfill_source_chain(
+    request: Request,
+    source_id: str,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Queue processor products for items stored before the chain was enabled.
+
+    A write (it mutates item_enrichment and spends provider budget), so it is
+    authenticated, idempotent and audited like every other write.
+    """
+    endpoint = f"POST /v1/sources/{source_id}:backfill-chain"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    from adapters.repository import backfill_chain
+
+    with factory() as session:
+        row = _require_source(session, source_id)
+        if not row.pipeline_chain:
+            raise api_error(
+                status_code=422,
+                code="no_pipeline_chain",
+                message="This source has no processing chain to backfill.",
+                suggestion="Set pipeline_chain via PATCH first.",
+            )
+        try:
+            queued = backfill_chain(session, source_id=source_id)
+        except ValueError as exc:
+            raise api_error(
+                status_code=422,
+                code="invalid_chain",
+                message=str(exc),
+                suggestion=(
+                    "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
+                    "translation, summary, tts_audio."
+                ),
+            ) from exc
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "source_id": source_id,
+        "queued": queued,
+        "audit": "recorded by the Core API",
+    }
     remember(
         factory,
         actor=principal.name,
