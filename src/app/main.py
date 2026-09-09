@@ -30,6 +30,7 @@ from app.auth import Principal, auth_configured, write_required
 from app.hardening import (
     AuthFailureRateLimitMiddleware,
     BodySizeLimitMiddleware,
+    EarlyAuthMiddleware,
     SecurityHeadersMiddleware,
     env_int,
 )
@@ -285,11 +286,16 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     )
     # Public-exposure hardening (ADR 0016). Starlette wraps in reverse
     # registration order, so the rate limiter ends up outermost: a blocked
-    # address is refused before the body limit, the audit write, or any route
-    # runs, and 413s never reach the application either.
+    # address is refused before the body limit, the early auth check, the
+    # audit write, or any route runs, and 413s never reach the application
+    # either. EarlyAuth sits just inside the rate limiter so an unauthenticated
+    # request is refused before FastAPI reads or validates the body - body
+    # parsing is endpoint work, and endpoint work is for authenticated
+    # callers only.
     app.add_middleware(
         BodySizeLimitMiddleware, max_bytes=env_int("PEARSS_MAX_BODY_BYTES", 1024 * 1024)
     )
+    app.add_middleware(EarlyAuthMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         AuthFailureRateLimitMiddleware,

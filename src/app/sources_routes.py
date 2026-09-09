@@ -165,6 +165,32 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _redact_queries(value: Any) -> Any:
+    """Strip query strings from URL-shaped strings in a replayed payload.
+
+    The idempotency store keeps whole response bodies for a week, and source
+    payloads carry `url`/`canonical_url` verbatim - feed URLs routinely
+    embed access tokens in their query (AGENTS.md privacy rule, same reason
+    the audit trail redacts headers and adapters.http redacts logged URLs).
+    A replay is still an exposure surface: it goes to whoever holds the key,
+    which after a leak is exactly the wrong party. Structured recursion over
+    dicts and lists; strings that parse as URLs with a query get the query
+    dropped, everything else passes through untouched.
+    """
+    if isinstance(value, dict):
+        return {key_: _redact_queries(item) for key_, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_queries(item) for item in value]
+    if isinstance(value, str) and value.count("?") == 1:
+        base, _, query = value.partition("?")
+        # Only strip when the left side plausibly is a URL (scheme://...):
+        # a schedule policy string or a title containing a lone "?" is data,
+        # not an address.
+        if "://" in base and query:
+            return base
+    return value
+
+
 def replay_or_none(
     session_factory: sessionmaker[Any],
     *,
@@ -172,7 +198,13 @@ def replay_or_none(
     endpoint: str,
     key: str,
 ) -> JSONResponse | None:
-    """Return a stored response for this write, if one exists."""
+    """Return a stored response for this write, if one exists.
+
+    The replayed body is query-redacted: see `_redact_queries`. The original
+    execution's response carried the full URLs; the replay deliberately does
+    not, because a client that wants the URLs again has the resource itself
+    (GET /v1/sources/{id}) under its own authenticated request.
+    """
     now = timestamp(_now())
     with session_factory() as session:
         stored = find_idempotent(
@@ -180,7 +212,7 @@ def replay_or_none(
         )
         if stored is None:
             return None
-        payload: dict[str, Any] = json.loads(stored.response_body)
+        payload: dict[str, Any] = _redact_queries(json.loads(stored.response_body))
         response = JSONResponse(status_code=stored.status_code, content=payload)
     # Replaying must be visible to the caller: without this a retry looks
     # identical to a fresh execution, which is correct but unhelpful when

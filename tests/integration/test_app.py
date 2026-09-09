@@ -471,6 +471,11 @@ async def test_oversized_bodies_are_rejected_before_the_app(
     session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PEARSS_MAX_BODY_BYTES", "64")
+    # Early auth runs before the body limit: an unauthenticated oversized
+    # request is answered 401, so this test must present a valid token to
+    # reach the 413 it is about.
+    monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("PEARSS_API_READ_TOKEN", READ_TOKEN)
     hardened = create_app(session_factory)
     transport = httpx.ASGITransport(app=hardened)
     async with httpx.AsyncClient(
@@ -589,3 +594,45 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
                 f"sandboxed collector {name!r} must egress through the "
                 "host's shared client"
             )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_unauthenticated_requests_are_refused_before_body_parsing(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bad token gets 401 even when the body is invalid JSON.
+
+    FastAPI resolves dependencies after the body has been read and
+    validated, so the route dependency alone let an unauthenticated caller
+    probe every endpoint's validation behaviour. EarlyAuth refuses at the
+    scope level, before any body byte is parsed.
+    """
+    monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
+    monkeypatch.setenv("PEARSS_API_READ_TOKEN", READ_TOKEN)
+    hardened = create_app(session_factory)
+    transport = httpx.ASGITransport(app=hardened)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as aclient:
+        bad_token_bad_body = await aclient.post(
+            "/v1/sources",
+            headers={"Authorization": f"Bearer {API_TOKEN}-wrong"},
+            content=b"{ this is not json",
+        )
+        assert bad_token_bad_body.status_code == 401
+        assert bad_token_bad_body.json()["error"]["code"] == "unauthenticated"
+
+        no_token = await aclient.get("/v1/sources")
+        assert no_token.status_code == 401
+
+        read_token_write = await aclient.post(
+            "/v1/sources",
+            headers={"Authorization": f"Bearer {READ_TOKEN}", "Idempotency-Key": "k"},
+            json={"url": "https://blog.example.com/feed"},
+        )
+        assert read_token_write.status_code == 403
+        assert read_token_write.json()["error"]["code"] == "insufficient_scope"
+
+    # The documented envelope shape, not Starlette's default.
+    assert "suggestion" in bad_token_bad_body.json()["error"]

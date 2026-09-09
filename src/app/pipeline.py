@@ -13,15 +13,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
 from sqlalchemy.orm import Session
 
 from adapters import filestore
+from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
 from adapters.http import FetchError
+from adapters.raw_payload import RawPayload
 from adapters.repository import (
     StoreOutcome,
     last_conditional_state,
@@ -255,9 +257,15 @@ def _collect_one_page(
             conditional=last_conditional_state(session, source_id=source.id),
         )
     except FetchError as exc:
+        # Failed fetches are recorded too: the run's diagnostics point at a
+        # RawFetch row, and a 403's absence of ETag is itself the conditional
+        # state the next cycle should act on (none — revalidate from scratch).
+        _record_raw_fetch_failure(session, source_id=source.id, exc=exc)
         return CollectionResult(
             succeeded=False, error_class=exc.error_class.value, detail=exc.detail
         )
+
+    _record_raw_fetch_payload(session, source_id=source.id, payload=payload)
 
     if payload.not_modified:
         return CollectionResult(succeeded=True, not_modified=True)
@@ -320,6 +328,81 @@ if TYPE_CHECKING:
             state: Any,
             max_pages: int = 20,
         ) -> Any: ...
+
+
+def _record_raw_fetch_payload(
+    session: Session, *, source_id: str, payload: RawPayload
+) -> None:
+    """Record the fetch attempt and its conditional state.
+
+    This is the loop-closer for Conditional GET: the response's ETag and
+    Last-Modified land on a RawFetch row, and `last_conditional_state` reads
+    the newest row for the next cycle's If-None-Match. A 304 is recorded
+    like a 200 — its headers re-affirm the current validators, and without
+    the row the next fetch would go unconditional. The payload body itself
+    stays out of the database (payload_ref/filestore is the raw-content
+    path for 200s; a 304 carries none).
+    """
+    session.add(
+        _raw_fetch_row(
+            source_id=source_id,
+            status="not_modified" if payload.not_modified else "fetched",
+            payload=payload,
+        )
+    )
+
+
+def _record_raw_fetch_failure(
+    session: Session, *, source_id: str, exc: FetchError
+) -> None:
+    """Record a failed fetch. No validators arrived, so none are stored —
+    the next cycle revalidates from scratch, which is the correct response
+    to a 403/5xx that may or may not be validator-related."""
+    session.add(
+        _raw_fetch_row(
+            source_id=source_id,
+            status="failed",
+            payload=None,
+            error_class=exc.error_class,
+            detail=exc.detail,
+        )
+    )
+
+
+def _raw_fetch_row(
+    *,
+    source_id: str,
+    status: str,
+    payload: RawPayload | None,
+    error_class: ErrorClass | None = None,
+    detail: str = "",
+) -> Any:
+    import secrets
+
+    from adapters.db_models import RawFetch as RawFetchRow
+    from adapters.repository import timestamp
+
+    row = RawFetchRow(
+        id=f"rawfetch-{secrets.token_hex(8)}",
+        source_id=source_id,
+        status=status,
+        http_status=payload.status_code if payload else None,
+        # A 304 re-affirms the validators it was sent with; RawPayload.etag
+        # on a 304 carries exactly those (adapters.http echoes them back).
+        etag=payload.etag if payload else None,
+        last_modified=payload.last_modified if payload else None,
+        error_class=error_class.value if error_class else None,
+        fetched_at=timestamp(datetime.now(UTC)),
+        correlation_id=current_correlation_id(),
+    )
+    if payload is not None and payload.body:
+        # content_hash of the body, for diagnostics; the body itself goes to
+        # the file store only through the item path (raw feed bodies are
+        # rebuildable from the origin, and storing them twice is waste).
+        import hashlib
+
+        row.content_hash = hashlib.sha256(payload.body).hexdigest()
+    return row
 
 
 def collect_paged(

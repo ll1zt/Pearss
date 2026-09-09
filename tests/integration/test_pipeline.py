@@ -604,3 +604,99 @@ def test_reworded_published_article_keeps_the_frozen_content(
     assert stored[0].content_hash != content_hash(
         title="Headline", content="<p>Quietly rewritten after publication.</p>"
     )
+
+
+# --------------------------------------------------------------------------
+# Conditional GET loop (record_raw_fetch wiring)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_the_conditional_loop_closes_over_two_cycles(session: Session) -> None:
+    """Cycle one stores the ETag; cycle two must send it and see a 304.
+
+    This is the acceptance test for the record_raw_fetch wiring: without it
+    the second collect_source goes out unconditional and re-downloads the
+    full body every time. A MockTransport stands in for the origin and
+    refuses any request that fails to present the validator.
+    """
+    import httpx
+
+    from app.pipeline import collect_source
+
+    requests_seen: list[dict[str, str | None]] = []
+
+    def origin(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(
+            {
+                "if_none_match": request.headers.get("if-none-match"),
+                "if_modified_since": request.headers.get("if-modified-since"),
+            }
+        )
+        if request.headers.get("if-none-match") == '"v1"':
+            return httpx.Response(304)
+        assert request.headers.get("if-none-match") is None, (
+            "the first cycle must be unconditional"
+        )
+        return httpx.Response(
+            200,
+            content=(FIXTURES / "valid.xml").read_bytes(),
+            headers={"etag": '"v1"', "content-type": "application/rss+xml"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(origin))
+
+    source = session.get(Source, SOURCE)
+    assert source is not None
+    first = collect_source(session, source=source, client=client)
+    session.commit()
+    assert first.succeeded
+    assert requests_seen[-1]["if_none_match"] is None
+
+    state = session.execute(
+        text(
+            "select etag, last_modified from raw_fetch order by fetched_at desc limit 1"
+        )
+    ).one()
+    assert state[0] == '"v1"', "the response ETag was not written back"
+
+    second = collect_source(session, source=source, client=client)
+    session.commit()
+    assert second.succeeded and second.not_modified, (
+        "the second cycle did not revalidate: the ETag loop is open"
+    )
+    assert requests_seen[-1]["if_none_match"] == '"v1"'
+
+    rows = session.execute(
+        text("select status, http_status from raw_fetch order by fetched_at")
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [("fetched", 200), ("not_modified", 304)]
+
+
+@pytest.mark.integration
+def test_a_failed_fetch_is_recorded_and_resets_validators(session: Session) -> None:
+    """A 5xx lands in raw_fetch with no validators, so the next cycle is
+    unconditional rather than replaying a possibly-stale ETag."""
+    import httpx
+
+    from app.pipeline import collect_source
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    client = httpx.Client(transport=httpx.MockTransport(flaky))
+    source = session.get(Source, SOURCE)
+    assert source is not None
+    result = collect_source(session, source=source, client=client)
+    session.commit()
+
+    assert not result.succeeded and result.error_class == "network"
+    row = session.execute(
+        text(
+            "select status, error_class, etag from raw_fetch"
+            " order by fetched_at desc limit 1"
+        )
+    ).one()
+    assert row[0] == "failed"
+    assert row[1] == "network"
+    assert row[2] is None
