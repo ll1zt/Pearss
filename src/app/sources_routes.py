@@ -671,6 +671,117 @@ def backfill_source_chain(
     return JSONResponse(status_code=200, content=payload)
 
 
+@router.get("/sources/{source_id}/enrichments", operation_id="listEnrichments")
+def list_source_enrichments(
+    request: Request,
+    source_id: str,
+    status: str | None = Query(default=None),
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """Processor-chain rows for one source: the agent's visibility into
+    what the chain is doing and why an item is being held."""
+    from sqlalchemy import select as _select
+
+    from adapters.db_models import Item as _ItemRow
+    from adapters.db_models import ItemEnrichment
+
+    del _
+    with request.app.state.session_factory() as session:
+        _require_source(session, source_id)
+        query = _select(ItemEnrichment).where(ItemEnrichment.item_id.in_(
+            _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
+        ))
+        if status is not None:
+            query = query.where(ItemEnrichment.status == status)
+        rows = session.execute(query).scalars().all()
+        return {
+            "data": [
+                {
+                    "id": row.id,
+                    "item_id": row.item_id,
+                    "plugin_id": row.plugin_id,
+                    "kind": row.kind,
+                    "lang": row.lang,
+                    "status": row.status,
+                    "error_class": row.error_class,
+                    "detail": row.detail,
+                    "attempt_count": row.attempt_count,
+                }
+                for row in rows
+            ],
+            "total": len(rows),
+            "correlation_id": current_correlation_id(),
+        }
+
+
+@router.post("/sources/{source_id}:retry-enrichments", operation_id="retryEnrichments")
+def retry_source_enrichments(
+    request: Request,
+    source_id: str,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Requeue failed enrichment rows for one source.
+
+    This is the manual/agent re-trigger the retry policy stops at: rows that
+    exhausted their attempts, or failed non-transiently (auth after a key
+    rotation, parse on a content shape since fixed), come back as queued and
+    the worker charges the provider again. A write for that reason.
+    """
+    endpoint = f"POST /v1/sources/{source_id}:retry-enrichments"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    from sqlalchemy import select as _select
+    from sqlalchemy import update as _update
+
+    from adapters.db_models import Item as _ItemRow
+    from adapters.db_models import ItemEnrichment
+
+    with factory() as session:
+        _require_source(session, source_id)
+        result = session.execute(
+            _update(ItemEnrichment)
+            .where(
+                ItemEnrichment.status == "failed",
+                ItemEnrichment.item_id.in_(
+                    _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
+                ),
+            )
+            .values(
+                status="queued",
+                # The content has not changed, so keep input_hash; but the
+                # attempt budget restarts on an explicit re-trigger — the
+                # operator has decided the failure is worth another pass.
+                # The stale failure's error fields are cleared with it.
+                attempt_count=0,
+                next_attempt_at=None,
+                error_class=None,
+                detail=None,
+                updated_at=timestamp(_now()),
+            ),
+        )
+        requeued = int(result.rowcount or 0)
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "source_id": source_id,
+        "requeued": requeued,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
 @router.delete("/sources/{source_id}", operation_id="deleteSource")
 def delete_source(
     request: Request,

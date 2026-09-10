@@ -776,3 +776,100 @@ async def test_backfill_chain_endpoint_queues_and_audits(
     )
     assert again.status_code == 200
     del sa
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_enrichment_visibility_and_agent_retry(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The agent loop: see a failed product, requeue it, see it queued.
+
+    The retry policy stops at MAX_ATTEMPTS and waits for exactly this — the
+    agent's answer to a user saying 'the provider is fixed, try again'.
+    """
+    from datetime import UTC, datetime
+
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    chain = [{"plugin_id": "translate", "kind": "translation"}]
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "enrich-vis-1"},
+        json={
+            "url": "https://vis.example/feed",
+            "schedule_policy": policy(),
+            "pipeline_chain": chain,
+            "target_lang": "en",
+        },
+    )
+    source_id = created.json()["id"]
+
+    with session_factory() as session:
+        session.add(
+            ItemRow(
+                id="vis-item",
+                source_id=source_id,
+                guid="g-vis",
+                content_hash="hash-vis",
+                title="Visible",
+                url="https://vis.example/1",
+                publish_status="pending",
+                tenant_id="default",
+                created_at="2026-01-01T00:00:00.000000Z",
+                updated_at="2026-01-01T00:00:00.000000Z",
+            )
+        )
+        session.add(
+            ItemEnrichment(
+                id="enr-vis-1",
+                item_id="vis-item",
+                plugin_id="translate",
+                plugin_version="0.1.0",
+                kind="translation",
+                lang="en",
+                input_hash="hash-vis",
+                status="failed",
+                error_class="auth",
+                detail="provider rejected the key",
+                attempt_count=3,
+                tenant_id="default",
+                created_at=timestamp(datetime.now(UTC)),
+                updated_at=timestamp(datetime.now(UTC)),
+            )
+        )
+        session.commit()
+
+    # Visibility: the agent sees the failed row and why.
+    listing = await writer.get(f"/v1/sources/{source_id}/enrichments")
+    assert listing.status_code == 200
+    rows = listing.json()["data"]
+    assert len(rows) == 1 and rows[0]["status"] == "failed"
+    assert rows[0]["error_class"] == "auth"
+    assert rows[0]["attempt_count"] == 3
+    # Status filter works.
+    filtered = await writer.get(f"/v1/sources/{source_id}/enrichments?status=queued")
+    assert filtered.json()["data"] == []
+
+    # Retry: failed rows requeue with the attempt budget reset.
+    retry = await writer.post(
+        f"/v1/sources/{source_id}:retry-enrichments",
+        headers={"Idempotency-Key": "enrich-retry-1"},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["requeued"] == 1
+
+    after = await writer.get(f"/v1/sources/{source_id}/enrichments?status=queued")
+    assert after.json()["data"][0]["attempt_count"] == 0
+    assert after.json()["data"][0]["detail"] is None
+
+    # Idempotent replay: same key answers the same body.
+    replay = await writer.post(
+        f"/v1/sources/{source_id}:retry-enrichments",
+        headers={"Idempotency-Key": "enrich-retry-1"},
+    )
+    assert replay.headers.get("idempotent-replay") == "true"
+    assert replay.json()["requeued"] == 1

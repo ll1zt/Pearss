@@ -11,9 +11,11 @@ from sqlalchemy.orm import Session
 
 from adapters.correlation import current
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import ItemEnrichment
 from adapters.db_models import Job as JobRow
 from adapters.db_models import JobRun as JobRunRow
 from adapters.db_models import Source as SourceRow
+from core.enrichment import EnrichmentStatus
 from core.enums import (
     ErrorClass,
     JobRunStatus,
@@ -131,6 +133,14 @@ def system_snapshot(session: Session, *, tenant_id: str) -> dict[str, object]:
         select(JobRunRow.status, func.count()).group_by(JobRunRow.status),
         every=JobRunStatus,
     )
+    enrichments = counts(
+        select(ItemEnrichment.status, func.count())
+        .where(ItemEnrichment.tenant_id == tenant_id)
+        .group_by(ItemEnrichment.status),
+        # Every state listed: a held item with no visible enrichment row is
+        # the exact misreading the `every` discipline exists to prevent.
+        every=EnrichmentStatus,
+    )
     # error_class is nullable; the query drops the NULLs, and str() keeps the
     # key type uniform without asserting away the None mypy still sees.
     runs_by_error = counts(
@@ -153,6 +163,7 @@ def system_snapshot(session: Session, *, tenant_id: str) -> dict[str, object]:
     return {
         "sources_by_status": sources,
         "items_by_publish_status": items,
+        "enrichments_by_status": enrichments,
         "runs_by_status": runs_by_status,
         "runs_by_error_class": runs_by_error,
         # A rate over the last 50 finished runs rather than all time: a source

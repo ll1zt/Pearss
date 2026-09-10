@@ -92,6 +92,27 @@
       "type": "object"
     }
   },
+  "list_enrichments": {
+    "description": "Processor-chain rows for one source: what translations are queued/running/succeeded/failed, with error classes and attempt counts. Use it to see why an item is being held by the gate.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "status": {
+          "default": "",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "list_enrichmentsArguments",
+      "type": "object"
+    }
+  },
   "list_jobs": {
     "description": "List collection jobs, each with its source and last run.",
     "input_schema": {
@@ -168,6 +189,22 @@
         "source_id"
       ],
       "title": "remove_sourceArguments",
+      "type": "object"
+    }
+  },
+  "retry_enrichments": {
+    "description": "Requeue failed processing-chain rows for one source (e.g. after fixing the provider key). Requires confirmation: rows restart the attempt budget and the provider charges again.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "retry_enrichmentsArguments",
       "type": "object"
     }
   },
