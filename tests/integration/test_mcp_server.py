@@ -275,8 +275,12 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "set_source_status",
         "remove_source",
         "trigger_job",
-        # P3 processor chain (ADR 0018): one-off backfill for legacy items.
+        # P3 processor chain (ADR 0018): one-off backfill for legacy items,
+        # plus chain visibility and the agent re-trigger the retry policy
+        # stops at.
         "backfill_source",
+        "list_enrichments",
+        "retry_enrichments",
     }
 
 
@@ -565,6 +569,7 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ),
         ("set_source_status", {"source_id": "src-1", "status": "paused"}),
         ("trigger_job", {"source_id": "src-1"}),
+        ("retry_enrichments", {"source_id": "src-1"}),
     ]
     for tool, args in cases:
         payload = await _call(mcp_url, tool, args)

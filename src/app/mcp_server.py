@@ -740,6 +740,61 @@ def build_mcp_server(app: Any) -> MCPServer:
             return _error_from(payload, status)
         return _truncate(payload)
 
+    @server.tool(
+        description=(
+            "Processor-chain rows for one source: what translations are "
+            "queued/running/succeeded/failed, with error classes and attempt "
+            "counts. Use it to see why an item is being held by the gate."
+        )
+    )
+    async def list_enrichments(
+        source_id: str, status: str = ""
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if status:
+            params["status"] = status
+        http_status, payload = await core.get(
+            f"/v1/sources/{source_id}/enrichments", **params
+        )
+        if http_status != 200:
+            return _error_from(payload, http_status)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Requeue failed processing-chain rows for one source (e.g. after "
+            "fixing the provider key). Requires confirmation: rows restart "
+            "the attempt budget and the provider charges again."
+        )
+    )
+    async def retry_enrichments(source_id: str, ctx: Context) -> dict[str, Any]:
+        data = await _confirm(
+            ctx,
+            f"Requeue failed processing-chain products for source {source_id}?",
+            _confirmation_schema({"source_id": source_id}),
+        )
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        if not _matches(data["source_id"], source_id):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        status, payload = await core.request(
+            "POST",
+            f"/v1/sources/{source_id}:retry-enrichments",
+            idempotency_key=_fresh_key(),
+        )
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
     # -------------------------------------------------------- plugin surface
 
     @server.tool(
