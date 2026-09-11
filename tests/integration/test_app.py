@@ -598,9 +598,38 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
                 "HostClientTransport"
             )
             assert transport._client is app.state.http_client, (
-                f"sandboxed collector {name!r} must wrap the host's shared "
-                "client"
+                f"sandboxed collector {name!r} must wrap the host's shared client"
             )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_lifespan_stops_every_sandboxed_child_on_shutdown(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shutdown must reap the children, not leave them to the OS.
+
+    Children spawn lazily and hold real processes with pipes; without an
+    explicit stop at lifespan exit they outlive a graceful shutdown and are
+    only reaped when the host process itself dies. In tests that shows up as
+    ResourceWarnings about running subprocesses, which is how this gap was
+    found -- but the production consequence is orphaned collector processes.
+    """
+    from app import collector_registry
+
+    collector_registry._registry()
+    # Force-real spawn so there is a live process whose death can be observed
+    # (children are lazy; a built registry alone leaves _proc as None).
+    child = collector_registry._SANDBOX_CHILDREN["telegram"]
+    child.start()
+    proc = child._proc
+    assert proc is not None, "the child must be running before the lifespan exits"
+
+    async with app.router.lifespan_context(app):
+        assert child._proc is not None and child._proc.poll() is None
+
+    assert child._proc is None, "the child must be stopped, not left dangling"
+    assert proc.poll() is not None, "the child process must be reaped"
 
 
 @pytest.mark.integration

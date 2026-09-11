@@ -60,3 +60,24 @@ def migrated_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _reap_sandboxed_children() -> Iterator[None]:
+    """Stop any sandboxed collector a test spawned.
+
+    `collector_registry` holds `_SANDBOX_CHILDREN` in a module global and the
+    children spawn lazily, so any test that builds the registry -- directly, or
+    indirectly by constructing an app -- leaves live subprocesses behind. The
+    app's lifespan stops them in production, but suites that drive the app
+    through `ASGITransport` never enter it. Without this teardown those
+    children outlive the suite, leaking pipes and finally being reaped by the
+    OS at interpreter shutdown (visible as ResourceWarnings).
+
+    Autouse and module-global because the leak is: whichever test spawned a
+    child, the registry still holds it at the end of any test.
+    """
+    yield
+    from app import collector_registry
+
+    collector_registry.for_each_sandboxed_collector(lambda name, child: child.stop())

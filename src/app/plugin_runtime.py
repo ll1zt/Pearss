@@ -240,12 +240,15 @@ class PluginChild:
             except subprocess.TimeoutExpired:
                 LOGGER.error("plugin child %s would not die", self._collector_id)
         finally:
-            # The child is gone; its stdout pipe would leak a ResourceWarning
-            # and, in a long-lived host, a file descriptor. (stderr is the
-            # host's own stream, inherited at spawn.)
-            if proc.stdout is not None:
-                with contextlib.suppress(OSError, ValueError):
-                    proc.stdout.close()
+            # Every pipe end the host opened must be closed: an unclosed one
+            # leaks a file descriptor in a long-lived host and raises a
+            # ResourceWarning at interpreter shutdown. stdin is closed above
+            # to signal EOF; stdout is the protocol stream we read from.
+            # (stderr is the host's own stream, inherited at spawn.)
+            for stream in (proc.stdin, proc.stdout):
+                if stream is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        stream.close()
         LOGGER.info("plugin child %s stopped", self._collector_id)
 
     def restart(self) -> None:
