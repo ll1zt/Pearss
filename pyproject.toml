@@ -31,8 +31,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+  "hypothesis>=6.168.0",
   "import-linter>=2.1",
   "lxml-stubs>=0.5.1",
+  "mutmut>=3.7.0",
   "mypy>=1.13",
   "pytest>=8.3",
   "pytest-asyncio>=1.4.0",
@@ -148,3 +150,24 @@ root_packages = ["core", "adapters", "plugins", "app"]
 name = "Four-layer architecture: app -> plugins -> adapters -> core"
 type = "layers"
 layers = ["app", "plugins", "adapters", "core"]
+
+# --------------------------------------------------------------------------
+# mutmut: mutation testing over src/core (run `just mutate`).
+#
+# Scope is deliberately narrow: core is pure domain logic, so a mutant runs
+# in milliseconds against the unit suite, and the modules are where the
+# invariants live. Mutating app/ or plugins/ would take hours and mostly
+# measure integration-test speed, not assertion strength.
+# --------------------------------------------------------------------------
+[tool.mutmut]
+source_paths = ["src/"]
+only_mutate = ["src/core/*"]
+pytest_add_cli_args_test_selection = ["tests/unit"]
+also_copy = [
+  "conftest.py",
+  "alembic.ini",
+  "migrations",
+  "docs",
+  "README.md",
+  "AGENTS.md",
+]
