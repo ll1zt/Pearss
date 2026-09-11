@@ -6,12 +6,49 @@
 
 | 层级 | 位置 | 测什么 | 是否访问网络/真实服务 | 频率 |
 |---|---|---|---|---|
-| 单元测试 | `tests/unit/` | core 纯函数、状态机、去重、调度统计、错误分类 | 否 | 每次改动 |
-| Fixture 测试 | `tests/fixtures/` 或插件目录 | RSS/HTML 快照到 ItemDraft 的解析行为 | 否 | 每次改动 |
+| 单元测试 | `tests/unit/` | core 纯函数、状态机、去重、调度统计、错误分类、属性测试、结构守卫 | 否 | 每次改动 |
+| Fixture 测试 | 插件目录（`src/plugins/collectors/*/test_*.py`） | RSS/HTML 快照到 ItemDraft 的解析行为 | 否 | 每次改动 |
 | 集成测试 | `tests/integration/` | adapter 与 SQLite、文件存储、FastAPI 的集成 | 不访问公网；可用临时本地服务 | 每次改动 |
-| 契约测试 | `tests/contract/` | MCP Tool 名称/描述/输入 schema 的 snapshot（`mcp_tools.json`）；OpenAPI diff **尚未接线**（nixpkgs 无 oasdiff） | 否 | 每次改动 |
-| E2E | `tests/e2e/` | Compose 启动后的完整闭环 | 仅本地 Compose 服务/测试 fixture server | **尚未接线**：需 `compose.yaml`，`just e2e` 会说明而非假装通过 |
+| 契约测试 | `tests/contract/` | MCP Tool 面 snapshot（`mcp_tools.json`）+ OpenAPI 全文档 snapshot（`openapi.json`） | 否（起本地 uvicorn 线程） | 每次改动 |
+| E2E | `tests/e2e/` | 单进程全链路：真 uvicorn 线程 + 真 MCP 客户端 + 本地 fixture origin，覆盖 testing.md 的 P1 七步场景 | 仅 127.0.0.1（`PEARSS_ALLOW_PRIVATE_FETCH=1` 是守卫的文档化逃生门） | 每次改动 |
 | Agent eval | `tests/evals/`（P2） | golden 指令的 Tool 选择、确认、安全边界 | 使用 mock MCP 或受控环境 | MCP 改动时 |
+
+### 契约层（tests/contract/）
+
+- MCP tool 面：`test_tool_surface_matches_the_snapshot` 经 Streamable HTTP 连活服务取 tool 列表，与 `mcp_tools.json` 比对。更新：`MCP_SNAPSHOT_UPDATE=1 just contract`，审查 diff 后提交
+- OpenAPI：`app.openapi()` 全文档与 `openapi.json` 比对（oasdiff 在 nixpkgs 不可用，用与 MCP 相同的 snapshot 手法保证破坏式变更必须显式接受）。更新：`OPENAPI_SNAPSHOT_UPDATE=1 just contract`
+- 契约层自带 conftest（空迁移库 + 真 HTTP 服务），不依赖 integration 套件的任何 fixture
+
+### E2E（tests/e2e/）
+
+- 拓扑：一个 app 实例、一个 uvicorn 线程；REST 与 MCP（挂载于同一 app 的 `/mcp/mcp`）走同一端口；origin 是本地 `ThreadingHTTPServer` 供 RSS fixture
+- 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
+- discover_feed 不存在（A5 backlog），feed URL 由测试直接给定；工具落地后补第 2 步
+
+### 属性测试（hypothesis）
+
+- `tests/unit/conftest.py` 注册 derandomize profile：testing.md 禁止依赖随机数，derandomized 的失败样例永远可复现；扩大 `max_examples` 是对配置文件的可见 diff
+- 现有属性：sanitize 输出不含执行/追踪向量且幂等；定宽时间戳字典序==时间序且往返稳定；content_hash 只看散文（markup/空白/零宽不敏感）、确定性且对规范化后不同的输入给出不同 hash；item 身份 tenant 隔离、guid 与内部 id 不同命名空间；scrypt verify 对任意输入不抛错；merge_state 幂等
+- 安全边界（sanitize）的属性测试验证过有牙：放宽 scheme 白名单的注入回归立刻变红
+
+### 结构守卫（tests/unit/test_structure_guards.py）
+
+守卫测的是**项目自身结构的约定**，不是业务逻辑：
+
+- enum ↔ DB CHECK 同步：对迁移后库的真实 DDL 断言每个 DB 侧枚举列的 CHECK 允许集合 == enum 成员集合（DDL 而非迁移源码，天然排除部分索引谓词）；缺 CHECK 本身也失败
+- migration downgrade：upgrade 改 schema 的 migration，downgrade 必须有真实 op 调用；纯数据迁移允许有文档的 no-op（0005 的先例）
+- fixture 引用：每个 collector fixture 必须被同目录至少一个测试引用，否则是死语料
+- ADR 引用：docs/README/AGENTS 中每个 `ADR NNNN` 必须能解析到 `docs/adr/NNNN-*.md`
+
+### 变异测试（mutmut）
+
+覆盖率不等于断言强度：一个测试可以"执行"了代码却验证不了行为（本仓库修过十余个这类假测试）。变异测试系统性地回答"这些测试能不能被证伪"。
+
+- 范围：只对 `src/core/`（`only_mutate = ["src/core/*"]`，其余 src/ 原样复制以保证 import 完整）。core 是纯函数、毫秒级，变异结果可解释；对 app/plugins 全量变异要数小时，测的是集成测试速度而非断言强度
+- 运行：`just mutate`（几分钟量级）。**改了测试后必须 `rm -rf mutants` 重跑**——mutmut 缓存按配置 hash 失效，不感知测试文件变更，缓存会给出一模一样的旧数字
+- 首轮基线（本分支落地前）：1184 变异，killed 703 / survived 255 / no-tests 226
+- 针对性补测后：killed 807 / survived 198 / no-tests 178（score ≈ 80%，基线 ≈ 73%）。补的测试在 `test_rpc_protocol.py`（RPC 解码边界，杀了 ~46）、`test_core_guards.py`（naive-datetime / policy-bound / 处理闸门守卫的单元级断言）、`test_dedupe.py` 尾部三个 pin（identity-or 语义 + matched_id 审计指针）
+- 读法：存活的变异分两类——**测试缺口**（补一个能杀它的断言）与**等价/文案变异**（如 reason 字符串加 XX、防御性 `or` 改写后行为真不变），后者记录并放过。剩余存活集中在 normalize 的 reason 文案（84）与 models 的 dataclass 管道（no-tests 154）——前者多为等价类，后者只有集成路径执行，两者都不是断言缺口优先级。新增 core 代码时跑一次，作为 review 的断言强度证据
 
 ## 必测领域不变量
 

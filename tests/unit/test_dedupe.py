@@ -255,3 +255,70 @@ def test_identity_match_takes_precedence_over_a_cross_source_content_match() -> 
     )
     decision = decide_dedupe(incoming, [twin, same_entry])
     assert decision.action is DedupeAction.SKIP_SAME_SOURCE
+
+
+# --------------------------------------------------------------------------
+# Pins added after the mutation baseline (feat/test-driven-hardening)
+#
+# `just mutate` showed the identity branch and the matched_id carry below
+# surviving: the `or` in the identity predicate is defensive (id and guid
+# derive from the same triple today, and the `or` keeps the door open if
+# they ever fork), and matched_id feeds the audit trail. Both now have a
+# test that fails if the code stops honouring them.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_identity_matches_on_guid_alone_not_only_on_both() -> None:
+    """The identity predicate is an `or`, deliberately.
+
+    Today id and guid derive from the same (tenant, source, external_id)
+    triple, so `or` and `and` agree; if the two derivations ever fork, `and`
+    would let a same-guid entry through to the content check and collide on
+    insert. This test constructs the fork directly so the defensive branch
+    stays pinned rather than relying on the derivations staying coupled.
+    """
+    incoming = item(item_id="fresh-id", guid="shared-guid", content_hash="new")
+    stored = item(item_id="other-id", guid="shared-guid", content_hash="different")
+
+    decision = decide_dedupe(incoming, [stored])
+
+    assert decision.action is not DedupeAction.INSERT
+    assert decision.matched_id == "other-id"
+
+
+@pytest.mark.unit
+def test_identity_match_by_internal_id_alone() -> None:
+    incoming = item(item_id="same-id", guid="guid-incoming", content_hash="new")
+    stored = item(item_id="same-id", guid="guid-stored", content_hash="different")
+
+    decision = decide_dedupe(incoming, [stored])
+
+    assert decision.action is DedupeAction.UPDATE_PENDING
+    assert decision.matched_id == "same-id"
+
+
+@pytest.mark.unit
+def test_every_non_insert_decision_names_the_item_it_matched() -> None:
+    """matched_id is the audit trail's pointer; None would point nowhere."""
+    pending_twin = item(item_id="twin", source_id="src-other", content_hash="same")
+    published_twin = item(
+        item_id="pub",
+        source_id="src-other",
+        content_hash="same",
+        status=PublishStatus.PUBLISHED,
+    )
+    same_entry = item(item_id="same", guid="g-same", content_hash="changed")
+
+    decisions = [
+        decide_dedupe(item(content_hash="same"), [pending_twin]),
+        decide_dedupe(item(content_hash="same"), [published_twin]),
+        decide_dedupe(item(content_hash="same"), [item(content_hash="same")]),
+        decide_dedupe(
+            same_entry, [item(item_id="same", guid="g-same", content_hash="old")]
+        ),
+    ]
+
+    for decision in decisions:
+        assert decision.action is not DedupeAction.INSERT
+        assert decision.matched_id is not None, decision.reason
