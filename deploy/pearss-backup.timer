@@ -1,0 +1,20 @@
+# Pearss — daily backup timer.
+#
+# Daily, not weekly: the audit log rolls at 30 days (ADR 0016), so a weekly
+# cadence leaves almost no margin for a missed run before forensic data starts
+# expiring inside the retention window.
+#
+# Persistent=true runs the job immediately when the machine was off at the
+# scheduled time, so a laptop that slept through the window still gets its
+# backup.
+
+[Unit]
+Description=Pearss daily backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+AccuracySec=1h
+
+[Install]
+WantedBy=timers.target

@@ -45,6 +45,9 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_BACKFILL_LIMIT",
         "PEARSS_ENRICHMENT_CONCURRENCY",  # worker sweep concurrency
         "PEARSS_TICK_CONCURRENCY",  # scheduler tick concurrency
+        "PEARSS_BACKUP_DIR",  # backup destination (CLI, host-side)
+        "PEARSS_RESTORE_ARCHIVE",  # restore CLI plumbing
+        "PEARSS_RESTORE_TARGET",
     }
 )
 

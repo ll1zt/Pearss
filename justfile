@@ -156,14 +156,19 @@ install-unit:
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
     cp deploy/pearss.service ~/.config/systemd/user/pearss.service
+    cp deploy/pearss-backup.service ~/.config/systemd/user/pearss-backup.service
+    cp deploy/pearss-backup.timer ~/.config/systemd/user/pearss-backup.timer
     systemctl --user daemon-reload
     systemctl --user enable --now pearss.service
+    systemctl --user enable --now pearss-backup.timer
     echo "installed and started. check with: just service-status"
 
-# Stop and disable the service.
+# Stop and disable the service and its backup timer.
 uninstall-unit:
-    systemctl --user disable --now pearss.service || true
-    rm -f ~/.config/systemd/user/pearss.service
+    systemctl --user disable --now pearss.service pearss-backup.timer || true
+    rm -f ~/.config/systemd/user/pearss.service \
+        ~/.config/systemd/user/pearss-backup.service \
+        ~/.config/systemd/user/pearss-backup.timer
     systemctl --user daemon-reload
 
 # Keep the service running across logout and boot.
@@ -204,3 +209,25 @@ enrichment-backfill source_id limit="":
     export PEARSS_BACKFILL_SOURCE_ID="{{source_id}}"
     export PEARSS_BACKFILL_LIMIT="{{limit}}"
     exec uv run python -m app.enrichment_backfill
+
+
+# Back up the fact-source data (SQLite snapshot + file store) into PEARSS_BACKUP_DIR (default backups/).
+backup:
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    exec uv run python -m app.backup create
+
+# Restore an archive into an empty target directory and verify it.
+# Usage: just restore <archive> <target-dir>
+restore archive target_dir:
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    export PEARSS_RESTORE_ARCHIVE="{{archive}}"
+    export PEARSS_RESTORE_TARGET="{{target_dir}}"
+    exec uv run python -m app.backup restore

@@ -1,0 +1,21 @@
+# Pearss — backup job (one-shot; driven by pearss-backup.timer).
+#
+# Installed alongside pearss.service (see `just install-unit`). Runs the same
+# Nix environment and WorkingDirectory the service does, because the backup
+# resolves the SQLite path and the storage directory from .env relative to the
+# project directory — the same resolution the service uses.
+#
+# The audit log is a 30-day rolling fact source (ADR 0016), so the backup
+# period must stay well under 30 days: a longer gap loses forensic data inside
+# its own retention window. The timer runs daily.
+
+[Unit]
+Description=Pearss daily backup (SQLite snapshot + file store)
+Documentation=file://%h/dev/Pearss/docs/operations/runbook.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dev/Pearss
+ExecStart=/run/current-system/sw/bin/nix develop \
+    --command /run/current-system/sw/bin/just backup
+Nice=10
