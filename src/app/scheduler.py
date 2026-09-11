@@ -23,7 +23,6 @@ import contextlib
 import logging
 import os
 import secrets
-import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -260,9 +259,7 @@ def run_tick(
     writes from collection do not block readers.
     """
     moment = now or datetime.now(UTC)
-    raw = str(
-        os.environ.get("PEARSS_TICK_CONCURRENCY", "")
-    ).strip()
+    raw = str(os.environ.get("PEARSS_TICK_CONCURRENCY", "")).strip()
     if concurrency is None:
         try:
             concurrency = max(1, int(raw)) if raw else DEFAULT_TICK_CONCURRENCY
@@ -277,7 +274,6 @@ def run_tick(
     failed: list[str] = []
     skipped: list[str] = []
     due_count = 0
-    lock = threading.Lock()
 
     def evaluate_and_collect(source_id: str, policy_json: str) -> str | None:
         """One source's due-check + collection. Returns outcome category."""

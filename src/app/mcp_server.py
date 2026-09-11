@@ -747,9 +747,7 @@ def build_mcp_server(app: Any) -> MCPServer:
             "counts. Use it to see why an item is being held by the gate."
         )
     )
-    async def list_enrichments(
-        source_id: str, status: str = ""
-    ) -> dict[str, Any]:
+    async def list_enrichments(source_id: str, status: str = "") -> dict[str, Any]:
         params: dict[str, Any] = {}
         if status:
             params["status"] = status
