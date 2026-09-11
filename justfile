@@ -65,18 +65,27 @@ test:
 test-integration:
     just _test integration
 
-# OpenAPI diff and MCP tool snapshots. Stubs until the API surface exists.
+# Contract snapshots: the MCP tool surface and the OpenAPI document.
+# A diff means a client-visible surface changed; review it, then regenerate
+# with MCP_SNAPSHOT_UPDATE=1 / OPENAPI_SNAPSHOT_UPDATE=1 and commit the file.
 contract:
-    @echo "contract: MCP tool surface snapshot (tests/contract/mcp_tools.json)"
+    @echo "contract: MCP tool surface (tests/contract/mcp_tools.json)"
+    @echo "contract: OpenAPI document  (tests/contract/openapi.json)"
     @uv run pytest -m contract -q
-    @echo "contract: OpenAPI diff not yet wired — oasdiff is not available in nixpkgs"
-    @echo "          and no breaking-change baseline exists yet. Tracked as a gap;"
-    @echo "          the MCP snapshot above is the contract check that does run."
 
-# Full Compose end-to-end run. Requires Docker.
-e2e:
-    @echo "e2e: not yet wired — needs compose.yaml and the P1 service images"
-    @just _test e2e
+# The end-to-end loop: one process, real server + MCP client + fixture origin.
+# Needs no Docker; see docs/guides/testing.md for the topology.
+test-e2e:
+    just _test e2e
+
+# Mutation testing over src/core. Slow on purpose (minutes, not seconds), so
+# it is a tool you run when touching core or reviewing assertion strength,
+# not a per-commit gate. `mutmut results` lists survivors; `mutmut show <id>`
+# prints the mutant. Survivors are either missing assertions (add a test) or
+# equivalent mutants (record and move on).
+mutate:
+    uv run mutmut run
+    uv run mutmut results
 
 # ---------------------------------------------------------------------------
 # Database
@@ -190,7 +199,7 @@ service-restart:
 # ---------------------------------------------------------------------------
 
 # Everything CI runs, in the order architecture section 7.6 prescribes.
-ci: lint test test-integration migrate-check contract
+ci: lint test test-integration test-e2e migrate-check contract
 
 # The exact command CI executes, including the Nix environment entry point.
 ci-nix:

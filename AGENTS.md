@@ -60,11 +60,12 @@ just test             # unit + fixture
 just test-integration # SQLite / 临时服务集成测试
 just lint             # ruff + mypy + import-linter
 just fix              # 自动修复可修复的 lint 与格式问题
-just contract         # OpenAPI diff + MCP snapshot（尚未接线）
+just contract         # MCP 工具面 + OpenAPI 双 snapshot
 just migrate          # Alembic upgrade head
 just migrate-check    # upgrade / downgrade / upgrade 往返
 just revision "msg"   # 生成新 migration
-just e2e              # Compose 全链路（尚未接线）
+just test-e2e         # 单进程全链路（真服务 + MCP 客户端 + fixture origin）
+just mutate           # core 变异测试（mutmut，非每提交门禁）
 just ci               # 完整门禁
 just ci-nix           # CI 实际执行的命令，含 nix flake check
 ```

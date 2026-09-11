@@ -809,60 +809,6 @@ async def test_unchecking_the_confirmation_declines(mcp_url: str) -> None:
     assert "src-1" in [row["id"] for row in still["data"]]
 
 
-# --------------------------------------------------------------------------
-# Tool-surface snapshot
-# --------------------------------------------------------------------------
-
-SNAPSHOT_PATH = REPO_ROOT / "tests" / "contract" / "mcp_tools.json"
-
-
-def _surface(tools: list[Any]) -> dict[str, Any]:
-    """The parts of the surface a client depends on.
-
-    Names, descriptions and input schemas only. Deliberately excluding the
-    server version and anything time-dependent, which would churn the snapshot
-    on unrelated releases and train reviewers to ignore its diffs.
-    """
-    return {
-        tool.name: {
-            "description": tool.description,
-            "input_schema": tool.input_schema,
-        }
-        for tool in sorted(tools, key=lambda item: item.name)
-    }
-
-
-@pytest.mark.contract
-@pytest.mark.asyncio
-async def test_tool_surface_matches_the_snapshot(mcp_url: str) -> None:
-    """docs/api/mcp-tool-guide.md section 6 and architecture section 7.1.
-
-    An agent that has adapted to this surface sees behaviour drift when it
-    changes quietly, so a change must be a visible diff in a committed file.
-    Set MCP_SNAPSHOT_UPDATE=1 to rewrite the snapshot after reviewing the
-    change, never to make the test pass.
-    """
-    async with mcp_session(mcp_url) as session:
-        current = _surface((await session.list_tools()).tools)
-
-    if os.environ.get("MCP_SNAPSHOT_UPDATE") == "1":
-        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SNAPSHOT_PATH.write_text(
-            json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        pytest.skip("snapshot rewritten; review the diff and commit it")
-
-    assert SNAPSHOT_PATH.exists(), (
-        "tests/contract/mcp_tools.json is missing; run "
-        "MCP_SNAPSHOT_UPDATE=1 just contract to create it"
-    )
-    expected = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
-    assert current == expected, (
-        "the MCP tool surface changed; review the difference, then run "
-        "MCP_SNAPSHOT_UPDATE=1 just contract and commit the new snapshot"
-    )
-
-
 @pytest.mark.asyncio
 async def test_add_source_infers_web_type_for_a_collector_url(mcp_url: str) -> None:
     """A URL a non-rss collector claims defaults to type=web, not rss.

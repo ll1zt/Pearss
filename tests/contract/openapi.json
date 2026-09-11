@@ -1,0 +1,2385 @@
+{
+  "components": {
+    "schemas": {
+      "Body_client_login_api_greader_php_accounts_ClientLogin_post": {
+        "properties": {
+          "Email": {
+            "default": "",
+            "title": "Email",
+            "type": "string"
+          },
+          "Passwd": {
+            "default": "",
+            "title": "Passwd",
+            "type": "string"
+          }
+        },
+        "title": "Body_client_login_api_greader_php_accounts_ClientLogin_post",
+        "type": "object"
+      },
+      "Body_edit_tag_api_greader_php_reader_api_0_edit_tag_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "a": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "A",
+            "type": "array"
+          },
+          "i": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "I",
+            "type": "array"
+          },
+          "r": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "R",
+            "type": "array"
+          }
+        },
+        "title": "Body_edit_tag_api_greader_php_reader_api_0_edit_tag_post",
+        "type": "object"
+      },
+      "Body_mark_all_as_read_api_greader_php_reader_api_0_mark_all_as_read_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "s": {
+            "default": "user/-/state/com.google/reading-list",
+            "title": "S",
+            "type": "string"
+          },
+          "ts": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ts"
+          }
+        },
+        "title": "Body_mark_all_as_read_api_greader_php_reader_api_0_mark_all_as_read_post",
+        "type": "object"
+      },
+      "Body_stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post": {
+        "properties": {
+          "i": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "I",
+            "type": "array"
+          }
+        },
+        "title": "Body_stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "ItemDraft": {
+        "description": "The universal pre-normalisation shape every ingest path produces.\n\nRSS, web collectors and the future ingest API all converge here before\nnormalisation, which is what keeps one dedupe rule and one publish gate\ncovering every source.",
+        "properties": {
+          "canonical_url": {
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "derivation_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Derivation Note"
+          },
+          "external_id": {
+            "title": "External Id",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Metadata",
+            "type": "object"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "raw_fetch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Fetch Id"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "external_id",
+          "title",
+          "canonical_url",
+          "published_at",
+          "content"
+        ],
+        "title": "ItemDraft",
+        "type": "object"
+      },
+      "ItemSort": {
+        "description": "The sortable orders, whitelisted rather than free-form.\n\nAn arbitrary column name here would either fail at the database or, if\ninterpolated, become an injection point — SQL identifiers cannot be passed\nas query parameters.",
+        "enum": [
+          "-published_at",
+          "published_at"
+        ],
+        "title": "ItemSort",
+        "type": "string"
+      },
+      "PublishStatus": {
+        "description": "Lifecycle of an Item with respect to external visibility (C5).\n\nThe gate is the point: because NetNewsWire caches whatever it fetched\nfirst, an item must not appear in a feed until every processor in its\nchain has succeeded. `published` is terminal for the item's content.",
+        "enum": [
+          "pending",
+          "ready",
+          "published"
+        ],
+        "title": "PublishStatus",
+        "type": "string"
+      },
+      "SourceCreate": {
+        "description": "Body for creating a source.\n\n`pipeline_chain` + `target_lang` enable the processing chain at creation\ntime — the correct ordering: first source with chain, then first fetch,\nso no item is ever cached unprocessed.",
+        "properties": {
+          "parser_plugin_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parser Plugin Id"
+          },
+          "pipeline_chain": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Chain"
+          },
+          "schedule_policy": {
+            "additionalProperties": true,
+            "title": "Schedule Policy",
+            "type": "object"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Lang"
+          },
+          "trust_level": {
+            "$ref": "#/components/schemas/TrustLevel",
+            "default": "standard"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SourceType",
+            "default": "rss"
+          },
+          "url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "schedule_policy"
+        ],
+        "title": "SourceCreate",
+        "type": "object"
+      },
+      "SourcePatch": {
+        "description": "Body for updating a source. Absent fields are left alone.\n\n`pipeline_chain` is a JSON list of {plugin_id, kind, lang?, required?}\nspecs the source's items must complete before the gate opens; an explicit\n`null` clears the chain (items go ready straight after normalisation).\nAbsent vs explicit-null is decided by `model_fields_set`, the pydantic v2\nway to give PATCH bodies three-state fields.",
+        "properties": {
+          "pipeline_chain": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Chain"
+          },
+          "schedule_policy": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Policy"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Lang"
+          },
+          "trust_level": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrustLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "SourcePatch",
+        "type": "object"
+      },
+      "SourceStatus": {
+        "description": "Lifecycle of a content source.",
+        "enum": [
+          "active",
+          "paused",
+          "disabled",
+          "deleted"
+        ],
+        "title": "SourceStatus",
+        "type": "string"
+      },
+      "SourceType": {
+        "description": "How a source is acquired.",
+        "enum": [
+          "rss",
+          "web",
+          "agent"
+        ],
+        "title": "SourceType",
+        "type": "string"
+      },
+      "TrustLevel": {
+        "description": "Recorded operator intent about a source.\n\nThe hard rule, from docs/domain/data-model.md: this never makes fetched\ncontent trusted. A `trusted` source's body is still untrusted input —\nAGENTS.md is explicit that external pages and RSS bodies must never be\ntreated as instructions, and a per-source flag that silently flipped that\nwould be the most dangerous possible reading of the field.\n\nNothing currently branches on this value. It is stored and surfaced so the\ndistinction exists in the data before any behaviour depends on it; giving\nit effects requires an ADR, because the only behaviour it could plausibly\nchange is a security default.",
+        "enum": [
+          "standard",
+          "trusted",
+          "restricted"
+        ],
+        "title": "TrustLevel",
+        "type": "string"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Single-user, agent-first RSS+ system.",
+    "title": "Pearss",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/greader.php/accounts/ClientLogin": {
+      "post": {
+        "description": "Exchange credentials for an auth token.\n\nReturns the auth token in the three-field form clients expect. Never\nreveals whether the username or the password was the wrong part.",
+        "operationId": "client_login_api_greader_php_accounts_ClientLogin_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "output",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Output",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_client_login_api_greader_php_accounts_ClientLogin_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Client Login",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/edit-tag": {
+      "post": {
+        "description": "Mark items read/unread and starred/unstarred.\n\nIdempotent by construction: the same request replayed produces the same\nstate, because every write is last-write-wins on a fixed pair of flags.",
+        "operationId": "edit_tag_api_greader_php_reader_api_0_edit_tag_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_edit_tag_api_greader_php_reader_api_0_edit_tag_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Tag",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/mark-all-as-read": {
+      "post": {
+        "description": "Mark everything in a stream read up to a timestamp.",
+        "operationId": "mark_all_as_read_api_greader_php_reader_api_0_mark_all_as_read_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_mark_all_as_read_api_greader_php_reader_api_0_mark_all_as_read_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mark All As Read",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/stream/items/contents": {
+      "post": {
+        "description": "Content for specific items.\n\nAuthenticated like a read, not like a write. This endpoint changes nothing\n-- it is POST only because the item ids are too numerous for a query\nstring -- and NetNewsWire sends it with the Authorization header and no\nform `T`. Requiring `T` here returned 401 to every real client request,\nwhich surfaced as a populated article list whose bodies were all blank.",
+        "operationId": "stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stream Items Contents Api Greader Php Reader Api 0 Stream Items Contents Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Items Contents",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/stream/items/ids": {
+      "get": {
+        "description": "Item ids for a stream.\n\nSupports `xt` to exclude the read state, which is how a client fetches\nonly unread items. Pending items are always excluded: the gate applies to\nthe Reader API just as it does to RSS.",
+        "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "s",
+            "required": false,
+            "schema": {
+              "default": "user/-/state/com.google/reading-list",
+              "title": "S",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "n",
+            "required": false,
+            "schema": {
+              "default": 10000,
+              "title": "N",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "xt",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Xt",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "c",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "C"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stream Items Ids Api Greader Php Reader Api 0 Stream Items Ids Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Items Ids",
+        "tags": [
+          "reader-api"
+        ]
+      },
+      "post": {
+        "description": "Item ids for a stream.\n\nSupports `xt` to exclude the read state, which is how a client fetches\nonly unread items. Pending items are always excluded: the gate applies to\nthe Reader API just as it does to RSS.",
+        "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_post",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "s",
+            "required": false,
+            "schema": {
+              "default": "user/-/state/com.google/reading-list",
+              "title": "S",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "n",
+            "required": false,
+            "schema": {
+              "default": 10000,
+              "title": "N",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "xt",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Xt",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "c",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "C"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stream Items Ids Api Greader Php Reader Api 0 Stream Items Ids Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream Items Ids",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/subscription/list": {
+      "get": {
+        "operationId": "subscription_list_api_greader_php_reader_api_0_subscription_list_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Subscription List Api Greader Php Reader Api 0 Subscription List Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Subscription List",
+        "tags": [
+          "reader-api"
+        ]
+      },
+      "post": {
+        "operationId": "subscription_list_api_greader_php_reader_api_0_subscription_list_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Subscription List Api Greader Php Reader Api 0 Subscription List Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Subscription List",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/tag/list": {
+      "get": {
+        "description": "Starred state and labels.\n\nOnly the starred state exists today; labels arrive with FeedOut grouping.",
+        "operationId": "tag_list_api_greader_php_reader_api_0_tag_list_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Tag List Api Greader Php Reader Api 0 Tag List Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Tag List",
+        "tags": [
+          "reader-api"
+        ]
+      },
+      "post": {
+        "description": "Starred state and labels.\n\nOnly the starred state exists today; labels arrive with FeedOut grouping.",
+        "operationId": "tag_list_api_greader_php_reader_api_0_tag_list_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "items": {
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "title": "Response Tag List Api Greader Php Reader Api 0 Tag List Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Tag List",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/token": {
+      "get": {
+        "description": "Return the caller's own token, used by clients as an edit token.",
+        "operationId": "get_token_api_greader_php_reader_api_0_token_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Token",
+        "tags": [
+          "reader-api"
+        ]
+      },
+      "post": {
+        "description": "Return the caller's own token, used by clients as an edit token.",
+        "operationId": "get_token_api_greader_php_reader_api_0_token_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Token",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/user-info": {
+      "get": {
+        "operationId": "user_info_api_greader_php_reader_api_0_user_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response User Info Api Greader Php Reader Api 0 User Info Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "User Info",
+        "tags": [
+          "reader-api"
+        ]
+      },
+      "post": {
+        "operationId": "user_info_api_greader_php_reader_api_0_user_info_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response User Info Api Greader Php Reader Api 0 User Info Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "User Info",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "description": "Liveness probe with no dependency on the database.",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Healthz Healthz Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Healthz",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/internal/items": {
+      "post": {
+        "description": "Normalise and store a draft.\n\nWrite-scoped: this mutates the corpus, so the read-only token must not\nbe able to call it. The audit middleware records the request; the\nprincipal is attached to the scope so the record names who did it.",
+        "operationId": "ingest_draft_internal_items_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ItemDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Ingest Draft Internal Items Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Ingest Draft",
+        "tags": [
+          "internal"
+        ]
+      }
+    },
+    "/v1/items": {
+      "get": {
+        "description": "List collected items, newest first by default.\n\nBodies are not included at any `fields` setting; fetch them from\n`/v1/items/{id}/body`. Pending items never appear.",
+        "operationId": "searchItems",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque cursor from a previous response.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "description": "Sort order. Only these two are supported.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ItemSort",
+              "default": "-published_at",
+              "description": "Sort order. Only these two are supported."
+            }
+          },
+          {
+            "description": "Comma-separated subset of: id, guid, source_id, title, url, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Comma-separated subset of: id, guid, source_id, title, url, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
+              "title": "Fields"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Id"
+            }
+          },
+          {
+            "description": "Narrow within what the gate allows. `pending` can never be returned: it is excluded before this filter applies.",
+            "in": "query",
+            "name": "publish_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PublishStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Narrow within what the gate allows. `pending` can never be returned: it is excluded before this filter applies.",
+              "title": "Publish Status"
+            }
+          },
+          {
+            "description": "Substring match on the title.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Substring match on the title.",
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Searchitems",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Items",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/items/{item_id}": {
+      "get": {
+        "description": "One item, without its body.",
+        "operationId": "getItem",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fields"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getitem",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Item",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/items/{item_id}/body": {
+      "get": {
+        "description": "The item's body, as its own request.\n\nSeparate by design: docs/api/style-guide.md forbids inlining HTML bodies in\nlist responses, and the architecture routes large content through an\nexplicit reference so a caller pays for it only when it asks.\n\nServing a body is an observable first publication (ADR 0016: with the\npublic RSS render removed, this and the Reader API are the paths where a\nclient actually sees content), so the item's content is frozen here — the\nimmutability guarantee exists because clients cache what they were shown.",
+        "operationId": "getItemBody",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Item Body",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/jobs": {
+      "get": {
+        "description": "Declared jobs, each with its source and last run summary.\n\nJobs are the durable \"collect this source\" declarations. Paging is by\noffset rather than keyset because the set changes only when a source is\nadded or deleted, and the order is by id, so a page cannot shift under a\nreader the way a newest-first item list can.",
+        "operationId": "listJobs",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listjobs",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Jobs",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/jobs/{job_id}/runs": {
+      "get": {
+        "description": "Recent runs for one job, newest first.\n\n`error_class` is present only on failures, per the JobRun state machine,\nwhich is what makes a cluster of `structure_changed` visible as the signal\nthat a source's page shape moved.",
+        "operationId": "listJobRuns",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listjobruns",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Job Runs",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/plugins": {
+      "get": {
+        "description": "Every registered collector with its manifest and lifecycle status.",
+        "operationId": "listPlugins",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listplugins",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Plugins",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/plugins/{plugin_id}": {
+      "delete": {
+        "operationId": "uninstallPlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Uninstall Plugin",
+        "tags": [
+          "plugins"
+        ]
+      },
+      "get": {
+        "operationId": "getPlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getplugin",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/plugins/{plugin_id}:disable": {
+      "post": {
+        "operationId": "disablePlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Disable Plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/plugins/{plugin_id}:enable": {
+      "post": {
+        "operationId": "enablePlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Enable Plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/plugins/{plugin_id}:import": {
+      "post": {
+        "operationId": "importPlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/plugins/{plugin_id}:reload": {
+      "post": {
+        "operationId": "reloadPlugin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plugin_id",
+            "required": true,
+            "schema": {
+              "title": "Plugin Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reload Plugin",
+        "tags": [
+          "plugins"
+        ]
+      }
+    },
+    "/v1/sources": {
+      "get": {
+        "description": "List sources, oldest page first by creation order.\n\nOffset paging, unlike the items endpoint's keyset cursor. Sources are\nbounded (an operator's subscriptions, tens not millions) and new ones are\nappended at the end of this ordering, so a row arriving mid-walk shifts\nnothing already read -- the failure offset paging is famous for needs\ninsertion *ahead* of the cursor, which is what items do and sources do not.\nThe cursor is opaque to clients either way, so switching to keyset later\nwould not be a breaking change.",
+        "operationId": "listSources",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listsources",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Sources",
+        "tags": [
+          "core-api"
+        ]
+      },
+      "post": {
+        "description": "Add a source to collect.\n\nReturns the existing source when this URL is already known, rather than an\nerror: the operation is \"make sure this is subscribed\", and a retry after a\ndropped response must not fail.",
+        "operationId": "addSource",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}": {
+      "delete": {
+        "description": "Soft-delete a source.\n\nSoft, because docs/domain/data-model.md forbids deleting a source's items:\nthey are published, and their GUIDs are frozen. Removing the source would\norphan content a client still has cached.",
+        "operationId": "deleteSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete Source",
+        "tags": [
+          "core-api"
+        ]
+      },
+      "get": {
+        "operationId": "getSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getsource",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Source",
+        "tags": [
+          "core-api"
+        ]
+      },
+      "patch": {
+        "description": "Change a source's schedule policy, status or trust level.",
+        "operationId": "updateSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourcePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Update Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}/enrichments": {
+      "get": {
+        "description": "Processor-chain rows for one source: the agent's visibility into\nwhat the chain is doing and why an item is being held.",
+        "operationId": "listEnrichments",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listenrichments",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List Source Enrichments",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:backfill-chain": {
+      "post": {
+        "description": "Queue processor products for items stored before the chain was enabled.\n\nA write (it mutates item_enrichment and spends provider budget), so it is\nauthenticated, idempotent and audited like every other write.",
+        "operationId": "backfillChain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Backfill Source Chain",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:retry-enrichments": {
+      "post": {
+        "description": "Requeue failed enrichment rows for one source.\n\nThis is the manual/agent re-trigger the retry policy stops at: rows that\nexhausted their attempts, or failed non-transiently (auth after a key\nrotation, parse on a content shape since fixed), come back as queued and\nthe worker charges the provider again. A write for that reason.",
+        "operationId": "retryEnrichments",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Retry Source Enrichments",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:trigger": {
+      "post": {
+        "description": "Collect a source now.\n\nRuns in the request rather than returning 202 with a job id: P1 has no\nworker, and the handler is `def` so the event loop stays free while it\nruns. The scheduler work replaces this with a durable job; until then a\npromise that could be lost to a restart would be worse than a slower\nanswer that is true.",
+        "operationId": "triggerSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Trigger Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/system/snapshot": {
+      "get": {
+        "description": "Compact system state, sized to be pasted into a conversation.\n\nReports the decay signals architecture section 7.7 names — error\ndistribution, the pending backlog, recent success rate — rather than a\nwall of counters, because the point is noticing that something is going\nwrong, not counting rows.",
+        "operationId": "getSystemSnapshot",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getsystemsnapshot",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Snapshot",
+        "tags": [
+          "core-api"
+        ]
+      }
+    }
+  }
+}

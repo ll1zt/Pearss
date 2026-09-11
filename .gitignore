@@ -54,3 +54,9 @@ TODO.md
 *.swp
 .DS_Store
 backups/
+
+# --- Mutation testing ---
+mutants/
+.mutmut-cache/
+.hypothesis/
+.coverage

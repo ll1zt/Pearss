@@ -39,8 +39,8 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 部分接线的命令，运行会说明缺了什么而不是假装通过：
 
-- `just contract`：MCP 工具面 snapshot 已接；**OpenAPI diff 未接**（nixpkgs 无 `oasdiff`，且尚无破坏式变更基线）
-- `just e2e`：**未接**，需要 `compose.yaml` 与镜像
+- `just contract`：MCP 工具面 snapshot + OpenAPI 全文档 snapshot，均已接（OpenAPI 用 snapshot 手法替代 nixpkgs 缺失的 oasdiff）
+- `just test-e2e`：单进程全链路已接（真 uvicorn + MCP 客户端 + 本地 fixture origin）；Compose 多容器拓扑暂不需要
 - `/v1/plugins` 的 `:import`/`:uninstall`/`:reload`：**409 占位**，等第三方 loader（独立 ADR）
 
 其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
@@ -103,11 +103,12 @@ just test             # 单元测试与 fixture 回归测试
 just test-integration # SQLite / 临时服务集成测试
 just lint             # ruff、mypy、import-linter
 just fix              # 自动修复可修复的 lint 与格式问题
-just contract         # MCP 工具面 snapshot；OpenAPI diff 未接线
+just contract         # MCP 工具面 + OpenAPI 双 snapshot
 just migrate          # alembic upgrade head
 just migrate-check    # 验证 upgrade / downgrade / upgrade 往返
 just revision "msg"   # 生成新 migration
-just e2e              # Compose 全链路（尚未接线：无 compose.yaml）
+just test-e2e         # 单进程全链路
+just mutate           # core 变异测试（mutmut）
 just ci               # 本地完整质量门禁
 just ci-nix           # CI 实际执行的命令，含 Nix 环境入口
 
