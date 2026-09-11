@@ -522,11 +522,21 @@ async def test_body_endpoint_serves_stored_content(
         session.commit()
         stored = get_item(session, "item-0000")
         assert stored is not None
+        # Seeded as 'ready'; serving the body is what promotes it.
+        assert stored.publish_status == "ready"
 
     response = await client.get("/v1/items/item-0000/body")
     assert response.status_code == 200
     assert response.text == "<p>Real body text.</p>"
     assert "text/html" in response.headers["content-type"]
+
+    # A successful body read freezes the item: the body is now the artifact a
+    # client can cache, so later collection must not overwrite it. Losing this
+    # silently would let a re-fetch change content under a cached URL.
+    with app.state.session_factory() as session:
+        after = get_item(session, "item-0000")
+        assert after is not None
+        assert after.publish_status == "published"
 
 
 @pytest.mark.integration

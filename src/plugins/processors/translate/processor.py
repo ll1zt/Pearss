@@ -163,9 +163,7 @@ def process(
     translated: list[str] = []
     for chunk in chunks:
         translated.append(
-            _translate_one(
-                chunk, language=language, base=base, key=key, models=models
-            )
+            _translate_one(chunk, language=language, base=base, key=key, models=models)
         )
     paragraphs = "".join(
         f"<p>{html.escape(p)}</p>"

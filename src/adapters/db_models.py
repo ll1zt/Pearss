@@ -507,9 +507,7 @@ class ItemEnrichment(Base):
         sa.String(32), nullable=False
     )
     kind: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(32), nullable=False)
-    lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.String(16), nullable=True
-    )
+    lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.String(16), nullable=True)
     payload_ref: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.Text, nullable=True
     )

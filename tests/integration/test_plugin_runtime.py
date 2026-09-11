@@ -9,6 +9,7 @@ dying and being respawned.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -144,7 +145,7 @@ def test_a_child_that_freezes_mid_line_is_not_waited_on_forever() -> None:
     child = PluginChild.__new__(PluginChild)
     child._collector_id = "frozen"
     child._env = None
-    child._limits = None
+    child._limits = None  # type: ignore[assignment]  # unused on this path
     child._call_timeout = 1.0
     child._startup_timeout = 1.0
     child._http_transport = None
@@ -183,7 +184,13 @@ def test_the_child_fetch_branch_forwards_conditional_params_verbatim() -> None:
 
     class _StubCollector:
         @staticmethod
-        def fetch(url, *, client, source_id, conditional=None):
+        def fetch(
+            url: str,
+            *,
+            client: Any,
+            source_id: str,
+            conditional: Any = None,
+        ) -> RawPayload:
             seen.append(conditional)
             return RawPayload(
                 url=url, status_code=200, body=b"<rss/>", source_id=source_id

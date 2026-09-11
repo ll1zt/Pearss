@@ -27,11 +27,11 @@ from adapters.repository import (
     create_job_run,
     ensure_collect_job,
     finish_job_run,
-    job_for_source,
     last_collect_at,
     prune_audit_log,
     update_gaps_for_source,
 )
+from adapters.timestamps import fixed_width_utc
 from app.scheduler import TickReport, collect_now, run_tick
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
@@ -320,9 +320,40 @@ def test_consecutive_failures_stop_at_a_success(
 def test_last_collect_at_ignores_unfinished_runs(
     session_factory: sessionmaker[Session],
 ) -> None:
+    """An unfinished run is not evidence that a collection happened.
+
+    Seeding a real queued/running row is the whole test: asserting None on an
+    empty table cannot distinguish "filters on finished_at" from "returns
+    None unconditionally".
+    """
     with session_factory() as session:
         add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
-        assert last_collect_at(session, job_id="job-s1") is None
+        job_id = ensure_collect_job(
+            session,
+            source_id="s1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        # A run that was claimed but never finished: finished_at stays null.
+        create_job_run(
+            session, run_id="r-open", job_id=job_id, correlation_id="c1", at="x"
+        )
+        claim_job_run(session, run_id="r-open", at="2026-01-01T00:00:01.000000Z")
+        session.commit()
+
+        assert last_collect_at(session, job_id=job_id) is None
+
+        # Finishing it makes the same job visible, proving the query looks at
+        # finished runs rather than filtering the job out some other way.
+        finish_job_run(
+            session,
+            run_id="r-open",
+            event=JobRunEvent.SUCCEED,
+            correlation_id="c1",
+            at="2026-01-01T00:00:02.000000Z",
+        )
+        session.commit()
+        assert last_collect_at(session, job_id=job_id) is not None
 
 
 # --------------------------------------------------------------------------
@@ -519,11 +550,27 @@ def test_tick_report_counts_add_up(
 def test_collect_now_returns_a_cancelled_run_when_claim_loses(
     session_factory: sessionmaker[Session], fake_feed: httpx.Client
 ) -> None:
-    """A scheduler that loses the race must do no work, not duplicate it."""
+    """A scheduler that loses the race must do no work, not duplicate it.
+
+    The competing run has to exist before `collect_now` is called, or the
+    claim never loses and the CANCELLED branch is never entered -- which is
+    exactly how this test used to pass while asserting the happy path.
+    """
     with session_factory() as session:
         add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
-        job = job_for_source(session, "s1")
-        assert job is None, "the job is created by collect_now"
+        job_id = ensure_collect_job(
+            session,
+            source_id="s1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        # A live run for the same job: the unique partial index refuses a
+        # second active run, so the caller's claim stands down.
+        create_job_run(
+            session, run_id="r-holder", job_id=job_id, correlation_id="c-holder", at="x"
+        )
+        claim_job_run(session, run_id="r-holder", at="2026-01-01T00:00:01.000000Z")
+        session.commit()
 
     with session_factory() as session:
         status, result = collect_now(
@@ -534,8 +581,13 @@ def test_collect_now_returns_a_cancelled_run_when_claim_loses(
             now=NOW,
         )
         session.commit()
-    assert status is JobRunStatus.SUCCEEDED
-    assert result is not None and result.inserted == 1
+
+    assert status is JobRunStatus.CANCELLED
+    assert result is None, "a cancelled run must not have collected anything"
+
+    with session_factory() as session:
+        inserted = session.execute(sa.text("select count(*) from item")).scalar()
+    assert inserted == 0, "the losing caller must not have fetched or stored"
 
 
 @pytest.mark.integration
@@ -612,37 +664,62 @@ async def test_overlapping_ticks_are_serialised(
     asyncio.to_thread, which invokes a plain callable in a worker thread. An
     async stand-in would only produce a coroutine that is never awaited, and
     the test would pass without ever entering the lock.
+
+    Serialisation is proven with an event gate rather than a sleep window:
+    the first tick blocks until released, so a second tick has every
+    opportunity to overlap if the lock were absent. A timing-based version
+    ("sleep 50ms, hope four coroutines overlap") is flaky on a loaded runner
+    and can pass with no contention at all.
     """
     import asyncio
     import threading
-    import time
 
     import app.scheduler as scheduler_module
     from app.scheduler import Scheduler
 
-    lock = threading.Lock()
-    inside = 0
+    entered = threading.Event()
+    release = threading.Event()
+    concurrent = threading.Semaphore(0)
+    in_flight = 0
     peak = 0
+    counter_lock = threading.Lock()
+    calls = 0
 
-    def slow_run_tick(*args: object, **kwargs: object) -> TickReport:
-        nonlocal inside, peak
-        with lock:
-            inside += 1
-            peak = max(peak, inside)
-        time.sleep(0.05)
-        with lock:
-            inside -= 1
+    def gated_run_tick(*args: object, **kwargs: object) -> TickReport:
+        nonlocal in_flight, peak, calls
+        with counter_lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+            calls += 1
+            first = calls == 1
+        if first:
+            entered.set()
+            # Hold the tick open until the test has launched its rivals.
+            release.wait(timeout=10)
+        else:
+            concurrent.release()
+        with counter_lock:
+            in_flight -= 1
         return TickReport(considered=0, due=0, collected=[], failed=[], skipped=[])
 
     scheduler = Scheduler(session_factory, client=fake_feed, tick_seconds=0.01)
     original = scheduler_module.run_tick
-    scheduler_module.run_tick = slow_run_tick
+    scheduler_module.run_tick = gated_run_tick
     try:
-        await asyncio.gather(*(scheduler.tick_once() for _ in range(4)))
+        first = asyncio.create_task(scheduler.tick_once())
+        # Wait until the first tick genuinely holds the lock.
+        assert await asyncio.to_thread(entered.wait, 10), "the first tick never ran"
+        rivals = [asyncio.create_task(scheduler.tick_once()) for _ in range(3)]
+        # Give the rivals every chance to enter while the first is blocked.
+        overlapped = await asyncio.to_thread(concurrent.acquire, True, 0.5)
+        assert not overlapped, "a second tick entered while the first held the lock"
+        release.set()
+        await asyncio.gather(first, *rivals)
     finally:
         scheduler_module.run_tick = original
 
     assert peak == 1, f"ticks overlapped: {peak} ran at once"
+    assert calls == 4, f"every queued tick must still run, got {calls}"
 
 
 @pytest.mark.integration
@@ -733,11 +810,15 @@ def test_a_live_run_is_not_reaped(
     """Only runs older than the reap window are touched.
 
     Reaping a run that is genuinely in flight would mark live work failed.
+    The cutoff is a fixed instant and the run is claimed at a fixed instant
+    after it, so the boundary is deterministic -- a wall-clock version would
+    flip if the machine stalled between the claim and the reap.
     """
     from datetime import timedelta
 
     from adapters.repository import reap_orphaned_runs
 
+    cutoff = datetime(2026, 6, 1, 12, 0, 0, tzinfo=UTC)
     with session_factory() as session:
         add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
         job_id = ensure_collect_job(
@@ -749,23 +830,45 @@ def test_a_live_run_is_not_reaped(
         create_job_run(
             session, run_id="live", job_id=job_id, correlation_id="c1", at="x"
         )
-        # Claimed just now, so it is inside the reap window.
+        # Claimed one second after the cutoff: inside the reap window.
         claim_job_run(
-            session,
-            run_id="live",
-            at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+            session, run_id="live", at=fixed_width_utc(cutoff + timedelta(seconds=1))
         )
         session.commit()
 
-        reaped = reap_orphaned_runs(
-            session, older_than=datetime.now(UTC) - timedelta(seconds=30)
-        )
+        reaped = reap_orphaned_runs(session, older_than=cutoff)
         session.commit()
         assert reaped == 0
         status = session.execute(
             sa.text("select status from job_run where id='live'")
         ).scalar()
     assert status == "running"
+
+    # The complement, at the same fixed instant, proves the window is enforced
+    # and not merely "never reaps".
+    with session_factory() as session:
+        add_source(session, source_id="s2", policy={"type": "fixed", "interval": "30m"})
+        job_id = ensure_collect_job(
+            session,
+            source_id="s2",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        create_job_run(
+            session, run_id="stale", job_id=job_id, correlation_id="c2", at="x"
+        )
+        # Claimed one second *before* the cutoff: outside the window.
+        claim_job_run(
+            session, run_id="stale", at=fixed_width_utc(cutoff - timedelta(seconds=1))
+        )
+        session.commit()
+        reaped = reap_orphaned_runs(session, older_than=cutoff)
+        session.commit()
+        assert reaped == 1
+        status = session.execute(
+            sa.text("select status from job_run where id='stale'")
+        ).scalar()
+    assert status == "timed_out"
 
 
 @pytest.mark.integration
@@ -810,7 +913,9 @@ def test_audit_retention_prunes_only_old_rows(
 
 @pytest.mark.integration
 def test_an_escaped_exception_closes_the_run_and_does_not_wedge_the_source(
-    session_factory: sessionmaker[Session], fake_feed: httpx.Client, monkeypatch
+    session_factory: sessionmaker[Session],
+    fake_feed: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A raise inside the collection path must leave no open run behind.
 

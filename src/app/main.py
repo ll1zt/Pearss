@@ -208,6 +208,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         finally:
             await scheduler.stop()
             await worker.stop()
+            # Sandboxed children are spawned lazily and hold real processes
+            # with pipes; without this they outlive a graceful shutdown and
+            # are only reaped when the OS tears the host down. Stopped before
+            # the client closes because a live child may still be mid-call.
+            for_each_sandboxed_collector(lambda name, child: child.stop())
             client.close()
 
 

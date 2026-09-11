@@ -32,9 +32,7 @@ def upgrade() -> None:
     op.add_column(
         "item_enrichment", sa.Column("next_attempt_at", sa.Text(), nullable=True)
     )
-    op.add_column(
-        "item_enrichment", sa.Column("model", sa.String(64), nullable=True)
-    )
+    op.add_column("item_enrichment", sa.Column("model", sa.String(64), nullable=True))
 
 
 def downgrade() -> None:

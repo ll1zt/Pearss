@@ -152,7 +152,9 @@ def test_segmentation_preserves_every_character() -> None:
     text = "段落一。\n\n" + "b" * 30000 + "\n\n段落三。"
     chunks = _segment(text)
     assert len(chunks) > 1
+
     def strip_all(s: str) -> str:
         return "".join(s.split())
+
     assert strip_all("\n\n".join(chunks)) == strip_all(text)
     assert all(len(chunk) <= MAX_CHARS for chunk in chunks)

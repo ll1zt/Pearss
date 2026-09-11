@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -198,7 +199,9 @@ def test_a_transport_failure_stays_network_and_keeps_the_child(
     collector_registry._registry()
     registration = collector_registry.by_name("zhihu")
     assert registration is not None
-    registration.collector.start()
+    # `start` is on the sandboxed proxy, not the `Collector` Protocol the
+    # registry declares; the tests drive the real child directly.
+    cast("Any", registration.collector).start()
     child = collector_registry._SANDBOX_CHILDREN["zhihu"]
     assert child._proc is not None
     pid = child._proc.pid
@@ -234,7 +237,9 @@ def test_a_policy_refusal_keeps_its_blocked_classification(
     collector_registry._registry()
     registration = collector_registry.by_name("zhihu")
     assert registration is not None
-    registration.collector.start()
+    # `start` is on the sandboxed proxy, not the `Collector` Protocol the
+    # registry declares; the tests drive the real child directly.
+    cast("Any", registration.collector).start()
     child = collector_registry._SANDBOX_CHILDREN["zhihu"]
     assert child._proc is not None
     pid = child._proc.pid
