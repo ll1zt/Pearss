@@ -369,10 +369,15 @@ def read_sources(
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = Query(default=None),
 ) -> dict[str, Any]:
-    """List sources, newest page first by creation order.
+    """List sources, oldest page first by creation order.
 
-    Cursor rather than offset: an offset shifts when rows are inserted, so a
-    client paging through a changing collection silently skips or repeats.
+    Offset paging, unlike the items endpoint's keyset cursor. Sources are
+    bounded (an operator's subscriptions, tens not millions) and new ones are
+    appended at the end of this ordering, so a row arriving mid-walk shifts
+    nothing already read -- the failure offset paging is famous for needs
+    insertion *ahead* of the cursor, which is what items do and sources do not.
+    The cursor is opaque to clients either way, so switching to keyset later
+    would not be a breaking change.
     """
     del _
     offset = decode_cursor(cursor)
@@ -569,16 +574,14 @@ def update_source(
                 code="invalid_pipeline_chain",
                 message=str(exc),
                 suggestion=(
-                    'Use a list of {plugin_id, kind, lang?, required?}; kinds: '
+                    "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
                     "translation, summary, tts_audio."
                 ),
             ) from exc
         # json.dumps of None clears the chain; a chain forces the lang to
         # something explicit so the worker never has to guess.
         changes["pipeline_chain"] = (
-            json.dumps(body.pipeline_chain)
-            if body.pipeline_chain is not None
-            else None
+            json.dumps(body.pipeline_chain) if body.pipeline_chain is not None else None
         )
         changes["target_lang"] = body.target_lang
 
@@ -688,9 +691,11 @@ def list_source_enrichments(
     del _
     with request.app.state.session_factory() as session:
         _require_source(session, source_id)
-        query = _select(ItemEnrichment).where(ItemEnrichment.item_id.in_(
-            _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
-        ))
+        query = _select(ItemEnrichment).where(
+            ItemEnrichment.item_id.in_(
+                _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
+            )
+        )
         if status is not None:
             query = query.where(ItemEnrichment.status == status)
         rows = session.execute(query).scalars().all()

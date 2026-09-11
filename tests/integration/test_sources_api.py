@@ -107,6 +107,66 @@ async def test_read_token_cannot_write(reader: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/v1/sources"),
+        ("PATCH", "/v1/sources/src-1"),
+        ("DELETE", "/v1/sources/src-1"),
+        ("POST", "/v1/sources/src-1:trigger"),
+        ("POST", "/v1/sources/src-1:backfill-chain"),
+        ("POST", "/v1/sources/src-1:retry-enrichments"),
+    ],
+)
+async def test_read_token_is_refused_on_every_write_route(
+    reader: httpx.AsyncClient, method: str, path: str
+) -> None:
+    """Scope is enforced per route, not just on POST /v1/sources.
+
+    A single-route check leaves every sibling write one refactor away from
+    losing its scope guard. The parametrisation is the point: each verb the
+    sources surface exposes is refused for the read token.
+    """
+    response = await reader.request(
+        method,
+        path,
+        headers={"Idempotency-Key": f"scope-{method}-{path}"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    assert response.status_code == 403, (method, path, response.status_code)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/v1/sources",
+        "/v1/sources/src-1",
+        "/v1/sources/src-1/enrichments",
+        "/v1/items",
+        "/v1/items/item-1",
+        "/v1/jobs",
+        "/v1/system/snapshot",
+        "/v1/plugins",
+        "/v1/plugins/rss",
+    ],
+)
+async def test_read_token_can_read_every_read_route(
+    reader: httpx.AsyncClient, path: str
+) -> None:
+    """The read token's whole purpose: every read route accepts it.
+
+    Asserted as "not 401/403" rather than 200, because an empty collection or
+    a missing row is a legitimate answer -- what must never happen is a scope
+    rejection on a read.
+    """
+    response = await reader.get(path)
+    assert response.status_code not in (401, 403), (path, response.status_code)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_snapshot_lists_every_status_including_zero_counts(
     writer: httpx.AsyncClient,
 ) -> None:
@@ -198,13 +258,17 @@ async def test_same_url_under_a_new_key_does_not_duplicate(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_keys_are_scoped_per_actor(
-    app: FastAPI, writer: httpx.AsyncClient, reader: httpx.AsyncClient
+async def test_a_read_token_cannot_write_even_with_a_known_key(
+    writer: httpx.AsyncClient, reader: httpx.AsyncClient
 ) -> None:
-    """A key reused by a different principal must not replay their response.
+    """The read token is refused before idempotency is consulted.
 
-    Sharing across actors would let one caller read another's response body and
-    would let a second caller's write silently no-op.
+    Named for what it actually proves. An earlier version of this test was
+    called `test_keys_are_scoped_per_actor` and claimed to show that a key is
+    not shared between principals -- but the 403 comes from EarlyAuth, before
+    the route body or the idempotency lookup runs, so it never exercised key
+    scoping at all. That property is verified at its own layer in
+    tests/integration/test_idempotency.py, where two actors can be constructed.
     """
     body = {"url": FEED_URL, "schedule_policy": policy()}
     created = await writer.post(
@@ -212,12 +276,11 @@ async def test_keys_are_scoped_per_actor(
     )
     assert created.status_code == 201
 
-    # The read token cannot write at all, so the shared key is not honoured for
-    # it — the scope check runs before idempotency.
     refused = await reader.post(
         "/v1/sources", headers={"Idempotency-Key": "shared"}, json=body
     )
     assert refused.status_code == 403
+    assert refused.headers.get("idempotent-replay") is None
 
 
 # --------------------------------------------------------------------------
@@ -364,7 +427,9 @@ async def test_delete_is_soft_and_keeps_items(
     """Removing a source must not delete published items.
 
     Their GUIDs are frozen and clients have cached them; deleting the rows
-    would orphan content a reader still sees.
+    would orphan content a reader still sees. Items are seeded here because
+    without them "keeps items" cannot fail: a cascade would have nothing to
+    cascade to, and the test would pass on an empty set.
     """
     created = await writer.post(
         "/v1/sources",
@@ -372,13 +437,43 @@ async def test_delete_is_soft_and_keeps_items(
         json={"url": FEED_URL, "schedule_policy": policy()},
     )
     source_id = created.json()["id"]
+
+    with app.state.session_factory() as session:
+        for index in range(2):
+            session.execute(
+                sa.text(
+                    "insert into item (id, source_id, guid, content_hash, title,"
+                    " url, publish_status, tenant_id, created_at, updated_at)"
+                    " values (:id, :s, :g, :h, :t, :u, 'published', 'default',"
+                    " '2026-01-01T00:00:00.000000Z',"
+                    " '2026-01-01T00:00:00.000000Z')"
+                ),
+                {
+                    "id": f"soft-item-{index}",
+                    "s": source_id,
+                    "g": f"soft-guid-{index}",
+                    "h": f"soft-hash-{index}",
+                    "t": f"Kept {index}",
+                    "u": f"https://example.com/kept/{index}",
+                },
+            )
+        session.commit()
+
     await writer.delete(f"/v1/sources/{source_id}", headers={"Idempotency-Key": "d"})
 
     with app.state.session_factory() as session:
         remaining = session.execute(
             sa.text("select count(*) from source where id = :i"), {"i": source_id}
         ).scalar()
-    assert remaining == 1
+        status = session.execute(
+            sa.text("select status from source where id = :i"), {"i": source_id}
+        ).scalar()
+        items = session.execute(
+            sa.text("select count(*) from item where source_id = :i"), {"i": source_id}
+        ).scalar()
+    assert remaining == 1, "the source row must survive as a tombstone"
+    assert status == "deleted", "removal is a status change, not a row delete"
+    assert items == 2, "published items must survive their source's removal"
 
 
 @pytest.mark.integration
@@ -420,9 +515,22 @@ async def test_readding_a_deleted_source_reactivates_it(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_pagination_walks_and_terminates(writer: httpx.AsyncClient) -> None:
+async def test_pagination_walks_every_source_exactly_once(
+    writer: httpx.AsyncClient,
+) -> None:
+    """A full walk yields each source once, in creation order, and terminates.
+
+    The sources endpoint pages by offset (bounded, append-only collection),
+    so this pins the contract that actually holds: stable ordering, no
+    repeats, no skips, and a cursor that reaches None. The property offset
+    paging *cannot* give -- surviving an insert ahead of the cursor -- is
+    tested for the items endpoint, where insertion ahead is the norm; here a
+    source is appended at the end of the ordering, which is why the same test
+    would not discriminate between the two schemes.
+    """
+    created: list[str] = []
     for index in range(3):
-        await writer.post(
+        response = await writer.post(
             "/v1/sources",
             headers={"Idempotency-Key": f"page-{index}"},
             json={
@@ -430,9 +538,12 @@ async def test_pagination_walks_and_terminates(writer: httpx.AsyncClient) -> Non
                 "schedule_policy": policy(),
             },
         )
+        assert response.status_code == 201
+        created.append(response.json()["id"])
 
     seen: list[str] = []
     cursor: str | None = None
+    pages = 0
     for _ in range(10):
         params: dict[str, str | int] = {"limit": 1}
         if cursor:
@@ -440,11 +551,27 @@ async def test_pagination_walks_and_terminates(writer: httpx.AsyncClient) -> Non
         page = (await writer.get("/v1/sources", params=params)).json()
         seen.extend(item["id"] for item in page["data"])
         cursor = page["next_cursor"]
+        pages += 1
         if cursor is None:
             break
 
-    assert len(seen) == 3
-    assert len(set(seen)) == 3, "paging must not repeat or skip"
+    assert cursor is None, "the walk must terminate, not spin forever"
+    assert len(seen) == len(set(seen)), "paging must not repeat a row"
+    assert set(seen) == set(created), "paging must not skip a row"
+    assert seen == created, "creation order is the documented page order"
+    assert pages == 3, "limit=1 over 3 rows is 3 pages"
+
+    # A source appended after the walk is not lost: it simply sorts last and
+    # shows up on a fresh walk. This is the append-only assumption the offset
+    # cursor relies on.
+    late = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "page-late"},
+        json={"url": "https://example.com/late.xml", "schedule_policy": policy()},
+    )
+    assert late.status_code == 201
+    fresh = (await writer.get("/v1/sources", params={"limit": 50})).json()
+    assert [row["id"] for row in fresh["data"]] == [*created, late.json()["id"]]
 
 
 @pytest.mark.integration
@@ -457,10 +584,29 @@ async def test_malformed_cursor_is_refused(writer: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_limit_is_bounded(writer: httpx.AsyncClient) -> None:
-    # The style guide caps a page at 100; over-requesting must be refused
-    # rather than silently served.
-    assert (await writer.get("/v1/sources", params={"limit": 500})).status_code == 422
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, 101, 500])
+async def test_limit_above_or_below_the_contract_is_refused(
+    writer: httpx.AsyncClient, limit: int
+) -> None:
+    """The page size is bounded on both sides.
+
+    Only testing 500 leaves the lower bound and the exact upper boundary
+    unverified: a regression from `le=100` to `le=500` would still refuse 500
+    only by accident, and `0` or negative would slip through to the query.
+    """
+    response = await writer.get("/v1/sources", params={"limit": limit})
+    assert response.status_code == 422, (limit, response.status_code)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_limit_at_the_boundary_is_accepted(writer: httpx.AsyncClient) -> None:
+    """The exact bounds (1 and 100) are inside the contract, not outside it."""
+    for limit in (1, 100):
+        response = await writer.get("/v1/sources", params={"limit": limit})
+        assert response.status_code == 200, (limit, response.status_code)
 
 
 # --------------------------------------------------------------------------
@@ -571,7 +717,7 @@ async def test_trigger_records_a_job_run(
     response = await writer.post(
         f"/v1/sources/{source_id}:trigger", headers={"Idempotency-Key": "run-1"}
     )
-    assert response.status_code in (200, 502)
+    assert response.status_code == 200, response.text
 
     with session_factory() as session:
         jobs = session.execute(sa.text("select id from job")).fetchall()
@@ -580,7 +726,10 @@ async def test_trigger_records_a_job_run(
         ).fetchall()
     assert jobs, "triggering should create the collect job"
     assert runs, "triggering should record a run"
-    assert runs[0][0] in {"succeeded", "failed", "timed_out"}
+    # The mock client serves a valid feed, so the outcome is deterministic; a
+    # set-valued assertion would accept a regression that fails every run.
+    assert runs[0][0] == "succeeded", runs
+    assert runs[0][1] is None, runs
 
 
 @pytest.mark.integration
@@ -598,7 +747,8 @@ async def test_trigger_reports_the_run_status(
         f"/v1/sources/{created.json()['id']}:trigger",
         headers={"Idempotency-Key": "rs-1"},
     )
-    assert response.json()["run_status"] in {"succeeded", "failed", "timed_out"}
+    assert response.status_code == 200, response.text
+    assert response.json()["run_status"] == "succeeded", response.json()
 
 
 @pytest.mark.integration
@@ -719,22 +869,27 @@ async def test_create_and_patch_carry_the_processing_chain(
     bad = await writer.patch(
         f"/v1/sources/{created.json()['id']}",
         headers={"Idempotency-Key": "chain-bad-1"},
-        json={
-            "pipeline_chain": [{"plugin_id": "translate", "kind": "no-such-kind"}]
-        },
+        json={"pipeline_chain": [{"plugin_id": "translate", "kind": "no-such-kind"}]},
     )
     assert bad.status_code == 422
-    assert (
-        bad.json()["detail"]["error"]["code"] == "invalid_pipeline_chain"
-    )
+    assert bad.json()["detail"]["error"]["code"] == "invalid_pipeline_chain"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_backfill_chain_endpoint_queues_and_audits(
     writer: httpx.AsyncClient,
+    app: FastAPI,
+    session_factory: sessionmaker[Session],
 ) -> None:
-    """The :backfill-chain verb queues products for stored items."""
+    """The :backfill-chain verb queues products for stored items.
+
+    Items are seeded before the call on purpose: without them `queued` is
+    always 0 and the verb's actual job -- enqueuing for pre-existing items --
+    is never exercised. The audit assertion reads audit_log rather than
+    trusting the response's own `audit` string, which would be the API
+    vouching for itself.
+    """
     created = await writer.post(
         "/v1/sources",
         headers={"Idempotency-Key": "backfill-create-1"},
@@ -744,38 +899,65 @@ async def test_backfill_chain_endpoint_queues_and_audits(
         },
     )
     source_id = created.json()["id"]
+    chain = [{"plugin_id": "translate", "kind": "translation"}]
     await writer.patch(
         f"/v1/sources/{source_id}",
         headers={"Idempotency-Key": "backfill-patch-1"},
-        json={
-            "pipeline_chain": [
-                {"plugin_id": "translate", "kind": "translation"}
-            ],
-            "target_lang": "en",
-        },
+        json={"pipeline_chain": chain, "target_lang": "en"},
     )
-    # Seed two items directly (the pipeline enqueues only at store time; these
-    # stand in for items that predate the chain).
-    import sqlalchemy as sa
-    from tests.integration.test_reader_api import USERNAME
 
-    assert USERNAME  # import sanity; engine work happens via the app state
+    # Two items that predate the chain, written straight to the database the
+    # app is using (the pipeline only enqueues at store time).
+    with session_factory() as session:
+        for index in range(2):
+            session.execute(
+                sa.text(
+                    "insert into item (id, source_id, guid, content_hash, title,"
+                    " url, publish_status, tenant_id, created_at, updated_at)"
+                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " '2026-01-01T00:00:00.000000Z',"
+                    " '2026-01-01T00:00:00.000000Z')"
+                ),
+                {
+                    "id": f"bf-item-{index}",
+                    "s": source_id,
+                    "g": f"bf-guid-{index}",
+                    "h": f"bf-hash-{index}",
+                    "t": f"Backfilled {index}",
+                    "u": f"https://backfill.example/post/{index}",
+                },
+            )
+        session.commit()
 
     first = await writer.post(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "backfill-run-1"},
     )
-    # No items stored yet, so zero queued — but the verb must still succeed
-    # and audit.
     assert first.status_code == 200, first.text
-    assert first.json()["queued"] == 0
+    assert first.json()["queued"] == 2, first.json()
 
+    # The products exist, queued for the worker.
+    listed = await writer.get(f"/v1/sources/{source_id}/enrichments")
+    assert listed.status_code == 200
+    rows = listed.json()["data"]
+    assert len(rows) == 2
+    assert {row["status"] for row in rows} == {"queued"}
+
+    # A second run is a no-op: the unique constraint means re-queuing the same
+    # (item, plugin, version, kind, lang, input) does not duplicate products.
     again = await writer.post(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "backfill-run-2"},
     )
     assert again.status_code == 200
-    del sa
+    assert again.json()["queued"] == 0
+
+    with session_factory() as session:
+        audited = session.execute(
+            sa.text("select count(*) from audit_log where operation like :pattern"),
+            {"pattern": "POST /v1/sources/%:backfill-chain"},
+        ).scalar_one()
+    assert audited == 2, "each accepted backfill must leave an audit row"
 
 
 @pytest.mark.integration

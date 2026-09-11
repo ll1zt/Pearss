@@ -381,6 +381,34 @@ async def test_pending_items_are_invisible_to_the_reader_api(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_the_contents_path_also_hides_pending_items(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """The gate is enforced per endpoint, not just in the ids stream.
+
+    `stream/items/contents` applies its own pending filter, so a client that
+    already knows an id cannot read a gated item's body by asking for contents
+    directly. Testing only the ids endpoint would leave that branch unverified.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    assert ids, "the fixture must have visible items to begin with"
+
+    with app.state.session_factory() as session:
+        session.execute(sa.text("update item set publish_status = 'pending'"))
+        session.commit()
+
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        data={"T": token, "i": ids},
+    )
+    assert response.json()["items"] == [], (
+        "contents must not leak a pending item that the ids stream hides"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_stream_contents_returns_long_form_ids(
     client: httpx.AsyncClient,
 ) -> None:
@@ -554,9 +582,15 @@ async def test_an_unknown_folder_is_empty_rather_than_everything(
 async def test_starred_items_do_appear_in_the_starred_stream(
     client: httpx.AsyncClient,
 ) -> None:
-    """The filter has to pass things through, not just return nothing."""
+    """The starred stream returns the starred items and only those.
+
+    Asserting `refs` is non-empty would pass if the starred filter were dropped
+    entirely (the whole library would come back). The set comparison is what
+    pins the filter to the actual tag.
+    """
     token = await login(client)
     ids = await fetch_ids(client, token)
+    assert len(ids) > 1, "the fixture must have more than one item"
     target = ids[0]
 
     await edit(client, token, [target], add=[STARRED_TAG])
@@ -567,7 +601,7 @@ async def test_starred_items_do_appear_in_the_starred_stream(
         params={"output": "json", "n": 1000, "s": STARRED_TAG},
     )
     refs = [item["id"] for item in response.json()["itemRefs"]]
-    assert refs, "a starred item should appear in the starred stream"
+    assert refs == [target], "the starred stream must contain exactly the starred item"
 
 
 @pytest.mark.integration

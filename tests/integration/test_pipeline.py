@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -34,6 +35,7 @@ from adapters.repository import (
     store_item,
 )
 from adapters.rss_out import FeedMeta, render_feed, visible_items
+from app.pipeline import CollectionResult
 from core.enums import PublishStatus
 from core.models import Item, ItemDraft
 from core.normalize import content_hash, normalize
@@ -648,7 +650,9 @@ def test_the_conditional_loop_closes_over_two_cycles(session: Session) -> None:
 
     source = session.get(Source, SOURCE)
     assert source is not None
-    first = collect_source(session, source=source, client=client)
+    # Annotated so mypy's narrowing of `first` does not leak into `second`:
+    # the two results are independent outcomes from the same function.
+    first: CollectionResult = collect_source(session, source=source, client=client)
     session.commit()
     assert first.succeeded
     assert requests_seen[-1]["if_none_match"] is None
@@ -660,14 +664,21 @@ def test_the_conditional_loop_closes_over_two_cycles(session: Session) -> None:
     ).one()
     assert state[0] == '"v1"', "the response ETag was not written back"
 
-    second = collect_source(session, source=source, client=client)
+    second: CollectionResult = collect_source(session, source=source, client=client)
     session.commit()
-    assert second.succeeded and second.not_modified, (
-        "the second cycle did not revalidate: the ETag loop is open"
-    )
+    # Read through a plain local: asserting directly on `second.not_modified`
+    # makes mypy narrow the attribute to `Literal[True]` and then report the
+    # rest of the test unreachable (`warn_unreachable`), hiding real errors.
+    revalidated = second.succeeded and second.not_modified
+    assert revalidated, "the second cycle did not revalidate: the ETag loop is open"
     assert requests_seen[-1]["if_none_match"] == '"v1"'
 
-    rows = session.execute(
+    # The ignore below is for mypy, not for a real defect: after the assert it
+    # narrows `revalidated` to `Literal[True]` and then reports this statement
+    # unreachable under `warn_unreachable`. The rows do exist -- collect_source
+    # records a raw_fetch on both the 200 and the 304 path -- so the assertion
+    # is live and is exactly what the ETag loop is verified by.
+    rows = session.execute(  # type: ignore[unreachable]
         text("select status, http_status from raw_fetch order by fetched_at")
     ).fetchall()
     assert [tuple(r) for r in rows] == [("fetched", 200), ("not_modified", 304)]
@@ -799,8 +810,8 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
 
     class FakeTranslate:
         @staticmethod
-        def process(item_ctx: dict, *, target_lang: str, store):
-            return store(f"<p>Translated: {item_ctx['title']}</p>")
+        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+            return str(store(f"<p>Translated: {item_ctx['title']}</p>"))
 
     row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
     report = sweep_queue(
@@ -817,16 +828,11 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
 
     # The artifact is real: stored through filestore, referenced by the row.
     row = session.execute(
-        text(
-            "select status, payload_ref from item_enrichment where item_id = :i"
-        ),
+        text("select status, payload_ref from item_enrichment where item_id = :i"),
         {"i": item_id},
     ).first()
+    assert row is not None
     assert row[0] == "succeeded"
-    body = session.execute(
-        text("select 1")  # marker; payload read below via filestore
-    ).scalar()
-    assert body is not None
     from adapters import filestore
 
     content = filestore.read_body(row[1])
@@ -869,7 +875,7 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
 
     class FailingTranslate:
         @staticmethod
-        def process(item_ctx: dict, *, target_lang: str, store):
+        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
             raise ProcessorError(ErrorClass.AUTH, "provider rejected the key")
 
     row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
@@ -881,10 +887,9 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     assert report["failed"] == len(drafts), report
 
     rows = session.execute(
-        text(
-            "select status, error_class, detail from item_enrichment limit 1"
-        )
+        text("select status, error_class, detail from item_enrichment limit 1")
     ).first()
+    assert rows is not None
     assert rows[0] == "failed"
     assert rows[1] == "auth"
     assert "provider rejected the key" in rows[2]
@@ -952,16 +957,20 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
 
     class NetworkFailure:
         @staticmethod
-        def process(item_ctx: dict, *, target_lang: str, store):
+        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
             import httpx
 
             raise httpx.ConnectError("provider down")
 
     # Sweeps 1..MAX_ATTEMPTS: attempts 1..2 requeue; the MAX_ATTEMPTS-th
     # failure stops the row as failed. (MAX_ATTEMPTS counts *tries*.)
-    from app.enrichment_worker import MAX_ATTEMPTS
+    from app.enrichment_worker import BACKOFF_BASE_SECONDS, MAX_ATTEMPTS
 
+    assert BACKOFF_BASE_SECONDS > 0, "a zero base makes backoff no backoff"
+
+    observed_delays: list[float] = []
     for attempt in range(MAX_ATTEMPTS - 1):
+        before = datetime.now(UTC)
         report = sweep_queue(
             session,
             processors={"translate": NetworkFailure},
@@ -969,16 +978,35 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
             concurrency=1,
         )
         assert report["retried"] == 1, (attempt, report)
-        session.execute(text("update item_enrichment set next_attempt_at = null"))
-        session.commit()
         row = session.execute(
             text(
-                "select status, attempt_count from item_enrichment"
+                "select status, attempt_count, next_attempt_at from item_enrichment"
                 " where item_id = 'retry-item'"
             )
         ).first()
+        assert row is not None, "the retry row must exist"
         assert row[0] == "queued", row
         assert row[1] == attempt + 1
+
+        # Exponential backoff is a real schedule, not just "requeued anyway".
+        # The delay must be within a tolerance band of base * 2**attempt; a
+        # purely relative bound would be vacuous when the base is zero, which
+        # is exactly the mutation this guards.
+        expected = BACKOFF_BASE_SECONDS * (2**attempt)
+        scheduled = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
+        delay = (scheduled - before).total_seconds()
+        assert expected <= delay <= expected + 5, (attempt, delay, expected)
+        observed_delays.append(delay)
+
+        # Clear the schedule so the next sweep can claim the row immediately;
+        # the backoff assertion above already captured the value.
+        session.execute(text("update item_enrichment set next_attempt_at = null"))
+        session.commit()
+
+    # Doubling is the property, not merely "some non-zero wait": each attempt
+    # waits about twice as long as the one before.
+    assert len(observed_delays) == 2
+    assert observed_delays[1] >= observed_delays[0] * 1.8, observed_delays
 
     # The MAX_ATTEMPTS-th failure exceeds the retries: the row stops failed.
     report = sweep_queue(
@@ -994,6 +1022,7 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
             " where item_id = 'retry-item'"
         )
     ).first()
+    assert row is not None
     assert row[0] == "failed" and row[2] == "network"
 
     # auth failures skip retries entirely: a fresh row fails in one sweep.
@@ -1015,7 +1044,7 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
 
     class AuthFailure:
         @staticmethod
-        def process(item_ctx: dict, *, target_lang: str, store):
+        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
             raise ProcessorError(_EC.AUTH, "bad key")
 
     report = sweep_queue(
@@ -1031,6 +1060,7 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
             " where item_id = 'auth-item'"
         )
     ).first()
+    assert row is not None
     assert row[0] == "failed" and row[1] == 0, "auth must not retry"
 
 
@@ -1052,9 +1082,7 @@ def test_a_chain_naming_an_unregistered_processor_is_refused(
 
     with _pytest.raises(ValueError, match="unregistered processor"):
         parse_chain(
-            jsonlib.dumps(
-                [{"plugin_id": "no-such-processor", "kind": "translation"}]
-            ),
+            jsonlib.dumps([{"plugin_id": "no-such-processor", "kind": "translation"}]),
             target_lang="en",
             known_plugins=frozenset({"translate"}),
         )

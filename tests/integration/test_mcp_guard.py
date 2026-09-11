@@ -128,7 +128,9 @@ def test_the_api_token_does_not_work_on_mcp(base_url: str) -> None:
 @pytest.mark.integration
 def test_the_right_token_reaches_the_mcp_server(base_url: str) -> None:
     response = post_mcp(base_url, token=MCP_TOKEN)
-    assert response.status_code in (200, 201), response.text[:200]
+    # Exactly 200: accepting 201 would hide a status regression, and the guard
+    # never legitimately produces one.
+    assert response.status_code == 200, response.text[:200]
 
 
 @pytest.mark.integration

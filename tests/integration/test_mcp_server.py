@@ -423,7 +423,10 @@ async def test_get_item_body_rejects_a_non_positive_cap(mcp_url: str) -> None:
 async def test_get_item_body_honours_the_publish_gate(mcp_url: str) -> None:
     """A pending item is invisible on every path, this one included."""
     payload = await _call(mcp_url, "get_item_body", {"item_id": "i-pending"})
-    assert payload.get("error"), payload
+    # Not merely "some error": the gate reports the item as absent, so an
+    # agent cannot distinguish pending from nonexistent by probing (and a
+    # regression to a 500 would be caught rather than accepted).
+    assert payload.get("error") == "item_not_found", payload
     assert "body" not in payload
 
 
@@ -431,7 +434,7 @@ async def test_get_item_body_honours_the_publish_gate(mcp_url: str) -> None:
 @pytest.mark.asyncio
 async def test_get_item_body_reports_a_missing_item(mcp_url: str) -> None:
     payload = await _call(mcp_url, "get_item_body", {"item_id": "does-not-exist"})
-    assert payload.get("error")
+    assert payload.get("error") == "item_not_found", payload
     assert "body" not in payload
 
 
@@ -444,8 +447,8 @@ async def test_get_item_body_on_an_item_without_a_stored_body(mcp_url: str) -> N
     as "this post has no content".
     """
     payload = await _call(mcp_url, "get_item_body", {"item_id": "i-1"})
-    assert payload.get("error"), payload
-    assert payload.get("body") is None
+    assert payload.get("error") in {"body_not_stored", "body_unreadable"}, payload
+    assert "body" not in payload
 
 
 @pytest.mark.integration
@@ -570,6 +573,11 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ("set_source_status", {"source_id": "src-1", "status": "paused"}),
         ("trigger_job", {"source_id": "src-1"}),
         ("retry_enrichments", {"source_id": "src-1"}),
+        # Every write tool belongs here: a tool left out is a tool whose
+        # confirmation requirement is unverified.
+        ("backfill_source", {"source_id": "src-1"}),
+        ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}),
+        ("remove_source", {"source_id": "src-1"}),
     ]
     for tool, args in cases:
         payload = await _call(mcp_url, tool, args)
@@ -597,12 +605,39 @@ async def test_refused_writes_reach_no_audit_row(
     which is a separate decision — and AGENTS.md asks for audit at the Core API
     covering every caller, not for the MCP layer to keep its own ledger.
 
-    The consequence worth pinning is that reads and MCP-layer refusals produce
-    no rows, while a confirmed write does (asserted by the next test), so the
-    audit trail means exactly "something reached the API".
+    The consequence worth pinning is that MCP-layer refusals produce no *Core
+    API* rows, while a confirmed write does (asserted by the next test), so the
+    audit trail of `/v1/*` means exactly "something reached the API".
+
+    Rows are filtered to `POST /v1/` rather than counted wholesale: the MCP
+    transport itself is a POST to `/mcp/mcp`, so every protocol frame
+    (`initialize`, `list_tools`, each `tools/call`) leaves an audit row for the
+    mounted edge route. A plain before/after count therefore moves even when
+    the refused write is correctly refused, and the earlier substring-search
+    version could not fail at all — the audit row carries the route, never the
+    request URL.
     """
+
+    def _core_api_writes() -> list[str]:
+        engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
+        try:
+            with engine.connect() as conn:
+                return [
+                    op
+                    for (op,) in conn.execute(
+                        text(
+                            "select operation from audit_log"
+                            " where operation like 'POST /v1/%'"
+                        )
+                    ).fetchall()
+                ]
+        finally:
+            engine.dispose()
+
+    before = _core_api_writes()
+
     await _call(mcp_url, "list_sources", {"limit": 5})
-    await _call(
+    refused = await _call(
         mcp_url,
         "add_source",
         {
@@ -610,14 +645,10 @@ async def test_refused_writes_reach_no_audit_row(
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
     )
+    assert refused.get("declined") is True, "the write must have been refused"
 
-    engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
-    with engine.connect() as conn:
-        rows = conn.execute(text("select operation from audit_log")).fetchall()
-    engine.dispose()
-
-    assert not any("never-applied" in row[0] for row in rows), (
-        "a declined write should not have reached the API"
+    assert _core_api_writes() == before, (
+        "a declined write must not produce a Core API audit row"
     )
 
 
@@ -629,6 +660,10 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
 
     This is the payoff of routing tools through /v1: the same middleware sees
     both, so there is one ledger rather than one per entry point.
+
+    The actor assertion is deliberately exact for the row this test creates:
+    a subset check against {"api:full","anonymous"} would pass on an empty
+    table, and the point is that the *write* was attributed to the caller.
     """
     await _call(
         mcp_url,
@@ -643,8 +678,11 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
     with engine.connect() as conn:
         rows = conn.execute(text("select actor, operation from audit_log")).fetchall()
     engine.dispose()
-    assert any("POST /v1/sources" in op for _, op in rows)
-    assert {actor for actor, _ in rows} <= {"api:full", "anonymous"}
+    writes = [(actor, op) for actor, op in rows if "POST /v1/sources" in op]
+    assert writes, "a confirmed write must leave an audit row"
+    assert {actor for actor, _ in writes} == {"api:full"}, (
+        "the write must be attributed to the authenticated caller, not anonymous"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -877,3 +915,174 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
     assert explicit["type"] == "rss", explicit
     await _call(mcp_url, "remove_source", {"source_id": feed["id"]}, confirm=True)
     await _call(mcp_url, "remove_source", {"source_id": explicit["id"]}, confirm=True)
+
+
+# --------------------------------------------------------------------------
+# The confirmed path for tools the suite previously only named
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_plugin_status_maps_its_operation_and_executes(
+    mcp_url: str,
+) -> None:
+    """`enabled` and `disabled` must map to opposite operations.
+
+    The tool builds the URL as `:enable` for "enabled" and `:disable`
+    otherwise, so a typo in the comparison would silently send every status to
+    the same endpoint. Asserting the observed effect (not the request shape)
+    is what pins the mapping.
+    """
+    disabled = await _call(
+        mcp_url,
+        "set_plugin_status",
+        {"plugin_id": "rss", "status": "disabled"},
+        confirm=True,
+    )
+    assert disabled.get("declined") is None and disabled.get("aborted") is None
+    assert disabled.get("status") == "disabled", disabled
+
+    plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
+    rss = next(row for row in plugins["data"] if row["id"] == "rss")
+    assert rss["status"] == "disabled"
+
+    # And back: the opposite status reaches the opposite endpoint.
+    enabled = await _call(
+        mcp_url,
+        "set_plugin_status",
+        {"plugin_id": "rss", "status": "enabled"},
+        confirm=True,
+    )
+    assert enabled.get("status") == "enabled", enabled
+    plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
+    rss = next(row for row in plugins["data"] if row["id"] == "rss")
+    assert rss["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_backfill_source_executes_and_reports_queued(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """The backfill tool routes to :backfill-chain and returns its count.
+
+    The source needs a chain and stored items for the count to be non-zero;
+    both are set up directly against the shared database, since the MCP
+    surface has no tool that seeds items.
+    """
+    engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "update source set pipeline_chain = :chain, target_lang = 'en'"
+                    " where id = 'src-1'"
+                ),
+                {
+                    "chain": json.dumps(
+                        [{"plugin_id": "translate", "kind": "translation"}]
+                    )
+                },
+            )
+            conn.execute(
+                text(
+                    "insert into item (id, source_id, guid, content_hash, title, url,"
+                    " publish_status, tenant_id, created_at, updated_at)"
+                    " values ('bf-mcp', 'src-1', 'g-bf', 'h-bf', 'Backfill me',"
+                    " 'https://bf.example/1', 'ready', 'default', :ts, :ts)"
+                ),
+                {"ts": "2026-01-01T00:00:00.000000Z"},
+            )
+    finally:
+        engine.dispose()
+
+    payload = await _call(
+        mcp_url, "backfill_source", {"source_id": "src-1"}, confirm=True
+    )
+    assert payload.get("declined") is None and payload.get("aborted") is None
+    # The module database is shared, so other tests' items for this source may
+    # already be queued; what must hold is that this source now has products
+    # and the count is honest (non-zero means the verb did its job).
+    assert payload["queued"] >= 1, payload
+
+    listed = await _call(mcp_url, "list_enrichments", {"source_id": "src-1"})
+    assert listed["data"], listed
+    assert {row["plugin_id"] for row in listed["data"]} == {"translate"}
+
+
+@pytest.mark.asyncio
+async def test_every_write_tool_aborts_on_a_tampered_confirmation(
+    mcp_url: str,
+) -> None:
+    """A confirmation of one request must not authorise another -- for every
+    write tool, not just add_source.
+
+    Each tool has its own `_matches(...)` guard; a missing one lets a tampered
+    client execute something the user never saw. The tamper rewrites the first
+    string field the tool asks about, so the guard for that tool is exercised.
+    """
+    # (tool, args, field the tamper will flip)
+    cases: list[tuple[str, dict[str, Any], str]] = [
+        (
+            "add_source",
+            {
+                "url": "https://tamper-add.example/feed",
+                "schedule_policy": {"type": "fixed", "interval": "30m"},
+            },
+            "url",
+        ),
+        (
+            "update_schedule_policy",
+            {
+                "source_id": "src-1",
+                "schedule_policy": {"type": "fixed", "interval": "1h"},
+            },
+            "source_id",
+        ),
+        ("set_source_status", {"source_id": "src-1", "status": "paused"}, "status"),
+        ("trigger_job", {"source_id": "src-1"}, "source_id"),
+        ("retry_enrichments", {"source_id": "src-1"}, "source_id"),
+        ("backfill_source", {"source_id": "src-1"}, "source_id"),
+        ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}, "status"),
+        ("remove_source", {"source_id": "src-1"}, "source_id"),
+    ]
+
+    def _tampering(field: str) -> Any:
+        async def _cb(_ctx: Any, params: Any) -> Any:
+            from mcp import types
+
+            properties = (params.requested_schema or {}).get("properties", {})
+            content = {
+                name: (
+                    "tampered-value"
+                    if name == field and spec.get("type") != "boolean"
+                    else spec.get(
+                        "default", False if spec.get("type") == "boolean" else ""
+                    )
+                )
+                for name, spec in properties.items()
+            }
+            return types.ElicitResult(action="accept", content=content)
+
+        return _cb
+
+    for tool, args, field in cases:
+        async with mcp_session(
+            mcp_url, elicitation_callback=_tampering(field)
+        ) as session:
+            result = await session.call_tool(tool, args)
+        payload = _payload(result)
+        assert payload.get("aborted") is True, (tool, payload)
+        assert "differ" in payload["reason"], (tool, payload)
+
+    # And nothing was applied: src-1 is still active, the tampered URLs were
+    # not added, and rss is still enabled. Asserted per-item rather than by
+    # exact list, because the module database is shared and other tests leave
+    # sources behind.
+    sources = await _call(mcp_url, "list_sources", {"limit": 50})
+    src1 = next(row for row in sources["data"] if row["id"] == "src-1")
+    assert src1["status"] == "active", src1
+    assert not any("tamper-add" in row["canonical_url"] for row in sources["data"]), (
+        "the tampered URL must not have been added"
+    )
+    plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
+    assert next(r for r in plugins["data"] if r["id"] == "rss")["status"] == "enabled"
