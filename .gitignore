@@ -53,3 +53,4 @@ TODO.md
 .vscode/
 *.swp
 .DS_Store
+backups/

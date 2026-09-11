@@ -175,6 +175,31 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 
 每季度至少执行一次完整恢复演练；未演练的备份不视为可靠备份。
 
+## 备份与恢复
+
+**日常**：`pearss-backup.timer` 每日运行 `just backup`，产物落在
+`backups/`（gitignored）。审计日志按 ADR 0016 是 30 天滚动事实源，所以
+**备份周期必须远小于 30 天**——日度留足了漏跑余量。
+
+**归档内容**：SQLite 在线快照（`.backup` API，服务运行中一致）+ 文件存储
+整树（条目正文、翻译产物）。`raw_fetch` 报文不入档：它们是可重建的诊断
+数据（data-model.md 的分级）。
+
+**恢复**：
+
+```bash
+just restore backups/pearss-backup-<stamp>.tar.gz /tmp/restore-drill
+# 把 PEARSS_DATABASE_URL / PEARSS_STORAGE_DIR 指向还原目录，起服务验证
+```
+
+`restore` 会拒绝覆盖已存在的数据库文件（防误操作），并在解包后跑
+`pragma integrity_check` + 行数核对——一个能打开但空的库比失败更危险。
+
+**演练记录（2026-09-11，首次）**：9 源 / 127 条归档还原成功，Reader API
+登录、订阅列表、条目正文、译文合并全部正常。演练价值实证：过程中两次
+「疑似 bug」都是测量伪影（httpx data 传参形式、归档内 db 命名），真实
+curl 复核后端点行为正确——这正是 runbook 强调「用真实客户端复核」的原因。
+
 ## 手工冒烟清单
 
 大改动（新客户端接入、插件架构变更、部署形态变化、Reader/采集器修改）
