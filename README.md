@@ -64,9 +64,14 @@ cd <repository-name>
 direnv allow
 just sync
 just migrate
+cp .env.example .env && chmod 600 .env   # 然后填 PEARSS_API_TOKEN 等
 ```
 
 验证环境：`just ci`（或在 CI 之外复现 CI 的完整命令：`just ci-nix`）。
+
+`.env.example` 是全部 `PEARSS_*` 变量的完整清单，每项标注默认值与影响，并由
+`tests/unit/test_structure_guards.py` 强制与源码同步：代码读了但模板漏掉的变量会让
+测试失败，模板里没人读的变量同样失败。
 
 开发环境由 Nix Flake 提供（`pkgs.mkShell`，见 ADR 0002）；Python 项目依赖由 uv 安装。不要在项目目录外创建或提交 `.venv`。
 

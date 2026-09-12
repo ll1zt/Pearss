@@ -283,3 +283,62 @@ def test_every_adr_file_number_matches_its_own_id() -> None:
     assert not mismatched, (
         f"ADR files whose own number appears nowhere in their text: {mismatched}"
     )
+
+
+# --------------------------------------------------------------------------
+# .env.example: the deployment contract must not drift from the code
+# --------------------------------------------------------------------------
+
+
+def _pearss_names_in_source() -> set[str]:
+    """Every PEARSS_* variable the code (or a recipe) can actually read.
+
+    Three read forms, all of them real in this tree and each one missed by a
+    naive `environ.get` scan:
+      - os.environ.get("PEARSS_X", ...)
+      - env_int("PEARSS_X", ...) / _configured("PEARSS_X")
+      - ${PEARSS_X:-default} inside justfile recipes
+    Bare prefix stems used by the sandbox env allowlist ("PEARSS_X_") are not
+    variables and are excluded.
+    """
+    targets = [*Path("src").rglob("*.py"), Path("justfile")]
+    names: set[str] = set()
+    for path in targets:
+        if "__pycache__" in path.parts or path.name.startswith("test_"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        names |= set(re.findall(r'["\'](PEARSS_[A-Z0-9_]+)["\']', text))
+        names |= set(re.findall(r"\$\{(PEARSS_[A-Z0-9_]+)", text))
+    return {name for name in names if not name.endswith("_")}
+
+
+def _pearss_names_in_template() -> set[str]:
+    text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    # Both live assignments and the commented examples count as documented.
+    return set(re.findall(r"^\s*#?\s*(PEARSS_[A-Z0-9_]+)=", text, re.MULTILINE))
+
+
+def test_env_example_documents_every_variable_the_code_reads() -> None:
+    """A variable the code reads but the template omits is a deployment trap.
+
+    Someone deploys from the template, the feature silently stays off (or
+    fail-closes), and the cause is an env name nobody wrote down. The reverse
+    is also checked: a template entry the code cannot read is a lie that
+    survives every review because nothing tests it.
+    """
+    # Injected by the sandbox's own env allowlist, deliberately not user-set.
+    runtime_injected = {"PEARSS_SANDBOXED"}
+
+    source = _pearss_names_in_source()
+    template = _pearss_names_in_template()
+
+    undocumented = sorted(source - template - runtime_injected)
+    assert not undocumented, (
+        f"the code reads these but .env.example does not document them: {undocumented}"
+    )
+
+    fictional = sorted(template - source)
+    assert not fictional, (
+        f".env.example documents variables nothing reads: {fictional}. "
+        "Either wire them up or delete the entry."
+    )
