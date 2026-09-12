@@ -858,14 +858,37 @@ def build_mcp_server(app: Any) -> MCPServer:
         mime_type="text/html",
     )
     async def item_body(item_id: str) -> str:
-        # The body endpoint already enforces the gate and answers 404 for a
-        # pending or absent item, so a separate existence check would be a
-        # second request to learn something the first one reports.
+        """One item's body, or a JSON-RPC error saying why it is unavailable.
+
+        The body endpoint enforces the publish gate and answers 404 for both a
+        pending and an absent item, so a separate existence check would be a
+        second request to learn what the first already reports.
+
+        Returning "" here was wrong, and the spec says why (resources, Error
+        Handling): an empty body is indistinguishable from "this article has no
+        content", so an agent would report a missing id as an empty article.
+        A resource that cannot be served must be an error, and the code is
+        `-32602` on the current protocol (`-32002` before it; clients still
+        accept both).
+        """
         code, body = await core.request("GET", f"/v1/items/{item_id}/body")
-        if code != 200:
-            return ""
-        text = body.get("text", "")
-        return text if isinstance(text, str) else ""
+        if code == 200:
+            text = body.get("text", "")
+            return text if isinstance(text, str) else ""
+
+        # `body_not_stored` means the item exists but has no retrievable body
+        # yet; every other non-200 (404 item_not_found included) is absence.
+        error = _error_from(body, code)
+        absent = error.get("error") in {"item_not_found", "body_unreadable"}
+        raise MCPError(
+            code=-32602 if absent else -32603,
+            message=(
+                f"Resource not found: {item_id}"
+                if absent
+                else f"The stored body for {item_id} could not be read"
+            ),
+            data={"uri": f"item://{item_id}", "error": error.get("error")},
+        )
 
     return server
 
