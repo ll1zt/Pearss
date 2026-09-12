@@ -18,11 +18,15 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import httpx
+from mcp.server.apps import APP_MIME_TYPE, Apps
+from mcp.server.caching import CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.resolve import Elicit, Resolve
+from mcp.server.mcpserver.resources import FunctionResource
 from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, Field, create_model
 
@@ -30,6 +34,14 @@ LOGGER = logging.getLogger(__name__)
 
 SERVER_NAME = "pearss"
 MAX_STRING_CHARS = 200
+
+# The health panel: a `ui://` resource the host renders as an MCP App.
+# `get_system_snapshot` declares it, so a host that supports Apps can show the
+# decay signals (architecture section 7.7) as a real panel instead of a table
+# the model laid out. Clients without Apps support see exactly the same
+# structured data as before -- the tool result is unchanged, so this is pure
+# progressive enhancement.
+HEALTH_RESOURCE_URI = "ui://pearss/health"
 
 # `get_item_body` bounds itself rather than inheriting MAX_STRING_CHARS: the
 # whole point of that tool is to hand over a body, so the generic shrinker would
@@ -229,35 +241,147 @@ def _confirmation_schema(fields: dict[str, Any]) -> type[Confirmation]:
     )
 
 
-async def _confirm(
-    ctx: Context, message: str, model: type[Confirmation]
-) -> dict[str, Any] | None:
-    """Ask the user before a write, and return None unless they accepted.
+def _asked(model: type[Confirmation], message: str) -> Elicit[Any]:
+    """The confirmation question, as a resolver result.
 
-    Runs on the server rather than trusting a client prompt: AGENTS.md requires
-    confirmation to be elicited and executed server-side, because a client that
-    skips its dialog would otherwise produce an unconfirmed mutation.
+    Returned from a `Resolve`d parameter so the framework decides how to ask:
+    on the stateless protocol it batches the question into an
+    `InputRequiredResult` and the client retries with the answer; on the older
+    handshake protocol it sends a server-initiated request mid-call. Writing
+    that branching ourselves would be the same code, worse -- the SDK documents
+    this marker as the supported shape.
+
+    A resolver may run more than once per call (it re-runs on the retry round),
+    so the message must derive only from the tool's arguments, which the
+    framework passes to it by name. That is the reason each resolver below is a
+    small function of the arguments rather than a closure over local state.
     """
-    try:
-        result = await ctx.elicit(message, model)
-    except MCPError as exc:
-        # A client that does not implement elicitation cannot confirm a write.
-        # Refusing with a reason beats an unhandled error: the outcome is the
-        # same (nothing changed) but the caller learns why and what to do.
-        # Falling through to execute anyway would be the actual failure.
-        LOGGER.warning("elicitation unavailable, refusing write: %s", exc)
+    return Elicit(message, model)
+
+
+def _confirm_resolver(**kwargs: Any) -> Elicit[Any]:
+    """Ask for confirmation of one write, with the arguments prefilled.
+
+    Every write tool's confirmation runs through this: the message names the
+    write and the schema carries the values about to execute, so the user
+    confirms the actual request rather than retyping it. `_matches` still
+    refuses anything that drifted, which is what makes the dialog a
+    confirmation rather than a formality.
+
+    `_summary` and `_fields` are computed by each tool's own resolver from the
+    tool arguments; they are popped here so they never reach the schema.
+    """
+    summary = kwargs.pop("_summary")
+    fields = kwargs.pop("_fields")
+    return _asked(_confirmation_schema(fields), summary)
+
+
+def _add_source_confirmation(
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+) -> Elicit[Any]:
+    """The add_source question: names the source and prefills every argument."""
+    requested = type.strip().lower()
+    source_type = _infer_source_type(url) if requested == "auto" else requested
+    return _confirm_resolver(
+        _summary=(
+            f"Add {url} as a {source_type} source with policy "
+            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
+            f"(lang {target_lang or 'none'})?"
+        ),
+        _fields={
+            "url": url,
+            "type": source_type,
+            "schedule_policy": _render(schedule_policy),
+            "pipeline_chain": _render(pipeline_chain),
+            "target_lang": target_lang,
+        },
+    )
+
+
+def _update_schedule_policy_confirmation(
+    source_id: str, schedule_policy: dict[str, Any]
+) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set source {source_id} schedule to {_render(schedule_policy)}?",
+        _fields={
+            "source_id": source_id,
+            "schedule_policy": _render(schedule_policy),
+        },
+    )
+
+
+def _set_source_status_confirmation(source_id: str, status: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set source {source_id} status to {status}?",
+        _fields={"source_id": source_id, "status": status},
+    )
+
+
+def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Remove source {source_id}? Items already collected are kept.",
+        _fields={"source_id": source_id},
+    )
+
+
+def _trigger_job_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Fetch source {source_id} now?",
+        _fields={"source_id": source_id},
+    )
+
+
+def _backfill_source_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Backfill processing products for source {source_id}?",
+        _fields={"source_id": source_id},
+    )
+
+
+def _retry_enrichments_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=(f"Requeue failed processing-chain products for source {source_id}?"),
+        _fields={"source_id": source_id},
+    )
+
+
+def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set plugin {plugin_id} status to {status}?",
+        _fields={"plugin_id": plugin_id, "status": status},
+    )
+
+
+def _confirmation_verdict(answer: Any) -> dict[str, Any] | None:
+    """Read an elicitation outcome: the confirmed values, or None.
+
+    `confirmed` is the explicit checkbox in the schema. A client that accepts
+    the dialog but leaves it false has declined, and honouring that is the
+    difference between a confirmation and a form field.
+
+    A decline or cancel arrives as `None` (the framework unwraps the union for
+    a parameter annotated with the plain model), so a falsy answer means "not
+    confirmed" rather than "no answer yet". `None` is also what a client that
+    cannot elicit produces -- the SDK raises before we get here in that case,
+    and the tool layer reports it as a not-confirmed refusal.
+    """
+    if answer is None:
         return None
-    if result.action != "accept":
-        # decline and cancel are distinct reasons but the same outcome for the
-        # caller, so both are reported as "not confirmed" rather than one being
-        # silently treated as an error.
-        LOGGER.info("user %s the write: %s", result.action, message)
-        return None
-    data = result.data
-    # `confirmed` is the explicit checkbox in the schema. A client that accepts
-    # the dialog but leaves it false has declined, and honouring that is the
-    # difference between a confirmation and a form field.
-    values: dict[str, Any] = data.model_dump()
+    if isinstance(answer, Confirmation):
+        values = answer.model_dump()
+    elif isinstance(answer, dict):
+        values = dict(answer)
+    else:
+        action = getattr(answer, "action", None)
+        data = getattr(answer, "data", None)
+        if action != "accept" or data is None:
+            LOGGER.info("write %s", action or "unanswered")
+            return None
+        values = data.model_dump() if hasattr(data, "model_dump") else dict(data)
     return values if values.get("confirmed") else None
 
 
@@ -283,8 +407,117 @@ def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:
     }
 
 
+def _html_escape(text: str) -> str:
+    import html
+
+    return html.escape(text)
+
+
+def _render_health_html(snapshot: dict[str, Any]) -> str:
+    """The health panel: the section 7.7 decay signals, server-rendered.
+
+    Laid out here, once, rather than re-invented by the model on every turn --
+    the division of labour the agent-view TODO names: the agent decides what
+    to look at, deterministic code decides how it looks. The markup is
+    self-contained on purpose (inline styles, no scripts, no external
+    resources) so the sandboxed iframe needs no network and no JS, and the
+    self-containment is a pinned contract, not a style choice.
+
+    `data-*` attributes carry the exact counts so tests (and hosts) can read
+    the panel structurally instead of scraping prose.
+    """
+    import html as _html
+
+    def rows(mapping: dict[str, int], attribute: str) -> str:
+        return "".join(
+            f'<tr data-{attribute}="{_html.escape(str(key))}">'
+            f"<td>{_html.escape(str(key))}</td><td>{value}</td></tr>"
+            for key, value in mapping.items()
+        )
+
+    errors = snapshot.get("runs_by_error_class", {})
+    items = snapshot.get("items_by_publish_status", {})
+    sources = snapshot.get("sources_by_status", {})
+    enrichments = snapshot.get("enrichments_by_status", {})
+    rate = snapshot.get("recent_run_success_rate")
+    considered = snapshot.get("recent_runs_considered", 0)
+
+    rate_text = "no finished runs" if rate is None else f"{rate * 100:.0f}%"
+    return f"""<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>Pearss 采集健康</title>
+<style>
+body{{font:14px/1.5 system-ui,sans-serif;margin:16px;color:#1a1a2e}}
+h1{{font-size:18px;margin:0 0 4px}} h2{{font-size:13px;margin:16px 0 4px;color:#555}}
+table{{border-collapse:collapse}} td,th{{padding:2px 12px 2px 0;text-align:left}}
+td:last-child{{font-variant-numeric:tabular-nums}}
+.rate{{font-size:22px}}
+</style></head><body>
+<h1>Pearss 采集健康</h1>
+<p>近 <span data-field="considered">{considered}</span> 次采集成功率
+<span class="rate" data-field="success-rate">{rate_text}</span></p>
+<h2>按错误类别 (runs)</h2>
+<table>{rows(errors, "error")}</table>
+<h2>条目发布状态 · pending 积压是腐化信号</h2>
+<table>{rows(items, "status")}</table>
+<h2>处理链产品状态</h2>
+<table>{rows(enrichments, "enrichment")}</table>
+<h2>源状态</h2>
+<table>{rows(sources, "source")}</table>
+</body></html>"""
+
+
 def build_mcp_server(app: Any) -> MCPServer:
     """Construct the server with its tools and resources bound to `app`."""
+    apps = Apps()
+
+    core = CoreAPIClient(app)
+
+    # Apps-bound tools and their resources must be registered before the
+    # MCPServer is constructed: the extension is consumed in __init__, and
+    # a binding added after that never reaches tools/list.
+    @apps.tool(
+        resource_uri=HEALTH_RESOURCE_URI,
+        description=(
+            "Compact system state: source and item counts by status, run counts "
+            "by error class, and recent success rate. Read-only. Hosts that "
+            "support MCP Apps render the same signals as a health panel."
+        ),
+    )
+    async def get_system_snapshot() -> dict[str, Any]:
+        status, payload = await core.get("/v1/system/snapshot")
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    async def _health_panel() -> str:
+        """The panel's HTML, rendered from the snapshot at read time.
+
+        Dynamic by design: a host pulls the resource when it renders the App,
+        so the counts are current at display, not at registration.
+        """
+        status, payload = await core.get("/v1/system/snapshot")
+        if status != 200:
+            error = _error_from(payload, status)
+            return (
+                '<!DOCTYPE html><html lang="zh"><body>'
+                f"<h1>Pearss 采集健康</h1><p>快照不可用: "
+                f"{_html_escape(str(error.get('error')))}</p></body></html>"
+            )
+        return _render_health_html(payload)
+
+    apps.add_resource(
+        FunctionResource(
+            uri=HEALTH_RESOURCE_URI,
+            name="Pearss health",
+            description=(
+                "Collection health: success rate, errors by class, pending "
+                "backlog. The UI behind get_system_snapshot."
+            ),
+            mime_type=APP_MIME_TYPE,
+            fn=_health_panel,
+        )
+    )
+
     server = MCPServer(
         name=SERVER_NAME,
         instructions=(
@@ -293,8 +526,28 @@ def build_mcp_server(app: Any) -> MCPServer:
             "items. Article bodies are Resources, not tool results, so request "
             "them only when needed. Writes ask the user to confirm first."
         ),
+        # The spec requires a freshness hint on every cacheable result
+        # (tools/list, prompts/list, resources/list, resources/read,
+        # resources/templates/list, server/discover). The tool surface changes
+        # only when a release does, so five minutes saves a re-fetch every turn
+        # while staying wrong for at most five minutes after a deploy.
+        #
+        # `private` for both: the surface is identical for every caller today,
+        # but it is served from an authenticated endpoint and there is no
+        # second caller to share a cache with. Choosing `public` would buy
+        # nothing and would have to be re-justified if that ever changed.
+        cache_hints={
+            "tools/list": CacheHint(ttl_ms=300_000, scope="private"),
+            "resources/list": CacheHint(ttl_ms=300_000, scope="private"),
+            "resources/templates/list": CacheHint(ttl_ms=300_000, scope="private"),
+            # A body is immutable once published (the gate freezes it), but a
+            # pending item can become readable at any moment -- so the hint is
+            # zero and the client re-checks rather than caching a 404-shaped
+            # answer for a resource that is about to exist.
+            "resources/read": CacheHint(ttl_ms=0, scope="private"),
+        },
+        extensions=[apps],
     )
-    core = CoreAPIClient(app)
 
     # ---------------------------------------------------------------- reads
 
@@ -436,18 +689,6 @@ def build_mcp_server(app: Any) -> MCPServer:
             "untrusted": True,
         }
 
-    @server.tool(
-        description=(
-            "Compact system state: source and item counts by status, run counts "
-            "by error class, and recent success rate. Read-only."
-        )
-    )
-    async def get_system_snapshot() -> dict[str, Any]:
-        status, payload = await core.get("/v1/system/snapshot")
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(payload)
-
     @server.tool(description="List collection jobs, each with its source and last run.")
     async def list_jobs(limit: int = 20) -> dict[str, Any]:
         status, payload = await core.get("/v1/jobs", limit=min(limit, 100))
@@ -492,27 +733,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         url: str,
         schedule_policy: dict[str, Any],
         ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_add_source_confirmation)],
         type: str = "auto",
         pipeline_chain: list[dict[str, Any]] | None = None,
         target_lang: str = "",
     ) -> dict[str, Any]:
         requested = type.strip().lower()
         source_type = _infer_source_type(url) if requested == "auto" else requested
-        data = await _confirm(
-            ctx,
-            f"Add {url} as a {source_type} source with policy "
-            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
-            f"(lang {target_lang or 'none'})?",
-            _confirmation_schema(
-                {
-                    "url": url,
-                    "type": source_type,
-                    "schedule_policy": _render(schedule_policy),
-                    "pipeline_chain": _render(pipeline_chain),
-                    "target_lang": target_lang,
-                }
-            ),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -558,15 +786,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def update_schedule_policy(
-        source_id: str, schedule_policy: dict[str, Any], ctx: Context
+        source_id: str,
+        schedule_policy: dict[str, Any],
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_update_schedule_policy_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set source {source_id} schedule to {_render(schedule_policy)}?",
-            _confirmation_schema(
-                {"source_id": source_id, "schedule_policy": _render(schedule_policy)}
-            ),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -600,13 +827,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def set_source_status(
-        source_id: str, status: str, ctx: Context
+        source_id: str,
+        status: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_source_status_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set source {source_id} status to {status}?",
-            _confirmation_schema({"source_id": source_id, "status": status}),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -639,12 +867,12 @@ def build_mcp_server(app: Any) -> MCPServer:
             "the source stops being fetched."
         )
     )
-    async def remove_source(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Remove source {source_id}? Items already collected are kept.",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def remove_source(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_remove_source_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -673,12 +901,12 @@ def build_mcp_server(app: Any) -> MCPServer:
             "this issues a real request to the origin."
         )
     )
-    async def trigger_job(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Fetch source {source_id} now?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def trigger_job(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_trigger_job_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -712,12 +940,14 @@ def build_mcp_server(app: Any) -> MCPServer:
             "pipeline_chain configured."
         )
     )
-    async def backfill_source(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Backfill processing products for source {source_id}?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def backfill_source(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_backfill_source_confirmation)
+        ],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -765,12 +995,14 @@ def build_mcp_server(app: Any) -> MCPServer:
             "the attempt budget and the provider charges again."
         )
     )
-    async def retry_enrichments(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Requeue failed processing-chain products for source {source_id}?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def retry_enrichments(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_retry_enrichments_confirmation)
+        ],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -814,13 +1046,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def set_plugin_status(
-        plugin_id: str, status: str, ctx: Context
+        plugin_id: str,
+        status: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_plugin_status_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set plugin {plugin_id} status to {status}?",
-            _confirmation_schema({"plugin_id": plugin_id, "status": status}),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -858,25 +1091,63 @@ def build_mcp_server(app: Any) -> MCPServer:
         mime_type="text/html",
     )
     async def item_body(item_id: str) -> str:
-        # The body endpoint already enforces the gate and answers 404 for a
-        # pending or absent item, so a separate existence check would be a
-        # second request to learn something the first one reports.
+        """One item's body, or a JSON-RPC error saying why it is unavailable.
+
+        The body endpoint enforces the publish gate and answers 404 for both a
+        pending and an absent item, so a separate existence check would be a
+        second request to learn what the first already reports.
+
+        Returning "" here was wrong, and the spec says why (resources, Error
+        Handling): an empty body is indistinguishable from "this article has no
+        content", so an agent would report a missing id as an empty article.
+        A resource that cannot be served must be an error, and the code is
+        `-32602` on the current protocol (`-32002` before it; clients still
+        accept both).
+        """
         code, body = await core.request("GET", f"/v1/items/{item_id}/body")
-        if code != 200:
-            return ""
-        text = body.get("text", "")
-        return text if isinstance(text, str) else ""
+        if code == 200:
+            text = body.get("text", "")
+            return text if isinstance(text, str) else ""
+
+        # `body_not_stored` means the item exists but has no retrievable body
+        # yet; every other non-200 (404 item_not_found included) is absence.
+        error = _error_from(body, code)
+        absent = error.get("error") in {"item_not_found", "body_unreadable"}
+        raise MCPError(
+            code=-32602 if absent else -32603,
+            message=(
+                f"Resource not found: {item_id}"
+                if absent
+                else f"The stored body for {item_id} could not be read"
+            ),
+            data={"uri": f"item://{item_id}", "error": error.get("error")},
+        )
 
     return server
 
 
 def build_mcp_app(app: Any) -> Any:
-    """The MCP Starlette app, with Host pinning applied.
+    """The MCP Starlette app, on the current protocol, with Host pinning.
 
     The SDK rejects any Host it does not recognise, which by default means only
     loopback reaches the endpoint. `allowed_hosts` comes from the environment so
     a deployment that serves a Tailscale address says so explicitly rather than
     getting remote access by accident.
+
+    `stateless_http=True` selects the 2026-07-28 protocol rather than the
+    initialize-handshake one. That protocol removed protocol-level sessions, so
+    every request carries its version and capabilities in `_meta` and is
+    answerable on its own. Two consequences matter here:
+
+    - `server/discover` (a MUST on that protocol) is only reachable this way:
+      the legacy transport gates every method but `ping` behind a completed
+      handshake, so on the legacy path the method simply does not exist.
+    - the cache hints configured in `build_mcp_server` are only emitted on
+      this path; the legacy wire has no place to put `ttlMs`/`cacheScope`.
+
+    We keep no cross-request state on the MCP surface, so nothing is lost by
+    dropping the session: the tools are stateless by construction and every
+    write is confirmed by elicitation.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -884,8 +1155,9 @@ def build_mcp_app(app: Any) -> Any:
 
     server = build_mcp_server(app)
     return server.streamable_http_app(
+        stateless_http=True,
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts(),
-        )
+        ),
     )

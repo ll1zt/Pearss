@@ -85,11 +85,16 @@
     }
   },
   "get_system_snapshot": {
-    "description": "Compact system state: source and item counts by status, run counts by error class, and recent success rate. Read-only.",
+    "description": "Compact system state: source and item counts by status, run counts by error class, and recent success rate. Read-only. Hosts that support MCP Apps render the same signals as a health panel.",
     "input_schema": {
       "properties": {},
       "title": "get_system_snapshotArguments",
       "type": "object"
+    },
+    "meta": {
+      "ui": {
+        "resourceUri": "ui://pearss/health"
+      }
     }
   },
   "list_enrichments": {

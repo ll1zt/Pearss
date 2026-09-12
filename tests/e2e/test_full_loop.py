@@ -28,6 +28,7 @@ from typing import Any
 import httpx
 import pytest
 from mcp import types
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
@@ -49,6 +50,21 @@ async def _call(session: Any, tool: str, args: dict[str, Any]) -> dict[str, Any]
     return _payload(await session.call_tool(tool, args))
 
 
+def _rpc_error(excinfo: pytest.ExceptionInfo[BaseException]) -> MCPError:
+    """The MCPError inside whatever the transport raised (task groups wrap)."""
+    found: list[MCPError] = []
+
+    def walk(exc: BaseException) -> None:
+        if isinstance(exc, MCPError):
+            found.append(exc)
+        for sub in getattr(exc, "exceptions", []):
+            walk(sub)
+
+    walk(excinfo.value)
+    assert found, f"no MCPError in {excinfo.value!r}"
+    return found[0]
+
+
 async def _accept(_ctx: Any, params: Any) -> Any:
     """Confirm by echoing the server's prefilled defaults: 'press confirm'."""
     properties = (params.requested_schema or {}).get("properties", {})
@@ -68,18 +84,20 @@ async def test_subscribe_collect_consume_replay(
     mcp_endpoint = f"{served}/mcp/mcp"
 
     # -- 3. confirm and add_source (MCP, elicitation) -----------------------
+    # No elicitation capability declared: the resolver refuses with the spec's
+    # MissingRequiredClientCapability, and nothing is written.
     async with open_mcp_session(mcp_endpoint) as session:
-        refused = await _call(
-            session,
-            "add_source",
-            {
-                "url": origin_url,
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-        )
-        assert refused.get("declined") is True, (
-            "a write without elicitation must be refused"
-        )
+        with pytest.raises(BaseException) as excinfo:
+            await _call(
+                session,
+                "add_source",
+                {
+                    "url": origin_url,
+                    "schedule_policy": {"type": "fixed", "interval": "30m"},
+                },
+            )
+        error = _rpc_error(excinfo)
+        assert error.code == -32021, error.error
 
     async with open_mcp_session(mcp_endpoint, elicitation_callback=_accept) as session:
         added = await _call(

@@ -33,7 +33,8 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from mcp import types
-from mcp.client.session import ClientSession
+from mcp.client._transport import Transport
+from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 from sqlalchemy.orm import Session, sessionmaker
 from uvicorn.config import Config as UvicornConfig
@@ -198,7 +199,14 @@ async def mcp_url(app: FastAPI) -> AsyncIterator[str]:
 @asynccontextmanager
 async def mcp_session(
     url: str, *, elicitation_callback: Any = None
-) -> AsyncIterator[ClientSession]:
+) -> AsyncIterator[Client]:
+    """A modern-protocol client; see tests/integration/test_mcp_server.py for
+    the reasoning (no handshake, MRTR retry loop, transport carries auth)."""
+    kwargs = (
+        {"elicitation_callback": elicitation_callback}
+        if elicitation_callback is not None
+        else {}
+    )
     http_client = cast(
         "Any",
         httpx.AsyncClient(
@@ -207,18 +215,13 @@ async def mcp_session(
             follow_redirects=True,
         ),
     )
-    kwargs = (
-        {"elicitation_callback": elicitation_callback}
-        if elicitation_callback is not None
-        else {}
-    )
-    async with (
-        http_client,
-        streamable_http_client(url, http_client=http_client) as (read, write),
-        ClientSession(read, write, **kwargs) as session,
-    ):
-        await session.initialize()
-        yield session
+    transport = streamable_http_client(url, http_client=http_client)
+    client = Client(cast("Transport", transport), mode="2026-07-28", **kwargs)
+    try:
+        async with client:
+            yield client
+    finally:
+        await http_client.aclose()
 
 
 @pytest.fixture

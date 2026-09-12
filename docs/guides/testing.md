@@ -118,6 +118,7 @@ P3 加：翻译闸门、TTS enclosure、Reader API 已读/星标同步。
 - **MCP 用真实客户端**：经 Streamable HTTP 连活服务，而不是直接调工具函数。测的是线上契约（schema 生成、elicitation、审计覆盖）。elicitation 回调要**在同一 task 内进出**，故用 helper 上下文管理器而非 async fixture（anyio cancel scope 限制）
 - **调度器注入时钟**：`run_tick(now=...)` 可传时钟；不传时生产用真实时间。注意**时钟必须贯穿** —— 用挂钟写 run 时间戳而用注入值判到期，会让 elapsed 为负、被时钟偏移规则判为「永远到期」，退避静默失效
 - **对外契约以对端实现为准**：Reader API 的 item id 格式与 GET/POST 动词，两次都是「读文档/读源码得出的结论」被**真实客户端流量**推翻（见 ADR 0006 与 netnewswire.md）
+- **先怀疑自己的探针**：MCP 2026-07-28 协议升级时，三个「服务端缺陷」（`server/discover` 不可达、discover 内部错误、auto 模式回退）最终全部归因于探针脚本自身的错误——`_meta` 嵌套位置、缺 `jsonrpc`/`id`、缺 auth 头。静态读代码判断协议符合度不可靠，必须以实测协商结果为准；而实测结果反常时，第一嫌疑人是测试工具的构造，不是被测系统
 
 ## 本地与 CI 命令
 

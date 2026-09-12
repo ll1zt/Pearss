@@ -36,7 +36,11 @@ from app.hardening import (
     env_int,
 )
 from app.items_routes import router as items_router
-from app.mcp_guard import MCPAuthMiddleware, warn_if_unconfigured
+from app.mcp_guard import (
+    MCPAuthMiddleware,
+    MCPHeaderValidationMiddleware,
+    warn_if_unconfigured,
+)
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
 from app.pipeline import normalise_and_store
@@ -160,7 +164,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # break `router.lifespan_context` below, which is what makes MCP sessions
     # work at all.
     mcp_inner = build_mcp_app(app)
-    app.mount("/mcp", MCPAuthMiddleware(mcp_inner))
+    # Auth first (cheap, and an unauthenticated peer must not reach the
+    # body-reading layer), then header/body agreement.
+    app.mount(
+        "/mcp",
+        MCPAuthMiddleware(MCPHeaderValidationMiddleware(mcp_inner)),
+    )
     app.state.mcp_app = mcp_inner
 
     scheduler = Scheduler(

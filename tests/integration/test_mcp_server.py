@@ -22,8 +22,10 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from mcp.client.session import ClientSession
+from mcp.client._transport import Transport
+from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from sqlalchemy import text
 from uvicorn.config import Config as UvicornConfig
@@ -165,6 +167,26 @@ def mcp_url(mcp_env: dict[str, str]) -> Iterator[str]:
                 os.environ[key] = value
 
 
+def _rpc_error(excinfo: pytest.ExceptionInfo[BaseException]) -> MCPError:
+    """The MCPError inside whatever the transport raised.
+
+    The anyio task group wraps the error in an ExceptionGroup on its way out,
+    which pytest.raises(MCPError) will not match; the code is what the test
+    asserts on, so unwrap until it appears.
+    """
+    found: list[MCPError] = []
+
+    def walk(exc: BaseException) -> None:
+        if isinstance(exc, MCPError):
+            found.append(exc)
+        for sub in getattr(exc, "exceptions", []):
+            walk(sub)
+
+    walk(excinfo.value)
+    assert found, f"no MCPError in {excinfo.value!r}"
+    return found[0]
+
+
 async def _auto_accept(_ctx: Any, params: Any) -> Any:
     """Answer an elicitation by echoing the schema's prefilled defaults.
 
@@ -190,21 +212,27 @@ async def _auto_accept(_ctx: Any, params: Any) -> Any:
 @asynccontextmanager
 async def mcp_session(
     url: str, *, elicitation_callback: Any = None
-) -> AsyncIterator[ClientSession]:
-    """A connected session, opened and closed inside the calling task.
+) -> AsyncIterator[Client]:
+    """A connected modern-protocol client, opened and closed in one task.
 
-    A helper rather than a fixture on purpose: the MCP transport enters an anyio
+    A helper rather than a fixture on purpose: the transport enters an anyio
     cancel scope, and anyio requires the same task to exit it. An
     async-generator fixture tears down elsewhere and fails every test with
     "attempted to exit cancel scope in a different task".
+
+    `Client` rather than `ClientSession` because the server speaks the
+    2026-07-28 protocol: there is no initialize handshake to drive, and the
+    client is what implements the MRTR retry loop that carries elicitation
+    answers back to the server. The transport is handed in pre-built so the
+    bearer token rides every request -- `Client` accepts any `Transport`
+    (an async context manager yielding the stream pair), and
+    `streamable_http_client` is one.
     """
     kwargs = (
         {"elicitation_callback": elicitation_callback}
         if elicitation_callback is not None
         else {}
     )
-    # The MCP endpoint now requires its own bearer token, so the client is
-    # built with the header rather than left to the default.
     # The SDK vendors its own renamed httpx (`httpx2`), so the parameter is
     # typed against a different class than the one this project depends on.
     # Structurally identical for what the client uses; the cast records that
@@ -217,13 +245,16 @@ async def mcp_session(
             follow_redirects=True,
         ),
     )
-    async with (
-        http_client,
-        streamable_http_client(url, http_client=http_client) as (read, write),
-        ClientSession(read, write, **kwargs) as session,
-    ):
-        await session.initialize()
-        yield session
+    transport = streamable_http_client(url, http_client=http_client)
+    client = Client(cast("Transport", transport), mode="2026-07-28", **kwargs)
+    try:
+        async with client:
+            yield client
+    finally:
+        # The transport borrows the http client but does not own it; without
+        # this every test leaks a socket, which filterwarnings=error turns
+        # into a session-fatal ResourceWarning.
+        await http_client.aclose()
 
 
 def _payload(result: CallToolResult) -> dict[str, Any]:
@@ -538,15 +569,22 @@ async def test_a_wide_request_is_told_what_it_cost(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_writes_decline_when_the_client_cannot_confirm(mcp_url: str) -> None:
-    """The test client does not implement elicitation.
+async def test_writes_refuse_when_the_client_cannot_confirm(mcp_url: str) -> None:
+    """The test client declares no elicitation capability.
 
-    The write must be refused rather than executed. A tool that proceeded when
-    the client could not confirm would make the requirement decorative.
+    The resolver refuses with the spec's MissingRequiredClientCapability
+    (-32021) rather than executing: a server MUST NOT send an elicitation
+    request to a client that did not declare support. An earlier
+    implementation returned a friendly {"declined": true} body here, but that
+    shape required sending the request anyway on the legacy wire and has no
+    delivery mechanism at all on the stateless protocol -- the protocol error
+    is the honest answer, and its data names the missing capability.
     """
-    payload = await _call(mcp_url, "remove_source", {"source_id": "src-1"})
-    assert payload.get("declined") is True
-    assert "elicitation" in payload["reason"]
+    with pytest.raises(BaseException) as excinfo:
+        await _call(mcp_url, "remove_source", {"source_id": "src-1"})
+    error = _rpc_error(excinfo)
+    assert error.code == -32021, error.error
+    assert "elicitation" in str(error.error.data), error.error
 
     # The refusal must be real: the source is still there.
     still = await _call(mcp_url, "list_sources", {"limit": 10})
@@ -580,8 +618,10 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ("remove_source", {"source_id": "src-1"}),
     ]
     for tool, args in cases:
-        payload = await _call(mcp_url, tool, args)
-        assert payload.get("declined") is True, tool
+        with pytest.raises(BaseException) as excinfo:
+            await _call(mcp_url, tool, args)
+        error = _rpc_error(excinfo)
+        assert error.code == -32021, (tool, error.error)
 
     # Nothing changed anywhere.
     sources = await _call(mcp_url, "list_sources", {"limit": 10})
@@ -637,15 +677,16 @@ async def test_refused_writes_reach_no_audit_row(
     before = _core_api_writes()
 
     await _call(mcp_url, "list_sources", {"limit": 5})
-    refused = await _call(
-        mcp_url,
-        "add_source",
-        {
-            "url": "https://never-applied.example/feed",
-            "schedule_policy": {"type": "fixed", "interval": "30m"},
-        },
-    )
-    assert refused.get("declined") is True, "the write must have been refused"
+    with pytest.raises(BaseException) as excinfo:
+        await _call(
+            mcp_url,
+            "add_source",
+            {
+                "url": "https://never-applied.example/feed",
+                "schedule_policy": {"type": "fixed", "interval": "30m"},
+            },
+        )
+    assert _rpc_error(excinfo).code == -32021
 
     assert _core_api_writes() == before, (
         "a declined write must not produce a Core API audit row"
