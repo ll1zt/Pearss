@@ -25,14 +25,17 @@ SNAPSHOT_PATH = REPO_ROOT / "tests" / "contract" / "mcp_tools.json"
 def _surface(tools: list[Any]) -> dict[str, Any]:
     """The parts of the surface a client depends on.
 
-    Names, descriptions and input schemas only. Deliberately excluding the
-    server version and anything time-dependent, which would churn the snapshot
-    on unrelated releases and train reviewers to ignore its diffs.
+    Names, descriptions, input schemas and `_meta` (which carries the MCP Apps
+    `ui` binding -- a host renders the bound panel because of it, so a drift
+    there is a contract change). Deliberately excluding the server version and
+    anything time-dependent, which would churn the snapshot on unrelated
+    releases and train reviewers to ignore its diffs.
     """
     return {
         tool.name: {
             "description": tool.description,
             "input_schema": tool.input_schema,
+            **({"meta": tool.meta} if tool.meta else {}),
         }
         for tool in sorted(tools, key=lambda item: item.name)
     }

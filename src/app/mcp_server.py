@@ -21,10 +21,12 @@ import uuid
 from typing import Annotated, Any, cast
 
 import httpx
+from mcp.server.apps import APP_MIME_TYPE, Apps
 from mcp.server.caching import CacheHint
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.resolve import Elicit, Resolve
+from mcp.server.mcpserver.resources import FunctionResource
 from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, Field, create_model
 
@@ -32,6 +34,14 @@ LOGGER = logging.getLogger(__name__)
 
 SERVER_NAME = "pearss"
 MAX_STRING_CHARS = 200
+
+# The health panel: a `ui://` resource the host renders as an MCP App.
+# `get_system_snapshot` declares it, so a host that supports Apps can show the
+# decay signals (architecture section 7.7) as a real panel instead of a table
+# the model laid out. Clients without Apps support see exactly the same
+# structured data as before -- the tool result is unchanged, so this is pure
+# progressive enhancement.
+HEALTH_RESOURCE_URI = "ui://pearss/health"
 
 # `get_item_body` bounds itself rather than inheriting MAX_STRING_CHARS: the
 # whole point of that tool is to hand over a body, so the generic shrinker would
@@ -397,8 +407,117 @@ def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:
     }
 
 
+def _html_escape(text: str) -> str:
+    import html
+
+    return html.escape(text)
+
+
+def _render_health_html(snapshot: dict[str, Any]) -> str:
+    """The health panel: the section 7.7 decay signals, server-rendered.
+
+    Laid out here, once, rather than re-invented by the model on every turn --
+    the division of labour the agent-view TODO names: the agent decides what
+    to look at, deterministic code decides how it looks. The markup is
+    self-contained on purpose (inline styles, no scripts, no external
+    resources) so the sandboxed iframe needs no network and no JS, and the
+    self-containment is a pinned contract, not a style choice.
+
+    `data-*` attributes carry the exact counts so tests (and hosts) can read
+    the panel structurally instead of scraping prose.
+    """
+    import html as _html
+
+    def rows(mapping: dict[str, int], attribute: str) -> str:
+        return "".join(
+            f'<tr data-{attribute}="{_html.escape(str(key))}">'
+            f"<td>{_html.escape(str(key))}</td><td>{value}</td></tr>"
+            for key, value in mapping.items()
+        )
+
+    errors = snapshot.get("runs_by_error_class", {})
+    items = snapshot.get("items_by_publish_status", {})
+    sources = snapshot.get("sources_by_status", {})
+    enrichments = snapshot.get("enrichments_by_status", {})
+    rate = snapshot.get("recent_run_success_rate")
+    considered = snapshot.get("recent_runs_considered", 0)
+
+    rate_text = "no finished runs" if rate is None else f"{rate * 100:.0f}%"
+    return f"""<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8"><title>Pearss 采集健康</title>
+<style>
+body{{font:14px/1.5 system-ui,sans-serif;margin:16px;color:#1a1a2e}}
+h1{{font-size:18px;margin:0 0 4px}} h2{{font-size:13px;margin:16px 0 4px;color:#555}}
+table{{border-collapse:collapse}} td,th{{padding:2px 12px 2px 0;text-align:left}}
+td:last-child{{font-variant-numeric:tabular-nums}}
+.rate{{font-size:22px}}
+</style></head><body>
+<h1>Pearss 采集健康</h1>
+<p>近 <span data-field="considered">{considered}</span> 次采集成功率
+<span class="rate" data-field="success-rate">{rate_text}</span></p>
+<h2>按错误类别 (runs)</h2>
+<table>{rows(errors, "error")}</table>
+<h2>条目发布状态 · pending 积压是腐化信号</h2>
+<table>{rows(items, "status")}</table>
+<h2>处理链产品状态</h2>
+<table>{rows(enrichments, "enrichment")}</table>
+<h2>源状态</h2>
+<table>{rows(sources, "source")}</table>
+</body></html>"""
+
+
 def build_mcp_server(app: Any) -> MCPServer:
     """Construct the server with its tools and resources bound to `app`."""
+    apps = Apps()
+
+    core = CoreAPIClient(app)
+
+    # Apps-bound tools and their resources must be registered before the
+    # MCPServer is constructed: the extension is consumed in __init__, and
+    # a binding added after that never reaches tools/list.
+    @apps.tool(
+        resource_uri=HEALTH_RESOURCE_URI,
+        description=(
+            "Compact system state: source and item counts by status, run counts "
+            "by error class, and recent success rate. Read-only. Hosts that "
+            "support MCP Apps render the same signals as a health panel."
+        ),
+    )
+    async def get_system_snapshot() -> dict[str, Any]:
+        status, payload = await core.get("/v1/system/snapshot")
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    async def _health_panel() -> str:
+        """The panel's HTML, rendered from the snapshot at read time.
+
+        Dynamic by design: a host pulls the resource when it renders the App,
+        so the counts are current at display, not at registration.
+        """
+        status, payload = await core.get("/v1/system/snapshot")
+        if status != 200:
+            error = _error_from(payload, status)
+            return (
+                '<!DOCTYPE html><html lang="zh"><body>'
+                f"<h1>Pearss 采集健康</h1><p>快照不可用: "
+                f"{_html_escape(str(error.get('error')))}</p></body></html>"
+            )
+        return _render_health_html(payload)
+
+    apps.add_resource(
+        FunctionResource(
+            uri=HEALTH_RESOURCE_URI,
+            name="Pearss health",
+            description=(
+                "Collection health: success rate, errors by class, pending "
+                "backlog. The UI behind get_system_snapshot."
+            ),
+            mime_type=APP_MIME_TYPE,
+            fn=_health_panel,
+        )
+    )
+
     server = MCPServer(
         name=SERVER_NAME,
         instructions=(
@@ -427,8 +546,8 @@ def build_mcp_server(app: Any) -> MCPServer:
             # answer for a resource that is about to exist.
             "resources/read": CacheHint(ttl_ms=0, scope="private"),
         },
+        extensions=[apps],
     )
-    core = CoreAPIClient(app)
 
     # ---------------------------------------------------------------- reads
 
@@ -569,18 +688,6 @@ def build_mcp_server(app: Any) -> MCPServer:
             "max_chars": max_chars,
             "untrusted": True,
         }
-
-    @server.tool(
-        description=(
-            "Compact system state: source and item counts by status, run counts "
-            "by error class, and recent success rate. Read-only."
-        )
-    )
-    async def get_system_snapshot() -> dict[str, Any]:
-        status, payload = await core.get("/v1/system/snapshot")
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(payload)
 
     @server.tool(description="List collection jobs, each with its source and last run.")
     async def list_jobs(limit: int = 20) -> dict[str, Any]:

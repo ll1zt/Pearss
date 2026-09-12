@@ -16,7 +16,8 @@ import json
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, cast
 
@@ -31,10 +32,19 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextResourceContents
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
+from adapters.repository import (
+    claim_job_run,
+    create_job_run,
+    ensure_collect_job,
+    finish_job_run,
+)
 from app.main import create_app
+from core.enums import ErrorClass
+from core.job_state import JobRunEvent
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "conformance-edge-token"
@@ -198,6 +208,28 @@ async def _rpc(
     async with httpx.AsyncClient(timeout=20) as client:
         response = await client.post(mcp_url, json=body, headers=request_headers)
     return response.status_code, _decode_response(response)
+
+
+@asynccontextmanager
+async def mcp_session(url: str) -> AsyncIterator[Client]:
+    """A modern-protocol client with the edge token attached.
+
+    Same shape as the integration suite's helper; local to this file so the
+    conformance layer has no dependency on it.
+    """
+    http_client = cast(
+        "Any",
+        httpx.AsyncClient(
+            headers={"authorization": f"Bearer {MCP_EDGE_TOKEN}"},
+            timeout=httpx.Timeout(30.0),
+        ),
+    )
+    transport = streamable_http_client(url, http_client=http_client)
+    try:
+        async with Client(cast("Transport", transport), mode="2026-07-28") as client:
+            yield client
+    finally:
+        await http_client.aclose()
 
 
 # --------------------------------------------------------------------------
@@ -397,3 +429,118 @@ async def test_results_carry_a_result_type(mcp_url: str) -> None:
 
     assert status == 200, payload
     assert payload["result"]["resultType"] == "complete", payload["result"]
+
+
+# --------------------------------------------------------------------------
+# MCP Apps: the health panel (progressive enhancement over get_system_snapshot)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_snapshot_tool_declares_its_ui_resource(mcp_url: str) -> None:
+    """The tool's _meta.ui points at the panel, per the Apps extension.
+
+    A host that supports Apps renders the bound resource instead of leaving
+    the model to lay out the counts; a host that does not support Apps never
+    sees the binding matter. Either way the binding itself is contract.
+    """
+    async with mcp_session(mcp_url) as client:
+        tools = (await client.list_tools()).tools
+    snapshot = next(t for t in tools if t.name == "get_system_snapshot")
+    resource_uri = (snapshot.meta or {}).get("ui", {}).get("resourceUri")
+    assert resource_uri == "ui://pearss/health", snapshot.meta
+
+
+@pytest.mark.asyncio
+async def test_the_health_panel_is_served_as_an_app_resource(mcp_url: str) -> None:
+    """Reading the panel yields app HTML, rendered from current state.
+
+    The resource is re-rendered per read, so the counts reflect the database
+    at display time rather than at registration.
+    """
+    async with mcp_session(mcp_url) as client:
+        result = await client.read_resource(cast("Any", "ui://pearss/health"))
+
+    first = result.contents[0]
+    assert isinstance(first, TextResourceContents), first
+    assert first.mime_type == "text/html;profile=mcp-app", first.mime_type
+    assert "Pearss" in first.text
+
+
+@pytest.mark.asyncio
+async def test_the_health_panel_renders_the_decay_signals(
+    mcp_url: str, base_url: str
+) -> None:
+    """Section 7.7's signals appear with their live counts.
+
+    Two failed network runs and one pending item are planted directly; the
+    panel must carry those exact numbers -- the whole point of rendering
+    server-side is that the agent neither computes nor mis-transcribes them.
+    """
+    engine = sa.create_engine(os.environ["PEARSS_DATABASE_URL"])
+    factory = sessionmaker(engine, expire_on_commit=False)
+    with factory() as session:
+        job_id = ensure_collect_job(
+            session,
+            source_id="src-1",
+            tenant_id="default",
+            at="2026-01-01T00:00:00.000000Z",
+        )
+        for index in range(2):
+            run_id = f"run-h{index}"
+            create_job_run(
+                session,
+                run_id=run_id,
+                job_id=job_id,
+                correlation_id="c",
+                at="2026-01-01T00:00:00.000000Z",
+            )
+            claim_job_run(session, run_id=run_id, at="2026-01-01T00:00:01.000000Z")
+            finish_job_run(
+                session,
+                run_id=run_id,
+                event=JobRunEvent.FAIL,
+                correlation_id="c",
+                error_class=ErrorClass.NETWORK,
+                at="2026-01-01T00:00:02.000000Z",
+            )
+        session.execute(
+            text(
+                "insert into item (id, source_id, guid, content_hash, title,"
+                " url, publish_status, tenant_id, created_at, updated_at)"
+                " values ('i-hold', 'src-1', 'g-hold', 'h-hold', 'Held',"
+                " 'https://e.com/held', 'pending', 'default',"
+                " '2026-01-01T00:00:00.000000Z',"
+                " '2026-01-01T00:00:00.000000Z')"
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    async with mcp_session(mcp_url) as client:
+        result = await client.read_resource(cast("Any", "ui://pearss/health"))
+    first = result.contents[0]
+    assert isinstance(first, TextResourceContents), first
+    html = first.text
+
+    assert '<tr data-error="network"><td>network</td><td>2</td></tr>' in html
+    assert '<tr data-status="pending"><td>pending</td><td>1</td></tr>' in html
+
+
+@pytest.mark.asyncio
+async def test_the_health_panel_is_self_contained(mcp_url: str) -> None:
+    """No scripts, no external references: the iframe needs nothing else.
+
+    The sandbox's default posture is deny; a panel that pulled a stylesheet or
+    script from the network would turn a read-only dashboard into a channel
+    from the reader's context outward. Self-containment is pinned here so the
+    CSP conversation never has to happen.
+    """
+    async with mcp_session(mcp_url) as client:
+        result = await client.read_resource(cast("Any", "ui://pearss/health"))
+    first = result.contents[0]
+    assert isinstance(first, TextResourceContents), first
+    html = first.text
+
+    assert "<script" not in html.lower()
+    assert "http://" not in html and "https://" not in html
