@@ -22,7 +22,8 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from mcp.client.session import ClientSession
+from mcp.client._transport import Transport
+from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
@@ -211,21 +212,27 @@ async def _auto_accept(_ctx: Any, params: Any) -> Any:
 @asynccontextmanager
 async def mcp_session(
     url: str, *, elicitation_callback: Any = None
-) -> AsyncIterator[ClientSession]:
-    """A connected session, opened and closed inside the calling task.
+) -> AsyncIterator[Client]:
+    """A connected modern-protocol client, opened and closed in one task.
 
-    A helper rather than a fixture on purpose: the MCP transport enters an anyio
+    A helper rather than a fixture on purpose: the transport enters an anyio
     cancel scope, and anyio requires the same task to exit it. An
     async-generator fixture tears down elsewhere and fails every test with
     "attempted to exit cancel scope in a different task".
+
+    `Client` rather than `ClientSession` because the server speaks the
+    2026-07-28 protocol: there is no initialize handshake to drive, and the
+    client is what implements the MRTR retry loop that carries elicitation
+    answers back to the server. The transport is handed in pre-built so the
+    bearer token rides every request -- `Client` accepts any `Transport`
+    (an async context manager yielding the stream pair), and
+    `streamable_http_client` is one.
     """
     kwargs = (
         {"elicitation_callback": elicitation_callback}
         if elicitation_callback is not None
         else {}
     )
-    # The MCP endpoint now requires its own bearer token, so the client is
-    # built with the header rather than left to the default.
     # The SDK vendors its own renamed httpx (`httpx2`), so the parameter is
     # typed against a different class than the one this project depends on.
     # Structurally identical for what the client uses; the cast records that
@@ -238,13 +245,16 @@ async def mcp_session(
             follow_redirects=True,
         ),
     )
-    async with (
-        http_client,
-        streamable_http_client(url, http_client=http_client) as (read, write),
-        ClientSession(read, write, **kwargs) as session,
-    ):
-        await session.initialize()
-        yield session
+    transport = streamable_http_client(url, http_client=http_client)
+    client = Client(cast("Transport", transport), mode="2026-07-28", **kwargs)
+    try:
+        async with client:
+            yield client
+    finally:
+        # The transport borrows the http client but does not own it; without
+        # this every test leaks a socket, which filterwarnings=error turns
+        # into a session-fatal ResourceWarning.
+        await http_client.aclose()
 
 
 def _payload(result: CallToolResult) -> dict[str, Any]:

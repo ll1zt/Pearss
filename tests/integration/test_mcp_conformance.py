@@ -25,7 +25,8 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
-from mcp.client.session import ClientSession
+from mcp.client._transport import Transport
+from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextResourceContents
@@ -228,14 +229,13 @@ async def test_reading_a_missing_resource_is_an_error_not_empty_content(
             timeout=httpx.Timeout(30.0),
         ),
     )
-    async with (
-        http_client,
-        streamable_http_client(mcp_url, http_client=http_client) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        await session.initialize()
-        with pytest.raises(MCPError) as excinfo:
-            await session.read_resource(cast("Any", "item://does-not-exist"))
+    transport = streamable_http_client(mcp_url, http_client=http_client)
+    try:
+        async with Client(cast("Transport", transport), mode="2026-07-28") as client:
+            with pytest.raises(MCPError) as excinfo:
+                await client.read_resource(cast("Any", "item://does-not-exist"))
+    finally:
+        await http_client.aclose()
 
     error = excinfo.value
     # -32602 (Invalid Params) is the spec's code for a missing resource;
@@ -266,13 +266,12 @@ async def test_reading_an_existing_item_resource_still_works(mcp_url: str) -> No
             timeout=httpx.Timeout(30.0),
         ),
     )
-    async with (
-        http_client,
-        streamable_http_client(mcp_url, http_client=http_client) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        await session.initialize()
-        result = await session.read_resource(cast("Any", "item://i-ready"))
+    transport = streamable_http_client(mcp_url, http_client=http_client)
+    try:
+        async with Client(cast("Transport", transport), mode="2026-07-28") as client:
+            result = await client.read_resource(cast("Any", "item://i-ready"))
+    finally:
+        await http_client.aclose()
 
     assert result.contents, "an existing item must return its body"
     first = result.contents[0]
@@ -316,3 +315,85 @@ async def test_a_matching_mcp_method_header_is_accepted(mcp_url: str) -> None:
 
     assert status == 200, payload
     assert "result" in payload, payload
+
+
+# --------------------------------------------------------------------------
+# Stateless transport (spec 2026-07-28: sessions removed)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_request_needs_no_session_id(mcp_url: str) -> None:
+    """The current spec removed protocol-level sessions and `Mcp-Session-Id`.
+
+    A request carrying its protocol version and client capabilities in `_meta`
+    must be answerable without a prior handshake. Demanding a session id makes
+    every client do a two-request dance for no state we keep, and it puts
+    `server/discover` (a MUST) out of reach on the legacy wire.
+    """
+    status, payload = await _rpc(
+        mcp_url,
+        "tools/list",
+        headers={"mcp-method": "tools/list", "mcp-name": "tools/list"},
+    )
+
+    assert status == 200, payload
+    assert "result" in payload, payload
+
+
+@pytest.mark.asyncio
+async def test_server_discover_answers(mcp_url: str) -> None:
+    """`server/discover` is a MUST for servers on the current protocol.
+
+    It advertises supported versions, capabilities and identity before any
+    other call, which is what lets a client pick a version up front instead of
+    probing and falling back.
+    """
+    status, payload = await _rpc(
+        mcp_url,
+        "server/discover",
+        headers={"mcp-method": "server/discover", "mcp-name": "server/discover"},
+    )
+
+    assert status == 200, payload
+    result = payload.get("result", {})
+    # Wire names are camelCase (`supportedVersions`); the snake_case spellings
+    # are the Python-side model fields.
+    versions = result.get("supportedVersions") or result.get("supported_versions")
+    assert "2026-07-28" in (versions or []), result
+    assert result.get("capabilities"), result
+    # The identity a client uses to decide whether to keep talking.
+    assert result.get("instructions"), "discover must carry the server instructions"
+
+
+@pytest.mark.asyncio
+async def test_cacheable_results_carry_ttl_and_scope(mcp_url: str) -> None:
+    """`tools/list` and `resources/read` MUST carry `ttlMs` and `cacheScope`.
+
+    Without them a client re-fetches the tool surface on every turn. The values
+    are ours to choose; the presence of the fields is not.
+    """
+    status, payload = await _rpc(
+        mcp_url,
+        "tools/list",
+        headers={"mcp-method": "tools/list", "mcp-name": "tools/list"},
+    )
+
+    assert status == 200, payload
+    result = payload["result"]
+    assert "ttlMs" in result, result
+    assert result["cacheScope"] in {"public", "private"}, result
+    assert result["ttlMs"] >= 0, result
+
+
+@pytest.mark.asyncio
+async def test_results_carry_a_result_type(mcp_url: str) -> None:
+    """Every result on the current protocol states `resultType`."""
+    status, payload = await _rpc(
+        mcp_url,
+        "tools/list",
+        headers={"mcp-method": "tools/list", "mcp-name": "tools/list"},
+    )
+
+    assert status == 200, payload
+    assert payload["result"]["resultType"] == "complete", payload["result"]
