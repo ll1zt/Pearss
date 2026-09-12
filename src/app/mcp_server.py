@@ -18,11 +18,12 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.resolve import Elicit, Resolve
 from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, Field, create_model
 
@@ -229,35 +230,147 @@ def _confirmation_schema(fields: dict[str, Any]) -> type[Confirmation]:
     )
 
 
-async def _confirm(
-    ctx: Context, message: str, model: type[Confirmation]
-) -> dict[str, Any] | None:
-    """Ask the user before a write, and return None unless they accepted.
+def _asked(model: type[Confirmation], message: str) -> Elicit[Any]:
+    """The confirmation question, as a resolver result.
 
-    Runs on the server rather than trusting a client prompt: AGENTS.md requires
-    confirmation to be elicited and executed server-side, because a client that
-    skips its dialog would otherwise produce an unconfirmed mutation.
+    Returned from a `Resolve`d parameter so the framework decides how to ask:
+    on the stateless protocol it batches the question into an
+    `InputRequiredResult` and the client retries with the answer; on the older
+    handshake protocol it sends a server-initiated request mid-call. Writing
+    that branching ourselves would be the same code, worse -- the SDK documents
+    this marker as the supported shape.
+
+    A resolver may run more than once per call (it re-runs on the retry round),
+    so the message must derive only from the tool's arguments, which the
+    framework passes to it by name. That is the reason each resolver below is a
+    small function of the arguments rather than a closure over local state.
     """
-    try:
-        result = await ctx.elicit(message, model)
-    except MCPError as exc:
-        # A client that does not implement elicitation cannot confirm a write.
-        # Refusing with a reason beats an unhandled error: the outcome is the
-        # same (nothing changed) but the caller learns why and what to do.
-        # Falling through to execute anyway would be the actual failure.
-        LOGGER.warning("elicitation unavailable, refusing write: %s", exc)
+    return Elicit(message, model)
+
+
+def _confirm_resolver(**kwargs: Any) -> Elicit[Any]:
+    """Ask for confirmation of one write, with the arguments prefilled.
+
+    Every write tool's confirmation runs through this: the message names the
+    write and the schema carries the values about to execute, so the user
+    confirms the actual request rather than retyping it. `_matches` still
+    refuses anything that drifted, which is what makes the dialog a
+    confirmation rather than a formality.
+
+    `_summary` and `_fields` are computed by each tool's own resolver from the
+    tool arguments; they are popped here so they never reach the schema.
+    """
+    summary = kwargs.pop("_summary")
+    fields = kwargs.pop("_fields")
+    return _asked(_confirmation_schema(fields), summary)
+
+
+def _add_source_confirmation(
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+) -> Elicit[Any]:
+    """The add_source question: names the source and prefills every argument."""
+    requested = type.strip().lower()
+    source_type = _infer_source_type(url) if requested == "auto" else requested
+    return _confirm_resolver(
+        _summary=(
+            f"Add {url} as a {source_type} source with policy "
+            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
+            f"(lang {target_lang or 'none'})?"
+        ),
+        _fields={
+            "url": url,
+            "type": source_type,
+            "schedule_policy": _render(schedule_policy),
+            "pipeline_chain": _render(pipeline_chain),
+            "target_lang": target_lang,
+        },
+    )
+
+
+def _update_schedule_policy_confirmation(
+    source_id: str, schedule_policy: dict[str, Any]
+) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set source {source_id} schedule to {_render(schedule_policy)}?",
+        _fields={
+            "source_id": source_id,
+            "schedule_policy": _render(schedule_policy),
+        },
+    )
+
+
+def _set_source_status_confirmation(source_id: str, status: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set source {source_id} status to {status}?",
+        _fields={"source_id": source_id, "status": status},
+    )
+
+
+def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Remove source {source_id}? Items already collected are kept.",
+        _fields={"source_id": source_id},
+    )
+
+
+def _trigger_job_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Fetch source {source_id} now?",
+        _fields={"source_id": source_id},
+    )
+
+
+def _backfill_source_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Backfill processing products for source {source_id}?",
+        _fields={"source_id": source_id},
+    )
+
+
+def _retry_enrichments_confirmation(source_id: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=(f"Requeue failed processing-chain products for source {source_id}?"),
+        _fields={"source_id": source_id},
+    )
+
+
+def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Set plugin {plugin_id} status to {status}?",
+        _fields={"plugin_id": plugin_id, "status": status},
+    )
+
+
+def _confirmation_verdict(answer: Any) -> dict[str, Any] | None:
+    """Read an elicitation outcome: the confirmed values, or None.
+
+    `confirmed` is the explicit checkbox in the schema. A client that accepts
+    the dialog but leaves it false has declined, and honouring that is the
+    difference between a confirmation and a form field.
+
+    A decline or cancel arrives as `None` (the framework unwraps the union for
+    a parameter annotated with the plain model), so a falsy answer means "not
+    confirmed" rather than "no answer yet". `None` is also what a client that
+    cannot elicit produces -- the SDK raises before we get here in that case,
+    and the tool layer reports it as a not-confirmed refusal.
+    """
+    if answer is None:
         return None
-    if result.action != "accept":
-        # decline and cancel are distinct reasons but the same outcome for the
-        # caller, so both are reported as "not confirmed" rather than one being
-        # silently treated as an error.
-        LOGGER.info("user %s the write: %s", result.action, message)
-        return None
-    data = result.data
-    # `confirmed` is the explicit checkbox in the schema. A client that accepts
-    # the dialog but leaves it false has declined, and honouring that is the
-    # difference between a confirmation and a form field.
-    values: dict[str, Any] = data.model_dump()
+    if isinstance(answer, Confirmation):
+        values = answer.model_dump()
+    elif isinstance(answer, dict):
+        values = dict(answer)
+    else:
+        action = getattr(answer, "action", None)
+        data = getattr(answer, "data", None)
+        if action != "accept" or data is None:
+            LOGGER.info("write %s", action or "unanswered")
+            return None
+        values = data.model_dump() if hasattr(data, "model_dump") else dict(data)
     return values if values.get("confirmed") else None
 
 
@@ -492,27 +605,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         url: str,
         schedule_policy: dict[str, Any],
         ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_add_source_confirmation)],
         type: str = "auto",
         pipeline_chain: list[dict[str, Any]] | None = None,
         target_lang: str = "",
     ) -> dict[str, Any]:
         requested = type.strip().lower()
         source_type = _infer_source_type(url) if requested == "auto" else requested
-        data = await _confirm(
-            ctx,
-            f"Add {url} as a {source_type} source with policy "
-            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
-            f"(lang {target_lang or 'none'})?",
-            _confirmation_schema(
-                {
-                    "url": url,
-                    "type": source_type,
-                    "schedule_policy": _render(schedule_policy),
-                    "pipeline_chain": _render(pipeline_chain),
-                    "target_lang": target_lang,
-                }
-            ),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -558,15 +658,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def update_schedule_policy(
-        source_id: str, schedule_policy: dict[str, Any], ctx: Context
+        source_id: str,
+        schedule_policy: dict[str, Any],
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_update_schedule_policy_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set source {source_id} schedule to {_render(schedule_policy)}?",
-            _confirmation_schema(
-                {"source_id": source_id, "schedule_policy": _render(schedule_policy)}
-            ),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -600,13 +699,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def set_source_status(
-        source_id: str, status: str, ctx: Context
+        source_id: str,
+        status: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_source_status_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set source {source_id} status to {status}?",
-            _confirmation_schema({"source_id": source_id, "status": status}),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -639,12 +739,12 @@ def build_mcp_server(app: Any) -> MCPServer:
             "the source stops being fetched."
         )
     )
-    async def remove_source(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Remove source {source_id}? Items already collected are kept.",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def remove_source(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_remove_source_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -673,12 +773,12 @@ def build_mcp_server(app: Any) -> MCPServer:
             "this issues a real request to the origin."
         )
     )
-    async def trigger_job(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Fetch source {source_id} now?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def trigger_job(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_trigger_job_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -712,12 +812,14 @@ def build_mcp_server(app: Any) -> MCPServer:
             "pipeline_chain configured."
         )
     )
-    async def backfill_source(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Backfill processing products for source {source_id}?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def backfill_source(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_backfill_source_confirmation)
+        ],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -765,12 +867,14 @@ def build_mcp_server(app: Any) -> MCPServer:
             "the attempt budget and the provider charges again."
         )
     )
-    async def retry_enrichments(source_id: str, ctx: Context) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Requeue failed processing-chain products for source {source_id}?",
-            _confirmation_schema({"source_id": source_id}),
-        )
+    async def retry_enrichments(
+        source_id: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_retry_enrichments_confirmation)
+        ],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -814,13 +918,14 @@ def build_mcp_server(app: Any) -> MCPServer:
         )
     )
     async def set_plugin_status(
-        plugin_id: str, status: str, ctx: Context
+        plugin_id: str,
+        status: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_plugin_status_confirmation)
+        ],
     ) -> dict[str, Any]:
-        data = await _confirm(
-            ctx,
-            f"Set plugin {plugin_id} status to {status}?",
-            _confirmation_schema({"plugin_id": plugin_id, "status": status}),
-        )
+        data = _confirmation_verdict(confirmed)
         if data is None:
             return {
                 "declined": True,
@@ -910,5 +1015,5 @@ def build_mcp_app(app: Any) -> Any:
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=allowed_hosts(),
-        )
+        ),
     )

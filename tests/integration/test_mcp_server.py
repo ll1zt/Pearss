@@ -24,6 +24,7 @@ from alembic import command
 from alembic.config import Config
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from sqlalchemy import text
 from uvicorn.config import Config as UvicornConfig
@@ -163,6 +164,26 @@ def mcp_url(mcp_env: dict[str, str]) -> Iterator[str]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _rpc_error(excinfo: pytest.ExceptionInfo[BaseException]) -> MCPError:
+    """The MCPError inside whatever the transport raised.
+
+    The anyio task group wraps the error in an ExceptionGroup on its way out,
+    which pytest.raises(MCPError) will not match; the code is what the test
+    asserts on, so unwrap until it appears.
+    """
+    found: list[MCPError] = []
+
+    def walk(exc: BaseException) -> None:
+        if isinstance(exc, MCPError):
+            found.append(exc)
+        for sub in getattr(exc, "exceptions", []):
+            walk(sub)
+
+    walk(excinfo.value)
+    assert found, f"no MCPError in {excinfo.value!r}"
+    return found[0]
 
 
 async def _auto_accept(_ctx: Any, params: Any) -> Any:
@@ -538,15 +559,22 @@ async def test_a_wide_request_is_told_what_it_cost(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_writes_decline_when_the_client_cannot_confirm(mcp_url: str) -> None:
-    """The test client does not implement elicitation.
+async def test_writes_refuse_when_the_client_cannot_confirm(mcp_url: str) -> None:
+    """The test client declares no elicitation capability.
 
-    The write must be refused rather than executed. A tool that proceeded when
-    the client could not confirm would make the requirement decorative.
+    The resolver refuses with the spec's MissingRequiredClientCapability
+    (-32021) rather than executing: a server MUST NOT send an elicitation
+    request to a client that did not declare support. An earlier
+    implementation returned a friendly {"declined": true} body here, but that
+    shape required sending the request anyway on the legacy wire and has no
+    delivery mechanism at all on the stateless protocol -- the protocol error
+    is the honest answer, and its data names the missing capability.
     """
-    payload = await _call(mcp_url, "remove_source", {"source_id": "src-1"})
-    assert payload.get("declined") is True
-    assert "elicitation" in payload["reason"]
+    with pytest.raises(BaseException) as excinfo:
+        await _call(mcp_url, "remove_source", {"source_id": "src-1"})
+    error = _rpc_error(excinfo)
+    assert error.code == -32021, error.error
+    assert "elicitation" in str(error.error.data), error.error
 
     # The refusal must be real: the source is still there.
     still = await _call(mcp_url, "list_sources", {"limit": 10})
@@ -580,8 +608,10 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ("remove_source", {"source_id": "src-1"}),
     ]
     for tool, args in cases:
-        payload = await _call(mcp_url, tool, args)
-        assert payload.get("declined") is True, tool
+        with pytest.raises(BaseException) as excinfo:
+            await _call(mcp_url, tool, args)
+        error = _rpc_error(excinfo)
+        assert error.code == -32021, (tool, error.error)
 
     # Nothing changed anywhere.
     sources = await _call(mcp_url, "list_sources", {"limit": 10})
@@ -637,15 +667,16 @@ async def test_refused_writes_reach_no_audit_row(
     before = _core_api_writes()
 
     await _call(mcp_url, "list_sources", {"limit": 5})
-    refused = await _call(
-        mcp_url,
-        "add_source",
-        {
-            "url": "https://never-applied.example/feed",
-            "schedule_policy": {"type": "fixed", "interval": "30m"},
-        },
-    )
-    assert refused.get("declined") is True, "the write must have been refused"
+    with pytest.raises(BaseException) as excinfo:
+        await _call(
+            mcp_url,
+            "add_source",
+            {
+                "url": "https://never-applied.example/feed",
+                "schedule_policy": {"type": "fixed", "interval": "30m"},
+            },
+        )
+    assert _rpc_error(excinfo).code == -32021
 
     assert _core_api_writes() == before, (
         "a declined write must not produce a Core API audit row"
