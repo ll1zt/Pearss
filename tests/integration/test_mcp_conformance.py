@@ -140,6 +140,65 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
     return {}
 
 
+def _decode_response(response: httpx.Response) -> dict[str, Any]:
+    """The JSON-RPC payload, whether it arrived as JSON or as one SSE event.
+
+    The transport may answer either way and the client must support both, so a
+    raw probe has to as well: an SSE answer is `event: message` followed by a
+    `data:` line holding the same JSON object.
+    """
+    content_type = response.headers.get("content-type", "")
+    if "text/event-stream" not in content_type:
+        try:
+            return dict(response.json())
+        except ValueError:
+            return {}
+    for line in response.text.splitlines():
+        if line.startswith("data:"):
+            try:
+                return dict(json.loads(line[len("data:") :].strip()))
+            except ValueError:
+                continue
+    return {}
+
+
+async def _rpc(
+    mcp_url: str,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """One raw JSON-RPC POST, so the transport layer is observable.
+
+    `_meta` carries the protocol version and client capabilities, which the
+    current protocol requires on every request instead of a handshake.
+    """
+    body: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": {
+            **(params or {}),
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    }
+    request_headers = {
+        "authorization": f"Bearer {MCP_EDGE_TOKEN}",
+        "content-type": "application/json",
+        "accept": "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+        **(headers or {}),
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(mcp_url, json=body, headers=request_headers)
+    return response.status_code, _decode_response(response)
+
+
 # --------------------------------------------------------------------------
 # Resource error reporting (spec: resources, Error Handling)
 # --------------------------------------------------------------------------
@@ -219,3 +278,41 @@ async def test_reading_an_existing_item_resource_still_works(mcp_url: str) -> No
     first = result.contents[0]
     assert isinstance(first, TextResourceContents), first
     assert "Real body." in first.text
+
+
+# --------------------------------------------------------------------------
+# Transport headers (spec: streamable http, SEP-2243)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_mcp_method_header_is_refused(mcp_url: str) -> None:
+    """`Mcp-Method` must agree with the JSON-RPC method in the body.
+
+    The header exists so a proxy can route and reject without parsing the body.
+    If a server accepts a request whose header disagrees with its body, the
+    proxy's decision and the server's action are about different requests --
+    which is the whole failure the header was added to prevent.
+    """
+    status, payload = await _rpc(
+        mcp_url,
+        "tools/list",
+        headers={"mcp-method": "tools/call", "mcp-name": "add_source"},
+    )
+
+    assert status != 200 or "error" in payload, payload
+    if "error" in payload:
+        assert payload["error"]["code"] == -32020, payload
+
+
+@pytest.mark.asyncio
+async def test_a_matching_mcp_method_header_is_accepted(mcp_url: str) -> None:
+    """The positive control: correct headers must not be refused."""
+    status, payload = await _rpc(
+        mcp_url,
+        "tools/list",
+        headers={"mcp-method": "tools/list", "mcp-name": "tools/list"},
+    )
+
+    assert status == 200, payload
+    assert "result" in payload, payload

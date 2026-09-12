@@ -28,6 +28,7 @@ yes. It bounds accidents, not adversaries.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -138,6 +139,218 @@ class MCPAuthMiddleware:
         await self._app(scope, receive, send)
 
 
+# Headers the Streamable HTTP transport mirrors from the JSON-RPC body so an
+# intermediary can route and reject without parsing it.
+METHOD_HEADER: Final = "mcp-method"
+NAME_HEADER: Final = "mcp-name"
+PROTOCOL_VERSION_HEADER: Final = "mcp-protocol-version"
+
+# The JSON-RPC error code the spec allocates for a header/body disagreement.
+HEADER_MISMATCH_CODE: Final = -32020
+
+# Methods whose `params` carry a name the transport mirrors; the spec names
+# exactly these three.
+_NAME_BEARING_METHODS: Final = frozenset(
+    {"tools/call", "resources/read", "prompts/get"}
+)
+
+
+def _header_value(scope: Mapping[str, Any], wanted: str) -> str | None:
+    """One request header, case-insensitively; None when absent."""
+    for name, value in scope.get("headers", []):
+        if name.decode("latin-1").lower() == wanted:
+            return str(value.decode("latin-1").strip())
+    return None
+
+
+def _decode_header_value(raw: str) -> str:
+    """Undo the Base64 sentinel the spec defines for unsafe header values.
+
+    `=?base64?...?=` marks a value that cannot ride as plain ASCII (non-ASCII,
+    control characters, leading/trailing space). Servers must decode before
+    comparing to the body, or a legitimate non-ASCII name would look like a
+    mismatch.
+    """
+    if not (raw.startswith("=?base64?") and raw.endswith("?=")):
+        return raw
+    import base64
+
+    encoded = raw[len("=?base64?") : -len("?=")]
+    try:
+        return base64.b64decode(encoded).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        # Leave it alone: the comparison below reports a mismatch, which is
+        # the honest answer for a claim that cannot be decoded.
+        return raw
+
+
+class MCPHeaderValidationMiddleware:
+    """Refuse a request whose mirrored headers disagree with its body.
+
+    Spec, Streamable HTTP / Server Validation:
+
+        Servers that process the request body MUST reject requests where the
+        values specified in the headers do not match the corresponding values
+        in the request body. This prevents potential security vulnerabilities
+        when different components in the network rely on different sources of
+        truth (e.g., a load balancer routing on the header value while the MCP
+        server executes based on the body value).
+
+    That divergence is the whole attack: a proxy that admits `tools/list`
+    while the body says `tools/call` has authorized a different request than
+    the one executed. The SDK streams the body without checking, so the check
+    lives here, in front of the MCP application.
+
+    Enforced only when the request carries a mirrored header at all: a legacy
+    client sends none, and refusing those would break the backward
+    compatibility the transport's own rules require us to keep. A modern
+    client sends them, and then a wrong value is a failure rather than an
+    omission.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await self._app(scope, receive, send)
+            return
+
+        declared_method = _header_value(scope, METHOD_HEADER)
+        declared_version = _header_value(scope, PROTOCOL_VERSION_HEADER)
+        if declared_method is None and declared_version is None:
+            # A legacy client: no mirrored headers to disagree with.
+            await self._app(scope, receive, send)
+            return
+
+        body = await _read_body(receive)
+        try:
+            payload = json.loads(body) if body else None
+        except ValueError:
+            # Malformed JSON is the MCP layer's error to report, not ours.
+            await _replay(scope, receive, send, body, self._app)
+            return
+
+        problem = _header_problem(scope, payload, declared_method, declared_version)
+        if problem is not None:
+            await _reject_header_mismatch(send, problem)
+            return
+
+        await _replay(scope, receive, send, body, self._app)
+
+
+def _header_problem(
+    scope: Mapping[str, Any],
+    payload: Any,
+    declared_method: str | None,
+    declared_version: str | None,
+) -> str | None:
+    """The first mismatch to report, or None when the headers agree."""
+    if not isinstance(payload, dict):
+        return None
+
+    method = payload.get("method")
+    # A header that is absent is not a disagreement: the spec's remedy for a
+    # missing required header is the client's business, and the installed SDK
+    # emits only the headers a given call needs. Comparing `None` against the
+    # body would refuse every request that omitted one, which is a worse
+    # failure than the mismatch this guards.
+    if (
+        isinstance(method, str)
+        and declared_method is not None
+        and declared_method != method
+    ):
+        return (
+            f"{METHOD_HEADER} header value {declared_method!r} does not match "
+            f"body value {method!r}"
+        )
+
+    params = payload.get("params")
+    if isinstance(method, str) and method in _NAME_BEARING_METHODS:
+        declared_name = _header_value(scope, NAME_HEADER)
+        body_name: Any = None
+        if isinstance(params, dict):
+            body_name = params.get("uri" if method == "resources/read" else "name")
+        # Same rule as the method header: absent means "not declared", which
+        # this layer does not enforce; present-but-different is the attack.
+        if isinstance(body_name, str) and declared_name is not None:
+            decoded = _decode_header_value(declared_name)
+            if decoded != body_name:
+                return (
+                    f"{NAME_HEADER} header value {declared_name!r} does not "
+                    f"match body value {body_name!r}"
+                )
+
+    if declared_version is not None:
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        body_version = (
+            meta.get("io.modelcontextprotocol/protocolVersion")
+            if isinstance(meta, dict)
+            else None
+        )
+        if isinstance(body_version, str) and declared_version != body_version:
+            return (
+                f"{PROTOCOL_VERSION_HEADER} header value {declared_version!r} "
+                f"does not match body value {body_version!r}"
+            )
+    return None
+
+
+async def _read_body(receive: Receive) -> bytes:
+    """Buffer the request body so it can be inspected and then replayed."""
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if message["type"] == "http.disconnect":
+            break
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body"):
+            break
+    return b"".join(chunks)
+
+
+async def _replay(
+    scope: Scope, receive: Receive, send: Send, body: bytes, app: Any
+) -> None:
+    """Hand the buffered body to the wrapped app as a fresh receive stream."""
+    sent = False
+
+    async def replay_receive() -> Any:
+        nonlocal sent
+        if not sent:
+            sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return await receive()
+
+    await app(scope, replay_receive, send)
+
+
+async def _reject_header_mismatch(send: Send, detail: str) -> None:
+    """400 with `-32020`: the status and code the spec requires here."""
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": HEADER_MISMATCH_CODE,
+                "message": f"Header mismatch: {detail}",
+            },
+        }
+    ).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 400,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
 async def _reject(
     scope: Scope,
     receive: Receive,
@@ -152,8 +365,6 @@ async def _reject(
     A client that speaks one API's error format should not have to learn a
     second one for a different port of the same process.
     """
-    import json
-
     body = json.dumps(
         {
             "error": {
@@ -191,9 +402,11 @@ def warn_if_unconfigured() -> None:
 
 
 __all__ = [
+    "HEADER_MISMATCH_CODE",
     "MCP_ALLOWED_HOSTS_ENV",
     "MCP_TOKEN_ENV",
     "MCPAuthMiddleware",
+    "MCPHeaderValidationMiddleware",
     "allowed_hosts",
     "mcp_auth_configured",
     "mcp_token",
