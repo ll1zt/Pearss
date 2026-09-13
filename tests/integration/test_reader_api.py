@@ -1103,3 +1103,127 @@ async def test_a_folder_stream_returns_only_that_folders_items(
     assert default_ids, "the default folder has the fixture's items"
     assert work_ids == set(), "the work folder has no items yet"
     assert nothing == set()
+
+
+# --------------------------------------------------------------------------
+# subscription/edit: the drag-and-drop write path
+# --------------------------------------------------------------------------
+
+
+async def _feed_id(client: httpx.AsyncClient, token: str) -> str:
+    response = await client.get(
+        "/api/greader.php/reader/api/0/subscription/list",
+        headers=auth_header(token),
+        params={"output": "json"},
+    )
+    feed_id = response.json()["subscriptions"][0]["id"]
+    return str(feed_id)
+
+
+async def _folder_of(client: httpx.AsyncClient, token: str) -> str:
+    response = await client.get(
+        "/api/greader.php/reader/api/0/subscription/list",
+        headers=auth_header(token),
+        params={"output": "json"},
+    )
+    label = response.json()["subscriptions"][0]["categories"][0]["label"]
+    return str(label)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_edit_moves_a_feed_into_the_named_folder(
+    client: httpx.AsyncClient,
+) -> None:
+    """The drag-and-drop contract: ac=edit, a=user/-/label/<name>.
+
+    After the edit, subscription/list must carry the new folder -- the client
+    re-reads it to rebuild the sidebar, and a write that is not reflected
+    there looks like a dropped drag.
+    """
+    token = await login(client)
+    feed = await _feed_id(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        headers=auth_header(token),
+        data={"T": token, "ac": "edit", "s": feed, "a": "user/-/label/新闻"},
+    )
+    assert response.status_code == 200
+    assert await _folder_of(client, token) == "新闻"
+
+    # And the folder's stream now answers with the feed's items.
+    ids = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "n": 1000, "s": "user/-/label/新闻"},
+    )
+    assert ids.json()["itemRefs"], "the moved feed's items must follow it"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_remove_moves_back_to_the_default_folder(
+    client: httpx.AsyncClient,
+) -> None:
+    """Dragging out of a folder lands the feed in the default one.
+
+    There is no "no folder" state to return to: the column is NOT NULL, and
+    the default folder is where unclassified subscriptions live.
+    """
+    token = await login(client)
+    feed = await _feed_id(client, token)
+    moved = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        headers=auth_header(token),
+        data={"T": token, "ac": "edit", "s": feed, "a": "user/-/label/临时"},
+    )
+    assert moved.status_code == 200
+
+    removed = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        headers=auth_header(token),
+        data={"T": token, "ac": "edit", "s": feed, "r": "user/-/label/临时"},
+    )
+    assert removed.status_code == 200
+    assert await _folder_of(client, token) == "default"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_edit_requires_the_write_token(client: httpx.AsyncClient) -> None:
+    """Folder edits are writes: the form-field T is mandatory, like edit-tag."""
+    feed = await _feed_id(client, await login(client))
+    response = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        data={"ac": "edit", "s": feed, "a": "user/-/label/X"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unknown_action_is_refused(client: httpx.AsyncClient) -> None:
+    """subscribe/unsubscribe are not this endpoint's job -- sources are
+    created and deleted through /v1, with their own auth and audit."""
+    token = await login(client)
+    feed = await _feed_id(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        headers=auth_header(token),
+        data={"T": token, "ac": "subscribe", "s": feed},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_non_label_add_is_refused(client: httpx.AsyncClient) -> None:
+    """`a` carries folders here, not stream urls or arbitrary strings."""
+    token = await login(client)
+    feed = await _feed_id(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/subscription/edit",
+        headers=auth_header(token),
+        data={"T": token, "ac": "edit", "s": feed, "a": "https://example.com/feed"},
+    )
+    assert response.status_code == 400

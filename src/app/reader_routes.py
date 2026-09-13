@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters import filestore, reader_api
 from adapters.db_models import Item as ItemRow
+from adapters.timestamps import fixed_width_utc as timestamp
 from core.reader_state import (
     TagChange,
     derive_auth_token,
@@ -668,6 +669,90 @@ def edit_tag(
         len(known),
         is_read,
         is_starred,
+    )
+    return PlainTextResponse("OK")
+
+
+@router.post("/reader/api/0/subscription/edit")
+def subscription_edit(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    ac: str = Form(default="edit"),
+    s: list[str] = Form(default=[]),
+    a: list[str] = Form(default=[]),
+    r: list[str] = Form(default=[]),
+) -> PlainTextResponse:
+    """Move subscriptions between folders -- the drag-and-drop write path.
+
+    FreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,
+    `r` one to remove. A feed can only be in one category, so an `a` wins and
+    the folder is set; an `r` without an `a` moves back to the default.
+    Unknown feeds are skipped rather than 404'd, the same leniency edit-tag
+    applies to item ids -- a client works from the ids subscription/list gave
+    it, and one that was withdrawn since should not fail the whole edit.
+    """
+    from adapters.db_models import Source as SourceRow
+    from core.enums import SourceStatus
+    from core.folders import DEFAULT_FOLDER, normalize_folder
+
+    if ac != "edit":
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported subscription/edit action {ac!r}; only 'edit'",
+        )
+
+    add_label = next((v for v in a if v), None)
+    remove_label = next((v for v in r if v), None)
+    if add_label and not add_label.startswith("user/-/label/"):
+        raise HTTPException(
+            status_code=400,
+            detail="a folder must be a user/-/label/ stream id",
+        )
+
+    # Both sent is a client mistake about its own model; the add is what such
+    # a drag means (moved INTO the target folder), so it decides.
+    if add_label:
+        try:
+            folder = normalize_folder(add_label.removeprefix("user/-/label/"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif remove_label:
+        folder = DEFAULT_FOLDER
+    else:
+        # A rename (t=) or a no-op edit: nothing this endpoint owns changes.
+        return PlainTextResponse("OK")
+
+    feed_ids = [
+        value
+        for value in (reader_api.parse_feed_stream_id(raw) for raw in s)
+        if value is not None
+    ]
+    if not feed_ids:
+        return PlainTextResponse("OK")
+
+    now = datetime.now(UTC)
+    with request.app.state.session_factory() as session:
+        rows = (
+            session.query(SourceRow)
+            .filter(
+                SourceRow.id.in_(feed_ids),
+                SourceRow.tenant_id == TENANT,
+                # A deleted source's items may be readable, but re-filing a
+                # subscription that no longer exists would resurrect it into
+                # the sidebar on the client's next subscription/list.
+                SourceRow.status != SourceStatus.DELETED.value,
+            )
+            .all()
+        )
+        for row in rows:
+            row.folder = folder
+            row.updated_at = timestamp(now)
+        session.commit()
+
+    LOGGER.info(
+        "reader subscription/edit: %d feed(s) moved to folder %r",
+        len(rows),
+        folder,
     )
     return PlainTextResponse("OK")
 
