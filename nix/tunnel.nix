@@ -37,9 +37,21 @@
       Type = "oneshot";
       RemainAfterExit = true;
     };
+    # Same etag race as the funnel unit below -- both commands write one shared
+    # config document. The funnel unit is ordered after this one, so this side
+    # normally wins the first write; the retry covers a tailscaled that is still
+    # settling from a reboot.
     script = ''
-      ${pkgs.tailscale}/bin/tailscale serve --bg --https=8443 \
-        http://127.0.0.1:${toString config.services.pearss.port}
+      for attempt in 1 2 3 4 5; do
+        if ${pkgs.tailscale}/bin/tailscale serve --bg --https=8443 \
+             http://127.0.0.1:${toString config.services.pearss.port}; then
+          exit 0
+        fi
+        echo "serve attempt $attempt failed; retrying in 2s" >&2
+        sleep 2
+      done
+      echo "serve could not be configured after 5 attempts" >&2
+      exit 1
     '';
     preStop = ''
       ${pkgs.tailscale}/bin/tailscale serve --https=8443 off || true
@@ -89,10 +101,18 @@
 
   systemd.services.tailscale-funnel-pearss = {
     description = "Expose the Reader API publicly (funnel :10000)";
+    # `tailscale serve` and `tailscale funnel` write one shared config document,
+    # versioned by an etag. Starting both units together therefore races: the
+    # loser is told "Another client is changing the serve config" and
+    # "Preconditions failed: etag mismatch", and the unit fails on first boot
+    # while succeeding on the next attempt. Ordering the funnel after the serve
+    # unit removes the concurrency; the retry below covers the remaining window,
+    # because tailscaled may still be settling when this unit starts.
     after = [
       "tailscaled.service"
       "nginx.service"
       "pearss.service"
+      "tailscale-serve-pearss.service"
     ];
     wants = [
       "tailscaled.service"
@@ -104,8 +124,19 @@
       RemainAfterExit = true;
     };
     script = ''
-      ${pkgs.tailscale}/bin/tailscale funnel --bg --https=10000 \
-        http://127.0.0.1:10000
+      # A bounded retry rather than a loop with no end: a genuine configuration
+      # problem (a missing ACL grant, for instance) must still fail the unit
+      # rather than restart forever.
+      for attempt in 1 2 3 4 5; do
+        if ${pkgs.tailscale}/bin/tailscale funnel --bg --https=10000 \
+             http://127.0.0.1:10000; then
+          exit 0
+        fi
+        echo "funnel attempt $attempt failed; retrying in 2s" >&2
+        sleep 2
+      done
+      echo "funnel could not be configured after 5 attempts" >&2
+      exit 1
     '';
     preStop = ''
       ${pkgs.tailscale}/bin/tailscale funnel --https=10000 off || true
