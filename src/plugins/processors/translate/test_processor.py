@@ -352,3 +352,99 @@ def test_an_unknown_target_language_is_never_skipped(
 
     assert is_already_in("Это довольно длинный русский текст.", "ru") is False
     assert is_already_in("这是一段足够长的中文内容，不应该被跳过。", "ru") is False
+
+
+# --------------------------------------------------------------------------
+# Failure classification
+# --------------------------------------------------------------------------
+
+
+def _provider(monkeypatch: pytest.MonkeyPatch, status: int, body: object) -> None:
+    """Configure a provider and make every request answer `status`."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kw: httpx.Response(status, json=body),
+    )
+
+
+def _classify() -> ProcessorError:
+    with pytest.raises(ProcessorError) as excinfo:
+        process({"title": "t", "content": "c"}, target_lang="zh", store=lambda c: "x")
+    return excinfo.value
+
+
+def test_a_rejected_request_is_parse_not_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 400 is the request's fault, so retrying it is pure waste.
+
+    Observed live: a model name set in the singular env var holding a
+    comma-separated pair made every call answer 400. Classified as `network`,
+    the worker retried each one three times with backoff and reported a
+    network problem, which pointed the operator at DNS instead of at the
+    setting that was wrong.
+    """
+    _provider(
+        monkeypatch,
+        400,
+        {
+            "error": {
+                "message": "unknown provider for model m",
+                "type": "invalid_request_error",
+            }
+        },
+    )
+    exc = _classify()
+    assert exc.error_class is ErrorClass.PARSE
+    assert "unknown provider for model m" in exc.detail
+    assert "400" in exc.detail
+
+
+def test_a_missing_endpoint_is_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    _provider(monkeypatch, 404, {"error": {"message": "not found"}})
+    assert _classify().error_class is ErrorClass.PARSE
+
+
+def test_a_rejected_key_is_still_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """401 keeps its own class: the remedy is a new key, not a fixed request."""
+    _provider(monkeypatch, 401, {"error": {"message": "invalid api key"}})
+    assert _classify().error_class is ErrorClass.AUTH
+
+
+def test_a_rate_limit_is_still_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """429 stays retryable: waiting is exactly the right response."""
+    _provider(monkeypatch, 429, {"error": {"message": "rate limited"}})
+    assert _classify().error_class is ErrorClass.BLOCKED
+
+
+def test_a_server_error_is_still_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """5xx is genuinely transient, so the retry policy should keep applying."""
+    _provider(monkeypatch, 503, {"error": {"message": "overloaded"}})
+    assert _classify().error_class is ErrorClass.NETWORK
+
+
+def test_an_unparseable_error_body_does_not_break_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason is a courtesy; the class is the contract."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    monkeypatch.setattr(
+        httpx, "post", lambda url, **kw: httpx.Response(400, text="<html>nope</html>")
+    )
+    exc = _classify()
+    assert exc.error_class is ErrorClass.PARSE
+    assert "no parseable error body" in exc.detail

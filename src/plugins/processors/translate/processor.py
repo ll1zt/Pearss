@@ -115,6 +115,28 @@ def processor_version() -> str:
     return "0.1.0"
 
 
+def _provider_reason(response: httpx.Response) -> str:
+    """The provider's own words for a refusal, trimmed for a log line.
+
+    OpenAI-compatible errors carry `{"error": {"message": ...}}`, and that
+    message is the actionable part: "unknown provider for model X" points
+    straight at the misconfigured env var, while the status code alone sends
+    the operator looking for a network problem. Never trusted or rendered --
+    it lands in an enrichment row's detail for a human to read.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return "no parseable error body"
+    if not isinstance(payload, dict):
+        return "no parseable error body"
+    error = payload.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str) or not message.strip():
+        return "no parseable error body"
+    return " ".join(message.split())[:200]
+
+
 def _parse_reply(payload: dict[str, Any]) -> str:
     try:
         content = payload["choices"][0]["message"]["content"]
@@ -287,6 +309,22 @@ def _translate_one(
                 f"all models exhausted; last HTTP {response.status_code}",
             )
         if response.status_code != 200:
+            # A 4xx that is not 401/429 is the request's fault, not the
+            # network's: an unknown model name, a malformed body, an endpoint
+            # that does not exist. Classifying those as `network` made the
+            # worker retry them to exhaustion -- three identical 400s, each
+            # after a backoff, while the real problem was a configuration
+            # string that only surfaced once the attempts ran out.
+            #
+            # `parse` is the taxonomy's home for "this cannot be processed as
+            # things stand": not retried automatically, and not `auth` either
+            # (the key was accepted; the request was refused).
+            if 400 <= response.status_code < 500:
+                raise ProcessorError(
+                    ErrorClass.PARSE,
+                    f"provider rejected the request: HTTP {response.status_code}"
+                    f" ({_provider_reason(response)})",
+                )
             raise ProcessorError(
                 ErrorClass.NETWORK, f"provider returned HTTP {response.status_code}"
             )
