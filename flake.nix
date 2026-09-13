@@ -11,15 +11,41 @@
   };
 
   outputs =
-    { self, nixpkgs, systems, ... }:
+    {
+      self,
+      nixpkgs,
+      systems,
+      ...
+    }:
     let
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
+      pkgsFor = system: nixpkgs.legacyPackages.${system};
     in
     {
+      # The deployable artifact. Section 10.1's line is preserved: this wraps a
+      # uv-managed environment, so the Python dependency graph still comes from
+      # uv.lock and not from nixpkgs. There is deliberately no second, parallel
+      # expression of the same dependencies.
+      packages = forEachSystem (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          default = pkgs.callPackage ./nix/package.nix { };
+        }
+      );
+
+      # The NixOS module: declares the service, its user, its state directory
+      # and its hardening. Configuration lives in the host's configuration.nix;
+      # only secrets go through an environment file (never the Nix store).
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+      nixosModules.pearss = self.nixosModules.default;
+
       devShells = forEachSystem (
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = pkgsFor system;
           python = pkgs.python313;
 
           # Section 10.1 draws the responsibility line: Nix owns the

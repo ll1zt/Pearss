@@ -326,8 +326,12 @@ def test_env_example_documents_every_variable_the_code_reads() -> None:
     is also checked: a template entry the code cannot read is a lie that
     survives every review because nothing tests it.
     """
-    # Injected by the sandbox's own env allowlist, deliberately not user-set.
-    runtime_injected = {"PEARSS_SANDBOXED"}
+    # Neither is user-set, so neither belongs in a deployment template:
+    # PEARSS_SANDBOXED is injected by the sandbox's own env allowlist, and
+    # PEARSS_TEST_DNS is set by the test suite to make sandboxed children
+    # resolve hermetic addresses. Documenting the latter would invite an
+    # operator to set it and quietly disable the SSRF guard for every fetch.
+    runtime_injected = {"PEARSS_SANDBOXED", "PEARSS_TEST_DNS"}
 
     source = _pearss_names_in_source()
     template = _pearss_names_in_template()

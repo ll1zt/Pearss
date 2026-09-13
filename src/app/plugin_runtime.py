@@ -61,8 +61,31 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 15.0
 # able to read another collector's credentials or the host's own secrets
 # (database URLs, API tokens) by executing `os.environ`, however unlikely
 # that misuse is.
+#
+# PYTHONPATH is here because it says *where the code is*, not what a secret is.
+# The child is spawned as `python -m plugins.collectors`, so it cannot start at
+# all without it whenever the source tree is not installed into the
+# interpreter's own site-packages -- which is the case for the packaged
+# deployment (`nix/package.nix` builds a venv with --no-install-project and
+# reaches the code through PYTHONPATH). On a development checkout an editable
+# install hid this: the child resolved `plugins` from the venv's `.pth` and the
+# allowlist omission went unnoticed until the package was run.
+# PEARSS_TEST_DNS joins them only because it is inert unless set, and the test
+# suite sets it to make sandboxed children resolve hermetic addresses. It names
+# no credential and reveals nothing; without it the child answers real DNS and
+# the fixture hosts are refused as private addresses.
 _BASE_ENV_VARS: Final[frozenset[str]] = frozenset(
-    {"PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR", "PYTHONHASHSEED"}
+    {
+        "PATH",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "TMPDIR",
+        "PYTHONHASHSEED",
+        "PYTHONPATH",
+        "PEARSS_TEST_DNS",
+    }
 )
 _SSL_ENV_PREFIXES: Final[tuple[str, ...]] = (
     "SSL_",

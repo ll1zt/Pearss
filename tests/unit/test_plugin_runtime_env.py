@@ -58,3 +58,22 @@ def test_an_unknown_collector_gets_only_the_base_set(
 
     assert env["PATH"] == "/usr/bin"
     assert "PEARSS_ZSXQ_ACCESS_TOKEN" not in env
+
+
+@pytest.mark.unit
+def test_pythonpath_reaches_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The child is spawned as `python -m plugins.collectors`, so it needs the
+    path to the code.
+
+    This was a real deployment failure: with the source tree installed into the
+    interpreter (the development venv), the child found `plugins` through the
+    venv's `.pth` and the omission was invisible. The packaged deployment
+    (`nix/package.nix`, `--no-install-project`) reaches the code only through
+    PYTHONPATH, so without this the child died at import with ModuleNotFoundError
+    and every sandboxed collector reported a crash.
+    """
+    monkeypatch.setenv("PYTHONPATH", "/opt/pearss/src")
+
+    env = child_environment("telegram")
+
+    assert env["PYTHONPATH"] == "/opt/pearss/src"

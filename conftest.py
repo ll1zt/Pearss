@@ -9,11 +9,25 @@ addresses they exercise.
 
 from __future__ import annotations
 
+import json
+
 import pytest
+
+# The answer every host resolves to under test. A public address, so the SSRF
+# guard classifies it as reachable; the SSRF-specific tests override
+# `resolve_host` themselves with the addresses they exercise.
+_HERMETIC_ADDRESS = "93.184.216.34"
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     from adapters import http as pearss_http
 
-    monkeypatch.setattr(pearss_http, "resolve_host", lambda host: {"93.184.216.34"})
+    monkeypatch.setattr(pearss_http, "resolve_host", lambda host: {_HERMETIC_ADDRESS})
+
+    # A sandboxed collector runs in a separate interpreter, where the patch
+    # above does not reach: it resolves for itself. Without this the child
+    # answered real DNS, `t.me` came back as a private address, and every
+    # sandboxed collector's fixture test failed as `blocked`. The variable is
+    # read by resolve_host in the child and is on the child env allowlist.
+    monkeypatch.setenv("PEARSS_TEST_DNS", json.dumps({"*": [_HERMETIC_ADDRESS]}))

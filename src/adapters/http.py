@@ -9,6 +9,7 @@ collector decide what it means.
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
 import os
 import socket
@@ -88,12 +89,42 @@ def allow_private_fetch() -> bool:
     }
 
 
+# A test-only override for `resolve_host`'s answer, expressed as JSON
+# (`{"host": ["1.2.3.4"]}`) so a sandboxed collector child can be made hermetic
+# too. The root conftest monkeypatches `resolve_host` directly, which only
+# reaches the in-process callers: a child is a separate interpreter that
+# resolves for itself, so before this existed the child answered real DNS and
+# refused every sandboxed collector's fixture host as a private address.
+#
+# A dedicated variable rather than PEARSS_ALLOW_PRIVATE_FETCH: that switch means
+# "this deployment serves internal sources", and using it here would turn the
+# guard off instead of pinning the answer, leaving the SSRF tests unable to
+# distinguish "allowed" from "resolved elsewhere".
+TEST_DNS_ENV: Final = "PEARSS_TEST_DNS"
+
+
 def resolve_host(host: str) -> set[str]:
     """Every address `host` resolves to; empty means unresolvable.
 
     Module-level so tests can substitute a hermetic answer — the guard must
-    not make the test suite depend on real DNS.
+    not make the test suite depend on real DNS. `PEARSS_TEST_DNS` extends that
+    substitution to sandboxed children, which cannot be monkeypatched.
     """
+    override = os.environ.get(TEST_DNS_ENV, "")
+    if override:
+        try:
+            table = json.loads(override)
+        except ValueError:
+            LOGGER.warning(
+                "%s is not valid JSON; falling back to real DNS", TEST_DNS_ENV
+            )
+        else:
+            if isinstance(table, dict):
+                # An exact entry wins; "*" is the fallback for every other host,
+                # which is what lets one variable make a whole child hermetic.
+                addresses = table.get(host, table.get("*"))
+                if isinstance(addresses, list):
+                    return {str(address) for address in addresses}
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, OSError):

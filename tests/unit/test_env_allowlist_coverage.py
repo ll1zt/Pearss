@@ -60,6 +60,12 @@ COLLECTOR_PREFIXES: tuple[str, ...] = (
     "PEARSS_TRANSLATE_",
 )
 
+# Test plumbing that deliberately reaches a sandboxed child. It is neither
+# host-side (the child has to read it) nor a collector credential, so it gets
+# its own category rather than being filed under a heading that misdescribes it.
+# It is inert unless the test suite sets it; see conftest.py.
+TEST_ONLY: frozenset[str] = frozenset({"PEARSS_TEST_DNS"})
+
 _REFERENCE = re.compile(r"PEARSS_[A-Z0-9_]+")
 
 
@@ -88,7 +94,9 @@ def test_every_referenced_env_name_is_allowlisted_or_host_side() -> None:
     unaccounted = sorted(
         name
         for name in referenced
-        if name not in HOST_SIDE and not name.startswith(COLLECTOR_PREFIXES)
+        if name not in HOST_SIDE
+        and name not in TEST_ONLY
+        and not name.startswith(COLLECTOR_PREFIXES)
     )
     assert not unaccounted, (
         "PEARSS_* variables referenced in src/ but not reachable by the "
