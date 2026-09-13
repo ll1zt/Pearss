@@ -381,6 +381,26 @@ def configured_count() -> int:
     return 20
 
 
+FIRST_PAGES_ENV = "PEARSS_X_FIRST_PAGES"
+DEFAULT_FIRST_PAGES = 3
+
+
+def configured_first_pages() -> int:
+    """Pages the very first walk of a source may spend.
+
+    The first cycle defines the crawl's history floor: it walks this many
+    pages, and the oldest tweet it reaches becomes the interval's lower end,
+    which later cycles never go below. Unbounded, the first walk of a busy
+    Following timeline runs its whole page budget and drags in years of
+    history -- observed live as 1,557 tweets spanning 2023-2026 on a source
+    whose operator asked for a small sample.
+    """
+    raw = os.environ.get(FIRST_PAGES_ENV, "").strip()
+    if raw.isdigit():
+        return max(1, int(raw))
+    return DEFAULT_FIRST_PAGES
+
+
 def credentials_configured() -> bool:
     """Whether an authenticated X source could run at all.
 

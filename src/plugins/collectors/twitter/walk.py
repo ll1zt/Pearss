@@ -45,6 +45,9 @@ class PagedWalkResult:
     resume_cursor: str | None
     error_class: ErrorClass | None = None
     detail: str | None = None
+    # Whether this walk ended on the interval's floor. Cursors are opaque, so
+    # only this flag authorises the host to move the stored floor.
+    reached_floor: bool = False
 
     @property
     def ok(self) -> bool:
@@ -64,6 +67,18 @@ def collect_pages(
     `state` is the host's persisted paging position (frontier, resume
     cursor, unresolved-rounds count); the walk itself never persists. The
     returned `drafts` are already filtered to what the frontier says is new.
+
+    The budget follows an interval model. The first walk of a source --
+    frontier empty, nothing to catch up on -- spends `PEARSS_X_FIRST_PAGES`
+    pages, and the oldest tweet it reaches becomes the interval's floor: it
+    is recorded as the walk's resume cursor and later cycles stop above it
+    rather than chasing it, so history below the floor is left unfetched by
+    design. Every later walk walks from the top only until it reaches the
+    frontier, but its budget is a safety ceiling, not a target: a timeline
+    whose new posts exceed one page must keep paging until the frontier is
+    actually crossed, because stopping on budget with the frontier uncrossed
+    is exactly how tweets get lost. Hence `ceiling`: the larger of what the
+    caller allows and what one catch-up pass can need.
     """
     if not x_client.credentials_configured():
         # ADR 0012: a missing credential stops as `auth`. It is not worked
@@ -76,6 +91,11 @@ def collect_pages(
             error_class=ErrorClass.AUTH,
             detail="X session credentials are not configured",
         )
+
+    first_pages = x_client.configured_first_pages()
+    has_history = state.seen_frontier is not None or bool(state.resume_cursor)
+    ceiling = max(max_pages, first_pages)
+    budget = first_pages if not has_history else ceiling
 
     credentials = x_client.Credentials.from_env(client)
     query_id = x_client.current_query_id()
@@ -133,11 +153,15 @@ def collect_pages(
     try:
         result = paging.two_phase_walk(
             fetch_page=fetch_with_recovery,
-            max_pages=max_pages,
+            max_pages=budget,
             seen_frontier=state.seen_frontier,
-            resume=None
-            if paging.should_drop_resume(state.resume_rounds)
-            else state.resume_cursor,
+            # The stored cursor is the interval's floor, not a place to resume
+            # from: resuming would walk below the oldest tweet ever kept, an
+            # unbounded history crawl. As a floor it is a stop sign reached
+            # from above, and unlike the old resume it is never dropped --
+            # should_drop_resume bounded a backlog that slid backwards every
+            # cycle; a floor does not slide, it only marks where history ends.
+            floor=state.resume_cursor,
         )
     except x_client.CredentialError as exc:
         # A credential problem, not a transport one: the operator has to act,
@@ -187,4 +211,5 @@ def collect_pages(
         error_class=ErrorClass.BLOCKED if walk_failed else None,
         detail=result.failed
         or ("no page could be retrieved" if not result.ok else None),
+        reached_floor=result.reached_floor,
     )

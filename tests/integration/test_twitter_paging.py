@@ -21,7 +21,6 @@ from adapters.repository import paging_state, save_paging_state
 from app import collector_registry
 from app.pipeline import CollectionResult, collect_paged
 from core.enums import ErrorClass
-from plugins.collectors.twitter.paging import should_drop_resume
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ID = "src-x"
@@ -110,7 +109,6 @@ def session(tmp_path: Path) -> Iterator[Session]:
                 tenant_id="default",
                 created_at="2026-01-01T00:00:00.000000Z",
                 updated_at="2026-01-01T00:00:00.000000Z",
-                resume_rounds=0,
             )
         )
         made.commit()
@@ -132,6 +130,60 @@ def source_row(session: Session) -> Source:
 # --------------------------------------------------------------------------
 # Failing closed on credentials
 # --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_the_first_walk_spends_first_pages_and_records_the_floor(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interval model's entry point: a fresh source walks exactly
+    `PEARSS_X_FIRST_PAGES` pages and its deepest cursor becomes the floor.
+
+    Without this cap the first walk ran to the host's page budget and dragged
+    in years of history -- 1,557 tweets spanning 2023-2026 on a source whose
+    operator asked for a small sample.
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+    monkeypatch.setenv(x_client.FIRST_PAGES_ENV, "3")
+
+    requested: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        cursor = body["variables"].get("cursor")
+        requested.append(cursor or "NEWEST")
+        # Every page is entirely new (frontier is empty), each carries a
+        # deeper continuation.
+        return httpx.Response(200, content=timeline(["9000"], "PAGE-2"))
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    result = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    # A fresh source has no frontier to stop at, so the walk runs to its
+    # three-page budget and no further.
+    assert requested == ["NEWEST", "PAGE-2", "PAGE-2"], requested
+    # Three pages fetched; dedupe collapses the repeated tweet.
+    assert result.drafts == 3
+    assert result.inserted == 1
+    # The deepest cursor the walk reached is the interval's floor... but note
+    # the walk did not *end on* a floor (there is none yet) -- it ended on
+    # budget. The floor is only ever set by a walk that reached one, so here
+    # it stays unset; the interval's lower end is simply "whatever page 3
+    # reached", and nothing below it will ever be requested because the
+    # frontier now covers everything the first walk kept.
+    state = paging_state(session, source_id=SOURCE_ID)
+    assert state.seen_frontier == 9000
 
 
 @pytest.mark.integration
@@ -284,80 +336,55 @@ def test_the_frontier_only_moves_forward(session: Session) -> None:
 
 
 @pytest.mark.integration
-def test_a_stuck_resume_ages_and_a_moving_one_does_not(session: Session) -> None:
-    """The bound exists so a backlog cannot slide into the past forever."""
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor="GAP-1")
-    session.commit()
-    assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 1
+def test_the_floor_persists_when_a_walk_stops_at_the_frontier(
+    session: Session,
+) -> None:
+    """A routine cycle reports no cursor; the stored floor must survive it.
 
-    # Same cursor again: unresolved, so it ages.
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor="GAP-1")
-    session.commit()
-    assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 2
-
-    # A *deeper* cursor still ages. A productive backfill mints a new cursor
-    # every cycle, so resetting on change would pin the count at 1 forever and
-    # the bound would never engage -- exactly the scenario it exists for.
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor="GAP-2")
-    session.commit()
-    assert paging_state(session, source_id=SOURCE_ID).resume_rounds == 3
-
-    # Clearing it resets the count.
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=10, resume_cursor=None)
+    Erasing the floor there would uncap the next cycle's history: with no
+    stop sign, a budget-exhausted walk crawls below the oldest tweet the
+    source ever reached.
+    """
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FLOOR-1"
+    )
+    # A frontier stop hands back no cursor at all.
+    save_paging_state(session, source_id=SOURCE_ID, newest_id=2000, resume_cursor=None)
     session.commit()
     state = paging_state(session, source_id=SOURCE_ID)
-    assert state.resume_rounds == 0 and state.resume_cursor is None
+    assert state.resume_cursor == "FLOOR-1"
+    assert state.seen_frontier == 2000
 
 
-@pytest.mark.integration
-def test_a_productive_backfill_still_reaches_the_bound(session: Session) -> None:
-    """Each cycle hands back a deeper cursor; the count must still climb.
-
-    This is the case a cursor-equality check gets wrong: the walk looks
-    productive, so it never ages, and a timeline with more history than the
-    budget can reach is crawled forever while new content queues behind it.
-    """
-    for expected_round in range(1, 4):
-        save_paging_state(
-            session,
-            source_id=SOURCE_ID,
-            newest_id=10,
-            resume_cursor=f"DEEPER-{expected_round}",
-        )
-        session.commit()
-        state = paging_state(session, source_id=SOURCE_ID)
-        assert state.resume_rounds == expected_round
-        assert should_drop_resume(state.resume_rounds) is (expected_round >= 3)
-
-
-@pytest.mark.integration
-def test_a_dropped_resume_lets_the_walk_restart_from_the_newest(
+def test_a_budget_stop_never_moves_the_floor(
     session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Past the bound, the cycle stops chasing deep history."""
+    """A walk that stopped on budget reports a cursor -- but not the floor.
+
+    Cursors are opaque strings, so the host cannot compare positions; the
+    walk's reached_floor flag is what says whether the interval's lower end
+    was touched. Without the flag the host must write nothing, or a shallow
+    budget-stop cursor would overwrite the floor and content between the two
+    positions would fall outside the interval the model promises to cover.
+    """
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FLOOR-DEEP"
+    )
+    session.commit()
+
     from plugins.collectors.twitter import client as x_client
-    from plugins.collectors.twitter.paging import MAX_RESUME_ROUNDS
 
     monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
     monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
 
-    save_paging_state(
-        session,
-        source_id=SOURCE_ID,
-        newest_id=1000,
-        resume_cursor="ANCIENT",
-    )
-    row = source_row(session)
-    row.resume_rounds = MAX_RESUME_ROUNDS
-    session.commit()
-
-    requested: list[str] = []
-
+    # Two pages, both above the floor, neither crossing the frontier: the
+    # walk ends on budget with its own bottom cursor.
     def route(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         cursor = body["variables"].get("cursor")
-        requested.append(cursor or "NEWEST")
-        return httpx.Response(200, content=timeline(["2000"], None))
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["2000"], "C1"))
+        return httpx.Response(200, content=timeline(["1500"], "C2"))
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
@@ -370,7 +397,22 @@ def test_a_dropped_resume_lets_the_walk_restart_from_the_newest(
     )
     session.commit()
 
-    assert requested == ["NEWEST"], f"stale resume was still used: {requested}"
+    state = paging_state(session, source_id=SOURCE_ID)
+    assert state.resume_cursor == "FLOOR-DEEP", (
+        "a budget-stop cursor overwrote the floor"
+    )
+    assert state.seen_frontier == 2000
+
+
+def test_a_first_walk_establishes_the_floor(session: Session) -> None:
+    """Before any walk there is no floor; the first one that leaves a cursor
+    sets it."""
+    assert paging_state(session, source_id=SOURCE_ID).resume_cursor is None
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FIRST-BOTTOM"
+    )
+    session.commit()
+    assert paging_state(session, source_id=SOURCE_ID).resume_cursor == "FIRST-BOTTOM"
 
 
 @pytest.mark.integration

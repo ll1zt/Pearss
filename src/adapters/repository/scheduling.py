@@ -21,7 +21,7 @@ from core.enums import (
     SourceStatus,
 )
 from core.normalize import source_display_label
-from core.paging import MAX_RESUME_ROUNDS, WalkState
+from core.paging import WalkState
 from core.scheduling import observed_gaps
 
 
@@ -29,7 +29,7 @@ from core.scheduling import observed_gaps
 class PagingState(WalkState):
     """Where the last walk of this source's origin left off.
 
-    The stored view of core.paging.WalkState — the same three fields, so a
+    The stored view of core.paging.WalkState — the same fields, so a
     persisted state passes anywhere a walk state is expected.
     """
 
@@ -41,7 +41,6 @@ def paging_state(session: Session, *, source_id: str) -> PagingState:
     return PagingState(
         seen_frontier=row.seen_frontier,
         resume_cursor=row.resume_cursor,
-        resume_rounds=row.resume_rounds,
     )
 
 
@@ -58,10 +57,14 @@ def save_paging_state(
     below it, and letting those win would drag the anchor backwards so every
     later cycle re-reads content it already has.
 
-    `resume_rounds` counts consecutive cycles that ended still holding a
-    resume. It resets when the resume clears, which is what bounds how far a
-    backlog can slide into the past.
+    `resume_cursor` is the interval's floor: the deepest point any walk of
+    this source has reached. The caller passes it only when the walk actually
+    ended there -- cursors are opaque, so a shallow budget-stop cursor cannot
+    be distinguished from the floor by value. Once set the floor is never
+    cleared or moved upward: erasing it would uncap the next cycle's history,
+    and a floor that drifted up would strand content outside the interval.
     """
+
     row = session.get(SourceRow, source_id)
     if row is None:
         return
@@ -70,20 +73,8 @@ def save_paging_state(
     ):
         row.seen_frontier = newest_id
 
-    # The count tracks "this cycle still ended with unfinished history", not
-    # "the same cursor as last time". A productive backfill produces a *new,
-    # deeper* cursor every cycle, so keying the count on cursor equality would
-    # pin it at 1 forever and the bound would never engage in exactly the case
-    # it exists for: a Following timeline with more history than the per-cycle
-    # budget can ever reach.
-    if resume_cursor:
+    if resume_cursor and resume_cursor != row.resume_cursor:
         row.resume_cursor = resume_cursor
-        row.resume_rounds = (
-            1 if row.resume_rounds >= MAX_RESUME_ROUNDS else row.resume_rounds + 1
-        )
-    else:
-        row.resume_cursor = None
-        row.resume_rounds = 0
     row.updated_at = timestamp(datetime.now(UTC))
 
 

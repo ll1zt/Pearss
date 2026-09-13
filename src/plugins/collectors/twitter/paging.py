@@ -28,25 +28,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Final
-
-from core.paging import MAX_RESUME_ROUNDS
-
-# How much of a cycle's budget is reserved for an unfinished backfill when one
-# exists, so a very active account cannot starve its own history by consuming
-# the whole budget on new content every time.
-BACKFILL_RESERVE_NUMERATOR: Final = 3
-BACKFILL_RESERVE_DENOMINATOR: Final = 10
-# Below this many pages there is nothing spare to reserve: with 2 pages, giving
-# one to the backfill leaves the fresh phase unable to reach the frontier.
-MIN_PAGES_FOR_RESERVE: Final = 3
-
-# Consecutive cycles an unresolved resume may slide backwards before it is
-# dropped. A backlog deeper than the frontier has no natural stopping anchor,
-# so without a bound the walk retreats further into the past every cycle and
-# never catches up; dropping it accepts a bounded gap in deep history instead
-# of an unbounded one. The bound itself lives in core.paging, because the
-# repository ages the counter and this module reads it -- the two must agree.
 
 
 def to_int(value: object) -> int | None:
@@ -92,6 +73,11 @@ class WalkResult:
     `resume` is non-None when work is unfinished. `gap` says which kind: a gap
     is a place where content is *known* to be missing, whereas a plain cursor
     only means the budget ran out. Callers prioritise the former.
+
+    `reached_floor` says the walk ended on the interval's lower end. Cursors
+    are opaque strings, so the host cannot tell a floor from a shallow
+    budget-stop cursor by comparing them -- this flag is what authorises the
+    host to move the stored floor at all.
     """
 
     pages: list[bytes] = field(default_factory=list)
@@ -99,6 +85,7 @@ class WalkResult:
     resume: str | None = None
     gap: bool = False
     pages_used: int = 0
+    reached_floor: bool = False
     # The newest id seen, for persisting the frontier even when nothing was kept.
     newest_id: int | None = None
     failed: str | None = None
@@ -109,16 +96,6 @@ class WalkResult:
         return bool(self.pages)
 
 
-def reserve_for_backfill(max_pages: int, resume_in: str | None) -> int:
-    """Pages held back for an unfinished backfill, or 0 when there is none."""
-    if not resume_in or max_pages < MIN_PAGES_FOR_RESERVE:
-        return 0
-    reserve = max(
-        1, max_pages * BACKFILL_RESERVE_NUMERATOR // BACKFILL_RESERVE_DENOMINATOR
-    )
-    return min(reserve, max_pages)
-
-
 def walk(
     *,
     fetch_page: Callable[[str | None], Page],
@@ -126,8 +103,9 @@ def walk(
     seen_frontier: int | None = None,
     resume: str | None = None,
     use_frontier: bool = True,
+    floor: str | None = None,
 ) -> WalkResult:
-    """Page newest-first until the frontier, the bottom, or the budget.
+    """Page newest-first until the frontier, the floor, or the budget.
 
     `fetch_page` receives the cursor to request (None for the newest page) and
     returns a `Page`. It raises to signal failure; the walk then decides
@@ -136,6 +114,11 @@ def walk(
     `use_frontier` is the single switch for that: the frontier is still passed
     in, so a caller can see what is being ignored rather than reading `None`
     and having to infer it.
+
+    `floor` is the interval's lower end: a cursor marking the oldest tweet
+    the source ever walked. Reaching it is reaching the bottom -- the walk
+    stops there exactly as if the origin had no deeper page, so history
+    below it is never crawled. It is a stop sign, never a starting cursor.
     """
     frontier = seen_frontier if use_frontier else None
     budget = max(0, max_pages)
@@ -189,10 +172,12 @@ def walk(
             previous_min_sort = current_min
 
         crossed_frontier = len(kept_here) < len(page.ids)
-        if crossed_frontier or page.next_cursor is None:
-            # Caught up, or the origin has nothing deeper. A detected gap
-            # still outranks "caught up": skipped content is in no page, so
-            # the frontier can never cover it.
+        at_floor = floor is not None and page.next_cursor == floor
+        if crossed_frontier or page.next_cursor is None or at_floor:
+            # Caught up, reached the interval's floor, or the origin has
+            # nothing deeper. A detected gap still outranks any of these:
+            # skipped content is in no page, so neither the frontier nor the
+            # floor can ever cover it.
             return WalkResult(
                 pages=bodies,
                 keep_ids=keep,
@@ -200,6 +185,7 @@ def walk(
                 gap=gap_cursor is not None,
                 pages_used=pages_used,
                 newest_id=newest,
+                reached_floor=at_floor,
             )
 
         cursor = page.next_cursor
@@ -222,81 +208,40 @@ def two_phase_walk(
     fetch_page: Callable[[str | None], Page],
     max_pages: int,
     seen_frontier: int | None,
-    resume: str | None,
+    floor: str | None = None,
 ) -> WalkResult:
-    """Fresh pages first, then catch up an unfinished backfill with the rest.
+    """Walk from the top until the frontier, the floor, or the budget.
 
-    The fresh phase reserves part of the budget for the backfill when a resume
-    exists, so a highly active account cannot permanently starve its own
-    history. The backfill deliberately ignores the frontier, for the reason
-    given on `walk(use_frontier=False)`.
+    The interval model: the frontier is the newest ingested tweet, `floor`
+    is the oldest tweet the first walk ever reached (a cursor marking where
+    history ends for this source). One phase suffices, because the walk
+    always starts at the top of the timeline: new content sits above the
+    frontier, so a single pass that stops at either the frontier or the
+    floor cannot miss anything between them.
+
+    The floor is a stop sign, not a place to continue from. Passing it as a
+    resume cursor would walk *below* the oldest tweet ever kept -- a history
+    crawl with no natural end, observed live as a timeline dragged back to
+    2023. When the budget runs out before the frontier is crossed the walk
+    simply returns; the next cycle starts at the top again and catches up,
+    with dedupe absorbing the overlap.
+
+    `gap` detection still applies within the window: a sortIndex break means
+    tweets are known-missing between two pages, and the walk reports the
+    cursor where the break happened so an operator (or a later, more generous
+    budget) can look there deliberately.
     """
-    reserve = reserve_for_backfill(max_pages, resume)
-    fresh_budget = max_pages - reserve
-
-    fresh = walk(
+    return walk(
         fetch_page=fetch_page,
-        max_pages=fresh_budget,
+        max_pages=max_pages,
         seen_frontier=seen_frontier,
+        floor=floor,
     )
-
-    if not resume or max_pages - fresh.pages_used <= 0:
-        return fresh
-
-    try:
-        backfill = walk(
-            fetch_page=fetch_page,
-            max_pages=max_pages - fresh.pages_used,
-            seen_frontier=seen_frontier,
-            resume=resume,
-            use_frontier=False,
-        )
-    except Exception as exc:  # classified by the caller
-        # Phase A's pages are still worth ingesting; losing them to a phase B
-        # failure would make a partial outage cost a whole cycle's content.
-        return WalkResult(
-            pages=fresh.pages,
-            keep_ids=fresh.keep_ids,
-            resume=resume,
-            gap=fresh.gap,
-            pages_used=fresh.pages_used,
-            newest_id=fresh.newest_id,
-            failed=str(exc),
-        )
-
-    # A gap from the fresh phase outranks everything: it is a known hole.
-    # Otherwise the backfill's own continuation cursor wins over the fresh
-    # phase's deep-water cursor, which the next cycle would re-derive anyway.
-    resume_out = fresh.resume if fresh.gap else (backfill.resume or fresh.resume)
-    return WalkResult(
-        pages=fresh.pages + backfill.pages,
-        keep_ids=fresh.keep_ids + backfill.keep_ids,
-        resume=resume_out,
-        gap=fresh.gap or backfill.gap,
-        pages_used=fresh.pages_used + backfill.pages_used,
-        newest_id=max(
-            filter(None, [fresh.newest_id, backfill.newest_id]), default=None
-        ),
-    )
-
-
-def should_drop_resume(rounds_unresolved: int, limit: int = MAX_RESUME_ROUNDS) -> bool:
-    """Whether a resume cursor has slid backwards too many times to keep.
-
-    Bounded on purpose: without a limit a backlog deeper than the frontier
-    retreats further into the past every cycle and is never closed, so the
-    collector spends every run re-walking old history while new content
-    accumulates behind it.
-    """
-    return rounds_unresolved >= limit
 
 
 __all__ = [
-    "MAX_RESUME_ROUNDS",
     "Page",
     "WalkResult",
-    "reserve_for_backfill",
-    "should_drop_resume",
     "to_int",
     "truncate_at_seen",
     "two_phase_walk",

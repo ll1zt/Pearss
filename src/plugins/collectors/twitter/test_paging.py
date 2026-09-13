@@ -11,8 +11,6 @@ import pytest
 from plugins.collectors.twitter.paging import (
     Page,
     WalkResult,
-    reserve_for_backfill,
-    should_drop_resume,
     to_int,
     truncate_at_seen,
     two_phase_walk,
@@ -231,90 +229,89 @@ def test_a_first_page_failure_propagates() -> None:
 
 
 @pytest.mark.unit
-def test_backfill_reserve_scales_and_has_a_floor() -> None:
-    assert reserve_for_backfill(20, None) == 0
-    assert reserve_for_backfill(2, "C") == 0  # nothing spare at that budget
-    assert reserve_for_backfill(3, "C") == 1
-    assert reserve_for_backfill(20, "C") == 6
+def test_the_walk_stops_at_the_floor() -> None:
+    """The floor is the interval's lower end: reaching it ends the walk.
 
-
-@pytest.mark.unit
-def test_a_resume_gets_its_own_phase_after_the_fresh_pages() -> None:
-    """New content and the backlog are walked in one cycle, fresh first."""
-    script = Script(
-        [
-            # Fresh phase: reaches the frontier on page 1.
-            page(["900", "500"], next_cursor="F1", sort_span=(900, 500)),
-            # Backfill phase, starting at the resume cursor.
-            page(["400"], next_cursor="B1", sort_span=(400, 300)),
-            page(["300"], next_cursor=None, sort_span=(300, 200)),
-        ]
-    )
-    result = two_phase_walk(
-        fetch_page=script, max_pages=10, seen_frontier=500, resume="R1"
-    )
-    assert script.requested[0] is None
-    assert "R1" in script.requested
-    assert result.pages_used == 3
-    assert result.ok
-
-
-@pytest.mark.unit
-def test_the_backfill_phase_ignores_the_frontier() -> None:
-    """A re-walk must continue *through* already-seen ids, not stop at them.
-
-    Both backfill pages sit below the frontier. Honouring it there would end
-    the re-walk on the first page and lose exactly the content the re-walk
-    exists to recover, so the second page must still be requested. The overlap
-    is left to dedupe, which is what it is for.
+    It marks the oldest tweet the source ever walked. History below it is
+    unfetched by design, so the walk must treat the floor's cursor as the
+    bottom of the timeline -- requesting the page *after* it would be the
+    unbounded history crawl the floor exists to prevent.
     """
-    calls: list[str | None] = []
-
-    def fetch(cursor: str | None) -> Page:
-        calls.append(cursor)
-        if cursor == "R1":
-            # Entirely below the frontier of 500, but there is deeper to go.
-            return page(["400", "300"], next_cursor="R2")
-        return page(["200", "100"], next_cursor=None)
-
-    result = two_phase_walk(
-        fetch_page=fetch, max_pages=6, seen_frontier=500, resume="R1"
-    )
-    assert calls[0] is None, "the fresh phase runs first"
-    assert "R2" in calls, f"backfill stopped at the frontier: {calls}"
-    # Everything on those pages is kept despite being already-seen.
-    assert list(result.keep_ids) == ["400", "300", "200", "100"]
-
-
-@pytest.mark.unit
-def test_a_backfill_failure_does_not_cost_the_fresh_pages() -> None:
     script = Script(
         [
-            page(["900", "500"], next_cursor="F1"),
-            RuntimeError("risk control"),
+            page(["1100", "900"], next_cursor="F1", sort_span=(1100, 900)),
+            page(["700", "600"], next_cursor="DEEP", sort_span=(700, 600)),
         ]
     )
     result = two_phase_walk(
-        fetch_page=script, max_pages=10, seen_frontier=600, resume="R1"
+        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
     )
+    # Page 2's next_cursor is the floor: stop without requesting it.
+    assert script.requested == [None, "F1"]
+    assert result.pages_used == 2
     assert result.ok
-    assert len(result.pages) == 1
-    assert result.failed == "risk control"
-    assert result.resume == "R1"
+    assert result.resume is None
 
 
-# --------------------------------------------------------------------------
-# Resume ageing
-# --------------------------------------------------------------------------
+def test_the_floor_never_becomes_a_resume_cursor() -> None:
+    """A walk that ends at the floor is complete, not unfinished.
+
+    Reporting the floor as a resume would make the next cycle continue from
+    below it -- the history crawl the interval model forbids.
+    """
+    script = Script(
+        [page(["700", "600"], next_cursor="DEEP")],
+    )
+    result = two_phase_walk(
+        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
+    )
+    assert result.resume is None
+    assert result.ok
 
 
-@pytest.mark.unit
-def test_an_unresolved_resume_is_dropped_after_a_bound() -> None:
-    """Otherwise a deep backlog slides backwards forever and never closes."""
-    assert should_drop_resume(0) is False
-    assert should_drop_resume(2) is False
-    assert should_drop_resume(3) is True
-    assert should_drop_resume(9) is True
+def test_budget_exhaustion_above_the_floor_stops_this_cycle() -> None:
+    """An overshooting cycle reports its own bottom cursor and stops.
+
+    The next cycle starts from the top again, not from this cursor: resuming
+    downward would skip whatever the timeline serves in between. The stored
+    floor only moves when a walk genuinely reaches deeper than before; that
+    decision belongs to the host's save_paging_state, which only accepts a
+    cursor it does not already hold.
+    """
+    script = Script(
+        [
+            page(["900", "800"], next_cursor="C1"),
+            page(["700", "600"], next_cursor="C2"),
+        ]
+    )
+    result = two_phase_walk(
+        fetch_page=script, max_pages=2, seen_frontier=500, floor="FLOOR"
+    )
+    assert result.pages_used == 2
+    assert result.resume == "C2"
+    assert "FLOOR" not in script.requested
+
+
+def test_a_gap_still_outranks_the_floor() -> None:
+    """A sortIndex break means tweets are known-missing; report the cursor.
+
+    Even at the floor, a gap inside the window is content no page carried,
+    so neither the frontier nor the floor covers it. The walk surfaces the
+    break so a later pass can look there deliberately.
+    """
+    script = Script(
+        [
+            page(["900", "800"], next_cursor="C1", sort_span=(900, 800)),
+            # Next page's max (850) is above the previous min (800): a break.
+            # Content sits between 800 and 850 that no page carried.
+            page(["850", "700"], next_cursor="DEEP", sort_span=(850, 700)),
+        ]
+    )
+    result = two_phase_walk(
+        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
+    )
+    assert result.gap is True
+    assert result.resume == "C1"
 
 
 @pytest.mark.unit

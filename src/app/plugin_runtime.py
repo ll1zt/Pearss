@@ -716,7 +716,6 @@ class SandboxedCollector:
                 "state": {
                     "seen_frontier": state.seen_frontier,
                     "resume_cursor": state.resume_cursor,
-                    "resume_rounds": state.resume_rounds,
                 },
                 "max_pages": max_pages,
             },

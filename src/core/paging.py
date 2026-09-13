@@ -9,15 +9,6 @@ same answer to, which is what makes it domain policy.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
-
-# Consecutive cycles a resume cursor may stay unresolved before it is dropped.
-# A backlog deeper than one cycle's budget has no natural stopping anchor, so
-# without a bound the walk retreats further into the past every cycle and never
-# closes: the collector spends each run re-walking old history while new content
-# piles up behind it. Dropping the cursor accepts a bounded gap in deep history
-# instead of an unbounded slide.
-MAX_RESUME_ROUNDS: Final = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,10 +17,13 @@ class WalkState:
 
     The host owns persistence (adapters.repository.PagingState is the stored
     view of this); the walk and the sandboxed child only ever read these
-    three fields, so the child may pass any object with this shape — no
-    adapters import required.
+    fields, so the child may pass any object with this shape — no adapters
+    import required.
+
+    `resume_cursor` carries the interval's floor: the deepest point any walk
+    of this source has reached. It is a stop sign, not a place to resume
+    from -- resuming below it would crawl history with no end.
     """
 
     seen_frontier: int | None = None
     resume_cursor: str | None = None
-    resume_rounds: int = 0

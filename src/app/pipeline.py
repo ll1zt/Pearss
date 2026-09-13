@@ -199,7 +199,12 @@ def collect_source(
         )
 
     result = _collect_one_page(
-        session, url=url, source=source, client=client, tenant_id=tenant_id
+        session,
+        url=url,
+        source=source,
+        client=client,
+        tenant_id=tenant_id,
+        max_pages=max_pages,
     )
     if not result.succeeded or max_pages <= 1:
         return result
@@ -245,11 +250,17 @@ def _collect_one_page(
     source: SourceRow,
     client: httpx.Client,
     tenant_id: str,
+    max_pages: int = 1,
 ) -> CollectionResult:
     """One fetch-parse-store pass over `url`.
 
     Split out of `collect_source` so a backfill can call it per page without
     duplicating the sequence, and so the single-page case has no loop in it.
+
+    `max_pages` is forwarded to a paged collector's walk: without this the
+    walk received its own default (20) no matter what the caller asked for,
+    and every routine collection of a paged source crawled up to twenty pages
+    instead of the one the budget promised.
     """
     # Selection happens before any network call: match_url is documented as
     # network-free, and a URL no collector claims should not be fetched at all.
@@ -294,6 +305,7 @@ def _collect_one_page(
             registration=registration,
             client=client,
             tenant_id=tenant_id,
+            max_pages=max_pages,
         )
 
     try:
@@ -457,7 +469,6 @@ def collect_paged(
         state=PagingState(
             seen_frontier=state.seen_frontier,
             resume_cursor=state.resume_cursor,
-            resume_rounds=state.resume_rounds,
         ),
         max_pages=max_pages,
     )
@@ -465,11 +476,15 @@ def collect_paged(
     set_source_title_if_absent(
         session, source_id=source.id, title=_paged_source_title(registration)
     )
+    # Only a walk that ended on the floor may move it. `resume_cursor` also
+    # carries gap cursors and budget-stop bottoms -- positions that are real
+    # but shallower -- and cursors are opaque strings, so the host cannot tell
+    # them apart without the walk saying so.
     save_paging_state(
         session,
         source_id=source.id,
         newest_id=walk.newest_id,
-        resume_cursor=walk.resume_cursor,
+        resume_cursor=walk.resume_cursor if walk.reached_floor else None,
     )
 
     if walk.error_class is not None:
