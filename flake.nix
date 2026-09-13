@@ -39,8 +39,13 @@
       # The NixOS module: declares the service, its user, its state directory
       # and its hardening. Configuration lives in the host's configuration.nix;
       # only secrets go through an environment file (never the Nix store).
-      nixosModules.default = import ./nix/module.nix { inherit self; };
+      nixosModules.default = ./nix/module.nix;
       nixosModules.pearss = self.nixosModules.default;
+
+      # The tunnel split is a separate module because it is optional and host
+      # specific: a deployment behind a different proxy, or with no public
+      # entry point at all, imports only the service module above.
+      nixosModules.tunnel = ./nix/tunnel.nix;
 
       devShells = forEachSystem (
         system:

@@ -2,7 +2,6 @@
 #
 # Configuration lives here; only secrets go through an environment file, so no
 # credential ever reaches the Nix store (AGENTS.md, architecture section 10.5).
-{ self }:
 {
   config,
   lib,
@@ -18,11 +17,19 @@ in
   options.services.pearss = {
     enable = mkEnableOption "Pearss, a single-user agent-first RSS+ system";
 
+    # No default. A module that defaulted to the flake's own package would
+    # close a reference cycle -- evaluating the module would require evaluating
+    # the flake, which requires the module -- and Nix reports that as "infinite
+    # recursion encountered" with a trace that points at `mkEnableOption`'s
+    # internals rather than anywhere useful. The host states which package it
+    # wants, which is also the NixOS convention.
     package = mkOption {
       type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      defaultText = lib.literalExpression "pearss.packages.\${system}.default";
-      description = "The Pearss package to run.";
+      example = lib.literalExpression "pearss.packages.\${system}.default";
+      description = ''
+        The Pearss package to run, typically
+        `inputs.pearss.packages.''${pkgs.stdenv.hostPlatform.system}.default`.
+      '';
     };
 
     environmentFile = mkOption {
@@ -33,6 +40,26 @@ in
         File holding PEARSS_* configuration and credentials, read by systemd at
         start. Keep it out of the world-readable Nix store: use sops-nix, or any
         file with mode 0400 owned by {option}`services.pearss.user`.
+      '';
+    };
+
+    environment = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      example = {
+        PEARSS_MCP_ALLOWED_HOSTS = "pearss.example.com,pearss.example.com:443";
+      };
+      description = ''
+        Non-secret PEARSS_* settings, passed to the service as environment
+        variables. Values here land in the world-readable Nix store, so only put
+        settings that are safe to publish in this option -- credentials belong in
+        {option}`environmentFile`.
+
+        The split matters because some settings are genuinely deployment
+        topology rather than secrets. `PEARSS_MCP_ALLOWED_HOSTS` is the common
+        one: without it the MCP transport's DNS-rebinding guard rejects every
+        request whose `Host` is not loopback, so a reverse-proxied deployment
+        answers 421 to its own clients while working perfectly on localhost.
       '';
     };
 
@@ -156,6 +183,7 @@ in
         WorkingDirectory = cfg.stateDir;
 
         ExecStart = "${cfg.package}/bin/pearss";
+        Environment = lib.mapAttrsToList (name: value: "${name}=${value}") cfg.environment;
         EnvironmentFile = mkIf (cfg.environmentFile != null) cfg.environmentFile;
 
         Restart = "on-failure";
