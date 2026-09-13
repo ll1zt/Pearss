@@ -77,3 +77,44 @@ def test_pythonpath_reaches_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
     env = child_environment("telegram")
 
     assert env["PYTHONPATH"] == "/opt/pearss/src"
+
+
+@pytest.mark.unit
+def test_the_private_fetch_switch_reaches_the_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A policy the parent already decided must not be silently re-decided.
+
+    Withholding this variable did not make the child safer -- it restored the
+    SSRF guard's *default* refusal that the operator had explicitly turned off,
+    so every fetch answered `blocked` while the parent believed private
+    addresses were allowed. Locally that surfaced as a Chinese collector
+    reporting the origin had refused us, which is the most misleading shape a
+    configuration bug can take.
+
+    It is a policy switch rather than a credential, which is why it belongs in
+    the base set: every collector needs the same answer, and it names nobody's
+    secret.
+    """
+    monkeypatch.setenv("PEARSS_ALLOW_PRIVATE_FETCH", "1")
+
+    env = child_environment("zhihu")
+
+    assert env["PEARSS_ALLOW_PRIVATE_FETCH"] == "1"
+
+
+@pytest.mark.unit
+def test_an_unset_private_fetch_switch_stays_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default posture is untouched: no variable, no private fetches.
+
+    Containers and public deployments leave this unset, and their children must
+    keep refusing private addresses rather than inheriting a permission nobody
+    granted.
+    """
+    monkeypatch.delenv("PEARSS_ALLOW_PRIVATE_FETCH", raising=False)
+
+    env = child_environment("zhihu")
+
+    assert "PEARSS_ALLOW_PRIVATE_FETCH" not in env

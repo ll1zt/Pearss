@@ -74,6 +74,18 @@ DEFAULT_STARTUP_TIMEOUT_SECONDS = 15.0
 # suite sets it to make sandboxed children resolve hermetic addresses. It names
 # no credential and reveals nothing; without it the child answers real DNS and
 # the fixture hosts are refused as private addresses.
+#
+# PEARSS_ALLOW_PRIVATE_FETCH is here for the same reason and one more. It is a
+# policy switch, not a credential: it says whether this deployment may fetch
+# private addresses, and the parent has already decided. Withholding it did not
+# keep the child safer -- it silently *re-enabled* the SSRF guard the operator
+# had turned off, so every collector fetch answered `blocked` while the parent
+# believed private fetches were allowed. The failure looked like the origin
+# refusing us, which is the most misleading shape a configuration bug can take.
+#
+# This is the documented escape hatch for a local or LAN deployment (ADR 0016);
+# a deployment that leaves it unset is unaffected, because the child then
+# inherits "not set" and keeps the default refusal.
 _BASE_ENV_VARS: Final[frozenset[str]] = frozenset(
     {
         "PATH",
@@ -85,6 +97,7 @@ _BASE_ENV_VARS: Final[frozenset[str]] = frozenset(
         "PYTHONHASHSEED",
         "PYTHONPATH",
         "PEARSS_TEST_DNS",
+        "PEARSS_ALLOW_PRIVATE_FETCH",
     }
 )
 _SSL_ENV_PREFIXES: Final[tuple[str, ...]] = (

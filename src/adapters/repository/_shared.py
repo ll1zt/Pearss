@@ -55,6 +55,7 @@ def row_to_item(row: ItemRow) -> Item:
         content_hash=row.content_hash,
         title=row.title,
         url=row.url,
+        author=row.author,
         published_at=_parse(row.published_at),
         content_ref=row.content_ref,
         publish_status=PublishStatus(row.publish_status),

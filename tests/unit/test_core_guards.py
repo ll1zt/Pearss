@@ -151,3 +151,30 @@ def test_a_timeout_holds_when_the_policy_says_hold() -> None:
     )
 
     assert result.status is PublishStatus.PENDING
+
+@pytest.mark.unit
+def test_row_to_item_round_trips_the_author() -> None:
+    """A stored byline must survive the row -> domain rebuild.
+
+    row_to_item initially omitted author, so /v1/items served "" for every
+    row even though the column held the value -- a one-way fix that only
+    covered writes. This pins the read side too.
+    """
+    from adapters.db_models import Item as ItemRow
+    from adapters.repository._shared import row_to_item
+    from core.enums import PublishStatus
+
+    row = ItemRow(
+        id="i" * 64,
+        source_id="s" * 32,
+        guid="g" * 64,
+        content_hash="h" * 32,
+        title="T",
+        url="https://example.com/a",
+        publish_status=PublishStatus.PUBLISHED.value,
+        tenant_id="default",
+        created_at="2026-09-13T00:00:00Z",
+        updated_at="2026-09-13T00:00:00Z",
+        author="Ada Example",
+    )
+    assert row_to_item(row).author == "Ada Example"
