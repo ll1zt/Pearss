@@ -152,6 +152,7 @@ def test_a_timeout_holds_when_the_policy_says_hold() -> None:
 
     assert result.status is PublishStatus.PENDING
 
+
 @pytest.mark.unit
 def test_row_to_item_round_trips_the_author() -> None:
     """A stored byline must survive the row -> domain rebuild.
