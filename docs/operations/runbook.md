@@ -281,6 +281,10 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
 服务经隧道暴露公网后（仅 Reader API 路由；`/v1` 与 `/mcp` 是否放行由隧道路由
 自行决定），以下信号与处置是新的：
 
+> NixOS 部署形态、隧道双入口（serve :8443 整应用 / funnel :10000 仅 Reader API）
+> 与 UID 约束见 `docs/adr/0020-nixos-deployment-and-tunnel.md`；
+> 部署后逐条验证见 `docs/operations/tunnel-drill.md`。
+
 - **429 `rate_limited`**：某个客户端地址的 401/403 在 5 分钟内超过 50 次，
   已被阻断 15 分钟。若是你自己的客户端——它拿的是过期凭据，先改 `.env` 再
   重启，等阻断自然过期；若是陌生地址——忽略即可，它已经被限速。

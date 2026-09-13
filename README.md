@@ -131,7 +131,28 @@ just uninstall-unit   # 停用并移除
 nix develop --command just ci
 ```
 
-## 长期运行（systemd 用户服务）
+## 部署到 NixOS 服务器
+
+本仓库的 flake 同时提供可部署的包与 NixOS module：
+
+```nix
+# flake.nix inputs
+pearss.url = "git+https://github.com/lllzt/Pearss";
+pearss.inputs.nixpkgs.follows = "nixpkgs";
+
+# 主机配置
+imports = [ inputs.pearss.nixosModules.default ];
+services.pearss = {
+  enable = true;
+  environmentFile = "/run/secrets/pearss-env";   # 密钥不进 store
+};
+```
+
+隧道双入口（tailnet 整应用 + 公网仅 Reader API）见 `nix/tunnel.nix`。
+完整步骤、UID 约束与已实测证据见 `nix/DEPLOY.md`；
+部署后验证清单见 `docs/operations/tunnel-drill.md`。
+
+## 长期运行（systemd 用户服务，开发机）
 
 无需 root。先启用 linger，否则登出后服务会停：
 
