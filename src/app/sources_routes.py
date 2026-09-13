@@ -39,6 +39,7 @@ from adapters.repository import (
 from app.auth import Principal, read_required, write_required
 from app.scheduler import collect_now
 from core.enums import SourceStatus, SourceType, TrustLevel
+from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
 
@@ -266,6 +267,19 @@ class SourceCreate(BaseModel):
     parser_plugin_id: str | None = Field(default=None, max_length=128)
     pipeline_chain: list[dict[str, Any]] | None = None
     target_lang: str | None = None
+    # The sidebar folder. Absent means the default folder, not "unset": every
+    # subscription sits somewhere a client can show.
+    folder: str | None = Field(default=None, max_length=64)
+
+    @field_validator("folder")
+    @classmethod
+    def _valid_folder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return normalize_folder(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
     @field_validator("url")
     @classmethod
@@ -297,6 +311,19 @@ class SourcePatch(BaseModel):
     trust_level: TrustLevel | None = None
     pipeline_chain: list[dict[str, Any]] | None = None
     target_lang: str | None = None
+    # Explicit null moves the source back to the default folder -- the same
+    # three-state convention pipeline_chain uses for clearing.
+    folder: str | None = Field(default=None, max_length=64)
+
+    @field_validator("folder")
+    @classmethod
+    def _valid_folder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return normalize_folder(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
     def sent(self, field: str) -> bool:
         """Whether the caller sent this field at all (even as null)."""
@@ -349,6 +376,7 @@ def _source_payload(row: SourceRow) -> dict[str, Any]:
             json.loads(row.pipeline_chain) if row.pipeline_chain else None
         ),
         "target_lang": row.target_lang,
+        "folder": row.folder,
         "status": row.status,
         "trust_level": row.trust_level,
         "tenant_id": row.tenant_id,
@@ -491,6 +519,7 @@ def add_source(
                 json.dumps(body.pipeline_chain) if body.pipeline_chain else None
             ),
             target_lang=body.target_lang,
+            folder=body.folder or DEFAULT_FOLDER,
             at=timestamp(_now()),
         )
         session.commit()
@@ -584,6 +613,10 @@ def update_source(
             json.dumps(body.pipeline_chain) if body.pipeline_chain is not None else None
         )
         changes["target_lang"] = body.target_lang
+    if body.sent("folder"):
+        # Null resets to the default folder; the validator normalized any
+        # sent name already.
+        changes["folder"] = body.folder if body.folder is not None else DEFAULT_FOLDER
 
     if not changes:
         raise api_error(
@@ -592,7 +625,7 @@ def update_source(
             message="The request body changed nothing.",
             suggestion=(
                 "Supply at least one of schedule_policy, status, trust_level, "
-                "pipeline_chain, target_lang."
+                "pipeline_chain, target_lang, folder."
             ),
         )
 

@@ -123,6 +123,14 @@ class Source(Base):
     target_lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(16), nullable=True
     )
+    # The subscription's sidebar folder, one per source (FreshRSS constrains a
+    # feed to a single category and clients are built to that). NOT NULL with
+    # the default name rather than nullable: an unclassified subscription still
+    # sits in a folder the client can show, and two spellings of "none" would
+    # make every reader of this column handle both.
+    folder: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text, nullable=False, server_default="default"
+    )
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.String(ENUM_LENGTHS["source_status"]), nullable=False
     )

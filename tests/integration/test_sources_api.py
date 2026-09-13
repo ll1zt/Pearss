@@ -1055,3 +1055,108 @@ async def test_enrichment_visibility_and_agent_retry(
     )
     assert replay.headers.get("idempotent-replay") == "true"
     assert replay.json()["requeued"] == 1
+
+
+# --------------------------------------------------------------------------
+# Folders: one per source, default "default"
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_source_defaults_to_the_default_folder(
+    writer: httpx.AsyncClient,
+) -> None:
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "folder-default-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    assert response.status_code == 201
+    assert response.json()["folder"] == "default"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_source_can_be_created_into_a_named_folder(
+    writer: httpx.AsyncClient,
+) -> None:
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "folder-named-1"},
+        json={
+            "url": FEED_URL,
+            "schedule_policy": policy(),
+            "folder": "  知乎  ",
+        },
+    )
+    assert response.status_code == 201
+    # Trimmed on the way in: a pasted name with stray whitespace is the
+    # common mistake, and a folder named " 知乎 " would render as a
+    # different sidebar entry from "知乎".
+    assert response.json()["folder"] == "知乎"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    ["", "   ", "x" * 65, "bad\nname"],
+)
+async def test_an_unusable_folder_name_is_refused(
+    writer: httpx.AsyncClient, bad: str
+) -> None:
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": f"folder-bad-{abs(hash(bad))}"},
+        json={"url": FEED_URL, "schedule_policy": policy(), "folder": bad},
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_patch_moves_a_source_between_folders(writer: httpx.AsyncClient) -> None:
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "folder-move-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+
+    moved = await writer.patch(
+        f"/v1/sources/{source_id}",
+        headers={"Idempotency-Key": "folder-move-2"},
+        json={"folder": "阅读"},
+    )
+    assert moved.status_code == 200
+    assert moved.json()["folder"] == "阅读"
+
+    # Explicit null resets to the default -- the same three-state convention
+    # pipeline_chain uses for clearing.
+    reset = await writer.patch(
+        f"/v1/sources/{source_id}",
+        headers={"Idempotency-Key": "folder-move-3"},
+        json={"folder": None},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["folder"] == "default"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_patch_rejects_an_unusable_folder_name(
+    writer: httpx.AsyncClient,
+) -> None:
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "folder-badpatch-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+    response = await writer.patch(
+        f"/v1/sources/{source_id}",
+        headers={"Idempotency-Key": "folder-badpatch-2"},
+        json={"folder": "x" * 65},
+    )
+    assert response.status_code == 422
