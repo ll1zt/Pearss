@@ -35,6 +35,7 @@ from typing import Any, Final
 import httpx
 
 from core.enums import ErrorClass
+from core.language import is_already_in
 from core.plugins.hooks import HOOKIMPL, ProcessorError
 
 LOGGER = logging.getLogger(__name__)
@@ -102,97 +103,6 @@ def _strip_to_text(content_html: str) -> str:
     return html.unescape(re.sub(r"\s+", " ", text)).strip()
 
 
-# Unicode script ranges, enough to answer "is this already the target
-# language?" without a detector dependency. Characters outside these ranges
-# (punctuation, digits, emoji, Cyrillic, Arabic) count as "other" and never
-# decide the outcome on their own.
-#
-# The CJK ideograph block is shared: the same characters are ordinary Chinese
-# and ordinary Japanese. Script ranges alone therefore cannot separate the two,
-# and classifying a kanji-heavy Japanese sentence (26 kanji, 2 kana) by first
-# match tagged it 93% Chinese -- skipping text the reader cannot read.
-#
-# The workable rule is that **kana is the deciding evidence**. Japanese prose
-# almost always carries kana, so when any kana is present the ideographs are
-# attributed to `ja`; with no kana the text is Chinese. A Japanese headline
-# written entirely in kanji is indistinguishable from Chinese at this size by
-# any statistical method, and is treated as Chinese -- the cost of that rare
-# miss is one unnecessary translation, which is the safe direction.
-_KANA_RANGES: Final[tuple[tuple[int, int], ...]] = (
-    (0x3040, 0x309F),  # hiragana
-    (0x30A0, 0x30FF),  # katakana
-)
-_CJK_RANGES: Final[tuple[tuple[int, int], ...]] = (
-    (0x3400, 0x4DBF),  # extension A
-    (0x4E00, 0x9FFF),  # unified ideographs
-    (0xF900, 0xFAFF),  # compatibility ideographs
-)
-_LATIN_RANGES: Final[tuple[tuple[int, int], ...]] = (
-    (0x0041, 0x005A),
-    (0x0061, 0x007A),
-)
-
-# The languages this can tell apart. A target outside this set gets no shortcut
-# rather than a wrong one.
-_KNOWN_TARGETS: Final[frozenset[str]] = frozenset({"zh", "ja", "en"})
-
-# A body counts as already-target when most of its scripted characters belong
-# to that language. 0.5 is deliberately the midpoint: the sampler found real X
-# posts like 「如果真是"自我提升向内求"，respect。」, majority-Chinese with a
-# Latin tail, and translating those is exactly the waste this avoids. A
-# genuinely bilingual post still translates, because there the target script is
-# not the majority.
-_TARGET_SCRIPT_SHARE: Final = 0.5
-
-# Below this many scripted characters a ratio is noise: "OK", "2026" and
-# one-word titles would all be judged by one or two glyphs. Short bodies go to
-# the provider, which is the safe direction -- an unnecessary call costs a
-# fraction of a cent, a skipped one leaves untranslated text.
-_MIN_SCRIPTED_CHARS: Final = 12
-
-
-def _in_ranges(codepoint: int, ranges: tuple[tuple[int, int], ...]) -> bool:
-    return any(low <= codepoint <= high for low, high in ranges)
-
-
-def _is_already_in(text: str, target_lang: str) -> bool:
-    """Whether `text` is predominantly written in `target_lang`.
-
-    Deliberately not a language *detector*: it answers one yes/no question for
-    the languages this deployment translates between, and returns False when
-    unsure. Every uncertain answer costs a provider call rather than leaving
-    the reader with text they cannot read.
-    """
-    if target_lang not in _KNOWN_TARGETS:
-        # An unknown target gets no shortcut: without knowing what its script
-        # looks like, any judgement here would be a guess.
-        return False
-
-    # Kana decides how the shared ideograph block is attributed, so it is
-    # resolved once for the whole body rather than per character.
-    has_kana = any(_in_ranges(ord(char), _KANA_RANGES) for char in text)
-
-    in_target = 0
-    scripted = 0
-    for char in text:
-        codepoint = ord(char)
-        if _in_ranges(codepoint, _LATIN_RANGES):
-            language = "en"
-        elif _in_ranges(codepoint, _KANA_RANGES):
-            language = "ja"
-        elif _in_ranges(codepoint, _CJK_RANGES):
-            language = "ja" if has_kana else "zh"
-        else:
-            continue
-        scripted += 1
-        if language == target_lang:
-            in_target += 1
-
-    if scripted < _MIN_SCRIPTED_CHARS:
-        return False
-    return in_target / scripted >= _TARGET_SCRIPT_SHARE
-
-
 @HOOKIMPL
 def processor_id() -> str:
     """The stable registration key."""
@@ -248,7 +158,7 @@ def process(
             return str(store(""))
         source_text = title_text
 
-    if _is_already_in(source_text, target_lang):
+    if is_already_in(source_text, target_lang):
         LOGGER.info(
             "item %s: already in %s, skipping translation",
             item_ctx.get("item_id", "?"),

@@ -731,14 +731,14 @@ def test_a_chained_source_holds_the_gate_until_processing_completes(
     raw_chain = jsonlib.dumps(chain)
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            "update source set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
     )
     session.commit()
-    specs = parse_chain(raw_chain, target_lang="en")
-    assert specs[0].lang == "en", "the source-level target_lang fills the spec"
+    specs = parse_chain(raw_chain, target_lang="zh")
+    assert specs[0].lang == "zh", "the source-level target_lang fills the spec"
 
     drafts = collect(SOURCE, "valid.xml")
     assert drafts
@@ -766,7 +766,7 @@ def test_a_chained_source_holds_the_gate_until_processing_completes(
         {"s": SOURCE},
     ).fetchall()
     assert rows and rows[0][0] == "queued" and rows[0][1] == "translation"
-    assert rows[0][2] == "en"
+    assert rows[0][2] == "zh"
 
 
 @pytest.mark.integration
@@ -790,13 +790,13 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
     )
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            "update source set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
     )
     session.commit()
-    specs = parse_chain(raw_chain, target_lang="en")
+    specs = parse_chain(raw_chain, target_lang="zh")
 
     drafts = collect(SOURCE, "valid.xml")
     ingested = normalise_and_store(session, drafts, chain=specs)
@@ -861,13 +861,13 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     )
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'en'"
+            "update source set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
     )
     session.commit()
-    specs = parse_chain(raw_chain, target_lang="en")
+    specs = parse_chain(raw_chain, target_lang="zh")
 
     drafts = collect(SOURCE, "valid.xml")
     normalise_and_store(session, drafts, chain=specs)
@@ -1093,3 +1093,138 @@ def test_a_chain_naming_an_unregistered_processor_is_refused(
         known_plugins=frozenset({"translate"}),
     )
     assert specs[0].plugin_id == "translate"
+
+
+# --------------------------------------------------------------------------
+# Queueing a chain: content already in the target language
+# --------------------------------------------------------------------------
+
+
+def _translation_chain(lang: str = "zh") -> tuple[Any, ...]:
+    from core.enrichment import EnrichmentKind, EnrichmentSpec
+
+    return (
+        EnrichmentSpec(
+            plugin_id="translate", kind=EnrichmentKind.TRANSLATION, lang=lang
+        ),
+    )
+
+
+def _draft(external_id: str, *, content: str, title: str = "T") -> ItemDraft:
+    return ItemDraft(
+        source_id=SOURCE,
+        external_id=external_id,
+        title=title,
+        canonical_url=f"https://blog.example.com/{external_id}",
+        published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        content=content,
+    )
+
+
+def _publish_state(session: Session, external_id: str) -> tuple[str, int]:
+    """(publish_status, enrichment row count) for one stored item."""
+    row = session.execute(
+        text(
+            "select i.publish_status,"
+            " (select count(*) from item_enrichment e where e.item_id = i.id)"
+            " from item i where i.guid like :needle"
+        ),
+        {"needle": f"%{external_id}%"},
+    ).one_or_none()
+    if row is None:
+        # guid is derived; fall back to title matching for the assertion helper.
+        row = session.execute(
+            text(
+                "select i.publish_status,"
+                " (select count(*) from item_enrichment e where e.item_id = i.id)"
+                " from item i order by i.created_at desc limit 1"
+            )
+        ).one()
+    return str(row[0]), int(row[1])
+
+
+@pytest.mark.integration
+def test_content_already_in_the_target_language_is_not_queued(session: Session) -> None:
+    """A Chinese post targeting Chinese is published, not queued-and-skipped.
+
+    Queueing it and letting the processor skip it later still occupies a slot
+    and still holds the gate until a worker gets there, so a Chinese timeline
+    waits behind its own English posts to be told there is nothing to do.
+    """
+    from app.pipeline import normalise_and_store
+
+    normalise_and_store(
+        session,
+        [
+            _draft(
+                "zh-1",
+                content="<p>这是一段足够长的中文内容，描述了一些具体的技术取舍和设计考虑。</p>",
+            )
+        ],
+        tenant_id=TENANT,
+        chain=_translation_chain("zh"),
+    )
+    session.commit()
+
+    status, enrichments = _publish_state(session, "zh-1")
+    assert enrichments == 0, "an already-translated item must not occupy the queue"
+    assert status == PublishStatus.READY.value
+
+
+@pytest.mark.integration
+def test_english_content_is_still_queued(session: Session) -> None:
+    """The filter must not swallow the work it exists to protect."""
+    from app.pipeline import normalise_and_store
+
+    normalise_and_store(
+        session,
+        [
+            _draft(
+                "en-1",
+                content="<p>"
+                + "This is a reasonably long English sentence. " * 3
+                + "</p>",
+            )
+        ],
+        tenant_id=TENANT,
+        chain=_translation_chain("zh"),
+    )
+    session.commit()
+
+    status, enrichments = _publish_state(session, "en-1")
+    assert enrichments == 1, "English text still needs its translation queued"
+    assert status == PublishStatus.PENDING.value
+
+
+@pytest.mark.integration
+def test_a_non_language_spec_survives_the_filter(session: Session) -> None:
+    """Only translations are judged: a future summary has no such case.
+
+    A Chinese body must not take its summarisation down with it just because
+    translation was unnecessary.
+    """
+    from app.pipeline import normalise_and_store
+    from core.enrichment import EnrichmentKind, EnrichmentSpec
+
+    chain = (
+        EnrichmentSpec(
+            plugin_id="translate", kind=EnrichmentKind.TRANSLATION, lang="zh"
+        ),
+        EnrichmentSpec(plugin_id="summarise", kind=EnrichmentKind.SUMMARY),
+    )
+    normalise_and_store(
+        session,
+        [
+            _draft(
+                "zh-2",
+                content="<p>这同样是一段足够长的中文内容，用来验证非语言类产物不会被误删。</p>",
+            )
+        ],
+        tenant_id=TENANT,
+        chain=chain,
+    )
+    session.commit()
+
+    status, enrichments = _publish_state(session, "zh-2")
+    assert enrichments == 1, "the summary spec must still be queued"
+    assert status == PublishStatus.PENDING.value

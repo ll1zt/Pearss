@@ -38,13 +38,15 @@ from adapters.repository import (
 from adapters.sanitize import sanitize_html
 from app import collector_registry
 from app.collector_registry import Registration as CollectorRegistration
-from core.enrichment import EnrichmentSpec
+from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.enums import ErrorClass
+from core.language import is_already_in
 from core.models import Item, ItemDraft
 from core.normalize import (
     DedupeAction,
     NormalizationResult,
     normalize,
+    plain_text,
     with_content_ref,
 )
 
@@ -59,6 +61,41 @@ class Ingested:
 
     result: NormalizationResult
     outcome: StoreOutcome
+
+
+def _specs_needing_work(
+    chain: tuple[EnrichmentSpec, ...], *, body: str, title: str
+) -> tuple[EnrichmentSpec, ...]:
+    """The chain's specs that still have work to do for this item.
+
+    A translation spec is dropped when the text is already in its target
+    language. Dropping it here rather than at the processor is what keeps such
+    an item out of the queue entirely: it publishes in its own cycle instead of
+    waiting for a worker to discover there is nothing to do.
+
+    Only translations are judged. A future non-language product (summary, TTS)
+    has no "already in the target language" case and must still run, so the
+    filter is per-spec and the remaining chain is enqueued unchanged.
+
+    The text is read the same way the processor reads it -- body first, title
+    as the fallback for title-only items -- so an item the processor would skip
+    is exactly an item dropped here.
+    """
+    text = plain_text(body) or plain_text(title)
+    remaining: list[EnrichmentSpec] = []
+    for spec in chain:
+        if (
+            spec.kind is EnrichmentKind.TRANSLATION
+            and spec.lang is not None
+            and is_already_in(text, spec.lang)
+        ):
+            LOGGER.info(
+                "item text is already in %s; not queueing its translation",
+                spec.lang,
+            )
+            continue
+        remaining.append(spec)
+    return tuple(remaining)
 
 
 def normalise_and_store(
@@ -106,14 +143,21 @@ def normalise_and_store(
         ):
             # UPDATE_PENDING belongs here too: the row is still unseen, so it
             # advances on the new content rather than waiting for nothing.
-            # With a chain the gate stays closed here — promotion is the
-            # enrichment worker's job once every required product exists.
-            if chain:
+            #
+            # Content already in the target language drops its translation
+            # spec *here*, before any row exists. Skipping at the processor
+            # instead still occupies a queue slot and still holds the gate
+            # until a worker reaches it -- so a Chinese timeline waited behind
+            # its own English posts to be told there was nothing to do. The
+            # decision is the same one the processor makes, from the same
+            # function, so the two can never disagree about an item.
+            wanted = _specs_needing_work(chain, body=result.body, title=item.title)
+            if wanted:
                 enqueue_chain(
                     session,
                     item_id=item.id,
                     content_hash=item.content_hash,
-                    chain=chain,
+                    chain=wanted,
                     tenant_id=tenant_id,
                     now=now,
                 )

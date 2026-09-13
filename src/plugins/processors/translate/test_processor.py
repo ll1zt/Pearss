@@ -348,7 +348,7 @@ def test_an_unknown_target_language_is_never_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No ranges for a language means no shortcut, not a wrong one."""
-    from plugins.processors.translate.processor import _is_already_in
+    from core.language import is_already_in
 
-    assert _is_already_in("Это довольно длинный русский текст.", "ru") is False
-    assert _is_already_in("这是一段足够长的中文内容，不应该被跳过。", "ru") is False
+    assert is_already_in("Это довольно длинный русский текст.", "ru") is False
+    assert is_already_in("这是一段足够长的中文内容，不应该被跳过。", "ru") is False

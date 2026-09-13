@@ -90,11 +90,14 @@ ignore = []
 "src/plugins/collectors/zsxq/**" = ["RUF001"]
 "src/plugins/collectors/rss/**" = ["RUF001"]
 "src/plugins/collectors/twitter/**" = ["RUF001"]
-# The translation processor decides whether text is already Chinese, so its
+# The language check decides whether text is already Chinese, so its module and
 # tests are necessarily written in Chinese with fullwidth punctuation. RUF003
 # covers comments: the docstrings quote real sampled posts, where the fullwidth
-# comma is the data being described rather than a mistyped ASCII one.
+# comma is the data being described rather than a mistyped ASCII one. The
+# pipeline's chain tests carry the same Chinese bodies through the same rule.
 "src/plugins/processors/translate/**" = ["RUF001", "RUF003"]
+"src/core/language.py" = ["RUF003"]
+"tests/integration/test_pipeline.py" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]
