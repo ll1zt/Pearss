@@ -385,9 +385,20 @@ def _author_html(tweet: Json) -> str | None:
 
     # `width`/`height` rather than the upstream inline `style`: the store-time
     # sanitiser (ADR 0007) drops `style` and `class`, so a style attribute
-    # would be silently discarded and the avatar would render full size.
+    # would be silently discarded and the avatar would render full size. The
+    # square 24px box plus `alt` is the whole budget available for making this
+    # read as a portrait; clients that round images by their own convention
+    # pick it up from the byline it sits beside.
+    #
+    # `alt` carries the display name rather than being empty: a broken or
+    # blocked avatar URL then degrades to the author's name instead of to
+    # nothing, and screen readers announce who the picture belongs to. It is
+    # the same text the byline already shows, which is what makes the image
+    # and the name recognisably one author.
     image = (
-        f'<img src="{html.escape(avatar, quote=True)}" alt="" width="24" height="24"/>'
+        f'<img src="{html.escape(avatar, quote=True)}"'
+        f' alt="{html.escape(name or screen, quote=True)}"'
+        f' width="24" height="24" loading="lazy"/>'
         if avatar
         else ""
     )

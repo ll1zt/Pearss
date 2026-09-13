@@ -505,3 +505,99 @@ def test_no_credential_appears_in_any_draft() -> None:
         blob = item.canonical_url + item.content + item.title
         assert "auth_token" not in blob
         assert "ct0" not in blob
+
+
+# --------------------------------------------------------------------------
+# The avatar
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_avatar_is_a_small_square_with_the_author_as_alt_text() -> None:
+    """The avatar's whole presentation budget, since styling is unavailable.
+
+    The store-time sanitiser drops `style` and `class` (ADR 0007), so the
+    square 24px box and the alt text are the only things that can make this
+    read as a portrait rather than as a picture in the body. The alt text
+    matters twice over: a blocked avatar URL degrades to the author's name
+    instead of to nothing, and screen readers announce whose face it is.
+    """
+    items = drafts("valid.json")
+    photo = by_suffix(items, "2")
+    assert photo is not None
+    assert photo.metadata["author"] == "User One (@user1)"
+
+    images = re.findall(r"<img[^>]*>", photo.content)
+    # The first image is the byline portrait; any others are post media.
+    avatar = next(i for i in images if "avatar/" in i)
+    assert 'alt="User One"' in avatar
+    assert 'width="24"' in avatar
+    assert 'height="24"' in avatar
+    assert 'loading="lazy"' in avatar
+
+
+@pytest.mark.unit
+def test_avatar_alt_is_escaped() -> None:
+    """The name is remote data and lands inside an attribute.
+
+    A display name containing a quote would otherwise close the attribute and
+    let the rest of the name become markup.
+    """
+    from plugins.collectors.twitter.collector import _author_html
+
+    tweet = {
+        "core": {
+            "user_results": {
+                "result": {
+                    "core": {"name": 'Ada "The Quote" Lovelace', "screen_name": "ada"},
+                    "avatar": {"image_url": "https://example.com/avatar/a.png"},
+                }
+            }
+        }
+    }
+    html_out = _author_html(tweet)
+    assert html_out is not None
+    assert "&quot;" in html_out
+    assert 'alt="Ada &quot;The Quote&quot; Lovelace"' in html_out
+
+
+@pytest.mark.unit
+def test_the_avatar_attributes_survive_the_sanitiser() -> None:
+    """Unasserted through the sanitiser, the markup above proves nothing.
+
+    `class` and `style` are dropped by design, so if `alt`/`width`/`height`/
+    `loading` were also dropped the avatar would silently render full size with
+    no accessible name -- the exact failure the collector comments warn about.
+    """
+    from adapters.sanitize import sanitize_html
+
+    items = drafts("valid.json")
+    photo = by_suffix(items, "2")
+    assert photo is not None
+    cleaned = sanitize_html(photo.content)
+
+    avatar = next(i for i in re.findall(r"<img[^>]*>", cleaned) if "avatar/" in i)
+    assert 'alt="User One"' in avatar
+    assert 'width="24"' in avatar
+    assert 'height="24"' in avatar
+    assert 'loading="lazy"' in avatar
+
+
+@pytest.mark.unit
+def test_an_entry_without_an_avatar_still_renders_the_byline() -> None:
+    """No portrait is not a reason to lose the author."""
+    from plugins.collectors.twitter.collector import _author_html
+
+    tweet = {
+        "core": {
+            "user_results": {
+                "result": {
+                    "core": {"name": "Ada", "screen_name": "ada"},
+                }
+            }
+        }
+    }
+    html_out = _author_html(tweet)
+    assert html_out is not None
+    assert "<img" not in html_out
+    assert "Ada" in html_out and "@ada" in html_out
