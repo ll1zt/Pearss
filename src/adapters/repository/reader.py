@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
+from adapters.db_models import Source as SourceRow
 from adapters.repository._shared import _parse
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
@@ -63,11 +64,19 @@ def visible_ids_for_stream(
                     )
                 )
             )
-        elif reader_api.label_stream_name(stream_id) == "All":
-            # The one folder we advertise. Every source lives in it, so it is
-            # the reading list; any other label is a folder that does not exist
-            # yet and must not silently read as "everything".
-            pass
+        elif (label := reader_api.label_stream_name(stream_id)) is not None:
+            # A folder stream: items of the sources in that folder. A name no
+            # source carries is an empty stream, not "everything" -- serving
+            # the unfiltered list for a filter with no matches is a wrong
+            # answer that looks like data.
+            query = query.where(
+                ItemRow.source_id.in_(
+                    select(SourceRow.id).where(
+                        SourceRow.folder == label,
+                        SourceRow.tenant_id == tenant_id,
+                    )
+                )
+            )
         elif state in {"broadcast", "verified"}:
             # Shared/verified streams: we record neither, so there is nothing
             # to list. Distinct from the unknown-state branch only in intent.

@@ -304,8 +304,16 @@ def subscription_list(
                 canonical_url=row.canonical_url,
                 source_id=row.id,
             ),
+            # The source's real folder. Every source has one (the column is
+            # NOT NULL DEFAULT 'default'), so the sidebar always has a group
+            # to put the subscription in -- and stream/items/ids answers for
+            # exactly the folders advertised here.
             "categories": [
-                {"id": reader_api.ALL_FOLDER_STREAM, "label": "All", "type": "folder"}
+                {
+                    "id": reader_api.folder_stream_id(row.folder),
+                    "label": row.folder,
+                    "type": "folder",
+                }
             ],
             "url": row.url or "",
             "htmlUrl": row.canonical_url or row.url or "",
@@ -317,12 +325,34 @@ def subscription_list(
 
 
 @reader_read(router, "/reader/api/0/tag/list")
-def tag_list(_: str = Depends(authenticate_any)) -> dict[str, list[dict[str, str]]]:
-    """Starred state and labels.
+def tag_list(request: Request, _: str = Depends(authenticate_any)) -> dict[str, Any]:
+    """Starred state plus the folders that exist.
 
-    Only the starred state exists today; labels arrive with FeedOut grouping.
+    A client builds its sidebar from this and from the categories on
+    subscription/list; the two must agree about which folders exist or the
+    sidebar shows groups with nothing in them (or subscriptions with no
+    group). Folders are derived from the sources, so an empty folder simply
+    does not appear -- there is no folder entity of its own to persist.
     """
-    return {"tags": [{"id": reader_api.STARRED_TAG}]}
+    from sqlalchemy import distinct
+
+    from adapters.db_models import Source
+
+    with request.app.state.session_factory() as session:
+        folders = (
+            session.query(distinct(Source.folder))
+            .filter(Source.tenant_id == TENANT)
+            .order_by(Source.folder)
+            .all()
+        )
+
+    tags: list[dict[str, str]] = [{"id": reader_api.STARRED_TAG}]
+    tags.extend(
+        {"id": reader_api.folder_stream_id(row[0]), "type": "folder"}
+        for row in folders
+        if row[0]
+    )
+    return {"tags": tags}
 
 
 # --------------------------------------------------------------------------

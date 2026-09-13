@@ -25,11 +25,6 @@ STARRED_TAG = "user/-/state/com.google/starred"
 KEPT_UNREAD_TAG = "user/-/state/com.google/kept-unread"
 READING_LIST = "user/-/state/com.google/reading-list"
 
-# The single folder every source is listed under until FeedOut grouping exists.
-# Exported because subscription/list advertises it and stream/items/ids has to
-# answer for it consistently -- the two must not disagree about what "All" means.
-ALL_FOLDER_STREAM = "user/-/label/All"
-
 # NNW asks for these; anything else is treated as unknown.
 KNOWN_STATE_TAGS = frozenset({READ_TAG, STARRED_TAG, KEPT_UNREAD_TAG, READING_LIST})
 
@@ -43,6 +38,11 @@ _USER_STATE_STREAM = re.compile(r"^user/-/state/com\.google/(?P<state>[a-z-]+)$"
 def feed_stream_id(source_id: str) -> str:
     """Stream id for one of our sources."""
     return f"feed/{source_id}"
+
+
+def folder_stream_id(name: str) -> str:
+    """Stream id for a subscription folder ("user/-/label/<name>")."""
+    return f"user/-/label/{name}"
 
 
 def parse_feed_stream_id(stream_id: str) -> str | None:
@@ -64,8 +64,9 @@ def state_stream_name(stream_id: str) -> str | None:
 def label_stream_name(stream_id: str) -> str | None:
     """The folder a label stream denotes, or None when it is not one.
 
-    `user/-/label/Work` -> `Work`. Only `All` is served today; the parser exists
-    so an unknown folder can be answered with "no items" instead of "everything".
+    `user/-/label/Work` -> `Work`. Whether the folder exists is the caller's
+    question: a name no source carries resolves to an empty stream, which is
+    the honest answer for a filter with no matches.
     """
     for prefix in ("user/-/label/", "user/%s/label/"):
         head = stream_id[: len(prefix)]

@@ -557,10 +557,12 @@ async def test_the_starred_stream_returns_only_starred_items(
 async def test_an_unknown_folder_is_empty_rather_than_everything(
     client: httpx.AsyncClient,
 ) -> None:
-    """A filter we do not implement must not answer with the unfiltered set.
+    """A folder no source carries must not answer with the unfiltered set.
 
-    `All` is the one folder subscription/list advertises, so it has to resolve
-    to the whole library; `Work` resolves to nothing.
+    Sources default to the `default` folder, so that label resolves to the
+    whole library; a name nothing carries (`Work`) resolves to nothing --
+    serving the unfiltered list for a filter with no matches is a wrong answer
+    that looks like data.
     """
     token = await login(client)
 
@@ -573,7 +575,7 @@ async def test_an_unknown_folder_is_empty_rather_than_everything(
         refs: list[object] = response.json()["itemRefs"]
         return refs
 
-    assert await for_label("All")
+    assert await for_label("default")
     assert await for_label("Work") == []
 
 
@@ -997,3 +999,107 @@ async def test_author_is_omitted_rather_than_empty_when_unknown(
     assert "author" not in by_title["Second Post: Content Encoded"]
     for item in by_title.values():
         assert item.get("author", "absent") != ""
+
+
+# --------------------------------------------------------------------------
+# Folders: the sidebar has real groups
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_subscription_list_carries_each_source_real_folder(
+    client: httpx.AsyncClient,
+) -> None:
+    """categories reflect the stored folder, not a hardcoded All.
+
+    The sidebar is built from this; a hardcoded category put every
+    subscription in one undifferentiated group regardless of what was stored.
+    """
+    token = await login(client)
+    response = await client.get(
+        "/api/greader.php/reader/api/0/subscription/list",
+        headers=auth_header(token),
+        params={"output": "json"},
+    )
+    subs = response.json()["subscriptions"]
+    assert subs
+    for sub in subs:
+        categories = sub["categories"]
+        assert len(categories) == 1
+        assert categories[0] == {
+            "id": "user/-/label/default",
+            "label": "default",
+            "type": "folder",
+        }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_tag_list_reports_the_folders_that_exist(
+    client: httpx.AsyncClient,
+) -> None:
+    """Folders are derived from the sources, so an empty one does not exist.
+
+    The sidebar is built from this list and the categories above; deriving
+    both from the same rows is what keeps them agreeing.
+    """
+    token = await login(client)
+    response = await client.get(
+        "/api/greader.php/reader/api/0/tag/list",
+        headers=auth_header(token),
+        params={"output": "json"},
+    )
+    tags = response.json()["tags"]
+    ids = {t["id"] for t in tags}
+    assert "user/-/state/com.google/starred" in ids
+    assert "user/-/label/default" in ids
+    folders = [t for t in tags if t.get("type") == "folder"]
+    assert {"id": "user/-/label/default", "type": "folder"} in folders
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_folder_stream_returns_only_that_folders_items(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """`s=user/-/label/X` answers with folder X's items and nothing else.
+
+    This is what a client fetches when the reader opens a folder in the
+    sidebar. A name no source carries answers empty: the unfiltered list for
+    a filter with no matches is a wrong answer that looks like data.
+    """
+    from sqlalchemy import text as _text
+
+    # The fixture's source stays in the default folder; a second one moves to
+    # a folder of its own.
+    with app.state.session_factory() as session:
+        session.execute(
+            _text(
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, tenant_id, folder, created_at, updated_at)"
+                " values ('src-2', 'rss', 'https://elsewhere.example.com/feed',"
+                " 'https://elsewhere.example.com/feed', '{}', 'active', 'default',"
+                " 'work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            )
+        )
+        session.commit()
+
+    token = await login(client)
+
+    async def ids_for(label: str) -> set[str]:
+        response = await client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params={"output": "json", "n": 1000, "s": f"user/-/label/{label}"},
+        )
+        return {ref["id"] for ref in response.json()["itemRefs"]}
+
+    default_ids = await ids_for("default")
+    work_ids = await ids_for("work")
+    nothing = await ids_for("no-such-folder")
+
+    assert default_ids, "the default folder has the fixture's items"
+    assert work_ids == set(), "the work folder has no items yet"
+    assert nothing == set()
