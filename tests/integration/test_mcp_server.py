@@ -158,7 +158,7 @@ def mcp_url(mcp_env: dict[str, str]) -> Iterator[str]:
     try:
         app = create_app()
         with _ServerInThread(app, 8091):
-            yield "http://127.0.0.1:8091/mcp/mcp"
+            yield "http://127.0.0.1:8091/mcp"
     finally:
         for key, value in previous.items():
             if value is None:
@@ -650,7 +650,7 @@ async def test_refused_writes_reach_no_audit_row(
     audit trail of `/v1/*` means exactly "something reached the API".
 
     Rows are filtered to `POST /v1/` rather than counted wholesale: the MCP
-    transport itself is a POST to `/mcp/mcp`, so every protocol frame
+    transport itself is a POST to `/mcp`, so every protocol frame
     (`initialize`, `list_tools`, each `tools/call`) leaves an audit row for the
     mounted edge route. A plain before/after count therefore moves even when
     the refused write is correctly refused, and the earlier substring-search

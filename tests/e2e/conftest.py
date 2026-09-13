@@ -193,7 +193,7 @@ async def served(app: FastAPI) -> AsyncIterator[str]:
 async def mcp_url(app: FastAPI) -> AsyncIterator[str]:
     port = _free_port()
     with _ServerInThread(app, port):
-        yield f"http://127.0.0.1:{port}/mcp/mcp"
+        yield f"http://127.0.0.1:{port}/mcp"
 
 
 @asynccontextmanager

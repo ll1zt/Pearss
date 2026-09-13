@@ -34,7 +34,10 @@ from app.mcp_guard import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MCP_PATH = "/mcp/mcp"
+# The SDK app routes on `/mcp` and is mounted at the root, so the endpoint is
+# `/mcp`. It used to be `/mcp/mcp` (the SDK path under a `/mcp` mount), which
+# only worked for clients that follow redirects on POST.
+MCP_PATH = "/mcp"
 MCP_TOKEN = "synthetic-mcp-edge-token"
 API_TOKEN = "synthetic-api-token"
 
@@ -243,3 +246,59 @@ def test_bearer_extraction_ignores_other_schemes() -> None:
         "spaced"
     )
     assert _bearer_present({"headers": []}) == ""
+
+
+# --------------------------------------------------------------------------
+# Path membership: the guard that makes a root mount safe
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_non_mcp_path_answers_404_not_the_mcp_layers_reply(base_url: str) -> None:
+    """Unknown URLs keep their own answer.
+
+    The MCP sub-app is mounted at the root so the SDK's `/mcp` route is the
+    public path, and a root mount absorbs whatever no earlier route claimed.
+    Without the guard those leftovers inherited the MCP layer's behaviour: an
+    unconfigured token answered 503 for every unknown URL, which both misstates
+    the failure (a missing route is 404, not "service unavailable") and
+    advertises that an MCP endpoint exists.
+    """
+    response = httpx.get(f"{base_url}/no/such/route")
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+def test_the_health_probe_is_not_swallowed_by_the_mount(base_url: str) -> None:
+    """A root mount sits above everything registered after it.
+
+    It is appended last for this reason: mounting earlier turned this probe
+    into a 401 from the MCP auth layer.
+    """
+    assert httpx.get(f"{base_url}/healthz").status_code == 200
+
+
+@pytest.mark.integration
+def test_the_mcp_endpoint_lives_at_its_advertised_path(base_url: str) -> None:
+    """`/mcp` answers directly -- no redirect for a POST to follow.
+
+    The nested alternative (a `/mcp`-routing app mounted under `/mcp`) left
+    this path as a 307, which clients that POST without following redirects
+    reported as a connection failure against a correct configuration.
+    """
+    response = httpx.post(
+        f"{base_url}/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"authorization": f"Bearer {MCP_TOKEN}"},
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.integration
+def test_the_guard_does_not_let_a_lookalike_prefix_through(base_url: str) -> None:
+    """`/mcpx` is not the MCP endpoint.
+
+    A plain `startswith(prefix)` would admit it; the guard compares on the
+    path separator, so a sibling name is a 404 rather than an MCP request.
+    """
+    assert httpx.get(f"{base_url}/mcpx").status_code == 404

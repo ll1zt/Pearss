@@ -1154,6 +1154,11 @@ def build_mcp_app(app: Any) -> Any:
     from app.mcp_guard import allowed_hosts
 
     server = build_mcp_server(app)
+    # The SDK's own path stays `/mcp`; the *mount* is what decides the public
+    # path. Mounting a `/mcp`-routing app under `/mcp` nested the two into
+    # `/mcp/mcp`, so create_app mounts this at the root and guards it by prefix
+    # instead -- see MCPPathGuard.
+
     return server.streamable_http_app(
         stateless_http=True,
         transport_security=TransportSecuritySettings(

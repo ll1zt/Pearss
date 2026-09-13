@@ -81,7 +81,7 @@ async def test_subscribe_collect_consume_replay(
     session_factory: sessionmaker[Session],
     open_mcp_session: Callable[..., Any],
 ) -> None:
-    mcp_endpoint = f"{served}/mcp/mcp"
+    mcp_endpoint = f"{served}/mcp"
 
     # -- 3. confirm and add_source (MCP, elicitation) -----------------------
     # No elicitation capability declared: the resolver refuses with the spec's

@@ -39,6 +39,7 @@ from app.items_routes import router as items_router
 from app.mcp_guard import (
     MCPAuthMiddleware,
     MCPHeaderValidationMiddleware,
+    MCPPathGuard,
     warn_if_unconfigured,
 )
 from app.mcp_server import build_mcp_app
@@ -163,14 +164,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # wrapper only fronts requests. Collapsing the two would look tidier and
     # break `router.lifespan_context` below, which is what makes MCP sessions
     # work at all.
-    mcp_inner = build_mcp_app(app)
-    # Auth first (cheap, and an unauthenticated peer must not reach the
-    # body-reading layer), then header/body agreement.
-    app.mount(
-        "/mcp",
-        MCPAuthMiddleware(MCPHeaderValidationMiddleware(mcp_inner)),
-    )
-    app.state.mcp_app = mcp_inner
+    #
+    # Built by create_app (it needs the app to read routes off) and read back
+    # here by name: the session manager must be entered inside this lifespan,
+    # which is the only one Starlette runs.
+    mcp_inner = app.state.mcp_app
 
     scheduler = Scheduler(
         app.state.session_factory,
@@ -391,6 +389,28 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
             "action": outcome.action.value,
             "reason": outcome.reason,
         }
+
+    # The MCP sub-app. Mounted at the root because the SDK app routes on
+    # `/mcp` itself: mounting it under `/mcp` nested the paths into
+    # `/mcp/mcp`, leaving the advertised `/mcp` as a 307 that clients which
+    # POST without following redirects reported as a connection failure.
+    #
+    # MCPPathGuard is what makes a root mount safe -- it hands every non-MCP
+    # path back as 404, so unknown URLs keep their own answer instead of
+    # inheriting this layer's (an unconfigured token used to turn them all
+    # into 503, and it swallowed the health probe).
+    #
+    # Order: guard first (cheapest, and it owns path membership), then auth so
+    # an unauthenticated peer never reaches the body-reading layer, then
+    # header/body agreement.
+    mcp_inner = build_mcp_app(app)
+    app.state.mcp_app = mcp_inner
+    app.mount(
+        "/",
+        MCPPathGuard(
+            MCPAuthMiddleware(MCPHeaderValidationMiddleware(mcp_inner)),
+        ),
+    )
 
     return app
 

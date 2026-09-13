@@ -49,7 +49,10 @@ from core.job_state import JobRunEvent
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "conformance-edge-token"
 API_TOKEN = "conformance-api-token"
-MCP_PATH = "/mcp/mcp"
+# The SDK app routes on `/mcp` and is mounted at the root, so the endpoint is
+# `/mcp`. It used to be `/mcp/mcp` (the SDK path under a `/mcp` mount), which
+# only worked for clients that follow redirects on POST.
+MCP_PATH = "/mcp"
 
 pytestmark = pytest.mark.integration
 

@@ -91,6 +91,46 @@ def _bearer_present(scope: Mapping[str, Any]) -> str:
     return ""
 
 
+class MCPPathGuard:
+    """Let only MCP paths through; hand everything else back as 404.
+
+    The MCP sub-app is mounted at the root so that the SDK's own route is the
+    public path, and a root mount matches whatever no earlier route claimed.
+    Without this, those leftovers land in the MCP layer and inherit its
+    behaviour -- an unconfigured deployment answered 503 for every unknown URL,
+    and the health probe and disabled docs paths were swallowed, which is both
+    wrong (a missing route is 404) and informative (it advertises that an MCP
+    endpoint exists).
+
+    `prefix` is the public path; the sub-app serves there and nowhere else.
+    """
+
+    def __init__(self, app: Any, *, prefix: str = "/mcp") -> None:
+        self._app = app
+        self.app = app  # Starlette's mount typing reads `.app`
+        self._prefix = prefix
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in {"http", "websocket"}:
+            await self._app(scope, receive, send)
+            return
+        path = str(scope.get("path", ""))
+        # `startswith` rather than equality: the transport and any protocol
+        # metadata live under the same prefix, and this guard decides only
+        # whether the MCP layer owns the path at all.
+        if path == self._prefix or path.startswith(self._prefix + "/"):
+            await self._app(scope, receive, send)
+            return
+        await _reject(
+            scope,
+            receive,
+            send,
+            status=404,
+            code="not_found",
+            message="No such endpoint.",
+        )
+
+
 class MCPAuthMiddleware:
     """Refuse any MCP request that does not carry the edge token.
 
