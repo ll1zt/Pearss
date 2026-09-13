@@ -15,6 +15,7 @@ construction and simply drops anything not named.
 from __future__ import annotations
 
 import logging
+from typing import Final
 
 import nh3
 
@@ -89,9 +90,16 @@ ALLOWED_TAGS = frozenset(
 
 # Global presentation attributes only. Event handlers (on*), `style`, `srcdoc`,
 # `formaction` and every `data-*` are absent, so they are dropped.
+#
+# img carries `class`, but nothing about it is trusted to the whitelist: nh3
+# only invokes `attribute_filter` for attributes the whitelist admits, so
+# `class` is listed here and then held to a single constant value by the
+# filter below. Anything else a remote body puts in that attribute is dropped
+# whole -- the filter is the gatekeeper, the whitelist is only what lets the
+# filter see the value.
 ALLOWED_ATTRIBUTES = {
     "a": frozenset({"href", "title"}),
-    "img": frozenset({"src", "alt", "title", "width", "height", "loading"}),
+    "img": frozenset({"src", "alt", "title", "width", "height", "loading", "class"}),
     "time": frozenset({"datetime"}),
     "td": frozenset({"colspan", "rowspan"}),
     "th": frozenset({"colspan", "rowspan", "scope"}),
@@ -103,6 +111,29 @@ ALLOWED_ATTRIBUTES = {
     "del": frozenset({"cite", "datetime"}),
     "ins": frozenset({"cite", "datetime"}),
 }
+
+# The one allowed class, and the mechanism that allows it. A class value is a
+# styling hook, so the surface granted here is a single fixed constant rather
+# than the attribute itself: `attribute_filter` receives every img class value
+# and keeps exactly this one, so `class="avatar onerror-x"` survives as
+# `class="pearss-avatar"` and anything else is dropped whole. A reader (or a
+# FreshRSS theme) can then hang CSS off it -- border-radius is the point --
+# and a client that ships no such rule renders the image exactly as before.
+AVATAR_CLASS: Final = "pearss-avatar"
+
+
+def _img_class_filter(tag: str, attribute: str, value: str) -> str | None:
+    """Keep an img class only when it is exactly the avatar marker.
+
+    nh3 calls this for every whitelisted attribute, not just class, and None
+    means "strip this attribute" -- so a non-class attribute must be passed
+    through untouched, or the filter would strip every img's src. Only a
+    class value that is not exactly the marker is refused.
+    """
+    if tag != "img" or attribute != "class":
+        return value
+    return AVATAR_CLASS if value.strip() == AVATAR_CLASS else None
+
 
 # Content of these is dropped along with the tag, rather than being unwrapped
 # and kept as text — otherwise a script's source would survive as visible text.
@@ -136,5 +167,6 @@ def sanitize_html(html: str) -> str:
         # CSS can carry url() tracking and behaviour we have no way to audit,
         # so no style declarations are allowed through at all.
         filter_style_properties=frozenset(),
+        attribute_filter=_img_class_filter,
         strip_comments=True,
     )

@@ -187,3 +187,72 @@ def test_idempotent() -> None:
     html = '<p>Hi <a href="https://e.com">link</a></p><script>bad()</script>'
     once = sanitize_html(html)
     assert sanitize_html(once) == once
+
+
+# --------------------------------------------------------------------------
+# The one allowed class: the avatar marker
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_avatar_class_survives() -> None:
+    """A reader hooks border-radius off this class to round the avatar.
+
+    It is the single exception to "no class anywhere": a fixed constant,
+    admitted by value through the attribute filter rather than by the
+    whitelist, which is what keeps it a styling hook and nothing more.
+    """
+    out = sanitize_html(
+        '<img src="https://a.example/p.png" class="pearss-avatar" alt="A">'
+    )
+    assert 'class="pearss-avatar"' in out
+    assert 'src="https://a.example/p.png"' in out
+    assert 'alt="A"' in out
+
+
+@pytest.mark.unit
+def test_a_class_that_merely_contains_the_marker_is_dropped() -> None:
+    """Partial injection must not ride along with the marker.
+
+    `class="pearss-avatar evil"` surviving as both tokens would let remote
+    content tag its markup with arbitrary additional hooks; the filter keeps
+    the attribute only when the whole value is the constant.
+    """
+    out = sanitize_html(
+        '<img src="https://a.example/p.png" class="pearss-avatar evil">'
+    )
+    assert "class" not in out
+
+
+@pytest.mark.unit
+def test_any_other_class_is_still_dropped() -> None:
+    out = sanitize_html('<img src="https://a.example/p.png" class="rounded-xl">')
+    assert "class" not in out
+
+
+@pytest.mark.unit
+def test_the_class_filter_does_not_touch_other_attributes() -> None:
+    """The filter sees every whitelisted attribute, not just class.
+
+    nh3 calls it per attribute and treats None as "strip", so a filter that
+    answers None outside its target silently deletes every img's src. This is
+    exactly the bug the first cut of the filter had; the avatar markup is the
+    canary because it is the only place class and src appear together.
+    """
+    out = sanitize_html(
+        '<img src="https://a.example/p.png" class="pearss-avatar"'
+        ' alt="Ada" width="24" height="24" loading="lazy">'
+    )
+    assert 'src="https://a.example/p.png"' in out
+    assert 'alt="Ada"' in out
+    assert 'width="24"' in out
+    assert 'height="24"' in out
+    assert 'loading="lazy"' in out
+    assert 'class="pearss-avatar"' in out
+
+
+@pytest.mark.unit
+def test_a_class_on_any_other_tag_is_dropped() -> None:
+    out = sanitize_html('<a href="https://e.com" class="pearss-avatar">x</a>')
+    assert "class" not in out
+    assert 'href="https://e.com"' in out

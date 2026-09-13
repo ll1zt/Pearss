@@ -531,6 +531,7 @@ def test_avatar_is_a_small_square_with_the_author_as_alt_text() -> None:
     # The first image is the byline portrait; any others are post media.
     avatar = next(i for i in images if "avatar/" in i)
     assert 'alt="User One"' in avatar
+    assert 'class="pearss-avatar"' in avatar
     assert 'width="24"' in avatar
     assert 'height="24"' in avatar
     assert 'loading="lazy"' in avatar
@@ -578,6 +579,7 @@ def test_the_avatar_attributes_survive_the_sanitiser() -> None:
 
     avatar = next(i for i in re.findall(r"<img[^>]*>", cleaned) if "avatar/" in i)
     assert 'alt="User One"' in avatar
+    assert 'class="pearss-avatar"' in avatar
     assert 'width="24"' in avatar
     assert 'height="24"' in avatar
     assert 'loading="lazy"' in avatar

@@ -38,6 +38,7 @@ from typing import Any
 import httpx
 
 from adapters.raw_payload import RawPayload
+from adapters.sanitize import AVATAR_CLASS
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from core.plugins.hooks import (
@@ -384,11 +385,16 @@ def _author_html(tweet: Json) -> str | None:
         author = ""
 
     # `width`/`height` rather than the upstream inline `style`: the store-time
-    # sanitiser (ADR 0007) drops `style` and `class`, so a style attribute
-    # would be silently discarded and the avatar would render full size. The
-    # square 24px box plus `alt` is the whole budget available for making this
-    # read as a portrait; clients that round images by their own convention
-    # pick it up from the byline it sits beside.
+    # sanitiser (ADR 0007) drops `style`, so a style attribute would be
+    # silently discarded and the avatar would render full size. The square
+    # 24px box plus `alt` is what makes this read as a portrait when the
+    # reader styles nothing.
+    #
+    # `class="pearss-avatar"` is the one class the sanitiser admits (a fixed
+    # constant, checked by value in adapters.sanitize), so a reader or theme
+    # that wants round avatars can hang `border-radius: 50%` off it. The class
+    # is an invitation, not an instruction: a client that ships no such rule
+    # renders the image exactly as before.
     #
     # `alt` carries the display name rather than being empty: a broken or
     # blocked avatar URL then degrades to the author's name instead of to
@@ -398,6 +404,7 @@ def _author_html(tweet: Json) -> str | None:
     image = (
         f'<img src="{html.escape(avatar, quote=True)}"'
         f' alt="{html.escape(name or screen, quote=True)}"'
+        f' class="{AVATAR_CLASS}"'
         f' width="24" height="24" loading="lazy"/>'
         if avatar
         else ""

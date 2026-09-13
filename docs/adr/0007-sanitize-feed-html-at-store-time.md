@@ -53,6 +53,14 @@ ADR 0003 曾为「避免第二个 C 扩展」而不加净化库。这个权衡�
 - 允许：排版与结构标签、`a[href]`、`img[src|alt|...]`、表格
 - 禁止：`script`/`style`/`iframe`/`object`/`embed`/`form`/`input`/`svg`、所有 `on*` 事件属性、`style` 属性、`data-*`、`javascript:`/`data:`/`vbscript:` URL
 - **被丢弃的标签连内容一起丢**（`clean_content_tags`）：只剥标签会把脚本源码留成可见文本
+- **唯一豁免（2026-09-13）**：`img` 的 `class` 属性经 `attribute_filter` 按
+  **值**放行，且只接受单个固定常量 `pearss-avatar`（其余 class 值照旧整属性
+  丢弃）。动机：RSS 协议没有作者头像通道，头像只能内联在正文里；这个常量
+  是阅读器/主题挂 `border-radius: 50%` 的样式钩子。安全分析：放行的不是
+  class 属性本身而是**一个字面量**——注入面为零，风险等级与 img 标签本身
+  相同；`style` 内联样式仍然全面禁止。实现注意：nh3 对白名单内**每个**属性
+  调用过滤器且 None 即剥除，所以非 class 属性必须原样返回（首版过滤器在这
+  里剥掉了全部 src，靠「class 与 src 同框」的测试抓出）
 - `filter_style_properties` 必须传 **frozenset 而非空元组**：nh3 的绑定对 tuple 抛 `TypeError`，而 `()` 是最自然的字面量写法，极易踩
 
 ## 验证
