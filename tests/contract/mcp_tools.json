@@ -313,6 +313,27 @@
       "type": "object"
     }
   },
+  "set_source_folder": {
+    "description": "Move a source to a sidebar folder (one folder per source; 'default' is the unclassified home). Requires confirmation. Reflected in the Reader API's subscription/list, so the client sidebar follows on its next refresh.",
+    "input_schema": {
+      "properties": {
+        "folder": {
+          "title": "Folder",
+          "type": "string"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "folder"
+      ],
+      "title": "set_source_folderArguments",
+      "type": "object"
+    }
+  },
   "set_source_status": {
     "description": "Pause or resume a source. Requires confirmation. Pausing stops collection without deleting anything already gathered.",
     "input_schema": {

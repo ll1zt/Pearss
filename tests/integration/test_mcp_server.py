@@ -304,6 +304,7 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "add_source",
         "update_schedule_policy",
         "set_source_status",
+        "set_source_folder",
         "remove_source",
         "trigger_job",
         # P3 processor chain (ADR 0018): one-off backfill for legacy items,
@@ -609,6 +610,7 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
             },
         ),
         ("set_source_status", {"source_id": "src-1", "status": "paused"}),
+        ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}),
         ("trigger_job", {"source_id": "src-1"}),
         ("retry_enrichments", {"source_id": "src-1"}),
         # Every write tool belongs here: a tool left out is a tool whose
@@ -1026,6 +1028,7 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
             "source_id",
         ),
         ("set_source_status", {"source_id": "src-1", "status": "paused"}, "status"),
+        ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}, "folder"),
         ("trigger_job", {"source_id": "src-1"}, "source_id"),
         ("retry_enrichments", {"source_id": "src-1"}, "source_id"),
         ("backfill_source", {"source_id": "src-1"}, "source_id"),

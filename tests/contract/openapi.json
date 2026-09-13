@@ -105,6 +105,52 @@
         "title": "Body_stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post",
         "type": "object"
       },
+      "Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "a": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "A",
+            "type": "array"
+          },
+          "ac": {
+            "default": "edit",
+            "title": "Ac",
+            "type": "string"
+          },
+          "r": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "R",
+            "type": "array"
+          },
+          "s": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "S",
+            "type": "array"
+          }
+        },
+        "title": "Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -216,6 +262,18 @@
       "SourceCreate": {
         "description": "Body for creating a source.\n\n`pipeline_chain` + `target_lang` enable the processing chain at creation\ntime — the correct ordering: first source with chain, then first fetch,\nso no item is ever cached unprocessed.",
         "properties": {
+          "folder": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder"
+          },
           "parser_plugin_id": {
             "anyOf": [
               {
@@ -284,6 +342,18 @@
       "SourcePatch": {
         "description": "Body for updating a source. Absent fields are left alone.\n\n`pipeline_chain` is a JSON list of {plugin_id, kind, lang?, required?}\nspecs the source's items must complete before the gate opens; an explicit\n`null` clears the chain (items go ready straight after normalisation).\nAbsent vs explicit-null is decided by `model_fields_set`, the pydantic v2\nway to give PATCH bodies three-state fields.",
         "properties": {
+          "folder": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder"
+          },
           "pipeline_chain": {
             "anyOf": [
               {
@@ -772,6 +842,45 @@
         ]
       }
     },
+    "/api/greader.php/reader/api/0/subscription/edit": {
+      "post": {
+        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.",
+        "operationId": "subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subscription Edit",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
     "/api/greader.php/reader/api/0/subscription/list": {
       "get": {
         "operationId": "subscription_list_api_greader_php_reader_api_0_subscription_list_get",
@@ -830,22 +939,14 @@
     },
     "/api/greader.php/reader/api/0/tag/list": {
       "get": {
-        "description": "Starred state and labels.\n\nOnly the starred state exists today; labels arrive with FeedOut grouping.",
+        "description": "Starred state plus the folders that exist.\n\nA client builds its sidebar from this and from the categories on\nsubscription/list; the two must agree about which folders exist or the\nsidebar shows groups with nothing in them (or subscriptions with no\ngroup). Folders are derived from the sources, so an empty folder simply\ndoes not appear -- there is no folder entity of its own to persist.",
         "operationId": "tag_list_api_greader_php_reader_api_0_tag_list_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "additionalProperties": {
-                        "type": "string"
-                      },
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
+                  "additionalProperties": true,
                   "title": "Response Tag List Api Greader Php Reader Api 0 Tag List Get",
                   "type": "object"
                 }
@@ -860,22 +961,14 @@
         ]
       },
       "post": {
-        "description": "Starred state and labels.\n\nOnly the starred state exists today; labels arrive with FeedOut grouping.",
+        "description": "Starred state plus the folders that exist.\n\nA client builds its sidebar from this and from the categories on\nsubscription/list; the two must agree about which folders exist or the\nsidebar shows groups with nothing in them (or subscriptions with no\ngroup). Folders are derived from the sources, so an empty folder simply\ndoes not appear -- there is no folder entity of its own to persist.",
         "operationId": "tag_list_api_greader_php_reader_api_0_tag_list_post",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "items": {
-                      "additionalProperties": {
-                        "type": "string"
-                      },
-                      "type": "object"
-                    },
-                    "type": "array"
-                  },
+                  "additionalProperties": true,
                   "title": "Response Tag List Api Greader Php Reader Api 0 Tag List Post",
                   "type": "object"
                 }

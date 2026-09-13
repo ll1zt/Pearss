@@ -321,6 +321,13 @@ def _set_source_status_confirmation(source_id: str, status: str) -> Elicit[Any]:
     )
 
 
+def _set_source_folder_confirmation(source_id: str, folder: str) -> Elicit[Any]:
+    return _confirm_resolver(
+        _summary=f"Move source {source_id} to folder {folder}?",
+        _fields={"source_id": source_id, "folder": folder},
+    )
+
+
 def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
     return _confirm_resolver(
         _summary=f"Remove source {source_id}? Items already collected are kept.",
@@ -854,6 +861,48 @@ def build_mcp_server(app: Any) -> MCPServer:
             "PATCH",
             f"/v1/sources/{source_id}",
             json_body={"status": status},
+            idempotency_key=_fresh_key(),
+        )
+        if code != 200:
+            return _error_from(payload, code)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Move a source to a sidebar folder (one folder per source; "
+            "'default' is the unclassified home). Requires confirmation. "
+            "Reflected in the Reader API's subscription/list, so the client "
+            "sidebar follows on its next refresh."
+        )
+    )
+    async def set_source_folder(
+        source_id: str,
+        folder: str,
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_source_folder_confirmation)
+        ],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        if not (
+            _matches(data["source_id"], source_id) and _matches(data["folder"], folder)
+        ):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        code, payload = await core.request(
+            "PATCH",
+            f"/v1/sources/{source_id}",
+            json_body={"folder": folder},
             idempotency_key=_fresh_key(),
         )
         if code != 200:
