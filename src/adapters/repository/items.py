@@ -117,6 +117,7 @@ def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> No
         return
     row.title = candidate.title
     row.url = candidate.url
+    row.author = candidate.author
     row.content_hash = candidate.content_hash
     row.content_ref = candidate.content_ref
     row.published_at = _optional_timestamp(candidate.published_at)
@@ -133,6 +134,7 @@ def _insert(session: Session, item: Item) -> None:
             content_hash=item.content_hash,
             title=item.title,
             url=item.url,
+            author=item.author,
             published_at=_optional_timestamp(item.published_at),
             content_ref=item.content_ref,
             publish_status=item.publish_status.value,

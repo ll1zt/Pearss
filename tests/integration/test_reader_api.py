@@ -947,3 +947,53 @@ async def test_a_translation_merges_above_the_original_in_contents(
         body.rstrip().endswith("</p>")
         and len(body) > len("<p>Translated body.</p>") + 40
     )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_contents_carries_the_author(client: httpx.AsyncClient) -> None:
+    """The byline reaches the client instead of an empty string.
+
+    The collector extracts it, normalize() keeps it, and this asserts the last
+    hop. Before that plumbing existed this key was hardcoded to "", so a client
+    had no way to show who wrote an item.
+
+    Only one of the three fixture entries carries <author>; the others are the
+    "origin named nobody" case, asserted separately below.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+    by_title = {item["title"]: item for item in response.json()["items"]}
+    assert by_title["First Post About Widgets"]["author"] == (
+        "author@example.com (Ada Example)"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_author_is_omitted_rather_than_empty_when_unknown(
+    client: httpx.AsyncClient,
+) -> None:
+    """An item whose origin names nobody carries no author key at all.
+
+    Google Reader only sets this key when the author is non-empty, and an empty
+    string reads as "anonymous" rather than "unknown". The fixture's other two
+    entries have no <author>, which is the normal shape for a feed that omits
+    bylines.
+    """
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids},
+    )
+    by_title = {item["title"]: item for item in response.json()["items"]}
+    assert "author" not in by_title["Second Post: Content Encoded"]
+    for item in by_title.values():
+        assert item.get("author", "absent") != ""

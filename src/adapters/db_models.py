@@ -215,6 +215,14 @@ class Item(Base):
     )
     title: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     url: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # The origin's byline, empty when it names nobody. Not nullable: the empty
+    # string is the meaningful value here ("unknown"), and NULL would make
+    # every reader of this column handle two spellings of one fact. The
+    # server_default lets the migration add a NOT NULL column to a populated
+    # table without a separate backfill pass.
+    author: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text, nullable=False, server_default=""
+    )
     published_at: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.Text, nullable=True
     )

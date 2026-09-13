@@ -1101,7 +1101,7 @@
             }
           },
           {
-            "description": "Comma-separated subset of: id, guid, source_id, title, url, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
+            "description": "Comma-separated subset of: id, guid, source_id, title, url, author, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
             "in": "query",
             "name": "fields",
             "required": false,
@@ -1114,7 +1114,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Comma-separated subset of: id, guid, source_id, title, url, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
+              "description": "Comma-separated subset of: id, guid, source_id, title, url, author, published_at, publish_status, content_hash, content_ref, tenant_id, created_at, updated_at, published_to_feed_at.",
               "title": "Fields"
             }
           },

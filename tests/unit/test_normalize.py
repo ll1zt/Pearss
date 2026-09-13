@@ -359,3 +359,49 @@ def test_display_label_last_resort_is_the_id() -> None:
         )
         == "e" * 32
     )
+
+
+@pytest.mark.unit
+def test_author_comes_from_draft_metadata() -> None:
+    """The byline the collector reported survives normalisation.
+
+    Every collector already put it in `metadata["author"]`; normalize() used to
+    read only the explicit draft fields and drop metadata entirely, so the
+    value was fetched and discarded on every collection.
+    """
+    result = normalize(draft(metadata={"author": "Ada Example"}), tenant_id=TENANT)
+    assert result.item.author == "Ada Example"
+
+
+@pytest.mark.unit
+def test_author_is_empty_when_the_origin_names_nobody() -> None:
+    """No metadata, no byline -- and that is not an error.
+
+    A feed without <author> is normal. The empty string is the honest answer;
+    inventing the source name would misattribute the byline.
+    """
+    assert normalize(draft(), tenant_id=TENANT).item.author == ""
+    assert normalize(draft(metadata={}), tenant_id=TENANT).item.author == ""
+
+
+@pytest.mark.unit
+def test_author_whitespace_is_collapsed() -> None:
+    """Origins wrap long names; a byline with newlines breaks client layout."""
+    result = normalize(
+        draft(metadata={"author": "  Ada\n\tExample  "}), tenant_id=TENANT
+    )
+    assert result.item.author == "Ada Example"
+
+
+@pytest.mark.unit
+def test_author_does_not_affect_identity() -> None:
+    """Identity is about which item this is, not who wrote it.
+
+    If author fed into guid or content_hash, correcting a byline would mint a
+    new item and the reader would show the article twice.
+    """
+    without = normalize(draft(), tenant_id=TENANT).item
+    with_author = normalize(draft(metadata={"author": "Ada"}), tenant_id=TENANT).item
+    assert without.id == with_author.id
+    assert without.guid == with_author.guid
+    assert without.content_hash == with_author.content_hash

@@ -523,7 +523,7 @@ def _render_item(
         categories.append(reader_api.STARRED_TAG)
 
     published = _epoch(row.published_at) if row.published_at else 0
-    return {
+    item: dict[str, object] = {
         "id": reader_api.encode_item_id(reader_api.reader_id(row.id)),
         "categories": categories,
         "title": row.title,
@@ -531,7 +531,6 @@ def _render_item(
         "timestampUsec": str(published * 1000000),
         "published": published,
         "updated": published,
-        "author": "",
         "alternate": [{"href": row.url, "type": "text/html"}],
         # The body is untrusted remote HTML, same trust decision as the RSS
         # path (ADR 0003). Here it is a JSON string, so there is no XML escape
@@ -546,6 +545,12 @@ def _render_item(
         "enclosure": [],
         "canonical": [{"href": row.url}],
     }
+    # Omitted rather than sent empty, matching Google Reader: FreshRSS only
+    # sets this key when the author is non-empty. An empty string reads as
+    # "anonymous" to some clients, and we mean "the origin named nobody".
+    if row.author:
+        item["author"] = row.author
+    return item
 
 
 def _epoch(value: str) -> int:

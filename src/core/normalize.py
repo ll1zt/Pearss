@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -368,6 +369,7 @@ def normalize(
         title=title,
         url=url,
         published_at=_resolve_published_at(draft.published_at),
+        author=_resolve_author(draft.metadata),
         content_ref=content_ref,
         # Every new item starts behind the gate. Whether it advances depends on
         # the feed's processing chain, decided downstream by the state machine.
@@ -406,6 +408,22 @@ def _resolve_title(title: str, body: str) -> tuple[str, bool]:
     if len(body) > DERIVED_TITLE_MAX_CHARS:
         clipped = f"{clipped}…"
     return clipped, True
+
+
+def _resolve_author(metadata: Mapping[str, str]) -> str:
+    """The byline the origin gave, taken from draft metadata.
+
+    Collectors report it as `metadata["author"]` because it varies by origin
+    (an RSS <author>, a Zhihu display name, an X "Name (@handle)") and core
+    must not know those shapes. Absent means the origin named nobody, which is
+    normal for a feed without <author> -- the empty string is the honest
+    answer, and callers treat it as "unknown" rather than "anonymous".
+
+    Whitespace is collapsed because origins wrap long names across lines, and
+    a byline with embedded newlines renders as a broken line in clients.
+    """
+    raw = metadata.get("author", "")
+    return " ".join(raw.split())
 
 
 def _resolve_published_at(published_at: datetime | None) -> datetime | None:

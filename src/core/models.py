@@ -151,6 +151,10 @@ class Item:
     url: str
     published_at: datetime | None
     publish_status: PublishStatus
+    # Who wrote it, as the origin named them. Empty when the origin names
+    # nobody: a feed without <author> is not an error, and inventing a name
+    # from the source would misattribute the byline.
+    author: str = ""
     tenant_id: str = "default"
     created_at: datetime | None = None
     updated_at: datetime | None = None
