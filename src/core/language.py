@@ -49,13 +49,23 @@ _LATIN_RANGES: Final[tuple[tuple[int, int], ...]] = (
 # rather than a wrong one.
 KNOWN_TARGETS: Final[frozenset[str]] = frozenset({"zh", "ja", "en"})
 
-# A body counts as already-target when most of its scripted characters belong
-# to that language. 0.5 is deliberately the midpoint: the sampler found real X
-# posts like 「如果真是"自我提升向内求"，respect。」, majority-Chinese with a
-# Latin tail, and translating those is exactly the waste this avoids. A
-# genuinely bilingual post still translates, because there the target script is
-# not the majority.
-TARGET_SCRIPT_SHARE: Final = 0.5
+# A body counts as already-target when enough of its scripted characters belong
+# to that language. 0.4 rather than a bare majority, because technical posts
+# mix scripts heavily: a live item read
+# 「pi agent 上面的两个 subagent 包用起来都有痛点」 -- perfectly readable to a
+# Chinese reader, but 15 Latin letters against 13 ideographs, so a 0.5
+# threshold sent it for translation. Translating it costs a call and improves
+# nothing.
+#
+# The two error directions are not symmetric. Skipping a body that genuinely
+# needed translation leaves the reader with text they cannot read; translating
+# one that did not costs a fraction of a cent. That asymmetry argues for the
+# conservative end of the range -- a body that is majority a *different*
+# language still translates (a 60/40 English-heavy post stays queued), and the
+# floor below (MIN_SCRIPTED_CHARS) keeps terse bodies out of the judgement
+# entirely. 0.4 is the point where the sampled mixed posts start reading as
+# Chinese without any English-dominant post flipping.
+TARGET_SCRIPT_SHARE: Final = 0.4
 
 # Below this many scripted characters a ratio is noise: "OK", "2026" and
 # one-word titles would all be judged by one or two glyphs. Short bodies go to

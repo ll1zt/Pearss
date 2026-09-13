@@ -98,6 +98,10 @@ ignore = []
 "src/plugins/processors/translate/**" = ["RUF001", "RUF003"]
 "src/core/language.py" = ["RUF003"]
 "tests/integration/test_pipeline.py" = ["RUF001"]
+# The language tests are written in the languages they classify: the Chinese
+# and Japanese samples are the evidence for where the thresholds sit, so their
+# fullwidth punctuation is the data, not a mistyped ASCII lookalike.
+"tests/unit/test_language.py" = ["RUF001"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "adapters", "plugins", "app"]
