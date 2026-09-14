@@ -385,28 +385,36 @@ def test_a_quote_without_media_renders_no_image() -> None:
 
 
 @pytest.mark.unit
-def test_the_post_time_is_visible_in_the_body() -> None:
-    """`published_at` was parsed but never shown, so a reader had no date.
+def test_the_post_time_is_not_in_the_body() -> None:
+    """The date belongs to the reader's own chrome, not to the content.
 
-    The `<time>` element carries a machine-readable `datetime` alongside the
-    visible text; the sanitiser admits `time[datetime]`, so this survives
-    storage.
+    It was rendered into the byline for one revision and taken back out: the
+    reading client already shows when an item arrived, and repeating it in the
+    body is noise on every single item. `published_at` is still populated on
+    the draft -- only its rendering is gone.
     """
-    from plugins.collectors.twitter.collector import _time_html
+    for name in ("valid.json", "quoted.json", "conversation.json"):
+        for item in drafts(name):
+            assert "<time" not in item.content, f"{name}: {item.content[:120]}"
+            assert "UTC" not in item.content, f"{name}: {item.content[:120]}"
 
-    item = drafts("valid.json")[0]
-    out = _time_html(item.published_at)
-    assert out is not None
-    assert "<time " in out and "datetime=" in out
-    assert "2026-08-08" in out, out
+    # The field itself must survive: the reader's chrome and the API rely on it.
+    assert drafts("valid.json")[0].published_at is not None
 
 
 @pytest.mark.unit
-def test_a_tweet_with_no_time_renders_no_time_element() -> None:
-    """A missing date must not become a fabricated one or an empty element."""
-    from plugins.collectors.twitter.collector import _time_html
+def test_the_byline_is_just_the_author() -> None:
+    """With the time gone the byline ends at the handle, with no separator left.
 
-    assert _time_html(None) is None
+    The separator was inserted only when both halves existed; removing one half
+    must not strand a trailing "·".
+    """
+    item = by_suffix(drafts("valid.json"), "2")
+    assert item is not None
+    byline = item.content.split("\n", 1)[0]
+    assert byline.endswith("</p>")
+    assert " · " not in byline, byline
+    assert "UTC" not in byline
 
 
 @pytest.mark.unit
