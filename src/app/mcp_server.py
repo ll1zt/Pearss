@@ -1000,12 +1000,13 @@ def build_mcp_server(app: Any) -> MCPServer:
     @server.tool(
         description=(
             "Delete a source and everything it collected. Requires "
-            "confirmation, which states how many items will go. Permanent: the "
-            "source row, its items, their stored bodies, read state and "
-            "translations are all removed, and re-subscribing the same feed "
-            "starts a new source with no history. Use delete_source_items to "
-            "clear a bad crawl and keep the subscription, or set_source_status "
-            "to disable it instead."
+            "confirmation. Permanent: the source row, its items, their stored "
+            "bodies, read state and translations are all removed, and "
+            "re-subscribing the same feed starts a new source with no history. "
+            "Check the size first with search_items (its `total` counts the "
+            "source's items). Use delete_source_items to clear a bad crawl and "
+            "keep the subscription, or set_source_status to disable it "
+            "instead."
         )
     )
     async def remove_source(
