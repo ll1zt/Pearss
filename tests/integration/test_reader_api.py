@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.raw_payload import RawPayload
-from app.main import create_app
+from app.main import create_app, create_engine_for
 from app.pipeline import normalise_and_store
 from plugins.collectors.rss import collector as rss
 
@@ -55,7 +55,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     with engine.begin() as conn:
         conn.execute(
             sa.text(
@@ -323,17 +323,18 @@ async def test_subscription_list(client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_subscription_list_excludes_a_deleted_source(
+async def test_subscription_list_excludes_a_disabled_source(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    """A soft-deleted source must not linger in the client's sidebar.
+    """A disabled source must not linger in the client's sidebar.
 
-    The source row survives (its items are published and frozen), but the
-    subscription itself is gone, so the listing has to say so.
+    `disabled` is the operator taking a subscription out of service without
+    deleting its history, so the listing hides it. A deleted source needs no
+    test here: deletion removes the row (ADR 0021), leaving nothing to hide.
     """
     with app.state.session_factory() as session:
         session.execute(
-            sa.text("update source set status = 'deleted' where id = 'src-1'")
+            sa.text("update source set status = 'disabled' where id = 'src-1'")
         )
         session.commit()
 

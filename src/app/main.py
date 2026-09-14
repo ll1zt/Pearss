@@ -99,12 +99,17 @@ def _ensure_parent_directory(url: str) -> None:
         parent.mkdir(parents=True, exist_ok=True)
 
 
-def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
-    """Build the session factory, creating the database directory if needed."""
-    resolved = url or database_url()
-    _ensure_parent_directory(resolved)
+def create_engine_for(url: str) -> Any:
+    """Build an engine with the pragmas this application depends on.
+
+    Exists as its own function because the pragmas are not optional and are
+    easy to forget: `sa.create_engine(url)` looks like it does the same thing
+    and silently skips every one of them. Anything that needs an engine --
+    the app, the migration tests, a test fixture -- should come through here so
+    the connection setup has a single definition.
+    """
     engine = create_engine(
-        resolved,
+        url,
         # WAL lets readers (NNW pulls, MCP queries) proceed while the
         # enrichment worker or the scheduler writes - the default journal
         # (delete) makes every writer take an exclusive lock and was the
@@ -112,30 +117,39 @@ def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
         connect_args={"timeout": 30.0},
     )
 
-    if url_is_sqlite(resolved):
-        from sqlalchemy import event
+    if not url_is_sqlite(url):
+        return engine
 
-        @event.listens_for(engine, "connect")
-        def _sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=30000")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            # SQLite ignores every ON DELETE clause unless this is set, and its
-            # default is off. Without it the schema's own declarations -- the
-            # CASCADEs from item to read_state and item_enrichment, and from
-            # source to item and raw_fetch -- were inert, so deleting a parent
-            # left children pointing at a row that no longer existed. Deletion
-            # (ADR 0021) relies on those cascades to carry a deleted item's
-            # consumption state and processor products away with it.
-            #
-            # Per connection, not per database, which is why it runs in the
-            # connect hook: setting it once at startup would leave every later
-            # connection unenforced.
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
+    from sqlalchemy import event
 
-    return sessionmaker(engine, expire_on_commit=False)
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        # SQLite ignores every ON DELETE clause unless this is set, and its
+        # default is off. Without it the schema's own declarations -- the
+        # CASCADEs from item to read_state and item_enrichment, and from
+        # source to item and raw_fetch -- were inert, so deleting a parent
+        # left children pointing at a row that no longer existed. Deletion
+        # (ADR 0021) relies on those cascades to carry a deleted item's
+        # consumption state and processor products away with it.
+        #
+        # Per connection, not per database, which is why it runs in the
+        # connect hook: setting it once at startup would leave every later
+        # connection unenforced.
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return engine
+
+
+def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
+    """Build the session factory, creating the database directory if needed."""
+    resolved = url or database_url()
+    _ensure_parent_directory(resolved)
+    return sessionmaker(create_engine_for(resolved), expire_on_commit=False)
 
 
 def url_is_sqlite(url: str) -> bool:

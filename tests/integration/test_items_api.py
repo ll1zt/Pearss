@@ -19,7 +19,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.main import create_app
+from app.main import create_app, create_engine_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -65,7 +65,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     with engine.begin() as conn:
         conn.execute(
             sa.text(

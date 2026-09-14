@@ -25,7 +25,7 @@ from sqlalchemy.orm import sessionmaker
 from uvicorn import Config as UvicornConfig
 from uvicorn.server import Server
 
-from app.main import create_app
+from app.main import create_app, create_engine_for
 from app.mcp_guard import (
     MCP_ALLOWED_HOSTS_ENV,
     MCP_TOKEN_ENV,
@@ -65,7 +65,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv(MCP_TOKEN_ENV, MCP_TOKEN)
@@ -161,7 +161,7 @@ def test_unconfigured_token_disables_the_endpoint(
     command.upgrade(config, "head")
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
-    app = create_app(sessionmaker(sa.create_engine(url), expire_on_commit=False))
+    app = create_app(sessionmaker(create_engine_for(url), expire_on_commit=False))
 
     server = Server(UvicornConfig(app, host="127.0.0.1", port=0, log_level="critical"))
     thread = threading.Thread(target=server.run, daemon=True)

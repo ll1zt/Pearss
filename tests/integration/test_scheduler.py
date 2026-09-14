@@ -32,6 +32,7 @@ from adapters.repository import (
     update_gaps_for_source,
 )
 from adapters.timestamps import fixed_width_utc
+from app.main import create_engine_for
 from app.scheduler import TickReport, collect_now, run_tick
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
@@ -90,7 +91,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -639,7 +640,7 @@ def test_collectable_sources_lists_only_active(
         add_source(
             session, source_id="gone", policy={"type": "fixed", "interval": "30m"}
         )
-        session.execute(sa.text("update source set status='deleted' where id='gone'"))
+        session.execute(sa.text("update source set status='disabled' where id='gone'"))
         session.commit()
         rows = collectable_sources(session, tenant_id="default")
     assert [row[0] for row in rows] == ["active-one"]

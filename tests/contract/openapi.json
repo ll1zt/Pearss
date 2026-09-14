@@ -151,6 +151,59 @@
         "title": "Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
         "type": "object"
       },
+      "DeleteItemsRequest": {
+        "description": "Ids to delete, and nothing else.\n\nA list rather than a filter. A filter reads as a convenient way to say\n\"everything matching this\", which is exactly the blast radius this\noperation should not have; a caller wanting a whole source cleared names\nthe source endpoint, where that intent is explicit.",
+        "properties": {
+          "item_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "title": "Item Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "item_ids"
+        ],
+        "title": "DeleteItemsRequest",
+        "type": "object"
+      },
+      "DeleteSourceItemsRequest": {
+        "description": "Narrowing for a per-source item deletion.\n\nEvery field is optional: an empty body means \"everything this source\ncollected\", which is the common case after a bad crawl.",
+        "properties": {
+          "include_published": {
+            "default": true,
+            "title": "Include Published",
+            "type": "boolean"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          }
+        },
+        "title": "DeleteSourceItemsRequest",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -417,12 +470,11 @@
         "type": "object"
       },
       "SourceStatus": {
-        "description": "Lifecycle of a content source.",
+        "description": "Lifecycle of a content source.\n\nThere is no `deleted`. Deletion removes the row (ADR 0021), and a status\nmeaning \"this row is really gone\" cannot describe a row that exists --\nkeeping one invited every reader to handle a state that was never durable.",
         "enum": [
           "active",
           "paused",
-          "disabled",
-          "deleted"
+          "disabled"
         ],
         "title": "SourceStatus",
         "type": "string"
@@ -1336,6 +1388,68 @@
       }
     },
     "/v1/items/{item_id}": {
+      "delete": {
+        "description": "Delete one item, permanently.\n\nRemoves the row, its stored body, its read state and its processor\nproducts. Not reversible and not a hide: the content is gone, and the\nclient's cached copy is the only one left (ADR 0021).\n\nAn id naming nothing answers 200 with `items: 0`, not 404 -- see\ndelete_source for why a retry must be indistinguishable from the first.",
+        "operationId": "deleteItem",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete Item",
+        "tags": [
+          "core-api"
+        ]
+      },
       "get": {
         "description": "One item, without its body.",
         "operationId": "getItem",
@@ -1446,6 +1560,69 @@
           }
         ],
         "summary": "Read Item Body",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/items:delete": {
+      "post": {
+        "description": "Delete several items in one call.\n\nPOST rather than DELETE-with-body: DELETE bodies are unevenly supported by\nclients and proxies, and an id list can be long enough to matter. The\n`:delete` suffix matches the other verb-style routes.",
+        "operationId": "deleteItems",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete Items",
         "tags": [
           "core-api"
         ]
@@ -2016,7 +2193,7 @@
     },
     "/v1/sources/{source_id}": {
       "delete": {
-        "description": "Soft-delete a source.\n\nSoft, because docs/domain/data-model.md forbids deleting a source's items:\nthey are published, and their GUIDs are frozen. Removing the source would\norphan content a client still has cached.",
+        "description": "Delete a source and everything it collected (ADR 0021).\n\nDestructive and not reversible: the source row, its items, their bodies,\ntheir read state and processor products, and the fetch records all go. The\nendpoint used to be a soft delete that left the source as a tombstone with\nits items published; that is no longer what this means, and any caller\nrelying on the old behaviour is relying on something the API does not\npromise.\n\nDeleting an id that is already gone answers 200 with `sources: 0` rather\nthan 404. A client retrying a request whose response was lost cannot tell\n\"it was here and I removed it\" from \"it was never here\", and after the\nfirst call those are the same fact.",
         "operationId": "deleteSource",
         "parameters": [
           {
@@ -2254,6 +2431,85 @@
           }
         ],
         "summary": "List Source Enrichments",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}/items:delete": {
+      "post": {
+        "description": "Delete a source's items, keeping the source itself.\n\nThe \"this crawl was wrong, keep collecting\" case. The source keeps its\ncursor, so the subscription resumes rather than re-sampling history\n(ADR 0021).\n\n`include_published` defaults true: the caller has explicitly asked to\nclear this source's contents, and silently keeping the items every client\nhas already cached would leave a source that looks emptied while its\narticles are still everywhere.",
+        "operationId": "deleteSourceItems",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DeleteSourceItemsRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Delete Source Items",
         "tags": [
           "core-api"
         ]

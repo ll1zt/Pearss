@@ -18,6 +18,8 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.main import create_engine_for
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -40,7 +42,7 @@ def migrated_database(tmp_path: Path, filename: str) -> str:
 @pytest.fixture
 def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     """A session factory backed by a migrated, empty, temporary database."""
-    engine = sa.create_engine(migrated_database(tmp_path, "integration.db"))
+    engine = create_engine_for(migrated_database(tmp_path, "integration.db"))
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -55,7 +57,7 @@ def migrated_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     one for the request, one for assertions -- does not have to reach for a
     relative import or rebuild the migration machinery.
     """
-    engine = sa.create_engine(migrated_database(tmp_path, "concurrency.db"))
+    engine = create_engine_for(migrated_database(tmp_path, "concurrency.db"))
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:

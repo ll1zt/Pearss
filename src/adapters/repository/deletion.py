@@ -32,8 +32,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from adapters import filestore
-from adapters.db_models import ItemEnrichment as EnrichmentRow
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import ItemEnrichment as EnrichmentRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow

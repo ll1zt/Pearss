@@ -32,7 +32,7 @@ from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
 from adapters.filestore import store_body
-from app.main import create_app
+from app.main import create_app, create_engine_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "synthetic-mcp-edge-token"
@@ -56,7 +56,7 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -661,7 +661,7 @@ async def test_refused_writes_reach_no_audit_row(
     """
 
     def _core_api_writes() -> list[str]:
-        engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
+        engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
         try:
             with engine.connect() as conn:
                 return [
@@ -717,7 +717,7 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
         },
         confirm=True,
     )
-    engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
+    engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
     with engine.connect() as conn:
         rows = conn.execute(text("select actor, operation from audit_log")).fetchall()
     engine.dispose()
@@ -958,7 +958,7 @@ async def test_backfill_source_executes_and_reports_queued(
     both are set up directly against the shared database, since the MCP
     surface has no tool that seeds items.
     """
-    engine = sa.create_engine(mcp_env["PEARSS_DATABASE_URL"])
+    engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
     try:
         with engine.begin() as conn:
             conn.execute(

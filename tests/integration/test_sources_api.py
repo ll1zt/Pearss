@@ -19,7 +19,7 @@ from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.main import create_app
+from app.main import create_app, create_engine_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -41,7 +41,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -416,24 +416,25 @@ async def test_status_transitions(writer: httpx.AsyncClient) -> None:
     deleted = await writer.delete(
         f"/v1/sources/{source_id}", headers={"Idempotency-Key": "del"}
     )
-    assert deleted.json()["status"] == "deleted"
+    assert deleted.status_code == 200
+    assert deleted.json()["sources"] == 1, "removal deletes the row"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_delete_is_soft_and_keeps_items(
+async def test_delete_removes_the_source_and_its_items(
     app: FastAPI, writer: httpx.AsyncClient
 ) -> None:
-    """Removing a source must not delete published items.
+    """Deletion is physical: the source, its items and their read state go.
 
-    Their GUIDs are frozen and clients have cached them; deleting the rows
-    would orphan content a reader still sees. Items are seeded here because
-    without them "keeps items" cannot fail: a cascade would have nothing to
-    cascade to, and the test would pass on an empty set.
+    This replaces a test that asserted the opposite -- that items survive
+    their source's removal. Deletion now removes them (ADR 0021), and the
+    items are seeded here for the same reason as before: a cascade with
+    nothing to cascade to would pass on an empty set.
     """
     created = await writer.post(
         "/v1/sources",
-        headers={"Idempotency-Key": "soft"},
+        headers={"Idempotency-Key": "hard"},
         json={"url": FEED_URL, "schedule_policy": policy()},
     )
     source_id = created.json()["id"]
@@ -449,43 +450,91 @@ async def test_delete_is_soft_and_keeps_items(
                     " '2026-01-01T00:00:00.000000Z')"
                 ),
                 {
-                    "id": f"soft-item-{index}",
+                    "id": f"hard-item-{index}",
                     "s": source_id,
-                    "g": f"soft-guid-{index}",
-                    "h": f"soft-hash-{index}",
-                    "t": f"Kept {index}",
-                    "u": f"https://example.com/kept/{index}",
+                    "g": f"hard-guid-{index}",
+                    "h": f"hard-hash-{index}",
+                    "t": f"Gone {index}",
+                    "u": f"https://example.com/gone/{index}",
                 },
             )
+        # Read state is the row a bare DELETE would strand if the database is
+        # not enforcing the schema's cascade.
+        session.execute(
+            sa.text(
+                "insert into read_state (item_id, is_read, is_starred, tenant_id,"
+                " updated_at) values ('hard-item-0', 1, 0, 'default',"
+                " '2026-01-01T00:00:00.000000Z')"
+            )
+        )
         session.commit()
 
-    await writer.delete(f"/v1/sources/{source_id}", headers={"Idempotency-Key": "d"})
+    response = await writer.delete(
+        f"/v1/sources/{source_id}", headers={"Idempotency-Key": "d"}
+    )
+    assert response.status_code == 200
+    counts = response.json()
+    assert counts["sources"] == 1
+    assert counts["items"] == 2
 
     with app.state.session_factory() as session:
-        remaining = session.execute(
+        sources = session.execute(
             sa.text("select count(*) from source where id = :i"), {"i": source_id}
-        ).scalar()
-        status = session.execute(
-            sa.text("select status from source where id = :i"), {"i": source_id}
         ).scalar()
         items = session.execute(
             sa.text("select count(*) from item where source_id = :i"), {"i": source_id}
         ).scalar()
-    assert remaining == 1, "the source row must survive as a tombstone"
-    assert status == "deleted", "removal is a status change, not a row delete"
-    assert items == 2, "published items must survive their source's removal"
+        states = session.execute(
+            sa.text("select count(*) from read_state where item_id in"
+                    " ('hard-item-0', 'hard-item-1')")
+        ).scalar()
+    assert sources == 0, "the source row is gone, not merely marked"
+    assert items == 0, "its items go with it"
+    assert states == 0, "and so does their read state"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_readding_a_deleted_source_reactivates_it(
+async def test_deleting_a_source_twice_is_not_an_error(
     writer: httpx.AsyncClient,
 ) -> None:
-    """Re-subscribing restores the source instead of returning a dead one.
+    """Idempotence: a retry must not turn a success into a 404.
 
-    Regression: the identity is deterministic from the canonical URL, so the
-    re-add found the deleted row and answered 201 with a source that would
-    never be collected again.
+    A client whose response was lost cannot tell "I already deleted it" from
+    "it was never there", and after the first call those are the same fact.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "twice-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+
+    first = await writer.delete(
+        f"/v1/sources/{source_id}", headers={"Idempotency-Key": "twice-del-a"}
+    )
+    second = await writer.delete(
+        f"/v1/sources/{source_id}", headers={"Idempotency-Key": "twice-del-b"}
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["sources"] == 1
+    assert second.json()["sources"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_readding_a_deleted_source_creates_a_fresh_one(
+    writer: httpx.AsyncClient,
+) -> None:
+    """Re-subscribing after deletion starts over, cursor included.
+
+    Replaces a test that pinned reactivation of a tombstone. Deletion removes
+    the row, so there is nothing to revive: the new source has the same
+    identity (it is derived from the canonical URL) but no history depth, and
+    its next collection re-samples from the first page. That is the cost of
+    deleting rather than the cost of a bug -- a caller who only wants the
+    items gone should clear them and keep the source.
     """
     created = await writer.post(
         "/v1/sources",
@@ -496,7 +545,7 @@ async def test_readding_a_deleted_source_reactivates_it(
     deleted = await writer.delete(
         f"/v1/sources/{source_id}", headers={"Idempotency-Key": "readd-del"}
     )
-    assert deleted.json()["status"] == "deleted"
+    assert deleted.json()["sources"] == 1
 
     readded = await writer.post(
         "/v1/sources",
@@ -508,9 +557,69 @@ async def test_readding_a_deleted_source_reactivates_it(
     )
     assert readded.status_code == 201
     body = readded.json()
-    assert body["id"] == source_id, "the same identity, revived"
+    assert body["id"] == source_id, "identity is derived, so it is the same id"
     assert body["status"] == "active"
     assert body["schedule_policy"] == {"type": "fixed", "interval": "2h"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_clearing_a_sources_items_keeps_the_subscription(
+    app: FastAPI,
+    writer: httpx.AsyncClient,
+) -> None:
+    """The "bad crawl, keep collecting" case (ADR 0021).
+
+    The source survives with its cursor intact, so the next walk resumes
+    instead of re-fetching history -- which is what distinguishes this from
+    delete-and-resubscribe.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "clear-1"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+    with app.state.session_factory() as session:
+        session.execute(
+            sa.text(
+                "update source set seen_frontier = 999 where id = :i"
+            ),
+            {"i": source_id},
+        )
+        session.execute(
+            sa.text(
+                "insert into item (id, source_id, guid, content_hash, title, url,"
+                " publish_status, tenant_id, created_at, updated_at)"
+                " values ('clear-item', :s, 'clear-guid', 'clear-hash', 'Bad',"
+                " 'https://example.com/bad', 'published', 'default',"
+                " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
+            ),
+            {"s": source_id},
+        )
+        session.commit()
+
+    cleared = await writer.post(
+        f"/v1/sources/{source_id}/items:delete",
+        headers={"Idempotency-Key": "clear-2"},
+        json={},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["items"] == 1
+
+    still = await writer.get(f"/v1/sources/{source_id}")
+    assert still.status_code == 200, "the subscription remains"
+    with app.state.session_factory() as session:
+        frontier = session.execute(
+            sa.text("select seen_frontier from source where id = :i"),
+            {"i": source_id},
+        ).scalar()
+        items = session.execute(
+            sa.text("select count(*) from item where source_id = :i"),
+            {"i": source_id},
+        ).scalar()
+    assert items == 0
+    assert frontier == 999, "the cursor survives, so collection resumes"
 
 
 @pytest.mark.integration

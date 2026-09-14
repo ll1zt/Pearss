@@ -42,7 +42,7 @@ from adapters.repository import (
     ensure_collect_job,
     finish_job_run,
 )
-from app.main import create_app
+from app.main import create_app, create_engine_for
 from core.enums import ErrorClass
 from core.job_state import JobRunEvent
 
@@ -66,7 +66,7 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -286,7 +286,7 @@ async def test_reading_an_existing_item_resource_still_works(mcp_url: str) -> No
     from adapters.filestore import store_body
 
     digest = store_body("<p>Real body.</p>")
-    engine = sa.create_engine(os.environ["PEARSS_DATABASE_URL"])
+    engine = create_engine_for(os.environ["PEARSS_DATABASE_URL"])
     with engine.begin() as conn:
         conn.execute(
             text("update item set content_ref = :ref where id = 'i-ready'"),
@@ -480,7 +480,7 @@ async def test_the_health_panel_renders_the_decay_signals(
     panel must carry those exact numbers -- the whole point of rendering
     server-side is that the agent neither computes nor mis-transcribes them.
     """
-    engine = sa.create_engine(os.environ["PEARSS_DATABASE_URL"])
+    engine = create_engine_for(os.environ["PEARSS_DATABASE_URL"])
     factory = sessionmaker(engine, expire_on_commit=False)
     with factory() as session:
         job_id = ensure_collect_job(

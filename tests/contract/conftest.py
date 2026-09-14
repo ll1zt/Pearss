@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
-from app.main import create_app
+from app.main import create_app, create_engine_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -63,7 +63,7 @@ def session_factory(
     monkeypatch.setenv("PEARSS_MCP_TOKEN", MCP_EDGE_TOKEN)
     monkeypatch.setenv("PEARSS_SCHEDULER_ENABLED", "0")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:

@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from adapters.db_models import Source
 from adapters.repository import paging_state, save_paging_state
 from app import collector_registry
+from app.main import create_engine_for
 from app.pipeline import CollectionResult, collect_paged
 from core.enums import ErrorClass
 
@@ -87,7 +88,7 @@ def timeline(ids: list[str], next_cursor: str | None) -> bytes:
 @pytest.fixture
 def session(tmp_path: Path) -> Iterator[Session]:
     url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "paging.db")))
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     from alembic import command
     from alembic.config import Config
 

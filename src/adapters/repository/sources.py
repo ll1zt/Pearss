@@ -46,27 +46,18 @@ def create_source(
     create answer with the same body instead of a 409: the caller's intent was
     "this source should exist", and after the first request it does.
 
-    A soft-deleted row is reactivated rather than returned as-is. Answering
-    201 with a `deleted` source would claim success for a subscription that
-    will never be collected again. Reactivation applies the request's url and
-    policy, because the operator is subscribing anew; an existing live source
-    keeps its stored configuration, which is what makes a retried create a
-    no-op rather than a policy change.
+    There is no revival branch any more. It existed for soft-deleted rows,
+    which answered 201 while never being collected again; deletion now removes
+    the row (ADR 0021), so a re-subscribe finds nothing and inserts fresh. The
+    new source starts with an empty cursor and re-samples history -- which is
+    what deletion means, and the reason `seen_frontier` is worth keeping when
+    the intent was only to clear a bad crawl.
     """
     source_id = derive_source_id(
         tenant_id=tenant_id, source_type=source_type, canonical_url=canonical_url
     )
     existing = session.get(SourceRow, source_id)
     if existing is not None:
-        if existing.status == SourceStatus.DELETED.value:
-            existing.status = SourceStatus.ACTIVE.value
-            existing.url = url
-            existing.schedule_policy = schedule_policy
-            existing.pipeline_chain = pipeline_chain
-            existing.target_lang = target_lang
-            existing.folder = folder
-            existing.updated_at = at
-            session.flush()
         return existing
 
     row = SourceRow(

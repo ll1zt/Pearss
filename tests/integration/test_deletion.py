@@ -384,8 +384,18 @@ class TestDeleteSourceItems:
     ) -> None:
         with session_factory() as session:
             _source(session)
-            _item(session, item_id="old", body="<p>old</p>", published_at="2026-01-01T00:00:00.000000Z")
-            _item(session, item_id="new", body="<p>new</p>", published_at="2026-09-01T00:00:00.000000Z")
+            _item(
+                session,
+                item_id="old",
+                body="<p>old</p>",
+                published_at="2026-01-01T00:00:00.000000Z",
+            )
+            _item(
+                session,
+                item_id="new",
+                body="<p>new</p>",
+                published_at="2026-09-01T00:00:00.000000Z",
+            )
 
             counts = delete_source_items(
                 session, "src-1", since="2026-06-01T00:00:00.000000Z", root=storage

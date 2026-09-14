@@ -20,8 +20,8 @@ from enum import StrEnum
 from typing import Any
 
 from fastapi import APIRouter, Depends, Path, Query, Request
-from fastapi.responses import Response
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from adapters.correlation import current as current_correlation_id
 from adapters.filestore import read_body
@@ -32,8 +32,11 @@ from adapters.repository import (
     query_items,
     timestamp,
 )
-from app.auth import Principal, read_required
-from app.sources_routes import api_error
+from adapters.repository import (
+    delete_items as repository_delete_items,
+)
+from app.auth import Principal, read_required, write_required
+from app.sources_routes import api_error, idempotency_key, remember, replay_or_none
 from core.enums import PublishStatus
 from core.models import Item
 
@@ -358,4 +361,106 @@ def read_item_body(
             "content-security-policy": "sandbox",
             "x-content-type-options": "nosniff",
         },
+    )
+
+
+# --------------------------------------------------------------------------
+# Deletion (ADR 0021)
+# --------------------------------------------------------------------------
+
+
+class DeleteItemsRequest(BaseModel):
+    """Ids to delete, and nothing else.
+
+    A list rather than a filter. A filter reads as a convenient way to say
+    "everything matching this", which is exactly the blast radius this
+    operation should not have; a caller wanting a whole source cleared names
+    the source endpoint, where that intent is explicit.
+    """
+
+    item_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+def _delete_items_payload(
+    request: Request,
+    item_ids: list[str],
+    *,
+    principal: Principal,
+    endpoint: str,
+    key: str,
+) -> JSONResponse:
+    """Delete `item_ids` and answer with what actually went.
+
+    Shared by both routes so they cannot drift: they are one operation, and
+    only the shape of the id list differs.
+    """
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        counts = repository_delete_items(session, item_ids)
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "requested": len(item_ids),
+        **counts,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
+@router.delete("/items/{item_id}", operation_id="deleteItem")
+def delete_item(
+    request: Request,
+    item_id: str = Path(min_length=1, max_length=64),
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Delete one item, permanently.
+
+    Removes the row, its stored body, its read state and its processor
+    products. Not reversible and not a hide: the content is gone, and the
+    client's cached copy is the only one left (ADR 0021).
+
+    An id naming nothing answers 200 with `items: 0`, not 404 -- see
+    delete_source for why a retry must be indistinguishable from the first.
+    """
+    return _delete_items_payload(
+        request,
+        [item_id],
+        principal=principal,
+        endpoint=f"DELETE /v1/items/{item_id}",
+        key=key,
+    )
+
+
+@router.post("/items:delete", operation_id="deleteItems")
+def delete_items(
+    request: Request,
+    body: DeleteItemsRequest,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Delete several items in one call.
+
+    POST rather than DELETE-with-body: DELETE bodies are unevenly supported by
+    clients and proxies, and an id list can be long enough to matter. The
+    `:delete` suffix matches the other verb-style routes.
+    """
+    return _delete_items_payload(
+        request,
+        body.item_ids,
+        principal=principal,
+        endpoint="POST /v1/items:delete",
+        key=key,
     )

@@ -287,11 +287,14 @@ def subscription_list(
             session.query(Source)
             .filter(
                 Source.tenant_id == TENANT,
-                # A deleted source's items stay published, but the source is
-                # gone: listing it would put a dead subscription back into the
-                # client's sidebar on every refresh. Paused stays listed — the
-                # operator may resume it, and its history is still readable.
-                Source.status != SourceStatus.DELETED.value,
+                # A disabled source is not a subscription the operator wants
+                # collected; listing it would put it back into the client's
+                # sidebar on every refresh. Paused stays listed — the operator
+                # may resume it, and its history is still readable.
+                #
+                # Deleted sources need no clause here: deletion removes the row
+                # (ADR 0021), so there is nothing left to filter out.
+                Source.status != SourceStatus.DISABLED.value,
             )
             .all()
         )
@@ -744,10 +747,11 @@ def subscription_edit(
             .filter(
                 SourceRow.id.in_(feed_ids),
                 SourceRow.tenant_id == TENANT,
-                # A deleted source's items may be readable, but re-filing a
-                # subscription that no longer exists would resurrect it into
-                # the sidebar on the client's next subscription/list.
-                SourceRow.status != SourceStatus.DELETED.value,
+                # Re-filing a source the operator has taken out of service
+                # would move it back into the sidebar on the client's next
+                # subscription/list. Deleted rows need no clause: deletion
+                # removes them (ADR 0021).
+                SourceRow.status != SourceStatus.DISABLED.value,
             )
             .all()
         )

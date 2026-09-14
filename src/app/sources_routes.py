@@ -36,6 +36,12 @@ from adapters.repository import (
     store_idempotent,
     timestamp,
 )
+from adapters.repository import (
+    delete_source as repository_delete_source,
+)
+from adapters.repository import (
+    delete_source_items as repository_delete_source_items,
+)
 from app.auth import Principal, read_required, write_required
 from app.scheduler import collect_now
 from core.enums import SourceStatus, SourceType, TrustLevel
@@ -334,6 +340,23 @@ class SourcePatch(BaseModel):
     def sent(self, field: str) -> bool:
         """Whether the caller sent this field at all (even as null)."""
         return field in self.model_fields_set
+
+
+class DeleteSourceItemsRequest(BaseModel):
+    """Narrowing for a per-source item deletion.
+
+    Every field is optional: an empty body means "everything this source
+    collected", which is the common case after a bad crawl.
+    """
+
+    # Fixed-width UTC bounds compared against published_at. An item with no
+    # published date falls outside any window, so a bounded delete leaves it
+    # alone -- there is no timestamp to place it in one.
+    since: str | None = None
+    until: str | None = None
+    # See the endpoint: defaulting true is the honest reading of "delete this
+    # source's items". Passing false is the narrower request.
+    include_published: bool = True
 
 
 def _shared_client(request: Request) -> httpx.Client:
@@ -833,11 +856,19 @@ def delete_source(
     principal: Principal = Depends(write_required),
     key: str = Depends(idempotency_key),
 ) -> JSONResponse:
-    """Soft-delete a source.
+    """Delete a source and everything it collected (ADR 0021).
 
-    Soft, because docs/domain/data-model.md forbids deleting a source's items:
-    they are published, and their GUIDs are frozen. Removing the source would
-    orphan content a client still has cached.
+    Destructive and not reversible: the source row, its items, their bodies,
+    their read state and processor products, and the fetch records all go. The
+    endpoint used to be a soft delete that left the source as a tombstone with
+    its items published; that is no longer what this means, and any caller
+    relying on the old behaviour is relying on something the API does not
+    promise.
+
+    Deleting an id that is already gone answers 200 with `sources: 0` rather
+    than 404. A client retrying a request whose response was lost cannot tell
+    "it was here and I removed it" from "it was never here", and after the
+    first call those are the same fact.
     """
     endpoint = f"DELETE /v1/sources/{source_id}"
     factory = request.app.state.session_factory
@@ -846,12 +877,14 @@ def delete_source(
         return replayed
 
     with factory() as session:
-        row = _require_source(session, source_id)
-        row.status = SourceStatus.DELETED.value
-        row.updated_at = timestamp(_now())
+        counts = repository_delete_source(session, source_id)
         session.commit()
-        payload = _source_payload(row)
 
+    payload: dict[str, Any] = {
+        "source_id": source_id,
+        **counts,
+        "correlation_id": current_correlation_id(),
+    }
     remember(
         factory,
         actor=principal.name,
@@ -861,6 +894,59 @@ def delete_source(
         body=payload,
     )
     return JSONResponse(status_code=200, content=payload)
+
+
+@router.post("/sources/{source_id}/items:delete", operation_id="deleteSourceItems")
+def delete_source_items(
+    request: Request,
+    source_id: str,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+    payload: DeleteSourceItemsRequest | None = None,
+) -> JSONResponse:
+    """Delete a source's items, keeping the source itself.
+
+    The "this crawl was wrong, keep collecting" case. The source keeps its
+    cursor, so the subscription resumes rather than re-sampling history
+    (ADR 0021).
+
+    `include_published` defaults true: the caller has explicitly asked to
+    clear this source's contents, and silently keeping the items every client
+    has already cached would leave a source that looks emptied while its
+    articles are still everywhere.
+    """
+    endpoint = f"POST /v1/sources/{source_id}/items:delete"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    body = payload or DeleteSourceItemsRequest()
+    with factory() as session:
+        _require_source(session, source_id)
+        counts = repository_delete_source_items(
+            session,
+            source_id,
+            since=body.since,
+            until=body.until,
+            include_published=body.include_published,
+        )
+        session.commit()
+
+    result: dict[str, Any] = {
+        "source_id": source_id,
+        **counts,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=result,
+    )
+    return JSONResponse(status_code=200, content=result)
 
 
 @router.post("/sources/{source_id}:trigger", operation_id="triggerSource")

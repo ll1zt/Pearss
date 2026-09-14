@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
-from app.main import create_app
+from app.main import create_app, create_engine_for
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALID_FEED = REPO_ROOT / "src/plugins/collectors/rss/fixtures/valid.xml"
@@ -132,7 +132,7 @@ def session_factory(
     # makes a hermetic end-to-end run possible at all.
     monkeypatch.setenv("PEARSS_ALLOW_PRIVATE_FETCH", "1")
 
-    engine = sa.create_engine(url)
+    engine = create_engine_for(url)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
