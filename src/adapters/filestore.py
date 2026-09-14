@@ -109,6 +109,41 @@ def read_body(ref: str | None, *, root: Path | None = None) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def path_for(ref: str, *, root: Path | None = None) -> Path | None:
+    """Resolve a `cas://<digest>` reference to the file it names.
+
+    Returns None for anything that is not a well-formed reference. The digest
+    is validated by the same pattern `read_body` uses rather than pasted into a
+    path: a hand-edited or hostile reference must not be able to name a file
+    outside the store, and a caller that deletes files needs that guarantee
+    more than a reader does.
+    """
+    match = _REF_PATTERN.match(ref)
+    if match is None:
+        return None
+    digest = match.group("digest")
+    return (root or storage_root()) / digest[:2] / digest
+
+
+def remove_body(ref: str, *, root: Path | None = None) -> bool:
+    """Delete the file `ref` names. Returns whether a file was removed.
+
+    Unconditional: this does not know what references the body, and no caller
+    should delete a shared body without checking first. Use it only where the
+    reference count is already known to be zero -- `repository.deletion`
+    owns the counting.
+    """
+    path = path_for(ref, root=root)
+    if path is None or not path.is_file():
+        return False
+    try:
+        path.unlink()
+    except OSError as exc:
+        LOGGER.warning("could not remove %s: %s", ref, exc.__class__.__name__)
+        return False
+    return True
+
+
 def bodies_for(
     refs: Mapping[str, str | None], *, root: Path | None = None
 ) -> dict[str, str]:

@@ -121,6 +121,18 @@ def create_session_factory(url: str | None = None) -> sessionmaker[Session]:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            # SQLite ignores every ON DELETE clause unless this is set, and its
+            # default is off. Without it the schema's own declarations -- the
+            # CASCADEs from item to read_state and item_enrichment, and from
+            # source to item and raw_fetch -- were inert, so deleting a parent
+            # left children pointing at a row that no longer existed. Deletion
+            # (ADR 0021) relies on those cascades to carry a deleted item's
+            # consumption state and processor products away with it.
+            #
+            # Per connection, not per database, which is why it runs in the
+            # connect hook: setting it once at startup would leave every later
+            # connection unenforced.
+            cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
     return sessionmaker(engine, expire_on_commit=False)

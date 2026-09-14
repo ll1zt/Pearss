@@ -20,6 +20,11 @@ from adapters.repository._shared import (
     row_to_item,
     timestamp,
 )
+from adapters.repository.deletion import (
+    delete_items,
+    delete_source,
+    delete_source_items,
+)
 from adapters.repository.enrichment import (
     backfill_chain,
     chain_for_source,
@@ -118,6 +123,9 @@ __all__ = [
     "count_items",
     "create_job_run",
     "create_source",
+    "delete_items",
+    "delete_source",
+    "delete_source_items",
     "derive_source_id",
     "dumps",
     "enqueue_chain",
