@@ -1,7 +1,9 @@
 # 0021 · 删除就是删除：条目与订阅的物理删除
 
-- 状态：proposed
+- 状态：accepted
 - 日期：2026-09-14
+- 实现：`src/adapters/repository/deletion.py`、`0017_retire_source_deleted.py`、
+  `items_routes.py` / `sources_routes.py`、`mcp_server.py`
 - 修订：`docs/domain/data-model.md`（Item/Source 的「不得删除」不变量）、
   `docs/domain/state-machines.md`（Source 状态机去掉 `deleted` 的软删除语义）、
   `docs/api/style-guide.md`（`DELETE /v1/sources/{id}` 语义）、
@@ -213,6 +215,44 @@ migration 会把它转成 `disabled`，属预期。
 | `style-guide.md:34,54` | 列 `DELETE /v1/sources/{id}` | 更新语义描述 |
 | ADR 0008:50（「删一个源会连带删掉…」） | 当时的推理是**不删** | 加注：本 ADR 采纳了级联删除，理由见 §2 |
 | `mcp-tool-guide.md:67` | `remove_source`「软删除」 | 更新描述 |
+
+## 实现期间发现的问题（记录以备后查）
+
+### 1. SQLite 从未启用外键，所有 CASCADE 一直是空文
+
+`PRAGMA foreign_keys` 的默认值是 **off**，而项目从未设置它（只设了
+`journal_mode` / `busy_timeout` / `synchronous`）。也就是说本 schema 声明的
+六处 `ON DELETE CASCADE` 在运行时**全部不生效**：
+
+```
+source ──CASCADE──> item, raw_fetch
+item   ──CASCADE──> read_state, item_enrichment
+```
+
+过去没暴露，是因为**从来没有任何代码删除过父行**（软删除只改 status）。
+本 ADR 的删除是第一个真正删父行的功能，于是它立刻表现为
+`test_read_state_and_item_enrichment_rows_go_with_the_item` 失败：
+item 行没了，`read_state` 还在。
+
+修法：在 engine 的 `connect` 钩子里加 `PRAGMA foreign_keys=ON`
+（`create_engine_for`）。**必须是每连接**，启动时设一次只对当次连接有效。
+
+连带修了测试基建：约 15 个 fixture 用 `sa.create_engine(url)` 自建 engine，
+绕过了 pragma——这也正是该缺陷一直不可见的原因：**自己造 engine 的测试，
+测的是一个应用从不使用的数据库**。现在统一走 `create_engine_for`。
+
+### 2. `batch_alter_table` 会让 CHECK 约束名双重加前缀
+
+改 `source.status` 的 CHECK 时，`op.batch_alter_table` 会先反射现有表，
+而反射用的 `MetaData` 带着项目的 naming convention（`ck_%(table_name)s_...`）。
+库里存的 `ck_source_sourcestatus` 被再套一层前缀，变成
+`ck_source_ck_source_sourcestatus`，于是 `drop_constraint` 按原名找不到，
+按裸名找又会把整张表的 CHECK 改名。
+
+因此 0017 用**显式 DDL 重建表**，并把约束名按库里实际存储的形式写出来
+（`ck_source_trustlevel`，不是模型里声明的裸 `trustlevel`）——0003 的
+downgrade 正是按这个名字 drop 的。这是项目里第一个改约束的迁移，
+所以这个坑之前没被踩到。
 
 ## 后果
 

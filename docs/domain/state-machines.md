@@ -76,15 +76,16 @@ running -> cancelled
 
 ## Source 状态机
 
-> **部分实现**：`active ↔ paused`、`→ disabled/deleted` 由 `PATCH`/`DELETE /v1/sources/{id}`
-> 驱动，均为软状态、不删数据。`deleted` 源的历史 Item 保留（外键 CASCADE 只在 Item 清理时生效）。
+> **部分实现**：`active ↔ paused`、`→ disabled` 由 `PATCH /v1/sources/{id}` 驱动，
+> 均为软状态、不删数据。`DELETE /v1/sources/{id}` **不是状态转换**，而是物理删除
+> （源行及其全部 Item、正文、已读状态、产物、抓取记录，ADR 0021），因此没有
+> `deleted` 状态：一个表示「这行其实没了」的状态无法描述一行存在的东西。
 
 ```text
 active <-> paused
 active -> disabled
 paused -> disabled
 disabled -> active       # 需用户确认
-action state -> deleted  # 软删除，需用户确认
 ```
 
 | 当前 | 事件 | 下一状态 | 规则 |
@@ -93,9 +94,21 @@ action state -> deleted  # 软删除，需用户确认
 | `paused` | resume | `active` | 恢复调度策略 |
 | `active` / `paused` | disable | `disabled` | 停止调度；保留内容与配置 |
 | `disabled` | enable | `active` | 用户确认后恢复 |
-| 非 `deleted` | delete | `deleted` | 软删除；撤销输出可见性由独立策略处理 |
 
-`deleted` Source 的历史 Item 默认保留，避免破坏已发布 RSS GUID 和 Reader API 历史；物理清理属于独立维护流程。
+`disabled` 的源不出现在 Reader 的订阅列表里（`subscription/list` 过滤它，
+`subscription/edit` 拒绝改动它），其历史 Item 仍可读。
+
+**删除与清空是两件事**：删除订阅 = 连内容一起删（`DELETE /v1/sources/{id}`）；
+清空某源的条目但保留订阅与抓取游标 = `POST /v1/sources/{id}/items:delete`。
+后者存在是因为「抓错了、清掉重来」不该丢掉 `seen_frontier`——丢了会让下一轮
+重新采样历史深度。
+
+### Item 删除（非状态转换）
+
+Item 的 `publish_status` 仍是 `pending` / `ready` / `published` 三态，
+**没有** `retracted` 之类第四态：删除是物理删除，不是可见性开关。
+`DELETE /v1/items/{id}` 与 `POST /v1/items:delete` 直接删行，行不存在时
+后续查询自然为空，不需要在可见性过滤里再加一个状态。
 
 ## Plugin 状态机（P2，未实现）
 

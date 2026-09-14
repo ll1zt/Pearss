@@ -42,6 +42,9 @@ POST /v1/feed-discovery                 # 输入 URL，返回候选 feed  ⏸ A5
 POST /v1/jobs/{job_id}:pause            # 改变任务生命周期        ❌ 未实现
                                           （暂停走 PATCH /v1/sources/{id} {status}）
 POST /v1/items/{item_id}:force-publish  # 需显式授权与审计        ❌ P3（处理器链）
+POST /v1/items:delete                   # 批量删除条目（不可逆）     ✅ 已实现（ADR 0021）
+DELETE /v1/items/{item_id}              # 删除单条（不可逆）         ✅ 已实现（ADR 0021）
+POST /v1/sources/{id}/items:delete      # 清空某源条目、保留订阅      ✅ 已实现（ADR 0021）
 ```
 
 POST /v1/plugins/{plugin_id}:enable    # 生命周期：启用插件       ✅ P2
@@ -52,10 +55,18 @@ POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）
 ```
 
 已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`、
-`POST /v1/sources/{id}:trigger`、`GET /v1/items`、`GET /v1/items/{id}`、
-`GET /v1/items/{id}/body`、`GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、
+`POST /v1/sources/{id}:trigger`、`POST /v1/sources/{id}/items:delete`、
+`GET /v1/items`、`GET /v1/items/{id}`、`GET /v1/items/{id}/body`、
+`DELETE /v1/items/{id}`、`POST /v1/items:delete`、
+`GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、
 `GET /v1/system/snapshot`、`GET /v1/plugins`、`GET /v1/plugins/{id}`、
 `POST /v1/plugins/{id}:enable|:disable`。
+
+**删除语义（ADR 0021）**：`DELETE /v1/sources/{id}` 删除源行及其全部 Item、
+正文、已读状态与产物——**不可逆**；它过去是软删除，语义已变更。
+删除一个不存在的 id 返回 200 与计数 0，**不是 404**：重试与首次执行必须对调用方
+不可区分（写操作幂等）。批量删除用 POST + `:delete` 后缀，因为 DELETE 带 body
+在各客户端/代理上支持不一致。
 
 动作 endpoint 必须：说明副作用、接受幂等键、返回 correlation ID；如果是异步操作，返回 `202 Accepted` 和 job/run 标识。
 

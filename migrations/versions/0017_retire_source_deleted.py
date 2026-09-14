@@ -74,7 +74,8 @@ CREATE TABLE source_new (
     CONSTRAINT pk_source PRIMARY KEY (id),
     CONSTRAINT ck_source_sourcetype CHECK (type IN ('rss', 'web', 'agent')),
     CONSTRAINT ck_source_sourcestatus CHECK (status IN ({statuses})),
-    CONSTRAINT ck_source_trustlevel CHECK (trust_level IN ('standard', 'trusted', 'restricted')),
+    CONSTRAINT ck_source_trustlevel
+        CHECK (trust_level IN ('standard', 'trusted', 'restricted')),
     CONSTRAINT uq_source_url UNIQUE (tenant_id, canonical_url, type)
 )
 """
@@ -86,14 +87,13 @@ CREATE TABLE source_new (
 # bare `ck_trustlevel` here would leave a table that no longer matches the rest
 # of the schema's naming and would break that downgrade.
 
+
 def upgrade() -> None:
     # Order matters: migrate the data first, then rebuild with the tighter
     # constraint, or the copy rejects the rows it is carrying over.
     op.execute("update source set status = 'disabled' where status = 'deleted'")
 
-    op.execute(
-        _CREATE_SOURCE.format(statuses="'active', 'paused', 'disabled'")
-    )
+    op.execute(_CREATE_SOURCE.format(statuses="'active', 'paused', 'disabled'"))
     op.execute(f"INSERT INTO source_new ({_COLUMNS}) SELECT {_COLUMNS} FROM source")
     op.execute("DROP TABLE source")
     op.execute("ALTER TABLE source_new RENAME TO source")

@@ -64,7 +64,9 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
-| `remove_source` | 停用来源（软删除，但影响后续采集） |
+| `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆；确认文本说明会删掉什么） |
+| `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文） |
+| `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
 
 `list_sources`、`search_items`、`get_system_snapshot`、`list_runs` 是只读，不需要确认。

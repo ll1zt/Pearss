@@ -80,6 +80,10 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
   （服务持有的 token），**agent 身份靠 correlation_id 关联，不体现在 actor 上**（ADR 0010 记录了这个可归因性弱化）
 - 工具面变更会撞 snapshot：`MCP_SNAPSHOT_UPDATE=1 just contract` 后**审查 diff 再提交**，
   不要为了让测试绿而重写
+- **删除类工具（ADR 0021）**：`remove_source`（删订阅+内容）、`delete_items`（按 id）、
+  `delete_source_items`（清空某源条目、保留订阅）。三者都不可逆，确认文本里会写明
+  后果。它们与其它写工具的一个区别：破坏半径不在参数里，所以确认消息必须把
+  「删掉什么」说出来，而不只是复述参数
 
 ## 日常健康检查
 
@@ -165,6 +169,45 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 - 不要“先发原文，后改译文”：NNW 可能缓存第一次内容
 - 已发布内容错误时，按明确的补发/更正策略创建新的稳定 Item；不要复用或修改旧 GUID
 - `force_publish` 仅在用户确认、理由记录、理解将无法自动撤回时执行
+
+## 清理条目与订阅（ADR 0021，不可逆）
+
+删除是**物理删除**：行、正文文件、已读状态、译文产物、抓取记录一并消失。
+误删只能从数据库备份恢复（见「备份与恢复」），AuditLog 只记录「删了什么」，
+不保留内容。
+
+### 抓错了内容，但订阅要保留
+
+用 `POST /v1/sources/{id}/items:delete`（MCP：`delete_source_items`）。
+源与其 `seen_frontier` / `floor_cursor` 保留，下一轮从这里继续——
+**不要**用「删订阅再重新订阅」代替，那会让采集重新采样历史深度。
+
+- 先看规模：`GET /v1/items?source_id=<id>&limit=1` 的 `total` 字段
+- 只想清未对外发布的部分：传 `include_published=false`
+
+### 删除指定条目
+
+`DELETE /v1/items/{id}`（单条）或 `POST /v1/items:delete`（批量，
+body `{"item_ids": [...]}`）。MCP：`delete_items`。
+id 从 `search_items` 或 Reader 的 items 流里取。
+
+### 删除整个订阅
+
+`DELETE /v1/sources/{id}`（MCP：`remove_source`）。**不可逆**，
+且重新订阅同一 feed 会得到一个新源、从首轮页数策略重新采样。
+若不确定，先用 `set_source_status` 置为 `disabled`——它停止采集但保留一切。
+
+### 共享正文的坑（已由实现处理，排障时需知道）
+
+正文按 sha256 内容寻址，**正文相同的两个条目共享一个文件**。删除时只有
+当没有存活的 Item 行引用该摘要才会删文件。若你手工用 SQL 删条目，
+**不要**顺手删 `cas://` 文件——`read_body` 对缺失文件只返回空串并记一行
+warning，另一篇活文章的正文会静默变空。
+
+### 客户端仍会显示已删内容
+
+Reader/NNW 缓存有自己的时效，服务端删掉后客户端可能仍显示到缓存过期或
+重新拉取为止。这是已知且接受的：删除的目标是服务端不再提供它。
 
 ## SQLite 恢复流程
 

@@ -29,10 +29,15 @@
 | `folder` | 订阅在阅读器侧边栏中的归类，**一订阅一分类**（FreshRSS 模型：其源码明确 "a feed can only be in one category"，客户端也按此实现）。NOT NULL，默认 `default`；名称校验见 `core/folders`。它同时决定 `user/-/label/<name>` 流的内容 |
 | `schedule_policy` | `{type: fixed/adaptive, ...}`；决定下次抓取策略 |
 | `trust_level` | 来源信任等级；不改变“正文不可信”的默认规则 |
-| `status` | `active` / `paused` / `disabled` / `deleted` |
+| `status` | `active` / `paused` / `disabled` |
 | `tenant_id` | 租户预留字段 |
 
-不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 —— 否则该唯一约束对 NULL 行不生效，重复源可以无限并存。停用/删除 Source 不得删除已有 Item。
+不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 —— 否则该唯一约束对 NULL 行不生效，重复源可以无限并存。
+
+**停用（`paused`/`disabled`）不删除任何 Item**。`DELETE /v1/sources/{id}` 则是真删除：
+源行、它的 Item、正文文件、已读状态、处理器产物与抓取记录一并消失（ADR 0021）。
+要清掉内容但保留订阅（含抓取游标），用 `POST /v1/sources/{id}/items:delete`。
+
 
 **备份分级提醒**：`seen_frontier` / `floor_cursor` 是**运维状态而非派生物**。
 它们不能像 `RawFetch`/`JobRun` 那样靠重放管道重建，因此随 `Source` 一起属于事实源备份范围；
@@ -103,6 +108,17 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 - `content_hash` 相同的 Item 必须依据明确规则合并、关联或抑制，不允许无声重复发布
 - 处理结果不写回原 Item，见 ItemEnrichment
 
+**删除（ADR 0021）**：`DELETE /v1/items/{id}` 与 `POST /v1/items:delete` 物理删除
+Item 行，连带其 `read_state`、`item_enrichment` 与正文文件。两条规则：
+
+- **已发布 GUID 不得被复用**，但**可以删除**——删除之后重新抓取会经 `normalize`
+  去重，同一 external_id 若再次出现会得到同一 GUID；禁止的是把该 GUID 挂到
+  不同内容上，不是禁止行消失。
+- **正文文件按引用计数删**。`cas://<sha256>` 是内容寻址的，正文相同的两个 Item
+  共享一个文件；只有当没有任何存活 Item 行引用该摘要时才 unlink。按 Item
+  删文件会静默清空另一篇活文章的正文（`read_body` 对缺失文件只返回 `""` 并记
+  warning，不报错）。
+
 ### ItemEnrichment（P3）
 
 翻译、摘要、TTS 等处理器的独立产物。
@@ -160,7 +176,7 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 | `updated_at` | 状态最后写入时间 |
 | `tenant_id` | 租户预留 |
 
-ReadState 是事实源；清理 Item 前必须定义其级联/保留策略。
+ReadState 是事实源；清理 Item 时它随 Item 一起删除（`ON DELETE CASCADE`，ADR 0021 定义了删除语义）。已读状态没有独立于其 Item 的意义：条目不再可见时，「谁读过它」既不构成内容也不构成可查询的事实。
 
 ### Plugin（P2）
 
