@@ -15,6 +15,8 @@ with text they cannot read. That asymmetry is the whole design.
 
 from __future__ import annotations
 
+import html
+import re
 from typing import Final
 
 # Unicode script ranges. Characters outside them (punctuation, digits, emoji,
@@ -74,6 +76,30 @@ TARGET_SCRIPT_SHARE: Final = 0.4
 MIN_SCRIPTED_CHARS: Final = 12
 
 
+_SCRIPT_OR_TAG = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
+_ANY_TAG = re.compile(r"(?s)<[^>]+>")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def prose_text(markup: str) -> str:
+    """The prose a reader would see: tags out, entities decoded.
+
+    Shared by both callers of :func:`is_already_in` on purpose. The pipeline
+    decides at enqueue time whether a translation is worth queueing, and the
+    processor decides again when it runs; if the two extracted text
+    differently they could disagree, and an item would be queued only to be
+    skipped -- the coupling the enqueue-time check exists to remove.
+
+    Entities are decoded, which is what makes them agree: feeds encode non-ASCII
+    as numeric character references (a CJK body can arrive as `&#20013;` runs),
+    and a reader who ignores the encoding sees no Chinese at all in text that is
+    entirely Chinese.
+    """
+    without_scripts = _SCRIPT_OR_TAG.sub(" ", markup)
+    without_tags = _ANY_TAG.sub(" ", without_scripts)
+    return html.unescape(_WHITESPACE.sub(" ", without_tags)).strip()
+
+
 def _in_ranges(codepoint: int, ranges: tuple[tuple[int, int], ...]) -> bool:
     return any(low <= codepoint <= high for low, high in ranges)
 
@@ -119,4 +145,5 @@ __all__ = [
     "MIN_SCRIPTED_CHARS",
     "TARGET_SCRIPT_SHARE",
     "is_already_in",
+    "prose_text",
 ]

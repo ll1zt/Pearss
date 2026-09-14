@@ -40,13 +40,12 @@ from app import collector_registry
 from app.collector_registry import Registration as CollectorRegistration
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.enums import ErrorClass
-from core.language import is_already_in
+from core.language import is_already_in, prose_text
 from core.models import Item, ItemDraft
 from core.normalize import (
     DedupeAction,
     NormalizationResult,
     normalize,
-    plain_text,
     with_content_ref,
 )
 
@@ -81,7 +80,7 @@ def _specs_needing_work(
     as the fallback for title-only items -- so an item the processor would skip
     is exactly an item dropped here.
     """
-    text = plain_text(body) or plain_text(title)
+    text = prose_text(body) or prose_text(title)
     remaining: list[EnrichmentSpec] = []
     for spec in chain:
         if (

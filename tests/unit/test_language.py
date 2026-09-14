@@ -16,6 +16,7 @@ from core.language import (
     MIN_SCRIPTED_CHARS,
     TARGET_SCRIPT_SHARE,
     is_already_in,
+    prose_text,
 )
 
 # Real items, kept verbatim: they are the evidence for where the thresholds sit.
@@ -115,3 +116,32 @@ def test_the_threshold_sits_where_the_comment_says() -> None:
     """
     assert TARGET_SCRIPT_SHARE == 0.4
     assert frozenset({"zh", "ja", "en"}) == KNOWN_TARGETS
+
+
+@pytest.mark.unit
+def test_numeric_character_references_are_decoded_before_the_verdict() -> None:
+    """A CJK body encoded as `&#NNNNN;` runs is still Chinese.
+
+    Feeds do this, and a reader of the raw string sees no Chinese at all --
+    so a verdict taken before decoding says "translate me" about a body that
+    is entirely Chinese. Both callers (the enqueue-time check and the
+    processor) must extract text the same way, or one queues what the other
+    skips.
+    """
+    encoded = "&#" + str(ord("中")) + ";" * 1
+    body = ("&#20013;" * 20) + " ok"
+    assert prose_text(body).startswith("中" * 20)
+    assert is_already_in(prose_text(body), "zh") is True
+    # The raw string, undecoded, is ASCII and reads as anything but Chinese.
+    assert is_already_in(body, "zh") is False
+    assert encoded  # the literal above is what a feed emits
+
+
+@pytest.mark.unit
+def test_prose_text_strips_markup_and_scripts() -> None:
+    assert prose_text("<p>hello <b>world</b></p>") == "hello world"
+    # A script's source must not survive as "prose" the classifier reads.
+    assert (
+        prose_text("<script>var x = '中中中中中中中中中中中中中中'</script>ok") == "ok"
+    )
+    assert prose_text("") == ""

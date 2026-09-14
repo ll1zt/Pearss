@@ -29,13 +29,12 @@ from __future__ import annotations
 import html
 import logging
 import os
-import re
 from typing import Any, Final
 
 import httpx
 
 from core.enums import ErrorClass
-from core.language import is_already_in
+from core.language import is_already_in, prose_text
 from core.plugins.hooks import HOOKIMPL, ProcessorError
 
 LOGGER = logging.getLogger(__name__)
@@ -94,13 +93,6 @@ def _configured() -> tuple[str, str, list[str]]:
         )
     _CONFIG_CACHE = (base, key, models)
     return _CONFIG_CACHE
-
-
-def _strip_to_text(content_html: str) -> str:
-    """The model translates prose, not markup: tags out, entities decoded."""
-    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", content_html)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    return html.unescape(re.sub(r"\s+", " ", text)).strip()
 
 
 @HOOKIMPL
@@ -169,13 +161,13 @@ def process(
     why the check runs before `_configured()`: a deployment whose feed is
     entirely Chinese needs no provider configured to serve it.
     """
-    source_text = _strip_to_text(item_ctx.get("content", ""))
+    source_text = prose_text(item_ctx.get("content", ""))
     if not source_text:
         # Title-only items (common in announcement feeds) still have the
         # title to translate; a genuinely empty item produces an empty
         # artifact as a SUCCESS — failing here would deadlock the gate on
         # content shapes the chain can never act on.
-        title_text = _strip_to_text(item_ctx.get("title", ""))
+        title_text = prose_text(item_ctx.get("title", ""))
         if not title_text:
             return str(store(""))
         source_text = title_text

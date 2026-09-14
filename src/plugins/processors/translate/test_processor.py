@@ -10,11 +10,11 @@ import httpx
 import pytest
 
 from core.enums import ErrorClass
+from core.language import prose_text
 from core.plugins.hooks import ProcessorError
 from plugins.processors.translate.processor import (
     MAX_CHARS,
     _segment,
-    _strip_to_text,
     process,
     processor_id,
 )
@@ -24,8 +24,8 @@ def test_processor_id_is_stable() -> None:
     assert processor_id() == "translate"
 
 
-def test_strip_to_text_removes_markup_and_decodes_entities() -> None:
-    assert _strip_to_text("<p>a &amp; b<br>c</p>") == "a & b c"
+def test_the_shared_extractor_removes_markup_and_decodes_entities() -> None:
+    assert prose_text("<p>a &amp; b<br>c</p>") == "a & b c"
 
 
 def test_title_only_items_translate_their_title(

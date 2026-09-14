@@ -1228,3 +1228,29 @@ def test_a_non_language_spec_survives_the_filter(session: Session) -> None:
     status, enrichments = _publish_state(session, "zh-2")
     assert enrichments == 1, "the summary spec must still be queued"
     assert status == PublishStatus.PENDING.value
+
+
+@pytest.mark.integration
+def test_an_entity_encoded_chinese_body_is_not_queued(session: Session) -> None:
+    """The enqueue-time check and the processor must extract text alike.
+
+    They use the same function on purpose. A feed encoding its CJK as numeric
+    character references would otherwise be judged differently by each -- the
+    pipeline seeing ASCII and queueing a translation the processor then skips
+    -- which is the queue-slot-wasted-on-nothing coupling the enqueue-time
+    check exists to remove.
+    """
+    from app.pipeline import normalise_and_store
+
+    encoded = "&#20013;" * 20
+    normalise_and_store(
+        session,
+        [_draft("zh-entity", content=f"<p>{encoded} 这是一段中文内容。</p>")],
+        tenant_id=TENANT,
+        chain=_translation_chain("zh"),
+    )
+    session.commit()
+
+    status, enrichments = _publish_state(session, "zh-entity")
+    assert enrichments == 0, "an entity-encoded Chinese body must not be queued"
+    assert status == PublishStatus.READY.value
