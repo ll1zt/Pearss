@@ -79,7 +79,16 @@ _ACTION_TEXTS: Final = {
 }
 _FOLLOW_MARKERS: Final = ("关注", "FOLLOW", "SUBSCRIBED")
 _QUESTION_CREATED_MARKERS: Final = ("提出了问题", "提出问题", "QUESTION_CREAT")
-_ACTION_TAGS: Final = {"like": "赞同", "collect": "收藏", "create": "创作"}
+# "other" is the fall-through for an action the marker tables do not know:
+# the action name is unknown, but the target is still content worth showing,
+# so the draft renders with a neutral tag rather than crashing on the lookup
+# (seen live: one unknown action type took a source's whole collection down).
+_ACTION_TAGS: Final = {
+    "like": "赞同",
+    "collect": "收藏",
+    "create": "创作",
+    "other": "动态",
+}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
