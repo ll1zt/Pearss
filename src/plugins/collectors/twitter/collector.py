@@ -358,13 +358,11 @@ def _draft_from_tweet(
         # text with no indication of where it came from.
         full_text = _resolve_full_text(original)
         published = _parse_created_at(_text(_dig(original, "legacy", "created_at")))
-        content = _build_content(
-            original, full_text, prefix=_retweet_banner(wrapper), published=published
-        )
+        content = _build_content(original, full_text, prefix=_retweet_banner(wrapper))
     else:
         full_text = _resolve_full_text(tweet)
         published = _parse_created_at(_text(_dig(tweet, "legacy", "created_at")))
-        content = _build_content(tweet, full_text, prefix=None, published=published)
+        content = _build_content(tweet, full_text, prefix=None)
 
     title = _title_from_text(
         full_text,
@@ -473,16 +471,10 @@ def _author_label(tweet: Json) -> str:
 # --------------------------------------------------------------------------
 
 
-def _build_content(
-    tweet: Json,
-    full_text: str,
-    *,
-    prefix: str | None,
-    published: datetime | None = None,
-) -> str:
+def _build_content(tweet: Json, full_text: str, *, prefix: str | None) -> str:
     parts = [
         prefix,
-        _author_html(tweet, published=published),
+        _author_html(tweet),
         _text_to_html(full_text, _content_urls(tweet)),
         _media_html(_media_items(tweet)),
         _quoted_html(tweet),
@@ -509,26 +501,7 @@ def _content_urls(tweet: Json) -> list[Json]:
     )
 
 
-def _time_html(published: datetime | None) -> str | None:
-    """The post's time as a `<time>` element, or None when there is no date.
-
-    `published_at` was already parsed but appeared nowhere in the body, so a
-    reader had no date at all -- the reader's list view shows titles and
-    ordering, not timestamps.
-
-    The `datetime` attribute carries the machine-readable instant and the text
-    carries the visible one; the sanitiser admits `time[datetime]` (see
-    `ALLOWED_ATTRIBUTES`), so both survive storage. A missing date yields
-    nothing rather than a fabricated one.
-    """
-    if published is None:
-        return None
-    stamp = published.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
-    machine = published.astimezone(UTC).isoformat()
-    return f'<time datetime="{html.escape(machine, quote=True)}">{stamp}</time>'
-
-
-def _author_html(tweet: Json, *, published: datetime | None = None) -> str | None:
+def _author_html(tweet: Json) -> str | None:
     core = _user_core(tweet)
     name = _text(core.get("name"))
     screen = _text(core.get("screen_name"))
@@ -568,14 +541,9 @@ def _author_html(tweet: Json, *, published: datetime | None = None) -> str | Non
         if avatar
         else ""
     )
-    time_html = _time_html(published)
-    # The time rides on the byline rather than opening its own line: it belongs
-    # to the same piece of context (who posted, and when) and a separate
-    # paragraph would read as a second author line.
-    separator = " · " if (author and time_html) else ""
-    if not (image or author or time_html):
+    if not (image or author):
         return None
-    return f"<p>{image}{author}{separator}{time_html or ''}</p>"
+    return f"<p>{image}{author}</p>"
 
 
 def _media_items(tweet: Json) -> list[Json]:
