@@ -132,3 +132,28 @@ def test_all_three_client_forms_survive_a_full_round_trip() -> None:
         f"tag:google.com,2005:reader/item/{external:x}",
     ]
     assert {parse_item_id_param(form) for form in forms} == {external}
+
+
+@pytest.mark.unit
+def test_contents_response_long_form_is_zero_padded_to_16() -> None:
+    """ReadYou drops every article whose id is not exactly 16 hex digits.
+
+    ReadYou's id validator is `startsWith(PREFIX) && removePrefix(PREFIX)
+    .length == 16`, and its own comment table says "Long form needs
+    0-padding". An unpadded id parses fine as a number, so NetNewsWire (which
+    reads it back with Int(radix: 16)) is unaffected -- but ReadYou filters
+    the whole contents response out, leaving the subscription visible and
+    every article invisible, which is the failure the user reported.
+
+    The first 15 hex digits of the internal id are the external id, so an
+    internal id whose 15th digit is 0 produces a sub-16-digit tail whenever
+    the 16th is dropped by `:x` -- the exact case observed on the deployed
+    host: `.../item/6bb2584330b6d0d` (15 chars).
+    """
+    # An external id whose hex form is 15 digits: the padding is load-bearing.
+    external = 0x6BB2584330B6D0D
+    encoded = encode_item_id(external)
+    tail = encoded.rsplit("/", 1)[-1]
+    assert len(tail) == 16, f"{encoded} lost its padding"
+    assert tail == f"{external:016x}"
+    assert int(tail, 16) == external
