@@ -38,7 +38,6 @@ from typing import Any
 import httpx
 
 from adapters.raw_payload import RawPayload
-from adapters.sanitize import AVATAR_CLASS
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from core.plugins.hooks import (
@@ -502,10 +501,18 @@ def _content_urls(tweet: Json) -> list[Json]:
 
 
 def _author_html(tweet: Json) -> str | None:
+    """The byline: the author's name and handle, as text.
+
+    No avatar. One was carried here for a revision, as a 24px square with
+    `class="pearss-avatar"` for a reader to round with CSS; seen in a real
+    reader it stayed square, because clients do not inject custom CSS. Rounding
+    it server-side is not available either -- inline `style` is an XSS surface
+    the store-time sanitiser bans (ADR 0007) -- so a portrait that cannot look
+    like a portrait is not worth the bytes or the broken-image failure mode.
+    """
     core = _user_core(tweet)
     name = _text(core.get("name"))
     screen = _text(core.get("screen_name"))
-    avatar = _text(_dig(tweet, "core", "user_results", "result", "avatar", "image_url"))
 
     if name and screen:
         author = f"<strong>{html.escape(name)}</strong> @{html.escape(screen)}"
@@ -515,35 +522,9 @@ def _author_html(tweet: Json) -> str | None:
         author = html.escape(name)
     else:
         author = ""
-
-    # `width`/`height` rather than the upstream inline `style`: the store-time
-    # sanitiser (ADR 0007) drops `style`, so a style attribute would be
-    # silently discarded and the avatar would render full size. The square
-    # 24px box plus `alt` is what makes this read as a portrait when the
-    # reader styles nothing.
-    #
-    # `class="pearss-avatar"` is the one class the sanitiser admits (a fixed
-    # constant, checked by value in adapters.sanitize), so a reader or theme
-    # that wants round avatars can hang `border-radius: 50%` off it. The class
-    # is an invitation, not an instruction: a client that ships no such rule
-    # renders the image exactly as before.
-    #
-    # `alt` carries the display name rather than being empty: a broken or
-    # blocked avatar URL then degrades to the author's name instead of to
-    # nothing, and screen readers announce who the picture belongs to. It is
-    # the same text the byline already shows, which is what makes the image
-    # and the name recognisably one author.
-    image = (
-        f'<img src="{html.escape(avatar, quote=True)}"'
-        f' alt="{html.escape(name or screen, quote=True)}"'
-        f' class="{AVATAR_CLASS}"'
-        f' width="24" height="24" loading="lazy"/>'
-        if avatar
-        else ""
-    )
-    if not (image or author):
+    if not author:
         return None
-    return f"<p>{image}{author}</p>"
+    return f"<p>{author}</p>"
 
 
 def _media_items(tweet: Json) -> list[Json]:
@@ -669,24 +650,14 @@ def _quoted_html(tweet: Json) -> str | None:
 
 
 def _quoted_byline(quoted: Json, author: str) -> str:
-    """The quoted author's avatar (when there is one) followed by their name."""
-    avatar = _text(
-        _dig(quoted, "core", "user_results", "result", "avatar", "image_url")
-    )
-    name = _text(_user_core(quoted).get("name"))
-    screen = _text(_user_core(quoted).get("screen_name"))
-    if not author and not avatar:
+    """The quoted author's name, as text -- no avatar, same as the main byline.
+
+    The quote's own media is still rendered (see `_quoted_html`); it is only
+    the portrait that is gone.
+    """
+    if not author:
         return ""
-    image = (
-        f'<img src="{html.escape(avatar, quote=True)}"'
-        f' alt="{html.escape(name or screen, quote=True)}"'
-        f' class="{AVATAR_CLASS}"'
-        f' width="24" height="24" loading="lazy"/>'
-        if avatar
-        else ""
-    )
-    label = f"<strong>{html.escape(author)}</strong>" if author else ""
-    return f"{image}{label}"
+    return f"<strong>{html.escape(author)}</strong>"
 
 
 def _binding(bindings: object, key: str) -> str:

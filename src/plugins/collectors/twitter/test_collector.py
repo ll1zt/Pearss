@@ -1159,8 +1159,6 @@ def test_the_author_is_still_named_in_full() -> None:
 @pytest.mark.unit
 def test_a_quoted_byline_carries_no_image_either() -> None:
     """The quote block had its own copy of the avatar; both are gone."""
-    from plugins.collectors.twitter.collector import _quoted_html
-
     quoted = next(d for d in drafts("quoted.json") if d.external_id.endswith("1"))
     block = quoted.content.split("<blockquote>", 1)[1]
     assert "avatar/" not in block, block
@@ -1182,7 +1180,10 @@ def test_a_display_name_with_markup_is_still_escaped() -> None:
         "core": {
             "user_results": {
                 "result": {
-                    "core": {"name": 'Ada "The Quote" <b>Lovelace', "screen_name": "ada"}
+                    "core": {
+                        "name": 'Ada "The Quote" <b>Lovelace',
+                        "screen_name": "ada",
+                    }
                 }
             }
         }
