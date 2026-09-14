@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
 READ_TOKEN = "test-read-token"
 FEED_URL = "https://planetpython.org/rss20.xml"
+NOW = "2026-01-01T00:00:00.000000Z"
 
 
 def policy(**overrides: object) -> dict[str, object]:
@@ -1279,3 +1280,56 @@ async def test_patch_rejects_an_unusable_folder_name(
         json={"folder": "x" * 65},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_busy_source_says_when_to_retry(
+    with_mock_client: FastAPI,
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """409 already_running must carry Retry-After.
+
+    The answer is "not now, try later", and without the header the caller has
+    to guess the interval -- an agent client ends up either hammering the
+    endpoint or backing off far more than the run needs. Every other 429/409
+    the API emits already says when; this one was the exception.
+    """
+    from adapters.repository.jobs import (
+        create_job_run,
+        ensure_collect_job,
+    )
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "busy-seed"},
+        json={"url": FEED_URL, "schedule_policy": {"type": "fixed", "interval": "30m"}},
+    )
+    source_id = created.json()["id"]
+
+    # Hold the job's only active-run slot, as an in-flight collection would.
+    with session_factory() as session:
+        job_id = ensure_collect_job(
+            session, source_id=source_id, tenant_id="default", at=NOW
+        )
+        create_job_run(
+            session,
+            run_id="run-holding-the-slot",
+            job_id=job_id,
+            correlation_id="c",
+            at=NOW,
+        )
+        session.commit()
+
+    response = await writer.post(
+        f"/v1/sources/{source_id}:trigger",
+        headers={"Idempotency-Key": "busy-1"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "already_running"
+    retry_after = response.headers.get("retry-after")
+    assert retry_after is not None, "409 must say when to come back"
+    # A positive number of seconds: the client sleeps, then retries.
+    assert int(retry_after) > 0

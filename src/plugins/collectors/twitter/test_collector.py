@@ -1192,3 +1192,28 @@ def test_a_display_name_with_markup_is_still_escaped() -> None:
     assert html_out is not None
     assert "<b>" not in html_out, html_out
     assert "&lt;b&gt;" in html_out
+
+
+@pytest.mark.unit
+def test_a_tweet_with_no_resolvable_author_gets_no_fabricated_url() -> None:
+    """A missing author must not become `x.com/unknown/status/<id>`.
+
+    `_screen_name` falls back to the literal "unknown" so the byline can
+    still say something, but `_tweet_link` spliced that same sentinel into
+    the canonical URL -- producing a link to an account that does not exist.
+    collector-guide requires `canonical_url` to be non-empty and not a
+    tracking URL; a URL that resolves to the wrong place is worse than either,
+    because it silently sends the reader somewhere real but wrong.
+
+    The quoted path already guarded this same sentinel (`screen != "unknown"`),
+    which is how the inconsistency was spotted.
+    """
+    from plugins.collectors.twitter.collector import _tweet_link
+
+    authorless = {"rest_id": "2099382889754325000", "legacy": {"full_text": "x"}}
+    link = _tweet_link(authorless)
+
+    assert "unknown" not in link, link
+    # Still a usable link to the post itself, just without an author segment.
+    assert "2099382889754325000" in link
+    assert link.startswith("https://x.com/")

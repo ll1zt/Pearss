@@ -329,3 +329,69 @@ def test_a_401_still_carries_the_challenge(base_url: str) -> None:
     assert response.status_code == 401
     assert response.headers.get("www-authenticate") == 'Bearer realm="pearss-mcp"'
     assert MCP_TOKEN_ENV in response.json()["error"]["suggestion"]
+
+
+# --------------------------------------------------------------------------
+# Path ownership: the guard decides one question, and only one
+#
+# `MCPPathGuard` exists so a root mount does not swallow every unrouted path.
+# It answers "does the MCP layer own this path at all" -- which must be the
+# exact endpoint, because the SDK registers exactly one route. An earlier
+# `startswith(prefix + "/")` let any sub-path in, so a typo like `/mcp/mcp`
+# reached the auth layer and came back 401: a 404 defect wearing the costume
+# of an auth failure, which sends whoever is debugging it to the wrong
+# system entirely.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_typo_under_the_mcp_prefix_is_404_not_401(base_url: str) -> None:
+    """`/mcp/mcp` is not the endpoint, so it must not reach the auth layer.
+
+    This is the path a client lands on when it assumes the SDK's own route
+    (`/mcp`) is nested under a `/mcp` mount. It used to answer 401, which
+    reads as "your token is wrong" -- so the operator rotates a token
+    instead of fixing a URL.
+    """
+    response = httpx.post(
+        f"{base_url}/mcp/mcp",
+        json=INITIALIZE,
+        headers={**MCP_HEADERS, "authorization": f"Bearer {MCP_TOKEN}"},
+        timeout=10,
+    )
+    assert response.status_code == 404, response.text
+    body = response.json()
+    assert body["error"]["code"] == "not_found"
+
+
+@pytest.mark.integration
+def test_any_unknown_sub_path_is_404_even_with_a_valid_token(base_url: str) -> None:
+    """A correct token must not turn a missing route into a served one.
+
+    Distinguishing these matters: with a valid token the earlier behaviour
+    returned whatever the transport answered for a route it does not own,
+    rather than the honest "no such endpoint".
+    """
+    for path in ("/mcp/anything", "/mcp/", "/mcp/mcp"):
+        response = httpx.post(
+            f"{base_url}{path}",
+            json=INITIALIZE,
+            headers={**MCP_HEADERS, "authorization": f"Bearer {MCP_TOKEN}"},
+            timeout=10,
+        )
+        assert response.status_code in (404, 405), f"{path}: {response.status_code}"
+
+
+@pytest.mark.integration
+def test_the_real_endpoint_still_answers_without_a_token(base_url: str) -> None:
+    """Tightening the guard must not break the one path it exists to allow.
+
+    `/mcp` is the endpoint, so an unauthenticated request there reaches the
+    auth layer and gets the 401 challenge -- that answer is about the token,
+    which is the correct thing to say for this path.
+    """
+    response = httpx.post(
+        f"{base_url}/mcp", json=INITIALIZE, headers=MCP_HEADERS, timeout=10
+    )
+    assert response.status_code == 401, response.text
+    assert "www-authenticate" in {k.lower() for k in response.headers}
