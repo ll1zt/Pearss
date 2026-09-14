@@ -152,7 +152,7 @@ class Source(Base):
         enum_check(
             "sourcestatus",
             "status",
-            ("active", "paused", "disabled", "deleted"),
+            ("active", "paused", "disabled"),
         ),
         enum_check(
             "trustlevel",

@@ -110,12 +110,16 @@ class JobRunStatus(StrEnum):
 
 
 class SourceStatus(StrEnum):
-    """Lifecycle of a content source."""
+    """Lifecycle of a content source.
+
+    There is no `deleted`. Deletion removes the row (ADR 0021), and a status
+    meaning "this row is really gone" cannot describe a row that exists --
+    keeping one invited every reader to handle a state that was never durable.
+    """
 
     ACTIVE = "active"
     PAUSED = "paused"
     DISABLED = "disabled"
-    DELETED = "deleted"
 
 
 class PluginStatus(StrEnum):
