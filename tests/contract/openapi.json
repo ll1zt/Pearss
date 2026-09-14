@@ -265,7 +265,7 @@
           "folder": {
             "anyOf": [
               {
-                "maxLength": 64,
+                "maxLength": 256,
                 "type": "string"
               },
               {
@@ -345,7 +345,7 @@
           "folder": {
             "anyOf": [
               {
-                "maxLength": 64,
+                "maxLength": 256,
                 "type": "string"
               },
               {
@@ -844,7 +844,7 @@
     },
     "/api/greader.php/reader/api/0/subscription/edit": {
       "post": {
-        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.",
+        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.\n\nRenaming is not implemented, and a `t=` is answered with the same OK the\nrest of the edit produces. That is deliberate rather than lazy: a source's\ntitle belongs to the origin (it is discovered at collection time and\nrecorded once), so a client rename would be overwritten by the next fetch\nanyway. Accepting it silently and failing to honour it would be worse than\nthis -- the reply is honest about everything this endpoint owns.",
         "operationId": "subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
         "requestBody": {
           "content": {

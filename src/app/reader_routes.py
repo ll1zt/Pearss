@@ -690,6 +690,13 @@ def subscription_edit(
     Unknown feeds are skipped rather than 404'd, the same leniency edit-tag
     applies to item ids -- a client works from the ids subscription/list gave
     it, and one that was withdrawn since should not fail the whole edit.
+
+    Renaming is not implemented, and a `t=` is answered with the same OK the
+    rest of the edit produces. That is deliberate rather than lazy: a source's
+    title belongs to the origin (it is discovered at collection time and
+    recorded once), so a client rename would be overwritten by the next fetch
+    anyway. Accepting it silently and failing to honour it would be worse than
+    this -- the reply is honest about everything this endpoint owns.
     """
     from adapters.db_models import Source as SourceRow
     from core.enums import SourceStatus

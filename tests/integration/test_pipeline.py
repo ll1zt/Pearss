@@ -1110,36 +1110,37 @@ def _translation_chain(lang: str = "zh") -> tuple[Any, ...]:
     )
 
 
-def _draft(external_id: str, *, content: str, title: str = "T") -> ItemDraft:
+def _draft(external_id: str, *, content: str, title: str | None = None) -> ItemDraft:
+    """A draft whose title doubles as the test's lookup key."""
     return ItemDraft(
         source_id=SOURCE,
         external_id=external_id,
-        title=title,
+        title=title if title is not None else f"item-{external_id}",
         canonical_url=f"https://blog.example.com/{external_id}",
         published_at=datetime(2026, 1, 1, tzinfo=UTC),
         content=content,
     )
 
 
-def _publish_state(session: Session, external_id: str) -> tuple[str, int]:
-    """(publish_status, enrichment row count) for one stored item."""
+def _publish_state(session: Session, marker: str) -> tuple[str, int]:
+    """(publish_status, enrichment row count) for one stored item.
+
+    Keyed on the item's title, which these tests set to a unique marker. The
+    guid is a derived hash and never contains the id it was derived from, so
+    matching on it would silently find nothing and (as this helper used to)
+    fall back to "the most recent row" -- which passes for the wrong reason
+    the moment a test stores two items.
+    """
     row = session.execute(
         text(
             "select i.publish_status,"
             " (select count(*) from item_enrichment e where e.item_id = i.id)"
-            " from item i where i.guid like :needle"
+            " from item i where i.title = :marker"
         ),
-        {"needle": f"%{external_id}%"},
+        {"marker": marker},
     ).one_or_none()
     if row is None:
-        # guid is derived; fall back to title matching for the assertion helper.
-        row = session.execute(
-            text(
-                "select i.publish_status,"
-                " (select count(*) from item_enrichment e where e.item_id = i.id)"
-                " from item i order by i.created_at desc limit 1"
-            )
-        ).one()
+        raise AssertionError(f"no stored item titled {marker!r}")
     return str(row[0]), int(row[1])
 
 
@@ -1166,7 +1167,7 @@ def test_content_already_in_the_target_language_is_not_queued(session: Session) 
     )
     session.commit()
 
-    status, enrichments = _publish_state(session, "zh-1")
+    status, enrichments = _publish_state(session, "item-zh-1")
     assert enrichments == 0, "an already-translated item must not occupy the queue"
     assert status == PublishStatus.READY.value
 
@@ -1191,7 +1192,7 @@ def test_english_content_is_still_queued(session: Session) -> None:
     )
     session.commit()
 
-    status, enrichments = _publish_state(session, "en-1")
+    status, enrichments = _publish_state(session, "item-en-1")
     assert enrichments == 1, "English text still needs its translation queued"
     assert status == PublishStatus.PENDING.value
 
@@ -1225,7 +1226,7 @@ def test_a_non_language_spec_survives_the_filter(session: Session) -> None:
     )
     session.commit()
 
-    status, enrichments = _publish_state(session, "zh-2")
+    status, enrichments = _publish_state(session, "item-zh-2")
     assert enrichments == 1, "the summary spec must still be queued"
     assert status == PublishStatus.PENDING.value
 
@@ -1251,6 +1252,6 @@ def test_an_entity_encoded_chinese_body_is_not_queued(session: Session) -> None:
     )
     session.commit()
 
-    status, enrichments = _publish_state(session, "zh-entity")
+    status, enrichments = _publish_state(session, "item-zh-entity")
     assert enrichments == 0, "an entity-encoded Chinese body must not be queued"
     assert status == PublishStatus.READY.value

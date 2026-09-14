@@ -1076,3 +1076,43 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
     )
     plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
     assert next(r for r in plugins["data"] if r["id"] == "rss")["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_add_source_can_file_the_subscription_into_a_folder(
+    mcp_url: str,
+) -> None:
+    """One call subscribes and files it, instead of add-then-move.
+
+    Categorising a batch of subscriptions is an agent's job, and every extra
+    round trip is a second confirmation dialog for the same intent.
+    """
+    payload = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://plain.example/foldered.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+            "folder": "阅读",
+        },
+        confirm=True,
+    )
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+    assert payload["folder"] == "阅读", payload
+    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+
+
+@pytest.mark.asyncio
+async def test_add_source_without_a_folder_uses_the_default(mcp_url: str) -> None:
+    """Omitting it is not "no folder": the API's default applies."""
+    payload = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://plain.example/unfoldered.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    assert payload["folder"] == "default", payload
+    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)

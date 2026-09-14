@@ -30,6 +30,8 @@ from mcp.server.mcpserver.resources import FunctionResource
 from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, Field, create_model
 
+from core.folders import DEFAULT_FOLDER
+
 LOGGER = logging.getLogger(__name__)
 
 SERVER_NAME = "pearss"
@@ -282,6 +284,7 @@ def _add_source_confirmation(
     type: str = "auto",
     pipeline_chain: list[dict[str, Any]] | None = None,
     target_lang: str = "",
+    folder: str = "",
 ) -> Elicit[Any]:
     """The add_source question: names the source and prefills every argument."""
     requested = type.strip().lower()
@@ -289,8 +292,9 @@ def _add_source_confirmation(
     return _confirm_resolver(
         _summary=(
             f"Add {url} as a {source_type} source with policy "
-            f"{_render(schedule_policy)} and chain {_render(pipeline_chain)} "
-            f"(lang {target_lang or 'none'})?"
+            f"{_render(schedule_policy)}, chain {_render(pipeline_chain)} "
+            f"(lang {target_lang or 'none'}) and folder "
+            f"{folder or DEFAULT_FOLDER}?"
         ),
         _fields={
             "url": url,
@@ -298,6 +302,7 @@ def _add_source_confirmation(
             "schedule_policy": _render(schedule_policy),
             "pipeline_chain": _render(pipeline_chain),
             "target_lang": target_lang,
+            "folder": folder,
         },
     )
 
@@ -744,6 +749,7 @@ def build_mcp_server(app: Any) -> MCPServer:
         type: str = "auto",
         pipeline_chain: list[dict[str, Any]] | None = None,
         target_lang: str = "",
+        folder: str = "",
     ) -> dict[str, Any]:
         requested = type.strip().lower()
         source_type = _infer_source_type(url) if requested == "auto" else requested
@@ -765,6 +771,7 @@ def build_mcp_server(app: Any) -> MCPServer:
             and _matches(data["schedule_policy"], schedule_policy)
             and _matches(data["pipeline_chain"], pipeline_chain)
             and _matches(data["target_lang"], target_lang)
+            and _matches(data["folder"], folder)
         ):
             return {
                 "aborted": True,
@@ -779,6 +786,9 @@ def build_mcp_server(app: Any) -> MCPServer:
                 "schedule_policy": schedule_policy,
                 "pipeline_chain": pipeline_chain,
                 "target_lang": target_lang or None,
+                # Empty means "the API's default folder", not "no folder":
+                # omitting the key keeps the API's own default in charge.
+                **({"folder": folder} if folder else {}),
             },
             idempotency_key=_fresh_key(),
         )

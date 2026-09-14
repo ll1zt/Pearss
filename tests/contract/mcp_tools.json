@@ -3,6 +3,11 @@
     "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. source type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram), or 'auto' (default): the URL is checked against the collectors and a non-rss match suggests 'web'. Pass type explicitly when auto would guess wrong. pipeline_chain (a list of {plugin_id, kind, lang?, required?}) plus target_lang gates items until the chain completes: e.g. one translate/translation spec with target_lang 'en'.",
     "input_schema": {
       "properties": {
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        },
         "pipeline_chain": {
           "anyOf": [
             {

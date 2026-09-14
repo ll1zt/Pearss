@@ -1101,7 +1101,17 @@ async def test_a_source_can_be_created_into_a_named_folder(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad",
-    ["", "   ", "x" * 65, "bad\nname"],
+    [
+        "",
+        "   ",
+        "x" * 65,
+        "bad\nname",
+        # A slash would become a stream id no client can round-trip: the
+        # folder would list under one name and answer under none.
+        "a/b",
+        # The stream-id encoding is not a name.
+        "user/-/label/x",
+    ],
 )
 async def test_an_unusable_folder_name_is_refused(
     writer: httpx.AsyncClient, bad: str

@@ -269,7 +269,12 @@ class SourceCreate(BaseModel):
     target_lang: str | None = None
     # The sidebar folder. Absent means the default folder, not "unset": every
     # subscription sits somewhere a client can show.
-    folder: str | None = Field(default=None, max_length=64)
+    #
+    # The bound here is a coarse anti-abuse guard, not the real limit: it
+    # measures before the validator trims, so a name of exactly the maximum
+    # length with a stray space would be refused by a tighter value. The
+    # authoritative limit lives in core.folders.
+    folder: str | None = Field(default=None, max_length=256)
 
     @field_validator("folder")
     @classmethod
@@ -312,8 +317,9 @@ class SourcePatch(BaseModel):
     pipeline_chain: list[dict[str, Any]] | None = None
     target_lang: str | None = None
     # Explicit null moves the source back to the default folder -- the same
-    # three-state convention pipeline_chain uses for clearing.
-    folder: str | None = Field(default=None, max_length=64)
+    # three-state convention pipeline_chain uses for clearing. Same coarse
+    # bound as SourceCreate; core.folders owns the real limit.
+    folder: str | None = Field(default=None, max_length=256)
 
     @field_validator("folder")
     @classmethod
