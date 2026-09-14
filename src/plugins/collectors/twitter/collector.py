@@ -182,42 +182,47 @@ def _tweets(body: bytes | str) -> list[Json]:
     tweets: list[Json] = []
     for entry in _entries(body):
         entry_id = str(entry.get("entryId", ""))
-        if entry_id.startswith("promoted-tweet-") or _is_promoted(entry.get("content")):
+        if entry_id.startswith("promoted-tweet-"):
             continue
         if entry_id.startswith("tweet-"):
-            result = _result_of((entry.get("content") or {}).get("itemContent"))
+            item_content = (entry.get("content") or {}).get("itemContent")
+            if _is_promoted(item_content):
+                continue
+            result = _result_of(item_content)
             if isinstance(result, dict):
                 tweets.append(_unwrap_visibility(result))
             continue
         if entry_id.startswith("home-conversation-"):
             for item in _module_items(entry.get("content")):
+                # Promotion is decided per item. Skipping the whole module
+                # because one item is an ad would take the thread's genuine
+                # replies with it -- the same silent loss the module handling
+                # above exists to prevent.
+                if _is_promoted(item):
+                    continue
                 result = _result_of(item)
                 if isinstance(result, dict):
                     tweets.append(_unwrap_visibility(result))
     return tweets
 
 
-def _is_promoted(content: object) -> bool:
-    """Whether a top-level entry is an advertisement.
+def _is_promoted(item_content: object) -> bool:
+    """Whether one `itemContent` is an advertisement.
 
-    Two independent signals, both checked because they answer different
-    failure modes. The `promotedMetadata` field is what X's own clients read
-    and survives a rename of the entryId prefix; the `promoted-tweet-` prefix
-    is checked by the caller as a fast path.
+    Item-scoped, not entry-scoped: a module can carry a promoted item beside
+    ordinary ones, and condemning the whole module for it would lose the good
+    ones. Callers pass the `itemContent` -- for a top-level entry that is
+    `content.itemContent`, for a module item `item.itemContent`.
 
     Measured on two real pages: all 18 promoted entries carried the metadata
-    and the prefixed id, and none of the 168 ordinary tweets carried either --
-    the signals never disagreed. Guarding on the field is what makes this
-    falsifiable: without it, the entry would be ingested by the `tweet-`
-    branch the moment X stops prefixing the id, and nothing would notice.
+    and a prefixed id, and none of the 168 ordinary tweets carried either --
+    the signals never disagreed. This checks the metadata because that is what
+    X's own clients read and it survives a rename of the id prefix; the caller
+    checks the prefix as a fast path for top-level entries.
     """
-    if not isinstance(content, dict):
+    if not isinstance(item_content, dict):
         return False
-    item_content = content.get("itemContent")
-    if isinstance(item_content, dict) and "promotedMetadata" in item_content:
-        return True
-    # A module can in principle carry a promoted item too.
-    return any("promotedMetadata" in item for item in _module_items(content))
+    return "promotedMetadata" in item_content
 
 
 def _module_items(content: object) -> list[Json]:
@@ -291,7 +296,14 @@ def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
     sorts: list[int] = []
     for entry in _entries(body):
         entry_id = str(entry.get("entryId", ""))
+        if entry_id.startswith("promoted-tweet-"):
+            # Advertised ids come from the advertiser's own timeline, so they
+            # are unrelated in magnitude to the page's own tweets.
+            continue
         if entry_id.startswith("tweet-"):
+            item_content = (entry.get("content") or {}).get("itemContent")
+            if _is_promoted(item_content):
+                continue
             numeric = _sort_index(entry.get("sortIndex"))
             if numeric is not None:
                 sorts.append(numeric)
@@ -300,6 +312,8 @@ def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
             # The module's own sortIndex is a layout position, not the items'
             # range; each tweet inside carries its own id as its order.
             for item in _module_items(entry.get("content")):
+                if _is_promoted(item):
+                    continue
                 numeric = _id_sort_index(item)
                 if numeric is not None:
                     sorts.append(numeric)
