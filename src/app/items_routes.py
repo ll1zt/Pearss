@@ -27,6 +27,7 @@ from adapters.correlation import current as current_correlation_id
 from adapters.filestore import read_body
 from adapters.repository import (
     ItemFilter,
+    count_matching,
     get_item,
     mark_published,
     query_items,
@@ -192,22 +193,29 @@ def read_items(
     parsed_cursor = _parse_cursor(cursor)
 
     with request.app.state.session_factory() as session:
+        filter_spec = ItemFilter(
+            source_id=source_id,
+            publish_status=(
+                publish_status.value if publish_status is not None else None
+            ),
+            query=q,
+            since=_parse_bound(since, code="invalid_since", field="since"),
+            until=_parse_bound(until, code="invalid_until", field="until"),
+        )
         page = query_items(
             session,
             tenant_id=TENANT,
-            filter=ItemFilter(
-                source_id=source_id,
-                publish_status=(
-                    publish_status.value if publish_status is not None else None
-                ),
-                query=q,
-                since=_parse_bound(since, code="invalid_since", field="since"),
-                until=_parse_bound(until, code="invalid_until", field="until"),
-            ),
+            filter=filter_spec,
             descending=descending,
             limit=limit,
             cursor=parsed_cursor,
         )
+        # How many rows the filter selects in total, not how many this page
+        # returned. The sources list already answers this way, and it matters
+        # most for callers deciding on a destructive action: "clear this
+        # source" is a different decision at 3 items than at 3000, and paging
+        # to the end to find out is a request per page.
+        total = count_matching(session, tenant_id=TENANT, filter=filter_spec)
 
     return {
         "data": [
@@ -219,6 +227,7 @@ def read_items(
             for item in page.items
         ],
         "next_cursor": page.next_cursor,
+        "total": total,
         "correlation_id": current_correlation_id(),
     }
 

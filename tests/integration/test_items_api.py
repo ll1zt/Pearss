@@ -126,8 +126,28 @@ async def test_list_returns_the_documented_envelope(
     client: httpx.AsyncClient, store: sessionmaker[Session]
 ) -> None:
     body = (await client.get("/v1/items")).json()
-    assert set(body) == {"data", "next_cursor", "correlation_id"}
+    # `total` is the filtered row count, not the page length: it is what lets a
+    # caller size a destructive action ("clear this source") without paging to
+    # the end to find out.
+    assert set(body) == {"data", "next_cursor", "total", "correlation_id"}
     assert body["correlation_id"]
+    assert body["total"] == len(body["data"]), "one page, so the totals agree"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_total_counts_the_filter_not_the_page(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """A limited page must still report how much the filter selects.
+
+    Reporting the page length instead would make the number useless for the
+    decision it exists to inform, and would agree with the data only by
+    accident on a single-page response.
+    """
+    body = (await client.get("/v1/items", params={"limit": 3})).json()
+    assert len(body["data"]) == 3
+    assert body["total"] > 3
 
 
 @pytest.mark.integration
@@ -557,3 +577,132 @@ async def test_items_require_a_token(app: FastAPI) -> None:
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as anonymous:
         assert (await anonymous.get("/v1/items")).status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Deletion (ADR 0021)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_item_removes_it_from_every_read_path(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """`store` seeds twelve items; this deletes one and checks it is gone."""
+    before = await client.get("/v1/items", params={"limit": 100})
+    target = before.json()["data"][1]["id"]
+
+    response = await client.delete(
+        f"/v1/items/{target}", headers={"Idempotency-Key": "del-1"}
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == 1
+
+    assert (await client.get(f"/v1/items/{target}")).status_code == 404
+    after = await client.get("/v1/items", params={"limit": 100})
+    remaining = [row["id"] for row in after.json()["data"]]
+    assert target not in remaining
+    assert len(remaining) == len(before.json()["data"]) - 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_items_is_a_batch(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    before = await client.get("/v1/items", params={"limit": 100})
+    ids = [row["id"] for row in before.json()["data"]]
+    victims = [ids[0], ids[2]]
+
+    response = await client.post(
+        "/v1/items:delete",
+        headers={"Idempotency-Key": "del-batch"},
+        json={"item_ids": victims},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested"] == 2
+    assert body["items"] == 2
+
+    after = await client.get("/v1/items", params={"limit": 100})
+    remaining = [row["id"] for row in after.json()["data"]]
+    assert all(v not in remaining for v in victims)
+    assert len(remaining) == len(ids) - 2
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_deleting_an_unknown_item_is_not_a_404(
+    client: httpx.AsyncClient,
+) -> None:
+    """Idempotence: the retry must report the same success as the first call."""
+    first = await client.delete(
+        "/v1/items/never-existed", headers={"Idempotency-Key": "del-x1"}
+    )
+    second = await client.delete(
+        "/v1/items/never-existed", headers={"Idempotency-Key": "del-x2"}
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["items"] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_replayed_delete_returns_the_first_result(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """The same Idempotency-Key must not delete twice, and must replay."""
+    listed = await client.get("/v1/items", params={"limit": 100})
+    target = listed.json()["data"][0]["id"]
+
+    first = await client.delete(
+        f"/v1/items/{target}", headers={"Idempotency-Key": "same-key"}
+    )
+    second = await client.delete(
+        f"/v1/items/{target}", headers={"Idempotency-Key": "same-key"}
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json() == first.json(), "a replay, not a second deletion"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_requires_a_write_token(app: FastAPI) -> None:
+    """Deletion is a write, so the read token must not reach it."""
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as anonymous:
+        response = await anonymous.delete(
+            "/v1/items/item-0000", headers={"Idempotency-Key": "anon"}
+        )
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_delete_requires_an_idempotency_key(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.delete("/v1/items/item-0000")
+    assert response.status_code == 400
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_empty_id_list_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    """An empty batch is a caller mistake, not a silent no-op.
+
+    Answering 200 to "delete nothing" hides a bug that produced an empty list
+    where a populated one was meant.
+    """
+    response = await client.post(
+        "/v1/items:delete",
+        headers={"Idempotency-Key": "empty-batch"},
+        json={"item_ids": []},
+    )
+    assert response.status_code == 422

@@ -306,6 +306,11 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "set_source_status",
         "set_source_folder",
         "remove_source",
+        # Deletion (ADR 0021): remove_source stops flagging and starts
+        # deleting; these two clear items while keeping the subscription,
+        # or name exact items.
+        "delete_items",
+        "delete_source_items",
         "trigger_job",
         # P3 processor chain (ADR 0018): one-off backfill for legacy items,
         # plus chain visibility and the agent re-trigger the retry policy
@@ -618,6 +623,9 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ("backfill_source", {"source_id": "src-1"}),
         ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}),
         ("remove_source", {"source_id": "src-1"}),
+        # Deletion (ADR 0021).
+        ("delete_items", {"item_ids": ["it-1"]}),
+        ("delete_source_items", {"source_id": "src-1"}),
     ]
     for tool, args in cases:
         with pytest.raises(BaseException) as excinfo:
@@ -1116,3 +1124,112 @@ async def test_add_source_without_a_folder_uses_the_default(mcp_url: str) -> Non
     )
     assert payload["folder"] == "default", payload
     await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+
+
+# --------------------------------------------------------------------------
+# Deletion (ADR 0021)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_source_removes_its_items(mcp_url: str) -> None:
+    """The tool now deletes; the counts in its answer are the evidence.
+
+    This is the behaviour change ADR 0021 describes: remove_source used to
+    answer with a `deleted` status and leave the items published.
+    """
+    created = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://plain.example/todelete.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    source_id = created["id"]
+
+    result = await _call(
+        mcp_url, "remove_source", {"source_id": source_id}, confirm=True
+    )
+    assert result.get("declined") is None and result.get("aborted") is None, result
+    assert result["sources"] == 1
+
+    listed = await _call(mcp_url, "list_sources", {"limit": 50})
+    assert source_id not in [row["id"] for row in listed["data"]]
+
+
+@pytest.mark.asyncio
+async def test_delete_items_takes_the_ids_it_was_given(mcp_url: str) -> None:
+    """A batch delete reaches the API with the ids the caller named.
+
+    The list travels as a comma-joined string through the elicitation schema,
+    so this also pins that the round trip survives: a bug in that encoding
+    would abort every batch as "arguments differ".
+    """
+    found = await _call(mcp_url, "search_items", {"limit": 5, "fields": "id"})
+    ids = [row["id"] for row in found.get("data", [])]
+    if not ids:
+        pytest.skip("no items seeded in this environment")
+
+    result = await _call(mcp_url, "delete_items", {"item_ids": ids[:1]}, confirm=True)
+    assert result.get("declined") is None and result.get("aborted") is None, result
+    assert result["items"] == 1
+
+    after = await _call(mcp_url, "search_items", {"limit": 5, "fields": "id"})
+    assert ids[0] not in [row["id"] for row in after.get("data", [])]
+
+
+@pytest.mark.asyncio
+async def test_delete_items_aborts_when_the_ids_drift(mcp_url: str) -> None:
+    """The confirmation is a check, not a formality.
+
+    A client returning different ids than the tool was called with must not
+    have those substituted for the request -- that is how a confirmation
+    dialog becomes an injection point into a destructive call.
+    """
+    from mcp import types
+
+    async def _lie(_ctx: Any, params: Any) -> Any:
+        properties = (params.requested_schema or {}).get("properties", {})
+        content = {
+            name: (
+                spec.get("default", False)
+                if spec.get("type") == "boolean"
+                else spec.get("default", "")
+            )
+            for name, spec in properties.items()
+        }
+        content["item_ids"] = "someone-elses-item"
+        return types.ElicitResult(action="accept", content=content)
+
+    async with mcp_session(mcp_url, elicitation_callback=_lie) as session:
+        result = _payload(
+            await session.call_tool("delete_items", {"item_ids": ["it-1"]})
+        )
+    assert result.get("aborted") is True, result
+
+
+@pytest.mark.asyncio
+async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
+    """Clearing a crawl must not remove the source or its position."""
+    created = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://plain.example/clearcrawl.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    source_id = created["id"]
+
+    result = await _call(
+        mcp_url, "delete_source_items", {"source_id": source_id}, confirm=True
+    )
+    assert result.get("declined") is None and result.get("aborted") is None, result
+
+    listed = await _call(mcp_url, "list_sources", {"limit": 50})
+    assert source_id in [row["id"] for row in listed["data"]]
+
+    await _call(mcp_url, "remove_source", {"source_id": source_id}, confirm=True)

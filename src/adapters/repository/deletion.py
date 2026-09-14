@@ -88,9 +88,7 @@ def delete_items(
         return {"items": 0, "read_states": 0, "enrichments": 0, "bodies": 0}
 
     rows = list(
-        session.execute(
-            select(ItemRow).where(ItemRow.id.in_(item_ids))
-        ).scalars()
+        session.execute(select(ItemRow).where(ItemRow.id.in_(item_ids))).scalars()
     )
     if not rows:
         return {"items": 0, "read_states": 0, "enrichments": 0, "bodies": 0}
@@ -161,13 +159,9 @@ def items_for_source(
     if not include_published:
         query = query.where(ItemRow.publish_status != "published")
     if since:
-        query = query.where(
-            func.coalesce(ItemRow.published_at, "") >= since
-        )
+        query = query.where(func.coalesce(ItemRow.published_at, "") >= since)
     if until:
-        query = query.where(
-            func.coalesce(ItemRow.published_at, "") <= until
-        )
+        query = query.where(func.coalesce(ItemRow.published_at, "") <= until)
     rows = session.execute(query.order_by(ItemRow.id)).scalars()
     return [row_to_item(row) for row in rows]
 

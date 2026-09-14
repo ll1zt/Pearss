@@ -485,8 +485,10 @@ async def test_delete_removes_the_source_and_its_items(
             sa.text("select count(*) from item where source_id = :i"), {"i": source_id}
         ).scalar()
         states = session.execute(
-            sa.text("select count(*) from read_state where item_id in"
-                    " ('hard-item-0', 'hard-item-1')")
+            sa.text(
+                "select count(*) from read_state where item_id in"
+                " ('hard-item-0', 'hard-item-1')"
+            )
         ).scalar()
     assert sources == 0, "the source row is gone, not merely marked"
     assert items == 0, "its items go with it"
@@ -582,9 +584,7 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
     source_id = created.json()["id"]
     with app.state.session_factory() as session:
         session.execute(
-            sa.text(
-                "update source set seen_frontier = 999 where id = :i"
-            ),
+            sa.text("update source set seen_frontier = 999 where id = :i"),
             {"i": source_id},
         )
         session.execute(

@@ -118,16 +118,36 @@ def _render(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _matches(confirmed: str, actual: Any) -> bool:
+def _matches(confirmed: Any, actual: Any) -> bool:
     """Whether a confirmed value equals the value about to be executed.
 
     Strings compare as themselves; anything structured compares as its
     canonical JSON, which is the form the schema carries. Rendering a string
     through json.dumps would add quotes the client never sent, so every string
     comparison would fail and every write would abort.
+
+    Booleans compare by truth value: the elicitation field is typed `bool`, so
+    the client returns a real boolean, and comparing it as text ("True" against
+    the JSON "true") would reject every confirmation of a flag.
     """
+    if isinstance(actual, bool):
+        if isinstance(confirmed, bool):
+            return confirmed == actual
+        return confirmed.strip().lower() in (
+            ("true", "1") if actual else ("false", "0")
+        )
     expected = actual if isinstance(actual, str) else _render(actual)
-    return confirmed.strip() == expected
+    return str(confirmed).strip() == expected
+
+
+def _comma_join(values: list[str]) -> str:
+    """Join a list into the one string an elicitation schema can carry.
+
+    Elicitation fields are primitives only, so a list travels as text and is
+    compared back in that form. The join must be deterministic or every
+    confirmation of a batch would be rejected as drift.
+    """
+    return ",".join(values)
 
 
 def _truncate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -333,13 +353,6 @@ def _set_source_folder_confirmation(source_id: str, folder: str) -> Elicit[Any]:
     )
 
 
-def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
-    return _confirm_resolver(
-        _summary=f"Remove source {source_id}? Items already collected are kept.",
-        _fields={"source_id": source_id},
-    )
-
-
 def _trigger_job_confirmation(source_id: str) -> Elicit[Any]:
     return _confirm_resolver(
         _summary=f"Fetch source {source_id} now?",
@@ -365,6 +378,71 @@ def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
     return _confirm_resolver(
         _summary=f"Set plugin {plugin_id} status to {status}?",
         _fields={"plugin_id": plugin_id, "status": status},
+    )
+
+
+def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
+    """The source-deletion question.
+
+    Every other confirmation here can be "do X?" with the arguments prefilled,
+    because the arguments describe the effect. This one cannot: `source_id`
+    says nothing about how much content it takes with it, so the message has
+    to state the consequence in words. The count is deliberately not fetched
+    here -- a resolver runs before the tool body and must stay a pure function
+    of what the client sent, and an async resolver defined in the factory
+    cannot be resolved from this module-level annotation at all (the SDK
+    evaluates the annotation string against module globals).
+    """
+    return _confirm_resolver(
+        _summary=(
+            f"Delete source {source_id} and every item it collected? Their "
+            "stored bodies, read state and translations are removed too; "
+            "clients keep what they have already cached, and re-subscribing "
+            "the same feed starts over with no history. This cannot be undone."
+        ),
+        _fields={"source_id": source_id},
+    )
+
+
+def _delete_items_confirmation(item_ids: list[str]) -> Elicit[Any]:
+    listed = ", ".join(item_ids[:5])
+    if len(item_ids) > 5:
+        listed += f", and {len(item_ids) - 5} more"
+    return _confirm_resolver(
+        _summary=(
+            f"Permanently delete {len(item_ids)} item(s): {listed}? Their "
+            "bodies, read state and translations go too. This cannot be undone."
+        ),
+        _fields={"item_ids": _comma_join(item_ids)},
+    )
+
+
+def _delete_source_items_confirmation(
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> Elicit[Any]:
+    window = ""
+    if since or until:
+        window = f" published between {since or 'the start'} and {until or 'now'}"
+    scope = (
+        "including items clients have already seen"
+        if include_published
+        else "excluding already-published items"
+    )
+    return _confirm_resolver(
+        _summary=(
+            f"Permanently delete source {source_id}'s items{window}, {scope}? "
+            "The subscription and its crawl position are kept, so collection "
+            "resumes. This cannot be undone."
+        ),
+        _fields={
+            "source_id": source_id,
+            "since": since,
+            "until": until,
+            "include_published": include_published,
+        },
     )
 
 
@@ -921,9 +999,13 @@ def build_mcp_server(app: Any) -> MCPServer:
 
     @server.tool(
         description=(
-            "Remove a source. Requires confirmation. This is a soft delete: "
-            "already-collected items stay published and keep their GUIDs, but "
-            "the source stops being fetched."
+            "Delete a source and everything it collected. Requires "
+            "confirmation, which states how many items will go. Permanent: the "
+            "source row, its items, their stored bodies, read state and "
+            "translations are all removed, and re-subscribing the same feed "
+            "starts a new source with no history. Use delete_source_items to "
+            "clear a bad crawl and keep the subscription, or set_source_status "
+            "to disable it instead."
         )
     )
     async def remove_source(
@@ -948,6 +1030,100 @@ def build_mcp_server(app: Any) -> MCPServer:
         status, payload = await core.request(
             "DELETE",
             f"/v1/sources/{source_id}",
+            idempotency_key=_fresh_key(),
+        )
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Permanently delete specific items by id. Requires confirmation. "
+            "The bodies, read state and processor products go with them. Use "
+            "this to clean up items that were fetched wrongly or are no "
+            "longer wanted; ids come from search_items. Not reversible."
+        )
+    )
+    async def delete_items(
+        item_ids: list[str],
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_delete_items_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        # The schema carries one string, so the list arrives as a comma-joined
+        # value. Comparing the parse back to the request is what keeps the
+        # dialog a confirmation rather than a formality.
+        if not _matches(data["item_ids"], _comma_join(item_ids)):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        status, payload = await core.request(
+            "POST",
+            "/v1/items:delete",
+            json_body={"item_ids": item_ids},
+            idempotency_key=_fresh_key(),
+        )
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        description=(
+            "Delete a source's items while keeping the subscription. Requires "
+            "confirmation. Use this after a bad crawl: the source keeps its "
+            "crawl position, so collection resumes instead of re-reading "
+            "history. Optionally narrow by since/until; pass "
+            "include_published=false to spare items a client has already "
+            "seen. Not reversible."
+        )
+    )
+    async def delete_source_items(
+        source_id: str,
+        ctx: Context,
+        since: str = "",
+        until: str = "",
+        include_published: bool = True,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_delete_source_items_confirmation)
+        ] = None,
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        if not (
+            _matches(data["source_id"], source_id)
+            and _matches(data["since"], since)
+            and _matches(data["until"], until)
+            and _matches(data["include_published"], include_published)
+        ):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        body: dict[str, Any] = {"include_published": include_published}
+        if since:
+            body["since"] = since
+        if until:
+            body["until"] = until
+        status, payload = await core.request(
+            "POST",
+            f"/v1/sources/{source_id}/items:delete",
+            json_body=body,
             idempotency_key=_fresh_key(),
         )
         if status != 200:

@@ -128,10 +128,6 @@ def _item(
     return ref
 
 
-def _detail(item_id: str) -> dict[str, str]:
-    return {"author": "", "metadata": {}, "id": item_id}
-
-
 class TestDeleteItems:
     def test_removes_the_row_and_its_body(
         self, session_factory: sessionmaker[Session], storage: Path

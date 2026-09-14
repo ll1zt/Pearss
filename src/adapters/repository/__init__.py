@@ -58,6 +58,7 @@ from adapters.repository.items import (
 from adapters.repository.items_query import (
     ItemFilter,
     ItemPage,
+    count_matching,
     escape_like,
     get_item,
     query_items,
@@ -121,6 +122,7 @@ __all__ = [
     "collectable_sources",
     "consecutive_failures",
     "count_items",
+    "count_matching",
     "create_job_run",
     "create_source",
     "delete_items",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
@@ -71,23 +72,7 @@ def query_items(
     """
     sort_column = func.coalesce(ItemRow.published_at, EPOCH_FLOOR)
 
-    query = select(ItemRow).where(
-        ItemRow.publish_status != PublishStatus.PENDING.value,
-        ItemRow.tenant_id == tenant_id,
-    )
-
-    if filter.source_id:
-        query = query.where(ItemRow.source_id == filter.source_id)
-    if filter.publish_status:
-        query = query.where(ItemRow.publish_status == filter.publish_status)
-    if filter.query:
-        query = query.where(
-            ItemRow.title.like(f"%{escape_like(filter.query)}%", escape="\\")
-        )
-    if filter.since:
-        query = query.where(sort_column >= filter.since)
-    if filter.until:
-        query = query.where(sort_column <= filter.until)
+    query = select(ItemRow).where(*_filter_conditions(tenant_id, filter, sort_column))
 
     if cursor is not None:
         value, last_id = cursor
@@ -125,6 +110,53 @@ def query_items(
         next_cursor = f"{_sort_value(last)}|{last.id}"
 
     return ItemPage(items=[row_to_item(row) for row in page], next_cursor=next_cursor)
+
+
+def _filter_conditions(
+    tenant_id: str, filter: ItemFilter, sort_column: Any
+) -> list[Any]:
+    """The WHERE clauses a filter selects by, shared by the page and the count.
+
+    Factored out for the reason the gate is enforced in one place: a count that
+    drifts from its page is worse than no count, and the two would drift the
+    first time a filter was added to only one of them.
+    """
+    conditions: list[Any] = [
+        # The gate. Pending rows are invisible to every output, and a count is
+        # an output -- including it here would report a total the caller can
+        # never enumerate.
+        ItemRow.publish_status != PublishStatus.PENDING.value,
+        ItemRow.tenant_id == tenant_id,
+    ]
+    if filter.source_id:
+        conditions.append(ItemRow.source_id == filter.source_id)
+    if filter.publish_status:
+        conditions.append(ItemRow.publish_status == filter.publish_status)
+    if filter.query:
+        conditions.append(
+            ItemRow.title.like(f"%{escape_like(filter.query)}%", escape="\\")
+        )
+    if filter.since:
+        conditions.append(sort_column >= filter.since)
+    if filter.until:
+        conditions.append(sort_column <= filter.until)
+    return conditions
+
+
+def count_matching(session: Session, *, tenant_id: str, filter: ItemFilter) -> int:
+    """How many items the filter selects in total, ignoring any page window.
+
+    This is what tells a caller whether "clear this source" means three items
+    or three thousand; paging to the end to find out costs a request per page.
+    """
+    sort_column = func.coalesce(ItemRow.published_at, EPOCH_FLOOR)
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(ItemRow)
+            .where(*_filter_conditions(tenant_id, filter, sort_column))
+        ).scalar_one()
+    )
 
 
 def _sort_value(row: ItemRow) -> str:
