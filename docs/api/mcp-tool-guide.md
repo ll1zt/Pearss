@@ -60,9 +60,10 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 
 | 工具 | 理由 |
 |---|---|
-| `add_source` | 引入外部内容源 |
+| `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
-| `pause_source` / `resume_source` | 改变采集行为 |
+| `set_source_status` | 暂停/恢复采集，改变采集行为 |
+| `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
 | `remove_source` | 停用来源（软删除，但影响后续采集） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
 
@@ -117,9 +118,27 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
   `error_class` 取值范围
 - 描述里写清**副作用**：是否发起外部请求、是否改变状态、是否可逆
 
+## 七、订阅归类（folder）
+
+`Source` 带一个 `folder`：订阅在客户端侧边栏中的分组。**一订阅一分类**，
+跟随 FreshRSS（其源码明确 "a feed can only be in one category"，客户端也按该模型实现；
+多对多会在这些客户端里表现为不可预期）。默认 `default`。
+
+三条路径共享它，且都以 `user/-/label/<name>` 的形式暴露给 Reader API：
+
+| 路径 | 用法 |
+|---|---|
+| `POST /v1/sources` | 创建时带 `folder` 即可归入 |
+| `PATCH /v1/sources/{id}` | `{"folder": "阅读"}` 改分类；`{"folder": null}` 回 `default` |
+| `POST /reader/api/0/subscription/edit` | 客户端拖拽：`ac=edit`、`s=<feed id>`、`a=user/-/label/名字` 加入、`r=...` 回默认。**不支持 subscribe/unsubscribe** —— 增删订阅走 `/v1`，有各自的鉴权与审计 |
+
+名称校验在 `core/folders`：trim、长度上限、禁控制字符、**禁 `/`**（名字会变成 stream id，
+斜杠会产生客户端无法往返的路径）。MCP 侧对应 `set_source_folder` 与 `add_source` 的
+`folder` 参数。
+
 ## 八、传输与挂载
 
-- 传输：**Streamable HTTP**（§9），与 Core API 同进程挂载，端点 `/mcp/mcp`
+- 传输：**Streamable HTTP**（§9），与 Core API 同进程挂载，端点 `/mcp`
 
 **入站鉴权（客户端 → `/mcp`）**
 

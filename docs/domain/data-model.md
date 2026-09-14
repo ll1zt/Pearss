@@ -24,9 +24,9 @@
 | `canonical_url` | 规范化后的去重 URL。**NOT NULL**：它正是唯一约束比较的列，而 SQL 中 NULL 彼此不等 —— 可空会让这些行完全落在约束之外。agent 源用合成键 `agent://<name>`（见 ADR 0008） |
 | `parser_plugin_id` | web 来源使用的采集器标识；P1 为硬编码准插件 ID |
 | `title` | 来源自报的名字，采集时发现（feed 的 `<title>` / 页面标题）。**可空且不回填**：写入器只在缺失时设置，所以往列里塞一个 URL 派生猜测会**永久挡住真实标题**；未采集源的显示标签在展示层派生（`core.source_display_label`） |
-| `seen_frontier` | 分页型源已摄入的**最新推文 id**。翻页到此停止，不再重读历史。单调前进：回填重走时报到的更低 id 不得覆盖它 |
-| `resume_cursor` | 未完成的活：断档（gap）游标，或预算耗尽时的最深游标。**不可从 `item` 重算** —— 游标是来源给的不透明串，断档位置也无法从已存行推出 |
-| `resume_rounds` | 连续多少轮结束时仍有未解决 resume。到上限（3）即丢弃，从最新页重来 —— 比 frontier 更深的欠账没有自然停止锚点，不加上界会每轮向历史滑动、永不收敛 |
+| `seen_frontier` | 分页型源已摄入的**最新推文 id** —— 抓取区间的**上沿**。翻页到此停止，不再重读历史。单调前进：重走旧历史时报到的更低 id 不得覆盖它 |
+| `floor_cursor` | 抓取区间的**下沿**：该源走过的**最深**位置。首轮按 `PEARSS_X_FIRST_PAGES` 采样，预算耗尽时停在哪，那里就成为 floor；此后每轮只在 frontier 与 floor 之间作业。**它是停止符，不是续采起点** —— 见 §「抓取区间」。**不可从 `item` 重算**：游标是来源给的不透明串 |
+| `folder` | 订阅在阅读器侧边栏中的归类，**一订阅一分类**（FreshRSS 模型：其源码明确 "a feed can only be in one category"，客户端也按此实现）。NOT NULL，默认 `default`；名称校验见 `core/folders`。它同时决定 `user/-/label/<name>` 流的内容 |
 | `schedule_policy` | `{type: fixed/adaptive, ...}`；决定下次抓取策略 |
 | `trust_level` | 来源信任等级；不改变“正文不可信”的默认规则 |
 | `status` | `active` / `paused` / `disabled` / `deleted` |
@@ -34,9 +34,25 @@
 
 不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 —— 否则该唯一约束对 NULL 行不生效，重复源可以无限并存。停用/删除 Source 不得删除已有 Item。
 
-**备份分级提醒**：`seen_frontier` / `resume_cursor` / `resume_rounds` 是**运维状态而非派生物**。
+**备份分级提醒**：`seen_frontier` / `floor_cursor` 是**运维状态而非派生物**。
 它们不能像 `RawFetch`/`JobRun` 那样靠重放管道重建，因此随 `Source` 一起属于事实源备份范围；
-丢了不会报错，只会让下一次采集重新从最新页往历史深处走一遍。
+丢了不会报错，但会让下一次采集把已经抓过的区间重走一遍（去重兜住重复入库，
+代价是白费请求）。`folder` 则是普通配置，丢了表现为订阅回到 `default` 分组。
+
+### 抓取区间（分页型源）
+
+`seen_frontier``seen_frontier` 与 `floor_cursor` 共同界定「要抓什么」：
+
+- **首轮**是唯一有页数策略的一轮（`PEARSS_X_FIRST_PAGES`，默认 3）。它定义了该源的
+  历史深度 —— 这是操作者的选择，不是程序猜的。
+- **后续每轮**从时间线顶部开始，抓到 frontier 即停。请求数因此与该源的**真实产出**
+  成正比，而不是某个策略数字；`first_pages` 不约束后续轮，
+  因为「预算在触及 frontier 前用尽」正是跨轮丢内容的方式。
+- floor 只由「预算耗尽且未触及 frontier」这一种结局写入（walk 以
+  `floor_candidate` 上报）。 frontier 命中、到达 origin 底部、触及 floor、失败，
+  都不动它 —— 这些结局都没有说明区间该有多深。
+- **断档（gap）只记录、不追讨**。它位于区间内部，追它等于开出第二个爬取方向；
+  frontier 持续推进才是下一步抓什么的依据。
 
 ### RawFetch
 
@@ -74,6 +90,7 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 | `guid` | 对外 RSS/Reader API 的稳定 ID；首次发布后不可改变 |
 | `content_hash` | 规范化内容哈希，用于跨源重复检测 |
 | `title` / `url` / `published_at` | 面向消费端的规范化字段 |
+| `author` | 来源给出的署名（RSS `<author>`、知乎显示名、X 的 `名字 (@handle)`）。**空串表示来源本就没署名**，不是匿名。它不参与 `guid`/`content_hash` —— 修正署名不得产生新条目 |
 | `content_ref` | 正文/清洗正文存储引用 |
 | `publish_status` | `pending` / `ready` / `published` |
 | `published_to_feed_at` | 首次对外输出时间 |

@@ -139,9 +139,9 @@ structlog+correlation_id]
 
 | 表 | 关键字段 | 引入 | 备份等级 | 说明 |
 |---|---|---|---|---|
-| Source | id, type, url, parser_plugin_id, **schedule_policy(json)**, trust_level, tenant_id | P1 | 事实源 | |
+| Source | id, type, url, parser_plugin_id, **schedule_policy(json)**, **folder**, trust_level, tenant_id | P1（folder P3） | 事实源 | folder = 客户端侧边栏归类，一订阅一分类（FreshRSS 模型），默认 `default` |
 | RawFetch | id, source_id, payload_ref, status, fetched_at, correlation_id | P1 | 可重建 | adaptive 调度的数据源 |
-| Item | id, source_id, guid, content_hash, title, url, published_at, **publish_status**, tenant_id | P1 | 事实源 | 发布闸门字段 P1 就位 |
+| Item | id, source_id, guid, content_hash, title, url, **author**, published_at, **publish_status**, tenant_id | P1（author P3） | 事实源 | 发布闸门字段 P1 就位；author 不参与 guid/content_hash |
 | ItemEnrichment | id, item_id, plugin_id, kind, lang, payload_ref, status | P3 | 可重建 | 重放 pipeline 即恢复，不纳入备份 |
 | ReadState | item_id, is_read, is_starred, updated_at, tenant_id | P1（原 P3） | 事实源 | Reader API 状态写回；随 C4 提前（ADR 0004） |
 | Plugin | id, type, version, manifest, checksum, status, trust | P2 ✅（migration 0010） | 事实源 | |
@@ -460,7 +460,7 @@ P1（当前：单进程 + systemd 用户服务）      P3（compose 多服务，
 │ FastAPI                      │          │ core     │  │ MCP GW   │
 │  ├ /v1 Core API              │          ├──────────┤  ├──────────┤
 │  ├ /api/greader.php Reader   │    →     │ worker×N │  │ Redis    │
-│  └ /mcp/mcp  MCP 工具面       │          ├──────────┤  ├──────────┤
+│  └ /mcp      MCP 工具面       │          ├──────────┤  ├──────────┤
 │ 推导式调度器（asyncio 任务）    │          │ Postgres │  │ MinIO    │
 │ SQLite（文件）+ CAS 文件存储    │          └──────────┘  └──────────┘
 └──────────────────────────────┘

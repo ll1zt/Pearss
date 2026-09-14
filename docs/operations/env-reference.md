@@ -92,6 +92,8 @@ PEARSS_DOCS_ENABLED=0
 # 打开它会同时**关掉 SSRF 守卫**（ADR 0016）——云元数据、RFC1918、loopback
 # 都会变成可抓取目标。仅在你确实订阅内网源时开启，并明白这个代价。
 # PEARSS_ALLOW_PRIVATE_FETCH=0
+# （沙箱子进程同样继承此开关；早期版本会在子进程里被静默重置为「拒绝」，
+#   导致本地/内网源的采集全部报 blocked，而父进程以为已放行。）
 
 
 # ===========================================================================
@@ -115,10 +117,14 @@ PEARSS_DOCS_ENABLED=0
 # ⚠️ 填到 /v1 为止，**不要**自带 /chat/completions——代码会自行拼接。
 # PEARSS_TRANSLATE_BASE_URL=https://api.openai.com/v1
 # PEARSS_TRANSLATE_API_KEY=
-# 主模型。与 MODELS 二选一，后者优先。
+# 主模型。**只放一个模型名**，与 MODELS 二选一，后者优先。
 # PEARSS_TRANSLATE_MODEL=gpt-4o-mini
 # 备选链，逗号分隔。主模型遇到 429/5xx/不可达时依次降级。
 # PEARSS_TRANSLATE_MODELS=gpt-4o-mini,gpt-4o,deepseek-chat
+# ⚠️ 把逗号分隔的多模型写进**单数**变量会让 provider 直接 400
+#    （`unknown provider for model "a,b"`）——它被当成了一个模型名。
+#    实测踩过：表现为「翻译全部失败」。400 现已归类为 `parse`（不可重试），
+#    所以它会立刻显形，而不是伪装成网络抖动重试三次。
 
 
 # ===========================================================================
@@ -139,6 +145,9 @@ PEARSS_DOCS_ENABLED=0
 # PEARSS_X_CT0=
 # PEARSS_X_QUERY_ID=             # 可选：X 轮换 queryId 时覆盖代码内默认值
 # PEARSS_X_COUNT=20              # 每页推文数，1–40，默认 20
+# 首轮抓取页数，默认 3。它定义该源的**历史深度**：首轮走到哪，floor 就定在哪，
+# 此后每轮只在 floor 之上补新。后续轮不受它约束（否则会漏）。
+# PEARSS_X_FIRST_PAGES=3
 # PEARSS_X_USER_AGENT=
 
 # --- CookieCloud（X / 知乎 / 知识星球共用一套凭据分发）---

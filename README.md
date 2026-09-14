@@ -269,7 +269,7 @@ curl -sS "http://127.0.0.1:8000/v1/sources?limit=20" -H "Authorization: Bearer $
 
 ## MCP 控制平面
 
-MCP server 挂在同一应用的 `/mcp/mcp`（Streamable HTTP）。工具：
+MCP server 挂在同一应用的 `/mcp`（Streamable HTTP）。工具：
 
 | 工具 | 需确认 | 作用 |
 |---|---|---|
@@ -281,8 +281,12 @@ MCP server 挂在同一应用的 `/mcp/mcp`（Streamable HTTP）。工具：
 | `add_source` | ⚠ | 加源 |
 | `update_schedule_policy` | ⚠ | 改调度策略 |
 | `set_source_status` | ⚠ | 暂停 / 恢复 |
+| `set_source_folder` | ⚠ | 归类到侧边栏文件夹（一订阅一分类） |
 | `remove_source` | ⚠ | 软删除来源 |
 | `trigger_job` | ⚠ | 立即抓取 |
+| `list_enrichments` | | 某源的处理器链产物状态 |
+| `retry_enrichments` | ⚠ | 重排失败的产物（会再次消耗 provider 额度） |
+| `backfill_source` | ⚠ | 为启用链之前的存量条目补排队 |
 
 **取正文**：优先用 Resource `item://{item_id}` —— 部分客户端把它当附件，不占模型上下文。
 客户端不支持 Resource 时用 `get_item_body`（ADR 0013），它带截断并自述 `truncated` /

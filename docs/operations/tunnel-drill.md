@@ -34,7 +34,7 @@ curl -s -o /dev/null -w "serve /v1:     %{http_code}\n" \
 curl -s -o /dev/null -w "funnel reader: %{http_code}\n" \
   https://pearss.example.ts.net:10000/api/greader.php/reader/api/0/token
                                                              # 期望 200
-for p in /v1/sources /mcp/mcp /healthz /docs /views/health; do
+for p in /v1/sources /mcp /healthz /docs /views/health; do
   printf "funnel %-14s %s\n" "$p" \
     "$(curl -s -o /dev/null -w '%{http_code}' \
         https://pearss.example.ts.net:10000$p)"

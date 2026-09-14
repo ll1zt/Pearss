@@ -21,7 +21,7 @@
 
 ### E2E（tests/e2e/）
 
-- 拓扑：一个 app 实例、一个 uvicorn 线程；REST 与 MCP（挂载于同一 app 的 `/mcp/mcp`）走同一端口；origin 是本地 `ThreadingHTTPServer` 供 RSS fixture
+- 拓扑：一个 app 实例、一个 uvicorn 线程；REST 与 MCP（挂载于同一 app 的 `/mcp`）走同一端口；origin 是本地 `ThreadingHTTPServer` 供 RSS fixture
 - 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
 - discover_feed 不存在（A5 backlog），feed URL 由测试直接给定；工具落地后补第 2 步
 

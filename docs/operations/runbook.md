@@ -41,14 +41,16 @@ journalctl --user -u pearss.service -f
 
 ## X（Twitter）源：登录型采集
 
-X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**采集：每轮走多个页面直到
-前端（seen frontier）或预算耗尽，游标状态存在 `source` 上（`seen_frontier` /
-`resume_cursor` / `resume_rounds`）。
+X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**采集：抓取范围由
+`source` 上的两个游标界定 —— `seen_frontier`（上沿，已入库的最新推文 id）与
+`floor_cursor`（下沿，该源走过的最深位置）。语义见 data-model 的「抓取区间」。
 
 | 症状 | 查什么 | 说明 |
 |---|---|---|
 | `error_class=auth` | `PEARSS_X_*` 或 CookieCloud 配置 | 凭据缺失/失效**不会**匿名重试（ADR 0012）—— 若看到 `auth` 但确信配好了，查 CookieCloud 是否返回了 `auth_token`/`ct0` |
-| 每次采到很深的历史 | `source.resume_rounds` | 首次采集无 frontier，20 页预算会走很深（实测一轮 ~1500 条）。护栏在连续 3 轮仍有 resume 时丢弃游标，之后只取新推文 |
+| 首轮抓回上千条 | `PEARSS_X_FIRST_PAGES`（默认 3） | 它定义该源的历史深度。想让新源只取最近内容，调小再订阅；对已有源改它**无效** —— floor 已由首轮定格 |
+| 每轮请求数远超预期 | `source.floor_cursor` 是否为 NULL | floor 为空说明区间只有上沿，walk 会一直翻到 origin 底部或 200 页护栏。让首轮正常跑完即可建立 floor |
+| 日志出现 `timeline gap` | 无处置动作 | 断档是**记录**而非待办：它位于区间内部，追它等于开出第二个爬取方向。frontier 持续推进才是下一步抓什么的依据 |
 | CookieCloud 连不上 | 服务日志 `CookieCloud unavailable` | 静态 `PEARSS_X_*` 优先；若两者都无 → `auth`。服务端不可达与“没配置”是**不同处置** |
 | X 返回 401 | 服务日志 | 会话已轮换；会绕过缓存重取一次并重试该页（只一次）。若持续 401，说明 CookieCloud 里的仍未更新 —— 需在浏览器重新同步 |
 | `structure_changed` | 响应结构 | X 的 queryId 与结构由 X 单方变更；queryId 会自动从 x.com 的 JS bundle 恢复，失败则 human 介入（见采集器 README） |
@@ -61,7 +63,9 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 
 ## MCP 工具面
 
-- 端点 `/mcp/mcp`（Streamable HTTP），与 API 同进程
+- 端点 `/mcp`（Streamable HTTP），与 API 同进程。**不是 `/mcp/mcp`** —— 那个
+  双重路径是早期把 SDK 的 `/mcp` 路由挂到 `/mcp` 之下造成的，现已在根挂载并用路径守卫
+  收窄；未知路径返回 404，且不再附带 MCP 的鉴权挑战
 - **需要鉴权**：`PEARSS_MCP_TOKEN`（独立于 Core API token，便于单独撤销）。未配置时端点
   返回 **503** 并拒绝一切 —— 这是 fail-closed，不是“未鉴权”。无凭据请求返回 **401**
 - **远程访问需放行 Host**：`PEARSS_MCP_ALLOWED_HOSTS`（如 `100.64.0.1:*`）。不设则
