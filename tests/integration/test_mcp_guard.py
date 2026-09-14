@@ -302,3 +302,30 @@ def test_the_guard_does_not_let_a_lookalike_prefix_through(base_url: str) -> Non
     path separator, so a sibling name is a 404 rather than an MCP request.
     """
     assert httpx.get(f"{base_url}/mcpx").status_code == 404
+
+
+@pytest.mark.integration
+def test_a_404_does_not_advertise_the_mcp_endpoint(base_url: str) -> None:
+    """A missing path is a missing path.
+
+    The guard answers unknown URLs with 404, and the reply must not carry the
+    auth challenge or a token suggestion: neither is why the path is missing,
+    and both would let any mistyped URL discover that an MCP endpoint exists
+    and name the variable that unlocks it.
+    """
+    response = httpx.get(f"{base_url}/nope")
+    assert response.status_code == 404
+    assert "www-authenticate" not in {k.lower() for k in response.headers}
+    suggestion = response.json()["error"]["suggestion"]
+    assert MCP_TOKEN_ENV not in suggestion
+
+
+@pytest.mark.integration
+def test_a_401_still_carries_the_challenge(base_url: str) -> None:
+    """The auth path keeps its hint: there the token really is the remedy."""
+    response = httpx.post(
+        f"{base_url}/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )
+    assert response.status_code == 401
+    assert response.headers.get("www-authenticate") == 'Bearer realm="pearss-mcp"'
+    assert MCP_TOKEN_ENV in response.json()["error"]["suggestion"]

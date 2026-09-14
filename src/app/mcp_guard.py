@@ -404,30 +404,39 @@ async def _reject(
 
     A client that speaks one API's error format should not have to learn a
     second one for a different port of the same process.
+
+    Status-specific fields are deliberate. A 404 is a path this server does
+    not serve, and saying anything about the MCP token there is both wrong
+    (the token is not why the path is missing) and a disclosure (every
+    mistyped URL would advertise that an MCP endpoint exists and name the
+    variable that unlocks it). Only the 401/503 auth paths carry the
+    challenge header for the same reason.
     """
-    body = json.dumps(
-        {
-            "error": {
-                "code": code,
-                "message": message,
-                "suggestion": (
-                    f"Set {MCP_TOKEN_ENV} and send it as "
-                    "`Authorization: Bearer <token>`."
-                    if status == 401
-                    else f"Set {MCP_TOKEN_ENV} to enable the MCP endpoint."
-                ),
-            }
-        }
-    ).encode()
+    if status == 401:
+        suggestion = (
+            f"Set {MCP_TOKEN_ENV} and send it as `Authorization: Bearer <token>`."
+        )
+    elif status == 503:
+        suggestion = f"Set {MCP_TOKEN_ENV} to enable the MCP endpoint."
+    else:
+        suggestion = "Check the path; this server serves /mcp."
+    error: dict[str, object] = {
+        "code": code,
+        "message": message,
+        "suggestion": suggestion,
+    }
+    headers = [
+        (b"content-type", b"application/json"),
+    ]
+    if status in {401, 503}:
+        headers.append((b"www-authenticate", b'Bearer realm="pearss-mcp"'))
+    body = json.dumps({"error": error}).encode()
+    headers.append((b"content-length", str(len(body)).encode()))
     await send(
         {
             "type": "http.response.start",
             "status": status,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-                (b"www-authenticate", b'Bearer realm="pearss-mcp"'),
-            ],
+            "headers": headers,
         }
     )
     await send({"type": "http.response.body", "body": body})
