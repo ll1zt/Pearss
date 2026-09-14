@@ -1,8 +1,9 @@
 # 0006 · Reader API 的 item ID 必须是十进制整数（supersede ADR 0005 的 ID 部分）
 
-- 状态：accepted
+- 状态：accepted（**2026-09-15 修订**：contents 响应的长式 id 由「不填充」改为零填充 16 位）
 - 日期：2026-09-04
 - 部分取代：ADR 0005（仅其「item ID 映射」一节；凭据部分仍然有效）
+- 修订：下表 `stream/items/contents` 响应的格式，见「修订」一节
 
 ## 背景
 
@@ -47,7 +48,7 @@ reader_id_hex(ext)   = format(ext, "015x")       # 反查：还原为内部 id �
 | 位置 | 格式 |
 |---|---|
 | `stream/items/ids` 响应 | **十进制字符串** |
-| `stream/items/contents` 响应 | `tag:google.com,2005:reader/item/<hex>`（不填充） |
+| `stream/items/contents` 响应 | `tag:google.com,2005:reader/item/<hex>`，**零填充 16 位**（2026-09-15 修订，见下） |
 | `edit-tag` 请求 | 同上但零填充到 16 位 |
 | `contents` 请求 | 同上但不填充 |
 
@@ -86,3 +87,30 @@ reader_id_hex(ext)   = format(ext, "015x")       # 反查：还原为内部 id �
 ## 教训
 
 ADR 0005 的错误在于：用一个「我觉得客户端会怎么处理」的假设，替代了「去读客户端源码」。**涉及对外契约时，应以对端实现为准，而不是以规范文档或直觉为准。**
+
+## 修订（2026-09-15）：contents 响应必须零填充 16 位
+
+上表原写「contents 响应不填充」。**这条只对 NNW 成立，不是协议契约。**
+
+接入 Android 的 **ReadYou** 时暴露了后果：订阅列表正常、**零条目**、无限重同步。
+根因在 ReadYou 的 id 校验（`GoogleReaderAPI.kt`）：
+
+```kotlin
+val ItemId.isLongId: Boolean
+    get() = startsWith(PREFIX) && removePrefix(PREFIX).length == 16
+```
+
+它按**长度**校验长式 id，其源码注释表也写着 "Long form needs 0-padding"，
+不合格的条目在入库前被全部过滤。而我们此前用 `{external:x}` 输出：external
+是内部 id 的前 15 个十六进制字符，**最高位为 0 时尾长就是 15 位**——约莫每两条
+命中一条。部署主机实测响应是 `.../item/6bb2584330b6d0d`（15 字符）。
+
+NNW 用 `Int(part, radix: 16)` 读回，填充与否都解析得动，所以它无感——这正是
+本条 ADR 当初把「不填充」写成契约的原因：**它记录的只是当时唯一客户端的容忍度，
+不是协议要求。**
+
+改为一律零填充 16 位（`{external:016x}`），与上表 `edit-tag` 请求的 `%.16llx`
+同形。两个端点的长式 id 至此形状一致。
+
+**教训**（与 ADR 0005 被 0006 取代时同构）：把一个客户端的容忍度当成协议契约，
+就会在下一次接入新客户端时以「能登录但没内容」的形态复发。

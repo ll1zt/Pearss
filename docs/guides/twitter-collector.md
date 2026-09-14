@@ -241,15 +241,24 @@ cookie。ADR 0012「实现约束」记录了这条从全局环境变量改过来
 |---|---|---|---|
 | 1 | 非 `+0000` 的 `created_at` 一律返回无时间戳 | 换算成 UTC | 因为一个没预料到的时区就丢掉真实时间，比换算更糟 |
 | 2 | 区间不校验（注释说 UTF-16，代码按码点） | 比对 `t.co` 文本 → 定位字面量 → 丢弃 | 错误区间不是崩溃，是把链接安到错误的词上 |
-| 3 | 头像用 inline `style` | 用 `width`/`height` 属性 | 入库净化（ADR [0007](../adr/0007-sanitize-feed-html-at-store-time.md)）丢弃 `style` 与 `class` |
+| 3 | 头像用 inline `style` | **不渲染头像**（见下） | 无法可靠呈现为圆形，且正文不需要它 |
 
-第 3 条的配套：`class="pearss-avatar"` 是净化器**唯一**放行的类（固定常量，
-按值校验于 `adapters.sanitize`），所以读者/主题可以挂 `border-radius: 50%`
-做圆形头像。这个类是**邀请而非指令**——不提供该规则的客户端渲染结果与之前完全一致。
+### 头像：试过、撤销了
 
-`alt` 用作者显示名而非空串：头像 URL 挂掉时降级为作者名而不是降级为"什么都没有"，
-屏幕阅读器也能读出这是谁。测试用净化器过滤后再断言属性仍在
-（`test_the_avatar_attributes_survive_the_sanitiser`）——不过净化器就断言等于没断言。
+上游把头像内联在正文里（`style` 做圆形）。本移植先照做，改用
+`width`/`height` 属性 + `class="pearss-avatar"`（净化器唯一放行的类，按值
+校验于 `adapters.sanitize`），让阅读器/主题挂 `border-radius: 50%` 自行做圆。
+
+**在真实阅读器里验收后撤销**：NNW 不注入自定义 CSS，头像就显示成方形；
+而服务端做圆是**不可能的**——inline `style` 是 XSS 面，净化器（ADR 0007）
+全面禁止。与其发一个注定不像头像的图片，不如不发。
+
+因此署名就是纯文字 `名字 @handle`，正文里的**图片与引用媒体不受影响**
+（它们是内容，不是装饰）。`AVATAR_CLASS` 常量保留在 `adapters.sanitize`：
+它是通用样式钩子，其他采集器可能用，且有自己的测试。
+
+同理，`published_at` 已解析并入库，但**不在正文里渲染**：阅读器自己就显示
+到达时间，每条都重复是噪声。
 
 ## 身份与字段映射
 
@@ -301,33 +310,73 @@ X 在不同时期把同一份数据放在不同位置，**只接受一种会静�
 | `binding_values` | map | `[{key, value}]` 数组 | `cards.json` |
 | 可见性包装 | `TweetWithVisibilityResults.tweet` | 直接是 `Tweet` | `visibility.json` |
 
-### ⚠️ 已确认的内容丢失：`home-conversation` 模块被整块丢弃
+### 第四个分叉：`home-conversation` 模块（已处理）
 
-`_tweets()` 只接受 `entryId` 以 `tweet-` 开头的条目，于是
-`home-conversation-*`（`TimelineTimelineModule`）里的推文**从未被解析**。
-但这些模块的 `content.items[].item.itemContent.tweet_results.result`
+`_tweets()` 曾经只接受 `entryId` 以 `tweet-` 开头的条目，于是
+`home-conversation-*`（`TimelineTimelineModule`）里的推文被整块丢弃。
+这些模块的 `content.items[].item.itemContent.tweet_results.result`
 是**完整推文**——有 `legacy`、作者、时间戳，内容是回复串。
 
-**2026-09-14 实测**：两页各丢 11–13 条，占该页推文总数约 **14%**。
-丢失的全是对话回复，往往信息密度最高。
+**2026-09-14 实测**：两页各丢 11–13 条，占该页推文总数约 **14%**，
+且全是对话回复（信息密度最高的部分）。
 
-这是"同一事实的多条路径"的**第四个分叉，且尚未处理**。危险在于它与
-推广推文（`promoted-tweet-*`）目前靠**同一条规则**（"不以 `tweet-` 开头就跳过"）
-被排除——规则本身是偶然正确：`promoted-tweet-*` 确实该丢，
-`home-conversation-*` 不该。
+危险在于它和推广推文（`promoted-tweet-*`）此前靠**同一条规则**
+（"不以 `tweet-` 开头就跳过"）被排除——规则偶然正确：广告确实该丢，
+对话不该。展开模块后广告会意外入库。
 
-**修法**：展开 `TimelineTimelineModule` 的 `items`，并**显式**排除
-`promoted-tweet-*`（或按 `itemContent.promotedMetadata` 判），
-不能继续依赖前缀这一个模糊判据。`fixtures/` 目前**没有任何**
-`home-conversation` 语料——这正是缺陷长期未被发现的原因。
+现在的形状是**显式枚举**，不再依赖前缀：
+
+| 条目 | 处理 |
+|---|---|
+| `tweet-<id>` | 一条推文 |
+| `home-conversation-<id>` | 展开 `content.items[].item.itemContent`，每条是一推文 |
+| `promoted-tweet-<id>`、`itemContent.promotedMetadata` | 排除 |
+| `cursor-*` | 只取游标值 |
+
+**推广判定是 item 级，不是 entry 级**（`_is_promoted(item_content)`）。
+这一条是 review 自己代码时发现的：初版让 `_is_promoted` 递归进模块、
+任一 item 是广告就跳过**整个模块**——那正是本分支要修的那类静默丢内容，
+只是移到了另一层。
+
+`fixtures/conversation.json` 是脱敏语料（结构、字段组合、sortIndex 量纲
+照抄真实载荷；文本、用户名、头像 URL 为合成），同时含这三种条目形状。
 
 完整改进规划见 [twitter-improvements.md](twitter-improvements.md)。
+
+## 标题类型前缀（`RT ` / `QT `）
+
+阅读器的列表视图**只显示标题**，所以正文里的 `↻ 某人 转推了` 横幅在那里
+完全不可见。真实页面上转推 + 引用合计约 **44–46%**，此前在标题层面无法区分。
+
+| 类型 | 前缀 | 标题主体 |
+|---|---|---|
+| 转推 | `RT ` | 被转推原推的文本 |
+| 引用 | `QT ` | 自身正文 |
+| 原创 | （无） | 自身正文 |
+
+三个设计点：
+
+- 前缀加在 `_title_from_text()` 的**输出**上，不加在正文（会污染 content）
+- 前缀从 `TITLE_MAX` 里**扣**，不是加在上面——否则每个带标记的标题都超限
+- 两者同时成立时取 `RT `：顶层形态是转推，引用已在正文 blockquote 里呈现
+
+**刻意不带 handle**：上游的 `RT @user: text` 形态仍然被拒——它重复
+`metadata["author"]`，还让人分不清读到的是谁的话。`test_retweet_keeps_the_retweeter_and_uses_the_original_body`
+继续断言不含该形态，新测试断言裸 `RT ` 存在，两条 docstring 写清区别。
+
+## 图片尺寸
+
+图片用 `original_info.width/height` 写 `width`/`height` 属性，让阅读器在图片
+加载前占住正确高度、消除布局跳动（真实页面上 29/29 张图都带这个字段）。
+**注意**：`bool` 是 `int` 子类，`isinstance(True, int)` 为真，所以守卫显式
+排除布尔值——否则会渲染出 `width="True"`。图片 URL 用原图，不取缩略图。
+
 
 ## 测试布局
 
 ```text
 src/plugins/collectors/twitter/
-  test_collector.py    35 个  解析（含 6 个实体区间、头像/净化器）
+  test_collector.py    57 个  解析（含 6 个实体区间、条目形状、标题前缀、图片尺寸）
   test_client.py       29 个  请求形状、凭据解析、错误分类、queryId 恢复
   test_paging.py       21 个  frontier / 断档 / 预算 / 部分成功 / floor 候选
 tests/integration/
@@ -362,7 +411,8 @@ frontier 只前移、floor 不被预算停止覆盖。全部离线——HTTP 层
 改动本目录时值得先跑的检查：
 
 ```bash
-just test        # 含本目录 85 个 + tests/integration/test_twitter_paging.py 13 个
-                 #   + tests/unit/test_cookiecloud.py 35 个，全部离线
+just test        # 含本目录（test_collector 57 + test_client 29 + test_paging 21）
+                 #   + tests/integration/test_twitter_paging.py 13 个
+                 #   + tests/unit/test_cookiecloud.py，全部离线
 just lint        # import-linter 守四层依赖方向
 ```

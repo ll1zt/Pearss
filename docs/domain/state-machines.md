@@ -136,6 +136,11 @@ ReadState 不需要复杂生命周期；它是 Item 的可变消费侧事实：
 
 - 不存在记录等价于 `is_read=false, is_starred=false`
 - Reader API 写入使用 last-write-wins，但必须带服务端接收时间 `updated_at`
+- **last-write-wins 必须是单语句原子 upsert，不能是读-改-写**。读-改-写的
+  INSERT 挂到 commit 才落库，并发 `edit-tag` 期间另一个请求提交同 ``(item_id,
+  tenant_id)`` 会让前者在下一个查询的 autoflush 撞上 UNIQUE 约束，**整批 500**
+  （2026-09-14 线上实测，NNW 表现是"标已读偶发失效"）。WAL 会把并发写串行化，
+  所以正确的写法是把竞态消解在语句内部
 - 删除 Item 前必须先按保留策略归档/删除 ReadState
 - ReadState 改变永远不得改动 Item 发布内容或 publish_status
 

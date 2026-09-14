@@ -56,7 +56,7 @@ docs/adr/
 | [0003](0003-rss-cdata-passthrough-and-lxml.md) | RSS 正文以 CDATA 原样透传，并用 lxml 生成 | **部分 superseded**（净化取向被 0007 反转） | 2026-09-03 |
 | [0004](0004-reader-api-promoted-to-p1.md) | Reader API（C4）从 P3 提前到 P1 | accepted | 2026-09-03 |
 | [0005](0005-reader-api-credentials-and-id-mapping.md) | Reader API 的凭据与 item ID 映射 | **部分 superseded**（ID 部分被 0006 取代） | 2026-09-03 |
-| [0006](0006-reader-api-ids-must-be-decimal.md) | Reader API 的 item ID 必须是十进制整数 | accepted | 2026-09-04 |
+| [0006](0006-reader-api-ids-must-be-decimal.md) | Reader API 的 item ID 必须是十进制整数 | accepted（**修订**：contents 长式 id 零填充 16 位） | 2026-09-04 |
 | [0007](0007-sanitize-feed-html-at-store-time.md) | 入库前用 nh3 净化正文 HTML | accepted | 2026-09-04 |
 | [0008](0008-source-canonical-url-not-null.md) | source.canonical_url 必须 NOT NULL | accepted | 2026-09-04 |
 | [0009](0009-derived-schedule-without-apscheduler.md) | 调度时间从策略与历史推导，不引入 APScheduler | accepted | 2026-09-04 |

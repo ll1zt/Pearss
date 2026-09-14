@@ -20,11 +20,12 @@ src/plugins/collectors/twitter/
   client.py          # GraphQL 请求、凭据、queryId 恢复
   paging.py          # 翻页：frontier / 断档检测 / 区间下界
   walk.py            # 三者粘合 + 沙箱 RPC 入口
-  test_collector.py  # 35 个解析测试
+  test_collector.py  # 57 个解析测试
   test_client.py     # 29 个请求与分类测试
   test_paging.py     # 21 个翻页测试
   fixtures/
     valid.json         # 上游实现记录的真实形态（RT / 图片 / 长推 / 截断）
+    conversation.json  # home-conversation 模块 + 推广条目（脱敏，结构与量纲照抄真实载荷）
     quoted.json        # 引用推文在顶层与在 legacy 下两种形态
     cards.json         # 投票卡（binding_values 为 map 与为数组）+ 链接卡
     visibility.json    # TweetWithVisibilityResults 包装
