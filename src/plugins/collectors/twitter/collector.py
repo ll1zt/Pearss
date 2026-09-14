@@ -98,7 +98,12 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
     # _tweets validates through _instructions, so a suppressed or malformed
     # payload raises here rather than arriving as an empty list.
     return [
-        _draft_from_tweet(tweet, source_id=raw.source_id, raw_fetch_id=raw.raw_fetch_id)
+        _draft_from_tweet(
+            tweet,
+            source_id=raw.source_id,
+            raw_fetch_id=raw.raw_fetch_id,
+            source_url=raw.url,
+        )
         for tweet in _tweets(raw.body)
     ]
 
@@ -346,7 +351,11 @@ def _id_sort_index(item_content: object) -> int | None:
 
 
 def _draft_from_tweet(
-    tweet: Json, *, source_id: str, raw_fetch_id: str | None
+    tweet: Json,
+    *,
+    source_id: str,
+    raw_fetch_id: str | None,
+    source_url: str = "",
 ) -> ItemDraft:
     retweet = _retweet_parts(tweet)
 
@@ -381,7 +390,7 @@ def _draft_from_tweet(
         source_id=source_id,
         external_id=f"twitter:{_text(_get(tweet, 'rest_id'))}",
         title=title,
-        canonical_url=_tweet_link(tweet),
+        canonical_url=_tweet_link(tweet, source_url=source_url),
         published_at=published,
         content=content,
         raw_fetch_id=raw_fetch_id,
@@ -409,8 +418,30 @@ def _retweet_parts(tweet: Json) -> tuple[Json, Json] | None:
     return tweet, original
 
 
-def _tweet_link(tweet: Json) -> str:
-    return f"https://x.com/{_screen_name(tweet)}/status/{_text(_get(tweet, 'rest_id'))}"
+def _tweet_link(tweet: Json, *, source_url: str = "") -> str:
+    """The post's permalink, or the source URL when no author is resolvable.
+
+    `_screen_name` falls back to the literal "unknown" so a byline can still
+    say something, but that sentinel must never reach the URL: splicing it in
+    produced `x.com/unknown/status/<id>`, a link to an account that does not
+    exist. collector-guide requires `canonical_url` to be non-empty and not a
+    tracking URL -- a URL that resolves to a real page naming the wrong author
+    is worse than either, because it silently misleads.
+
+    The fallback is the *source* URL, not a guessed permalink shape. X's
+    authorless form is commonly said to be `/i/status/<id>`, but this could
+    not be verified (x.com answers 401 to an unauthenticated probe for both a
+    real and a fabricated author segment, so the two cannot be told apart),
+    and writing an unverified URL into a permanent field is exactly the
+    mistake being fixed. The source URL is reachable by construction and
+    names nobody. This is the same guard `_quoted_html` already applied to
+    this sentinel.
+    """
+    rest_id = _text(_get(tweet, "rest_id"))
+    screen = _screen_name(tweet)
+    if screen == "unknown":
+        return source_url or "https://x.com/home"
+    return f"https://x.com/{screen}/status/{rest_id}"
 
 
 def _retweet_banner(retweeter: Json) -> str:

@@ -17,7 +17,7 @@ import binascii
 import json
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -58,6 +58,11 @@ TENANT = "default"
 # the table does not grow without bound.
 IDEMPOTENCY_WINDOW = timedelta(days=7)
 
+# What a 409 already_running tells the client to wait. A collection takes
+# seconds to a couple of minutes; 30 is a hint that is neither so short that a
+# retry immediately hits the same 409 nor so long that a freed slot sits idle.
+_BUSY_RETRY_AFTER_SECONDS: Final = 30
+
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
 
@@ -74,15 +79,21 @@ def api_error(
     suggestion: str,
     error_class: str | None = None,
     details: list[Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> HTTPException:
     """Build an HTTPException carrying the documented error envelope.
 
     The correlation id is embedded so a client can quote one value when
     reporting a problem, and `code` is stable while `message` is allowed to
     change — clients branch on the former.
+
+    `headers` exists for the answers that carry a retry interval: HTTP has a
+    header for that, and a response whose body says "try later" while its
+    headers say nothing makes every caller invent its own backoff.
     """
     return HTTPException(
         status_code=status_code,
+        headers=headers,
         detail={
             "error": {
                 "code": code,
@@ -1010,7 +1021,16 @@ def trigger_source(
             status_code=409,
             code="already_running",
             message="Another collection of this source is in progress.",
-            suggestion="Check list_runs for the outcome of the in-flight run.",
+            suggestion=(
+                "Check list_runs for the outcome of the in-flight run, then "
+                f"retry after about {_BUSY_RETRY_AFTER_SECONDS} seconds."
+            ),
+            # Wait for the in-flight run, not for a scheduling interval: the
+            # slot frees when that collection ends, which is seconds to a
+            # couple of minutes. The number is a hint -- HTTP allows any
+            # positive delay -- and a client that retries once it has passed
+            # either succeeds or gets 409 again with the same hint.
+            headers={"Retry-After": str(_BUSY_RETRY_AFTER_SECONDS)},
         )
 
     payload: dict[str, Any] = {

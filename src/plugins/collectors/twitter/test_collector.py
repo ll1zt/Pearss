@@ -1198,22 +1198,82 @@ def test_a_display_name_with_markup_is_still_escaped() -> None:
 def test_a_tweet_with_no_resolvable_author_gets_no_fabricated_url() -> None:
     """A missing author must not become `x.com/unknown/status/<id>`.
 
-    `_screen_name` falls back to the literal "unknown" so the byline can
-    still say something, but `_tweet_link` spliced that same sentinel into
-    the canonical URL -- producing a link to an account that does not exist.
+    `_screen_name` falls back to the literal "unknown" so a byline can still
+    say something, but `_tweet_link` spliced that same sentinel into the
+    canonical URL -- producing a link to an account that does not exist.
     collector-guide requires `canonical_url` to be non-empty and not a
-    tracking URL; a URL that resolves to the wrong place is worse than either,
-    because it silently sends the reader somewhere real but wrong.
+    tracking URL; a URL that resolves to a real page naming the wrong author
+    is worse than either, because it silently misleads. The quoted path
+    already guarded this sentinel, which is how the inconsistency surfaced.
 
-    The quoted path already guarded this same sentinel (`screen != "unknown"`),
-    which is how the inconsistency was spotted.
+    The fallback is the source URL: reachable by construction, and it names
+    nobody. X's authorless shape is said to be `/i/status/<id>`, but that
+    could not be verified (x.com answers 401 to an unauthenticated probe for
+    both a real and a fabricated author segment), and a permanent field is no
+    place for a guess.
     """
     from plugins.collectors.twitter.collector import _tweet_link
 
     authorless = {"rest_id": "2099382889754325000", "legacy": {"full_text": "x"}}
-    link = _tweet_link(authorless)
 
+    link = _tweet_link(authorless, source_url="https://x.com/home")
     assert "unknown" not in link, link
-    # Still a usable link to the post itself, just without an author segment.
-    assert "2099382889754325000" in link
-    assert link.startswith("https://x.com/")
+    assert link == "https://x.com/home"
+
+    # With an author the permalink is unchanged -- this is a fallback, not a
+    # rewrite of the normal path.
+    authored = {
+        "rest_id": "2099382889754325000",
+        "core": {"user_results": {"result": {"core": {"screen_name": "someone"}}}},
+    }
+    assert _tweet_link(authored) == "https://x.com/someone/status/2099382889754325000"
+
+
+@pytest.mark.unit
+def test_an_authorless_tweet_still_parses_end_to_end() -> None:
+    """The guard must hold through `parse`, not only in the helper.
+
+    `source_url` has to reach `_tweet_link` from the payload; asserting only
+    on the helper would pass even if the wiring were dropped.
+    """
+    import json
+
+    tweet = {
+        "__typename": "Tweet",
+        "rest_id": "2099382889754325000",
+        "legacy": {
+            "full_text": "nobody is resolvable here",
+            "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+            "entities": {},
+        },
+    }
+    body = json.dumps(
+        {
+            "data": {
+                "home": {
+                    "home_timeline_urt": {
+                        "instructions": [
+                            {
+                                "type": "TimelineAddEntries",
+                                "entries": [
+                                    {
+                                        "entryId": "tweet-2099382889754325000",
+                                        "sortIndex": "2099382889754325000",
+                                        "content": {
+                                            "itemContent": {
+                                                "tweet_results": {"result": tweet}
+                                            }
+                                        },
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    ).encode()
+    drafts = parse(RawPayload(url=URL, status_code=200, body=body, source_id="src-x"))
+    assert len(drafts) == 1
+    assert "unknown" not in drafts[0].canonical_url
+    assert drafts[0].canonical_url == URL

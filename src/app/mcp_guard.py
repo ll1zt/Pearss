@@ -92,7 +92,7 @@ def _bearer_present(scope: Mapping[str, Any]) -> str:
 
 
 class MCPPathGuard:
-    """Let only MCP paths through; hand everything else back as 404.
+    """Let the MCP endpoint through; hand everything else back as 404.
 
     The MCP sub-app is mounted at the root so that the SDK's own route is the
     public path, and a root mount matches whatever no earlier route claimed.
@@ -102,7 +102,12 @@ class MCPPathGuard:
     wrong (a missing route is 404) and informative (it advertises that an MCP
     endpoint exists).
 
-    `prefix` is the public path; the sub-app serves there and nowhere else.
+    **The match is exact**, not a prefix. The SDK registers one route
+    (`streamable_http_path`, `/mcp` here) -- there is no sub-path tree to
+    admit. Admitting the whole prefix meant a URL typo such as `/mcp/mcp`
+    reached the auth layer and came back 401, which reads as "your token is
+    wrong": a missing-route defect wearing the costume of an auth failure, and
+    it sends whoever debugs it to the wrong system.
     """
 
     def __init__(self, app: Any, *, prefix: str = "/mcp") -> None:
@@ -115,10 +120,11 @@ class MCPPathGuard:
             await self._app(scope, receive, send)
             return
         path = str(scope.get("path", ""))
-        # `startswith` rather than equality: the transport and any protocol
-        # metadata live under the same prefix, and this guard decides only
-        # whether the MCP layer owns the path at all.
-        if path == self._prefix or path.startswith(self._prefix + "/"):
+        # Exact equality: this guard decides only whether the MCP layer owns
+        # the path at all, and it owns exactly one path. A trailing slash is
+        # not the endpoint either -- the transport answers 307 for it (client
+        # redirect) rather than the SDK serving a second address.
+        if path == self._prefix:
             await self._app(scope, receive, send)
             return
         await _reject(

@@ -1328,7 +1328,7 @@ async def test_a_busy_source_says_when_to_retry(
     )
 
     assert response.status_code == 409, response.text
-    assert response.json()["error"]["code"] == "already_running"
+    assert response.json()["detail"]["error"]["code"] == "already_running"
     retry_after = response.headers.get("retry-after")
     assert retry_after is not None, "409 must say when to come back"
     # A positive number of seconds: the client sleeps, then retries.
