@@ -201,6 +201,155 @@ def test_cursor_only_page_is_valid_and_empty() -> None:
 
 
 # --------------------------------------------------------------------------
+# Entry shapes: what a page contains besides plain top-level tweets
+#
+# Measured on a real HomeLatestTimeline page (2026-09-14): of 95 entries, 79
+# were top-level tweets, 5 were `home-conversation` modules holding 13 *more*
+# tweets, 9 were promoted slots, and 2 were cursors. The 13 conversation
+# tweets were being dropped whole -- about 14% of the page.
+# --------------------------------------------------------------------------
+
+
+def _entry_ids(body: bytes | str) -> list[str]:
+    """Every `tweet-` entryId anywhere on the page, modules included."""
+    import json
+
+    found: list[str] = []
+    for entry in json.loads(body)["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]:
+        if entry["entryId"].startswith("tweet-"):
+            found.append(entry["entryId"])
+        for item in (entry.get("content") or {}).get("items") or []:
+            inner = item.get("entryId", "")
+            if inner.startswith("tweet-"):
+                found.append(inner)
+    return found
+
+
+@pytest.mark.unit
+def test_tweets_inside_a_conversation_module_are_parsed() -> None:
+    """`home-conversation` is a TimelineTimelineModule, not a tweet.
+
+    Its `content.items[].item.itemContent` carries full tweets (the thread's
+    replies), so a parser that only looks at top-level `tweet-` entries loses
+    them silently. This asserts the count, not merely that parsing succeeds:
+    a test that only checked "no exception" would pass on the broken version.
+    """
+    body = payload("conversation.json").body
+    assert len(_entry_ids(body)) == 7, "the fixture holds 7 tweets in total"
+    assert len(page_ids(body)) == 7, "every tweet on the page must be seen"
+    assert len(drafts("conversation.json")) == 7
+
+
+@pytest.mark.unit
+def test_a_conversation_module_keeps_its_replies_in_order() -> None:
+    """Module items are ordered as X laid them out, and keep their fields."""
+    items = drafts("conversation.json")
+    by_id = {d.external_id.removeprefix("twitter:"): d for d in items}
+    parent = next(v for v in by_id.values() if "Parent post" in v.title)
+    first_reply = next(v for v in by_id.values() if "First reply" in v.title)
+    second_reply = next(v for v in by_id.values() if "Second reply" in v.title)
+
+    assert parent.metadata["author"] == "Gamma (@gamma)"
+    assert first_reply.metadata["author"] == "Delta (@delta)"
+    # The reply link must point at the replier, not the thread parent.
+    assert "/delta/status/" in first_reply.canonical_url
+    assert second_reply.published_at is not None
+    # Order within the module is the page's order: parent, then replies.
+    ids = [d.external_id for d in items]
+    assert ids.index(parent.external_id) < ids.index(first_reply.external_id)
+    assert ids.index(first_reply.external_id) < ids.index(second_reply.external_id)
+
+
+@pytest.mark.unit
+def test_promoted_tweets_are_never_ingested() -> None:
+    """A promoted slot carries a real tweet_results and must be excluded.
+
+    This is the trap in fixing the conversation case: once the parser walks
+    `itemContent` instead of keying off the `tweet-` prefix, an ad would be
+    ingested unless it is excluded *explicitly*. The fixture's promoted entry
+    is designed to be parsed successfully if it is ever let through.
+    """
+    body = payload("conversation.json").body
+    assert all("promoted" not in i for i in page_ids(body))
+    for draft in drafts("conversation.json"):
+        assert "PROMOTED" not in draft.title
+        assert "adco" not in draft.canonical_url
+        assert "PROMOTED" not in draft.content
+
+
+@pytest.mark.unit
+def test_page_sort_span_ignores_cursor_entries() -> None:
+    """Only tweets bound the interval; a cursor's sortIndex is not a tweet's.
+
+    Measured on real pages: `cursor-top` sits exactly one above the newest
+    tweet and `cursor-bottom` one below the oldest, so including them widens
+    the span by two units and shifts `previous_min_sort` below the true tweet
+    floor. Gap detection compares against that value, so the interval must be
+    built from tweets alone.
+    """
+    body = payload("conversation.json").body
+    span = page_sort_span(body)
+    assert span is not None
+    high, low = span
+    # The fixture's tweets run BASE+88 .. BASE+99; the cursors are BASE+0 and
+    # BASE+100. A span that includes them would reach either end.
+    assert high == _tweet_sort_max(body), "the newest tweet bounds the top"
+    assert low == _tweet_sort_min(body), "the oldest tweet bounds the bottom"
+
+    cursors = _cursor_sorts(body)
+    assert cursors, "the fixture has cursors, or this proves nothing"
+    assert low > min(cursors), "a cursor must not set the bottom of the span"
+    assert high < max(cursors), "a cursor must not set the top of the span"
+
+
+@pytest.mark.unit
+def test_a_cursor_only_page_has_no_span() -> None:
+    """No tweets means continuity cannot be proven -- not that it holds.
+
+    Returning a span here is worse than returning nothing: `(5, 5)`-style
+    values (as the old fixture implied) make every following page look
+    discontinuous, and even a correct-looking value would claim a continuity
+    the page has no evidence for.
+    """
+    body = payload("no_posts.json").body
+    assert page_ids(body) == []
+    assert page_sort_span(body) is None
+
+
+def _tweet_sort_max(body: bytes | str) -> int:
+    return max(_tweet_sorts(body))
+
+
+def _tweet_sort_min(body: bytes | str) -> int:
+    return min(_tweet_sorts(body))
+
+
+def _tweet_sorts(body: bytes | str) -> list[int]:
+    import json
+
+    sorts: list[int] = []
+    for entry in json.loads(body)["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]:
+        if entry["entryId"].startswith("tweet-"):
+            sorts.append(int(entry["sortIndex"]))
+        for item in (entry.get("content") or {}).get("items") or []:
+            if item.get("entryId", "").startswith("tweet-"):
+                # A module's own sortIndex is a layout position, not the item's
+                # id range; the item's id is what orders it.
+                sorts.append(int(item["entryId"].split("-", 1)[1]))
+    return sorts
+
+
+def _cursor_sorts(body: bytes | str) -> list[int]:
+    import json
+
+    return [
+        int(e["sortIndex"])
+        for e in json.loads(body)["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]
+        if e["entryId"].startswith("cursor")
+    ]
+
+
+# --------------------------------------------------------------------------
 # Shapes the upstream comments call necessary but never tested
 # --------------------------------------------------------------------------
 

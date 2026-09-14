@@ -1,0 +1,569 @@
+{
+ "data": {
+  "home": {
+   "home_timeline_urt": {
+    "instructions": [
+     {
+      "type": "TimelineAddEntries",
+      "entries": [
+       {
+        "entryId": "cursor-top-2099400000000000100",
+        "sortIndex": "2099400000000000100",
+        "content": {
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Top",
+         "entryType": "TimelineTimelineCursor",
+         "value": "CURSOR_TOP"
+        }
+       },
+       {
+        "entryId": "tweet-2099400000000000099",
+        "sortIndex": "2099400000000000099",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2099400000000000099",
+            "core": {
+             "user_results": {
+              "__typename": "UserResults",
+              "result": {
+               "__typename": "User",
+               "rest_id": "9001",
+               "is_blue_verified": false,
+               "core": {
+                "name": "Alpha",
+                "screen_name": "alpha"
+               },
+               "relationship_counts": {
+                "followers": 10,
+                "following": 20
+               },
+               "verification": {
+                "verified": false
+               },
+               "avatar": {
+                "image_url": "https://example.com/avatar/9001.png"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "full_text": "Top-level tweet A about a synthetic topic.",
+             "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+             "id_str": "2099400000000000099",
+             "conversation_id_str": "2099400000000000099",
+             "favorite_count": 1,
+             "retweet_count": 0,
+             "reply_count": 0,
+             "quote_count": 0,
+             "bookmark_count": 0,
+             "lang": "en",
+             "is_quote_status": false,
+             "display_text_range": [
+              0,
+              42
+             ],
+             "entities": {
+              "urls": [],
+              "media": []
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "tweet-2099400000000000098",
+        "sortIndex": "2099400000000000098",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2099400000000000098",
+            "core": {
+             "user_results": {
+              "__typename": "UserResults",
+              "result": {
+               "__typename": "User",
+               "rest_id": "9002",
+               "is_blue_verified": false,
+               "core": {
+                "name": "Beta",
+                "screen_name": "beta"
+               },
+               "relationship_counts": {
+                "followers": 10,
+                "following": 20
+               },
+               "verification": {
+                "verified": false
+               },
+               "avatar": {
+                "image_url": "https://example.com/avatar/9002.png"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "full_text": "Top-level tweet B, also synthetic.",
+             "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+             "id_str": "2099400000000000098",
+             "conversation_id_str": "2099400000000000098",
+             "favorite_count": 1,
+             "retweet_count": 0,
+             "reply_count": 0,
+             "quote_count": 0,
+             "bookmark_count": 0,
+             "lang": "en",
+             "is_quote_status": false,
+             "display_text_range": [
+              0,
+              34
+             ],
+             "entities": {
+              "urls": [],
+              "media": []
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "home-conversation-2099400000000000097",
+        "sortIndex": "2099400000000000097",
+        "content": {
+         "__typename": "TimelineTimelineModule",
+         "entryType": "TimelineTimelineModule",
+         "displayType": "VerticalConversation",
+         "clientEventInfo": {
+          "component": "following_in_network"
+         },
+         "metadata": {
+          "conversationMetadata": {
+           "enableDeduplication": true,
+           "allTweetIds": [
+            "2099400000000000090",
+            "2099400000000000091",
+            "2099400000000000097"
+           ]
+          }
+         },
+         "items": [
+          {
+           "entryId": "tweet-2099400000000000090",
+           "item": {
+            "clientEventInfo": {
+             "component": "following_in_network"
+            },
+            "itemContent": {
+             "__typename": "TimelineTweet",
+             "itemType": "TimelineTweet",
+             "tweetDisplayType": "Tweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2099400000000000090",
+               "core": {
+                "user_results": {
+                 "__typename": "UserResults",
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "9003",
+                  "is_blue_verified": false,
+                  "core": {
+                   "name": "Gamma",
+                   "screen_name": "gamma"
+                  },
+                  "relationship_counts": {
+                   "followers": 10,
+                   "following": 20
+                  },
+                  "verification": {
+                   "verified": false
+                  },
+                  "avatar": {
+                   "image_url": "https://example.com/avatar/9003.png"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "full_text": "Parent post starting a synthetic conversation.",
+                "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+                "id_str": "2099400000000000090",
+                "conversation_id_str": "2099400000000000090",
+                "favorite_count": 1,
+                "retweet_count": 0,
+                "reply_count": 0,
+                "quote_count": 0,
+                "bookmark_count": 0,
+                "lang": "en",
+                "is_quote_status": false,
+                "display_text_range": [
+                 0,
+                 46
+                ],
+                "entities": {
+                 "urls": [],
+                 "media": []
+                }
+               }
+              }
+             }
+            }
+           }
+          },
+          {
+           "entryId": "tweet-2099400000000000091",
+           "item": {
+            "clientEventInfo": {
+             "component": "following_in_network"
+            },
+            "itemContent": {
+             "__typename": "TimelineTweet",
+             "itemType": "TimelineTweet",
+             "tweetDisplayType": "Tweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2099400000000000091",
+               "core": {
+                "user_results": {
+                 "__typename": "UserResults",
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "9004",
+                  "is_blue_verified": false,
+                  "core": {
+                   "name": "Delta",
+                   "screen_name": "delta"
+                  },
+                  "relationship_counts": {
+                   "followers": 10,
+                   "following": 20
+                  },
+                  "verification": {
+                   "verified": false
+                  },
+                  "avatar": {
+                   "image_url": "https://example.com/avatar/9004.png"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "full_text": "First reply inside the conversation module.",
+                "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+                "id_str": "2099400000000000091",
+                "conversation_id_str": "2099400000000000090",
+                "favorite_count": 1,
+                "retweet_count": 0,
+                "reply_count": 0,
+                "quote_count": 0,
+                "bookmark_count": 0,
+                "lang": "en",
+                "is_quote_status": false,
+                "display_text_range": [
+                 0,
+                 43
+                ],
+                "entities": {
+                 "urls": [],
+                 "media": []
+                }
+               }
+              }
+             }
+            }
+           }
+          },
+          {
+           "entryId": "tweet-2099400000000000097",
+           "item": {
+            "clientEventInfo": {
+             "component": "following_in_network"
+            },
+            "itemContent": {
+             "__typename": "TimelineTweet",
+             "itemType": "TimelineTweet",
+             "tweetDisplayType": "Tweet",
+             "tweet_results": {
+              "result": {
+               "__typename": "Tweet",
+               "rest_id": "2099400000000000097",
+               "core": {
+                "user_results": {
+                 "__typename": "UserResults",
+                 "result": {
+                  "__typename": "User",
+                  "rest_id": "9003",
+                  "is_blue_verified": false,
+                  "core": {
+                   "name": "Gamma",
+                   "screen_name": "gamma"
+                  },
+                  "relationship_counts": {
+                   "followers": 10,
+                   "following": 20
+                  },
+                  "verification": {
+                   "verified": false
+                  },
+                  "avatar": {
+                   "image_url": "https://example.com/avatar/9003.png"
+                  }
+                 }
+                }
+               },
+               "legacy": {
+                "full_text": "Second reply, closing the thread.",
+                "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+                "id_str": "2099400000000000097",
+                "conversation_id_str": "2099400000000000090",
+                "favorite_count": 1,
+                "retweet_count": 0,
+                "reply_count": 0,
+                "quote_count": 0,
+                "bookmark_count": 0,
+                "lang": "en",
+                "is_quote_status": false,
+                "display_text_range": [
+                 0,
+                 33
+                ],
+                "entities": {
+                 "urls": [],
+                 "media": []
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         ]
+        }
+       },
+       {
+        "entryId": "tweet-2099400000000000089",
+        "sortIndex": "2099400000000000089",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2099400000000000089",
+            "core": {
+             "user_results": {
+              "__typename": "UserResults",
+              "result": {
+               "__typename": "User",
+               "rest_id": "9005",
+               "is_blue_verified": false,
+               "core": {
+                "name": "Epsilon",
+                "screen_name": "epsilon"
+               },
+               "relationship_counts": {
+                "followers": 10,
+                "following": 20
+               },
+               "verification": {
+                "verified": false
+               },
+               "avatar": {
+                "image_url": "https://example.com/avatar/9005.png"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "full_text": "Top-level tweet C after the module.",
+             "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+             "id_str": "2099400000000000089",
+             "conversation_id_str": "2099400000000000089",
+             "favorite_count": 1,
+             "retweet_count": 0,
+             "reply_count": 0,
+             "quote_count": 0,
+             "bookmark_count": 0,
+             "lang": "en",
+             "is_quote_status": false,
+             "display_text_range": [
+              0,
+              35
+             ],
+             "entities": {
+              "urls": [],
+              "media": []
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "promoted-tweet-2091904944890954167-4f55bceb8c58ee35",
+        "sortIndex": "2099400000000000088",
+        "content": {
+         "__typename": "TimelineTimelineItem",
+         "entryType": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelinePromotedTweet",
+          "__typename": "TimelinePromotedTweet",
+          "promotedMetadata": {
+           "advertiser_results": {}
+          },
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2099400000000000050",
+            "core": {
+             "user_results": {
+              "__typename": "UserResults",
+              "result": {
+               "__typename": "User",
+               "rest_id": "9100",
+               "is_blue_verified": false,
+               "core": {
+                "name": "Advertiser",
+                "screen_name": "adco"
+               },
+               "relationship_counts": {
+                "followers": 10,
+                "following": 20
+               },
+               "verification": {
+                "verified": false
+               },
+               "avatar": {
+                "image_url": "https://example.com/avatar/9100.png"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "full_text": "PROMOTED advertisement that must never be ingested.",
+             "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+             "id_str": "2099400000000000050",
+             "conversation_id_str": "2099400000000000050",
+             "favorite_count": 1,
+             "retweet_count": 0,
+             "reply_count": 0,
+             "quote_count": 0,
+             "bookmark_count": 0,
+             "lang": "en",
+             "is_quote_status": false,
+             "display_text_range": [
+              0,
+              51
+             ],
+             "entities": {
+              "urls": [],
+              "media": []
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "tweet-2099400000000000088",
+        "sortIndex": "2099400000000000088",
+        "content": {
+         "entryType": "TimelineTimelineItem",
+         "__typename": "TimelineTimelineItem",
+         "itemContent": {
+          "itemType": "TimelineTweet",
+          "__typename": "TimelineTweet",
+          "tweet_results": {
+           "result": {
+            "__typename": "Tweet",
+            "rest_id": "2099400000000000088",
+            "core": {
+             "user_results": {
+              "__typename": "UserResults",
+              "result": {
+               "__typename": "User",
+               "rest_id": "9006",
+               "is_blue_verified": false,
+               "core": {
+                "name": "Zeta",
+                "screen_name": "zeta"
+               },
+               "relationship_counts": {
+                "followers": 10,
+                "following": 20
+               },
+               "verification": {
+                "verified": false
+               },
+               "avatar": {
+                "image_url": "https://example.com/avatar/9006.png"
+               }
+              }
+             }
+            },
+            "legacy": {
+             "full_text": "Top-level tweet D, the last on the page.",
+             "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+             "id_str": "2099400000000000088",
+             "conversation_id_str": "2099400000000000088",
+             "favorite_count": 1,
+             "retweet_count": 0,
+             "reply_count": 0,
+             "quote_count": 0,
+             "bookmark_count": 0,
+             "lang": "en",
+             "is_quote_status": false,
+             "display_text_range": [
+              0,
+              40
+             ],
+             "entities": {
+              "urls": [],
+              "media": []
+             }
+            }
+           }
+          }
+         }
+        }
+       },
+       {
+        "entryId": "cursor-bottom-2099400000000000000",
+        "sortIndex": "2099400000000000000",
+        "content": {
+         "__typename": "TimelineTimelineCursor",
+         "cursorType": "Bottom",
+         "entryType": "TimelineTimelineCursor",
+         "value": "CURSOR_BOTTOM"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}
