@@ -130,9 +130,15 @@ def reader_id_hex(external: int) -> str:
 def encode_item_id(external: int) -> str:
     """Render an external id in the long form the contents response expects.
 
-    NNW parses this with `Int(part, radix: 16)`, so it must be hex, not decimal.
+    Zero-padded to 16 hex digits, matching what edit-tag sends
+    (`%.16llx` in NNW's Swift). The padding is contract, not decoration:
+    ReadYou validates a long-form id by `length == 16` and filters out every
+    article that fails it, so an unpadded 15-digit tail -- which parses fine
+    everywhere -- leaves that client a subscription list with no articles.
+    NNW reads the tail back with `Int(radix: 16)`, which padding does not
+    disturb.
     """
-    return f"{_LONG_FORM_PREFIX}{external:x}"
+    return f"{_LONG_FORM_PREFIX}{external:016x}"
 
 
 def parse_item_id_param(raw: str) -> int | None:
