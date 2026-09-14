@@ -343,12 +343,14 @@ def _draft_from_tweet(
         # retweeter, and a banner says so. Without that a reader sees original
         # text with no indication of where it came from.
         full_text = _resolve_full_text(original)
-        content = _build_content(original, full_text, prefix=_retweet_banner(wrapper))
         published = _parse_created_at(_text(_dig(original, "legacy", "created_at")))
+        content = _build_content(
+            original, full_text, prefix=_retweet_banner(wrapper), published=published
+        )
     else:
         full_text = _resolve_full_text(tweet)
-        content = _build_content(tweet, full_text, prefix=None)
         published = _parse_created_at(_text(_dig(tweet, "legacy", "created_at")))
+        content = _build_content(tweet, full_text, prefix=None, published=published)
 
     title = _title_from_text(
         full_text,
@@ -457,10 +459,16 @@ def _author_label(tweet: Json) -> str:
 # --------------------------------------------------------------------------
 
 
-def _build_content(tweet: Json, full_text: str, *, prefix: str | None) -> str:
+def _build_content(
+    tweet: Json,
+    full_text: str,
+    *,
+    prefix: str | None,
+    published: datetime | None = None,
+) -> str:
     parts = [
         prefix,
-        _author_html(tweet),
+        _author_html(tweet, published=published),
         _text_to_html(full_text, _content_urls(tweet)),
         _media_html(_media_items(tweet)),
         _quoted_html(tweet),
@@ -487,7 +495,26 @@ def _content_urls(tweet: Json) -> list[Json]:
     )
 
 
-def _author_html(tweet: Json) -> str | None:
+def _time_html(published: datetime | None) -> str | None:
+    """The post's time as a `<time>` element, or None when there is no date.
+
+    `published_at` was already parsed but appeared nowhere in the body, so a
+    reader had no date at all -- the reader's list view shows titles and
+    ordering, not timestamps.
+
+    The `datetime` attribute carries the machine-readable instant and the text
+    carries the visible one; the sanitiser admits `time[datetime]` (see
+    `ALLOWED_ATTRIBUTES`), so both survive storage. A missing date yields
+    nothing rather than a fabricated one.
+    """
+    if published is None:
+        return None
+    stamp = published.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    machine = published.astimezone(UTC).isoformat()
+    return f'<time datetime="{html.escape(machine, quote=True)}">{stamp}</time>'
+
+
+def _author_html(tweet: Json, *, published: datetime | None = None) -> str | None:
     core = _user_core(tweet)
     name = _text(core.get("name"))
     screen = _text(core.get("screen_name"))
@@ -527,9 +554,14 @@ def _author_html(tweet: Json) -> str | None:
         if avatar
         else ""
     )
-    if not (image or author):
+    time_html = _time_html(published)
+    # The time rides on the byline rather than opening its own line: it belongs
+    # to the same piece of context (who posted, and when) and a separate
+    # paragraph would read as a second author line.
+    separator = " · " if (author and time_html) else ""
+    if not (image or author or time_html):
         return None
-    return f"<p>{image}{author}</p>"
+    return f"<p>{image}{author}{separator}{time_html or ''}</p>"
 
 
 def _media_items(tweet: Json) -> list[Json]:
@@ -541,26 +573,60 @@ def _media_items(tweet: Json) -> list[Json]:
     return [m for m in plain if isinstance(m, dict)] if isinstance(plain, list) else []
 
 
-def _media_html(media: list[Json]) -> str | None:
+def _media_html(media: list[Json], *, quote: bool = False) -> str | None:
+    """Media items as markup, optionally wrapped for a quote block.
+
+    `quote=True` drops the enclosing `<p>` because a `<blockquote>` holds the
+    quote's own content; nesting block elements inside one is what the
+    quoted-tweet tests pin.
+    """
     out: list[str] = []
     for item in media:
         kind = _text(item.get("type"))
         url = _text(item.get("media_url_https"))
         expanded = _text(item.get("expanded_url"))
+        size = _dimensions(item)
         if kind == "photo" and url:
-            out.append(f'<p><img src="{html.escape(url, quote=True)}" alt=""/></p>')
+            out.append(f'<img src="{html.escape(url, quote=True)}"{size} alt=""/>')
         elif kind in {"video", "animated_gif"} and expanded:
             label = "▶ 视频" if kind == "video" else "🎞 动图"
             href = html.escape(expanded, quote=True)
             if url:
                 img = (
-                    f'<img src="{html.escape(url, quote=True)}" alt="{label}" '
+                    f'<img src="{html.escape(url, quote=True)}"{size} alt="{label}" '
                     f'title="{label}"/>'
                 )
-                out.append(f'<p><a href="{href}">{img}</a></p>')
+                out.append(f'<a href="{href}">{img}</a>')
             else:
-                out.append(f'<p><a href="{href}">{label}</a></p>')
-    return "\n".join(out) or None
+                out.append(f'<a href="{href}">{label}</a>')
+    if not out:
+        return None
+    if quote:
+        return "".join(out)
+    return "\n".join(f"<p>{chunk}</p>" for chunk in out)
+
+
+def _dimensions(item: Json) -> str:
+    """` width="N" height="N"` from the media's stated size, or "".
+
+    Reserving the box before the image loads is what stops a timeline from
+    reflowing under the reader as pictures arrive. The payload carries the true
+    size in `original_info` (every photo on a measured page had it), so nothing
+    is guessed here: when it is absent the attributes are simply omitted, and
+    an unsized image still renders.
+    """
+    info = item.get("original_info")
+    if not isinstance(info, dict):
+        return ""
+    width = info.get("width")
+    height = info.get("height")
+    # `bool` is an `int` subclass, so `isinstance(True, int)` holds and a
+    # boolean would render as `width="True"`. X sends integers, but the
+    # guard should not depend on that: reject bools explicitly.
+    for value in (width, height):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return ""
+    return f' width="{width}" height="{height}"'
 
 
 def _quoted_result(tweet: Json) -> Json | None:
@@ -582,6 +648,13 @@ def _quoted_result(tweet: Json) -> Json | None:
 
 
 def _quoted_html(tweet: Json) -> str | None:
+    """The quoted tweet as a `<blockquote>`, with its author's face and media.
+
+    A quote names someone else's post, so the byline and the avatar are what
+    make it read as theirs rather than as the quoter's own aside -- every
+    quoted tweet on a measured page carried an avatar, and 10 of 29 carried
+    media of their own, which a text-only block silently dropped.
+    """
     quoted = _quoted_result(tweet)
     if quoted is None:
         return None
@@ -592,13 +665,17 @@ def _quoted_html(tweet: Json) -> str | None:
     rest = _text(_get(quoted, "rest_id"))
 
     pieces: list[str] = []
-    if author:
-        pieces.append(f"<strong>{html.escape(author)}</strong>")
+    byline = _quoted_byline(quoted, author)
+    if byline:
+        pieces.append(byline)
     if text:
         preview = text[:QUOTED_PREVIEW_MAX]
         if len(text) > QUOTED_PREVIEW_MAX:
             preview += "…"
         pieces.append(html.escape(preview))
+    media = _media_html(_media_items(quoted), quote=True)
+    if media:
+        pieces.append(media)
     if rest and screen and screen != "unknown":
         pieces.append(
             f'<a href="https://x.com/{html.escape(screen, quote=True)}'
@@ -607,6 +684,27 @@ def _quoted_html(tweet: Json) -> str | None:
     if not pieces:
         return None
     return "<blockquote>" + " ".join(pieces) + "</blockquote>"
+
+
+def _quoted_byline(quoted: Json, author: str) -> str:
+    """The quoted author's avatar (when there is one) followed by their name."""
+    avatar = _text(
+        _dig(quoted, "core", "user_results", "result", "avatar", "image_url")
+    )
+    name = _text(_user_core(quoted).get("name"))
+    screen = _text(_user_core(quoted).get("screen_name"))
+    if not author and not avatar:
+        return ""
+    image = (
+        f'<img src="{html.escape(avatar, quote=True)}"'
+        f' alt="{html.escape(name or screen, quote=True)}"'
+        f' class="{AVATAR_CLASS}"'
+        f' width="24" height="24" loading="lazy"/>'
+        if avatar
+        else ""
+    )
+    label = f"<strong>{html.escape(author)}</strong>" if author else ""
+    return f"{image}{label}"
 
 
 def _binding(bindings: object, key: str) -> str:

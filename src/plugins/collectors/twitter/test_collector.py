@@ -292,7 +292,9 @@ def test_a_photo_carries_its_real_dimensions() -> None:
     """
     photo = by_suffix(drafts("valid.json"), "2")
     assert photo is not None
-    img = next(i for i in re.findall(r"<img[^>]*>", photo.content) if "media/photo1" in i)
+    img = next(
+        i for i in re.findall(r"<img[^>]*>", photo.content) if "media/photo1" in i
+    )
     assert 'width="500"' in img, img
     assert 'height="500"' in img, img
     # The full-size URL is kept: the plan chose real images over thumbnails.
@@ -320,6 +322,31 @@ def test_a_photo_without_dimensions_still_renders() -> None:
     assert "media/nosize.png" in out
     assert "width=" not in out
     assert "height=" not in out
+
+
+@pytest.mark.unit
+def test_only_positive_integer_dimensions_are_rendered() -> None:
+    """Malformed sizes are omitted rather than written into the markup.
+
+    `bool` is an `int` subclass in Python, so a naive `isinstance(x, int)`
+    accepts `True` and emits `width="True"` -- invalid markup that no reader
+    can interpret. Negative and zero sizes are equally meaningless.
+    """
+    from plugins.collectors.twitter.collector import _dimensions
+
+    assert _dimensions({"original_info": {"width": 500, "height": 400}}) == (
+        ' width="500" height="400"'
+    )
+    for bad in (
+        {"width": True, "height": True},
+        {"width": "500", "height": "400"},
+        {"width": 0, "height": 400},
+        {"width": -5, "height": 400},
+        {"width": None, "height": None},
+    ):
+        assert _dimensions({"original_info": bad}) == "", f"{bad} produced markup"
+    assert _dimensions({}) == ""
+    assert _dimensions({"original_info": "not a dict"}) == ""
 
 
 @pytest.mark.unit
