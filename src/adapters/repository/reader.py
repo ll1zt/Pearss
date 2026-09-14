@@ -6,6 +6,7 @@ import logging
 from datetime import UTC, datetime
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
@@ -180,27 +181,35 @@ def upsert_read_state(
 
     The timestamp comes from the state object, which core set from the server
     clock — never from the client.
+
+    A single atomic INSERT ... ON CONFLICT DO UPDATE, not a read-modify-write.
+    The read-modify-write version lost to its own concurrency: the INSERT is
+    pending until commit, and a concurrent request that commits the same
+    (item, tenant) in that window turns the first request's next query into an
+    autoflush that violates the composite primary key -- the batch fails with
+    a 500 even though "both wrote, the later one wins" was the whole contract.
+    The atomic form resolves the race inside the statement: whichever row is
+    already there gets updated, whichever request commits second wins.
     """
     stamp = timestamp(state.updated_at or datetime.now(UTC))
-    # Read-modify-write rather than an upsert: SQLAlchemy's typed Insert does
-    # not expose on_conflict_do_update, and the dialect-specific form would
-    # not carry over to Postgres in P3. The composite primary key prevents a
-    # concurrent duplicate row from being created either way.
-    row = session.get(ReadStateRow, (state.item_id, tenant_id))
-    if row is None:
-        session.add(
-            ReadStateRow(
-                item_id=state.item_id,
-                tenant_id=tenant_id,
-                is_read=state.is_read,
-                is_starred=state.is_starred,
-                updated_at=stamp,
-            )
+    session.execute(
+        sqlite_insert(ReadStateRow)
+        .values(
+            item_id=state.item_id,
+            tenant_id=tenant_id,
+            is_read=state.is_read,
+            is_starred=state.is_starred,
+            updated_at=stamp,
         )
-    else:
-        row.is_read = state.is_read
-        row.is_starred = state.is_starred
-        row.updated_at = stamp
+        .on_conflict_do_update(
+            index_elements=[ReadStateRow.item_id, ReadStateRow.tenant_id],
+            set_={
+                "is_read": state.is_read,
+                "is_starred": state.is_starred,
+                "updated_at": stamp,
+            },
+        )
+    )
 
 
 def mark_all_read(
@@ -236,23 +245,33 @@ def mark_all_read(
         return 0
 
     now = timestamp(datetime.now(UTC))
-    for item_id in ids:
-        row = session.get(ReadStateRow, (item_id, tenant_id))
-        if row is None:
-            session.add(
-                ReadStateRow(
-                    item_id=item_id,
-                    tenant_id=tenant_id,
-                    is_read=True,
-                    is_starred=False,
-                    updated_at=now,
-                )
-            )
-        else:
-            # Preserve an existing star: marking read is not a request to
-            # unstar. Only is_read and the timestamp move.
-            row.is_read = True
-            row.updated_at = now
+    # One bulk upsert rather than a loop of read-modify-writes (see
+    # upsert_read_state for why read-modify-write loses to concurrency). The
+    # candidates query already excludes read items, so the conflict branch
+    # fires only for a row that exists *unread* -- an item starred-but-unread,
+    # or one a client marked unread after an earlier mark-all. Those keep
+    # their star and gain is_read, exactly as the per-row loop used to.
+    session.execute(
+        sqlite_insert(ReadStateRow)
+        .values(
+            [
+                {
+                    "item_id": item_id,
+                    "tenant_id": tenant_id,
+                    "is_read": True,
+                    "is_starred": False,
+                    "updated_at": now,
+                }
+                for item_id in ids
+            ]
+        )
+        .on_conflict_do_update(
+            index_elements=[ReadStateRow.item_id, ReadStateRow.tenant_id],
+            # is_starred is deliberately absent: marking read is not a request
+            # to unstar, same as the loop it replaces.
+            set_={"is_read": True, "updated_at": now},
+        )
+    )
     return len(ids)
 
 
