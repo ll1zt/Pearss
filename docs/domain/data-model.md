@@ -118,6 +118,10 @@ Item 行，连带其 `read_state`、`item_enrichment` 与正文文件。两条�
   共享一个文件；只有当没有任何存活 Item 行引用该摘要时才 unlink。按 Item
   删文件会静默清空另一篇活文章的正文（`read_body` 对缺失文件只返回 `""` 并记
   warning，不报错）。
+- **计数在事务内，unlink 在提交后**。行可回滚，文件删除不可回滚；在事务内
+  删文件会让一次回滚留下「活条目指向缺失正文」。详见 ADR 0021 的 `ReclaimPlan`。
+- **时间窗只作用于有发布时间的 Item**。没有 `published_at` 的条目不属于任何
+  窗口，`since` 与 `until` 都会排除它——按日期清内容不会顺带删掉无日期条目。
 
 ### ItemEnrichment（P3）
 

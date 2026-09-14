@@ -21,6 +21,8 @@ from adapters.repository._shared import (
     timestamp,
 )
 from adapters.repository.deletion import (
+    DeletionResult,
+    ReclaimPlan,
     delete_items,
     delete_source,
     delete_source_items,
@@ -112,9 +114,11 @@ __all__ = [
     "COLLECT_JOB_TYPE",
     "EPOCH_FLOOR",
     "FEED_WINDOW",
+    "DeletionResult",
     "ItemFilter",
     "ItemPage",
     "PagingState",
+    "ReclaimPlan",
     "StoreOutcome",
     "backfill_chain",
     "chain_for_source",

@@ -409,12 +409,19 @@ def _delete_items_payload(
         return replayed
 
     with factory() as session:
-        counts = repository_delete_items(session, item_ids)
+        result = repository_delete_items(session, item_ids)
         session.commit()
+
+    # After the commit, never before: see ReclaimPlan. A rollback would restore
+    # the rows, and files removed inside the transaction cannot come back.
+    removed = result.reclaim.reclaim()
 
     payload: dict[str, Any] = {
         "requested": len(item_ids),
-        **counts,
+        **result.counts,
+        # What was actually unlinked, which can be less than the count of
+        # reclaimable refs if a file had already gone missing.
+        "files_removed": removed,
         "correlation_id": current_correlation_id(),
     }
     remember(

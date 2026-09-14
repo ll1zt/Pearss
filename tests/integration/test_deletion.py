@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -28,13 +29,56 @@ from adapters.db_models import ItemEnrichment as EnrichmentRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
-from adapters.repository import delete_items, delete_source, delete_source_items
+from adapters.repository import (
+    DeletionResult,
+    delete_items,
+    delete_source,
+    delete_source_items,
+)
 from adapters.timestamps import fixed_width_utc as timestamp
 from app.main import create_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 NOW = timestamp(datetime(2026, 9, 14, 12, 0, 0, tzinfo=UTC))
+
+
+def _delete_items(
+    session: Session,
+    item_ids: list[str],
+    *,
+    root: Path | None = None,
+    commit: bool = True,
+) -> DeletionResult:
+    """Delete and reclaim, the way a route does.
+
+    Reclaiming here rather than in the repository is the point of the split
+    (ReclaimPlan): files are only removed once the rows are committed, so a
+    test that wants to observe the pre-commit state passes commit=False.
+    """
+    result = delete_items(session, item_ids, root=root)
+    if commit:
+        session.commit()
+        result.reclaim.reclaim()
+    return result
+
+
+def _delete_source_items(
+    session: Session, source_id: str, *, root: Path | None = None, **kwargs: Any
+) -> DeletionResult:
+    result = delete_source_items(session, source_id, root=root, **kwargs)
+    session.commit()
+    result.reclaim.reclaim()
+    return result
+
+
+def _delete_source(
+    session: Session, source_id: str, *, root: Path | None = None
+) -> DeletionResult:
+    result = delete_source(session, source_id, root=root)
+    session.commit()
+    result.reclaim.reclaim()
+    return result
 
 
 @pytest.fixture
@@ -139,11 +183,10 @@ class TestDeleteItems:
             path = filestore.path_for(ref, root=storage)
             assert path is not None and path.is_file()
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["items"] == 1
-            assert counts["bodies"] == 1
+            assert result.counts["items"] == 1
+            assert result.counts["bodies"] == 1
             assert session.get(ItemRow, "it-1") is None
             assert not path.exists()
 
@@ -163,11 +206,10 @@ class TestDeleteItems:
             path = filestore.path_for(ref, root=storage)
             assert path is not None
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["items"] == 1
-            assert counts["bodies"] == 0, "the survivor still needs this file"
+            assert result.counts["items"] == 1
+            assert result.counts["bodies"] == 0, "the survivor still needs this file"
             assert path.is_file()
             assert filestore.read_body(ref, root=storage) == "<p>shared</p>"
 
@@ -183,8 +225,8 @@ class TestDeleteItems:
             path = filestore.path_for(ref, root=storage)
             assert path is not None
 
-            assert delete_items(session, ["it-1"], root=storage)["bodies"] == 0
-            assert delete_items(session, ["it-2"], root=storage)["bodies"] == 1
+            assert _delete_items(session, ["it-1"], root=storage).counts["bodies"] == 0
+            assert _delete_items(session, ["it-2"], root=storage).counts["bodies"] == 1
             session.commit()
 
             assert not path.exists()
@@ -198,11 +240,11 @@ class TestDeleteItems:
             kept = _item(session, item_id="it-2", body="<p>two</p>")
             assert gone is not None and kept is not None
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["bodies"] == 1
-            assert not filestore.path_for(gone, root=storage).exists()  # type: ignore[union-attr]
+            assert result.counts["bodies"] == 1
+            gone_path = filestore.path_for(gone, root=storage)
+            assert gone_path is not None and not gone_path.exists()
             assert filestore.read_body(kept, root=storage) == "<p>two</p>"
 
     def test_read_state_and_enrichment_rows_go_with_the_item(
@@ -237,11 +279,10 @@ class TestDeleteItems:
             )
             session.flush()
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["read_states"] == 1
-            assert counts["enrichments"] == 1
+            assert result.counts["read_states"] == 1
+            assert result.counts["enrichments"] == 1
             assert session.get(ReadStateRow, ("it-1", "default")) is None
             assert session.get(EnrichmentRow, "en-1") is None
 
@@ -273,10 +314,9 @@ class TestDeleteItems:
             )
             session.flush()
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["bodies"] == 2, "item body and product file"
+            assert result.counts["bodies"] == 2, "item body and product file"
             assert not path.exists()
 
     def test_unknown_ids_are_not_an_error(
@@ -290,19 +330,19 @@ class TestDeleteItems:
             _source(session)
             _item(session, item_id="it-1", body="<p>x</p>")
 
-            first = delete_items(session, ["it-1"], root=storage)
-            second = delete_items(session, ["it-1"], root=storage)
+            first = _delete_items(session, ["it-1"], root=storage)
+            second = _delete_items(session, ["it-1"], root=storage)
             session.commit()
 
-            assert first["items"] == 1
-            assert second["items"] == 0
-            assert second["bodies"] == 0
+            assert first.counts["items"] == 1
+            assert second.counts["items"] == 0
+            assert second.counts["bodies"] == 0
 
     def test_an_empty_list_is_a_no_op(
         self, session_factory: sessionmaker[Session], storage: Path
     ) -> None:
         with session_factory() as session:
-            counts = delete_items(session, [], root=storage)
+            counts = _delete_items(session, [], root=storage).counts
             assert counts == {
                 "items": 0,
                 "read_states": 0,
@@ -317,11 +357,10 @@ class TestDeleteItems:
             _source(session)
             _item(session, item_id="it-1", body=None)
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["items"] == 1
-            assert counts["bodies"] == 0
+            assert result.counts["items"] == 1
+            assert result.counts["bodies"] == 0
 
     def test_pending_items_are_deletable(
         self, session_factory: sessionmaker[Session], storage: Path
@@ -336,10 +375,9 @@ class TestDeleteItems:
             _source(session)
             _item(session, item_id="it-1", body="<p>x</p>", publish_status="pending")
 
-            counts = delete_items(session, ["it-1"], root=storage)
-            session.commit()
+            result = _delete_items(session, ["it-1"], root=storage)
 
-            assert counts["items"] == 1
+            assert result.counts["items"] == 1
 
 
 class TestDeleteSourceItems:
@@ -362,8 +400,7 @@ class TestDeleteSourceItems:
             _item(session, item_id="it-1", body="<p>a</p>")
             _item(session, item_id="it-2", body="<p>b</p>")
 
-            counts = delete_source_items(session, "src-1", root=storage)
-            session.commit()
+            counts = _delete_source_items(session, "src-1", root=storage).counts
 
             assert counts["items"] == 2
             assert session.get(SourceRow, "src-1") is not None
@@ -393,10 +430,9 @@ class TestDeleteSourceItems:
                 published_at="2026-09-01T00:00:00.000000Z",
             )
 
-            counts = delete_source_items(
+            counts = _delete_source_items(
                 session, "src-1", since="2026-06-01T00:00:00.000000Z", root=storage
-            )
-            session.commit()
+            ).counts
 
             assert counts["items"] == 1
             assert session.get(ItemRow, "new") is None
@@ -410,10 +446,9 @@ class TestDeleteSourceItems:
             _item(session, item_id="pub", body="<p>p</p>", publish_status="published")
             _item(session, item_id="ready", body="<p>r</p>", publish_status="ready")
 
-            counts = delete_source_items(
+            counts = _delete_source_items(
                 session, "src-1", include_published=False, root=storage
-            )
-            session.commit()
+            ).counts
 
             assert counts["items"] == 1
             assert session.get(ItemRow, "pub") is not None
@@ -431,7 +466,7 @@ class TestDeleteSource:
             path = filestore.path_for(ref, root=storage)
             assert path is not None
 
-            counts = delete_source(session, "src-1", root=storage)
+            counts = _delete_source(session, "src-1", root=storage).counts
             session.commit()
 
             assert counts == {
@@ -443,9 +478,22 @@ class TestDeleteSource:
             assert session.get(SourceRow, "src-1") is None
             assert not path.exists()
 
-    def test_fetch_records_and_their_payloads_go_too(
+    def test_fetch_records_go_but_their_payload_column_is_untouched(
         self, session_factory: sessionmaker[Session], storage: Path
     ) -> None:
+        """Fetch rows are removed; payload files are not this module's business.
+
+        `RawFetch.payload_ref` is never written -- `pipeline._raw_fetch_row`
+        stores only `content_hash`, because a raw feed body is rebuildable from
+        the origin and storing it twice is waste. A row carrying one is a shape
+        production cannot produce, which is why the deletion path has no
+        payload-unlink branch: a loop over an always-NULL column is dead code,
+        and it would use the wrong reference test anyway (a fetch payload is
+        not an item body, so no item row accounts for it).
+
+        So this asserts the boundary rather than the absent behaviour: the
+        fetch row goes, and the payload file is left alone.
+        """
         with session_factory() as session:
             _source(session)
             payload = filestore.store_body("<rss>raw</rss>")
@@ -464,12 +512,15 @@ class TestDeleteSource:
             )
             session.flush()
 
-            counts = delete_source(session, "src-1", root=storage)
-            session.commit()
+            counts = _delete_source(session, "src-1", root=storage).counts
 
             assert counts["raw_fetches"] == 1
-            assert not path.exists()
             assert session.get(RawFetchRow, "rf-1") is None
+            assert counts["bodies"] == 0, "only item bodies count as reclaimed"
+            assert path.is_file(), (
+                "payload files are deliberately not reclaimed; if that ever "
+                "changes, the unlink must not consult item references"
+            )
 
     def test_a_shared_body_survives_an_other_sources_item(
         self, session_factory: sessionmaker[Session], storage: Path
@@ -484,8 +535,7 @@ class TestDeleteSource:
             path = filestore.path_for(ref, root=storage)
             assert path is not None
 
-            counts = delete_source(session, "src-1", root=storage)
-            session.commit()
+            counts = _delete_source(session, "src-1", root=storage).counts
 
             assert counts["bodies"] == 0
             assert path.is_file()
@@ -495,6 +545,196 @@ class TestDeleteSource:
         self, session_factory: sessionmaker[Session], storage: Path
     ) -> None:
         with session_factory() as session:
-            counts = delete_source(session, "nope", root=storage)
-            session.commit()
+            counts = _delete_source(session, "nope", root=storage).counts
             assert counts["sources"] == 0
+
+
+class TestTimeWindow:
+    """The window bounds are the one filter whose edge case is invisible.
+
+    An item with no publication date sits outside every window by definition,
+    but the comparison that expresses that is easy to get wrong in a way that
+    only shows up as content disappearing.
+    """
+
+    def test_an_until_bound_does_not_sweep_up_undated_items(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """Regression: `until` used to delete every item with no date.
+
+        The filter was `coalesce(published_at, '') <= until`. The empty string
+        sorts before every timestamp, so the bound matched every undated row --
+        a caller trimming old content would silently lose items that had no
+        date at all, which is the opposite of the request.
+        """
+        with session_factory() as session:
+            _source(session)
+            _item(
+                session,
+                item_id="old",
+                body="<p>old</p>",
+                published_at="2026-01-01T00:00:00.000000Z",
+            )
+            _item(
+                session,
+                item_id="new",
+                body="<p>new</p>",
+                published_at="2026-09-01T00:00:00.000000Z",
+            )
+            _item(session, item_id="undated", body="<p>?</p>", published_at=None)
+
+            counts = _delete_source_items(
+                session,
+                "src-1",
+                until="2026-06-01T00:00:00.000000Z",
+                root=storage,
+            ).counts
+
+            assert counts["items"] == 1, "only the item inside the window"
+            assert session.get(ItemRow, "old") is None
+            assert session.get(ItemRow, "new") is not None
+            assert session.get(ItemRow, "undated") is not None, (
+                "an item with no date belongs to no window and must survive"
+            )
+
+    def test_a_since_bound_excludes_undated_items(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """The other bound, for the same reason.
+
+        `since` happened to behave correctly, but only by accident of how the
+        empty string sorts. Pinning it keeps a future rewrite from reversing
+        the two.
+        """
+        with session_factory() as session:
+            _source(session)
+            _item(
+                session,
+                item_id="recent",
+                body="<p>r</p>",
+                published_at="2026-09-01T00:00:00.000000Z",
+            )
+            _item(session, item_id="undated", body="<p>?</p>", published_at=None)
+
+            counts = _delete_source_items(
+                session,
+                "src-1",
+                since="2026-06-01T00:00:00.000000Z",
+                root=storage,
+            ).counts
+
+            assert counts["items"] == 1
+            assert session.get(ItemRow, "recent") is None
+            assert session.get(ItemRow, "undated") is not None
+
+    def test_a_window_selecting_nothing_deletes_nothing(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        with session_factory() as session:
+            _source(session)
+            _item(session, item_id="undated", body="<p>?</p>", published_at=None)
+
+            counts = _delete_source_items(
+                session,
+                "src-1",
+                since="2026-01-01T00:00:00.000000Z",
+                until="2026-12-31T00:00:00.000000Z",
+                root=storage,
+            ).counts
+
+            assert counts["items"] == 0
+            assert session.get(ItemRow, "undated") is not None
+
+
+class TestTransactionBoundary:
+    """Files must outlive a rollback; rows must not.
+
+    Deletion has two halves with different atomicity: rows are transactional,
+    an unlink is not. Removing a file before the commit means a rollback
+    restores rows whose bodies are gone -- and `read_body` answers "" for a
+    missing file without raising, so the loss is silent.
+    """
+
+    def test_a_rollback_keeps_the_body_file(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """Regression: unlinks used to happen inside the transaction.
+
+        After a rollback the row is back, so its body must still be readable --
+        otherwise the item is live but blank, with only a log warning to say so.
+        """
+        with session_factory() as session:
+            _source(session)
+            ref = _item(session, item_id="it-1", body="<p>keep me</p>")
+            assert ref is not None
+            path = filestore.path_for(ref, root=storage)
+            assert path is not None and path.is_file()
+            # Committed before the delete: otherwise the rollback below would
+            # discard the seed as well as the delete, and the test would prove
+            # nothing about what a rollback does to the body file.
+            session.commit()
+
+            # commit=False: the delete happens, then the transaction is thrown
+            # away, exactly as an error between the delete and the commit would
+            # do in a route.
+            _delete_items(session, ["it-1"], root=storage, commit=False)
+            session.rollback()
+
+            assert session.get(ItemRow, "it-1") is not None, "the row came back"
+            assert path.is_file(), "so its body must have survived the rollback"
+            assert filestore.read_body(ref, root=storage) == "<p>keep me</p>"
+
+    def test_a_rollback_leaves_the_refcount_uncorrupted(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """A rolled-back shared deletion must not free the survivor's file."""
+        with session_factory() as session:
+            _source(session)
+            ref = _item(session, item_id="it-1", body="<p>shared</p>")
+            _item(session, item_id="it-2", body="<p>shared</p>")
+            assert ref is not None
+            path = filestore.path_for(ref, root=storage)
+            assert path is not None
+            session.commit()
+
+            _delete_items(session, ["it-1"], root=storage, commit=False)
+            session.rollback()
+
+            assert path.is_file()
+
+            # And the surviving deletion still works afterwards.
+            result = _delete_items(session, ["it-1"], root=storage)
+            assert result.counts["bodies"] == 0, "it-2 still holds the file"
+            assert path.is_file()
+
+    def test_the_plan_names_the_files_before_they_go(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """The plan is computed inside the transaction, acted on after it."""
+        with session_factory() as session:
+            _source(session)
+            ref = _item(session, item_id="it-1", body="<p>x</p>")
+            assert ref is not None
+            path = filestore.path_for(ref, root=storage)
+            assert path is not None
+
+            result = delete_items(session, ["it-1"], root=storage)
+            assert result.reclaim.refs == (ref,), "named while the count is true"
+            assert path.is_file(), "but nothing on disk has moved yet"
+
+            session.commit()
+            assert result.reclaim.reclaim() == 1
+            assert not path.exists()
+
+    def test_reclaiming_twice_is_harmless(
+        self, session_factory: sessionmaker[Session], storage: Path
+    ) -> None:
+        """A retry after a partial failure must not raise."""
+        with session_factory() as session:
+            _source(session)
+            _item(session, item_id="it-1", body="<p>x</p>")
+            result = delete_items(session, ["it-1"], root=storage)
+            session.commit()
+
+            assert result.reclaim.reclaim() == 1
+            assert result.reclaim.reclaim() == 0, "already gone; not an error"

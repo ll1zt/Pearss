@@ -877,12 +877,16 @@ def delete_source(
         return replayed
 
     with factory() as session:
-        counts = repository_delete_source(session, source_id)
+        result = repository_delete_source(session, source_id)
         session.commit()
+
+    # Files after the commit: an unlink cannot be rolled back, and rows can.
+    removed = result.reclaim.reclaim()
 
     payload: dict[str, Any] = {
         "source_id": source_id,
-        **counts,
+        **result.counts,
+        "files_removed": removed,
         "correlation_id": current_correlation_id(),
     }
     remember(
@@ -924,7 +928,7 @@ def delete_source_items(
     body = payload or DeleteSourceItemsRequest()
     with factory() as session:
         _require_source(session, source_id)
-        counts = repository_delete_source_items(
+        outcome = repository_delete_source_items(
             session,
             source_id,
             since=body.since,
@@ -933,9 +937,13 @@ def delete_source_items(
         )
         session.commit()
 
+    # Files after the commit: an unlink cannot be rolled back, and rows can.
+    removed = outcome.reclaim.reclaim()
+
     result: dict[str, Any] = {
         "source_id": source_id,
-        **counts,
+        **outcome.counts,
+        "files_removed": removed,
         "correlation_id": current_correlation_id(),
     }
     remember(
