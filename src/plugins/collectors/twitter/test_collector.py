@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from adapters.raw_payload import RawPayload
+from adapters.sanitize import AVATAR_CLASS
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.twitter.collector import (
@@ -279,6 +280,106 @@ def test_photo_becomes_an_img_tag() -> None:
     photo = by_suffix(items, "2")
     assert photo is not None
     assert "media/photo1.png" in photo.content
+
+
+@pytest.mark.unit
+def test_a_photo_carries_its_real_dimensions() -> None:
+    """`width`/`height` from `original_info` reserve the box before it loads.
+
+    Without them the reader reflows as each image arrives, so a timeline jumps
+    under the cursor. The payload states the true size (all 29 photos on a
+    measured page carried it), so guessing is unnecessary.
+    """
+    photo = by_suffix(drafts("valid.json"), "2")
+    assert photo is not None
+    img = next(i for i in re.findall(r"<img[^>]*>", photo.content) if "media/photo1" in i)
+    assert 'width="500"' in img, img
+    assert 'height="500"' in img, img
+    # The full-size URL is kept: the plan chose real images over thumbnails.
+    assert "media/photo1.png" in img
+
+
+@pytest.mark.unit
+def test_a_photo_without_dimensions_still_renders() -> None:
+    """A missing `original_info` must not drop the image or invent a size.
+
+    Sizing is an improvement, not a requirement: an image with no stated
+    dimensions is still worth showing, just without the reserved box.
+    """
+    from plugins.collectors.twitter.collector import _media_html
+
+    out = _media_html(
+        [
+            {
+                "type": "photo",
+                "media_url_https": "https://example.com/media/nosize.png",
+            }
+        ]
+    )
+    assert out is not None
+    assert "media/nosize.png" in out
+    assert "width=" not in out
+    assert "height=" not in out
+
+
+@pytest.mark.unit
+def test_quoted_tweets_show_the_author_avatar() -> None:
+    """The quote block names its author; the avatar makes that name a face.
+
+    Every quoted tweet on a measured page carried an avatar, and the block
+    previously rendered text only -- so a quote read as an unattributed aside.
+    """
+    quoted = next(d for d in drafts("quoted.json") if d.external_id.endswith("1"))
+    block = quoted.content.split("<blockquote>", 1)[1]
+    assert "avatar/2002.png" in block, block
+    assert f'class="{AVATAR_CLASS}"' in block
+
+
+@pytest.mark.unit
+def test_quoted_media_is_shown_in_the_block() -> None:
+    """A quote's own image belongs in the quote, not dropped.
+
+    Ten of 29 quoted tweets on a measured page carried media. Rendering only
+    the text made those read as a one-line aside.
+    """
+    quoted = next(d for d in drafts("quoted.json") if d.external_id.endswith("1"))
+    block = quoted.content.split("<blockquote>", 1)[1]
+    assert "media/quoted1.png" in block, block
+    assert 'width="1024"' in block and 'height="768"' in block
+
+
+@pytest.mark.unit
+def test_a_quote_without_media_renders_no_image() -> None:
+    """The second fixture shape has no media; nothing must be invented."""
+    nested = next(d for d in drafts("quoted.json") if d.external_id.endswith("3"))
+    block = nested.content.split("<blockquote>", 1)[1]
+    assert "media/" not in block, block
+    assert "The original statement being quoted" in block
+
+
+@pytest.mark.unit
+def test_the_post_time_is_visible_in_the_body() -> None:
+    """`published_at` was parsed but never shown, so a reader had no date.
+
+    The `<time>` element carries a machine-readable `datetime` alongside the
+    visible text; the sanitiser admits `time[datetime]`, so this survives
+    storage.
+    """
+    from plugins.collectors.twitter.collector import _time_html
+
+    item = drafts("valid.json")[0]
+    out = _time_html(item.published_at)
+    assert out is not None
+    assert "<time " in out and "datetime=" in out
+    assert "2026-08-08" in out, out
+
+
+@pytest.mark.unit
+def test_a_tweet_with_no_time_renders_no_time_element() -> None:
+    """A missing date must not become a fabricated one or an empty element."""
+    from plugins.collectors.twitter.collector import _time_html
+
+    assert _time_html(None) is None
 
 
 @pytest.mark.unit
