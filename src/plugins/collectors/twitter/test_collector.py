@@ -580,6 +580,130 @@ def test_a_conversation_module_keeps_its_replies_in_order() -> None:
 
 
 @pytest.mark.unit
+def test_a_promoted_item_inside_a_module_drops_only_itself() -> None:
+    """Promotion is an item-level property; it must not condemn the module.
+
+    `_is_promoted` recursed into a module's items and returned True if *any*
+    item was promoted -- and `_tweets` then skipped the whole module, losing
+    the thread's legitimate replies along with the ad. That is the same class
+    of silent content loss this branch set out to fix, moved one level down.
+
+    Found by review, not by a failing run: no real module on the measured
+    pages carried a promoted item, so the shape was never observed. It is
+    guarded here rather than assumed away.
+    """
+    entry = {
+        "entryId": "home-conversation-300",
+        "sortIndex": "300",
+        "content": {
+            "__typename": "TimelineTimelineModule",
+            "items": [
+                _module_item(101, "legitimate reply A"),
+                _module_item(102, "an ad inside the module", promoted=True),
+                _module_item(103, "legitimate reply B"),
+            ],
+        },
+    }
+    body = _page_of([entry])
+
+    ids = page_ids(body)
+    assert "101" in ids and "103" in ids, f"the ad took its siblings down: {ids}"
+    assert "102" not in ids, "the promoted item itself must still be excluded"
+    assert len(drafts_of(body)) == 2
+
+
+@pytest.mark.unit
+def test_the_span_ignores_a_promoted_item_inside_a_module() -> None:
+    """The span must describe the same tweets `_tweets` returns.
+
+    A promoted tweet's id comes from the advertiser's own timeline, so it is
+    unrelated in magnitude to the surrounding ids. Counting it would report a
+    floor far below the real one -- and that floor is what gap detection
+    compares the next page against.
+    """
+    entry = {
+        "entryId": "home-conversation-90",
+        "sortIndex": "90",
+        "content": {
+            "__typename": "TimelineTimelineModule",
+            "items": [
+                _module_item(95, "a real reply"),
+                _module_item(11, "an ad whose id is far older", promoted=True),
+            ],
+        },
+    }
+    body = _page_of(
+        [
+            {
+                "entryId": "tweet-100",
+                "sortIndex": "100",
+                "content": _top_item(100, "the newest tweet"),
+            },
+            entry,
+        ]
+    )
+
+    span = page_sort_span(body)
+    assert span is not None
+    high, low = span
+    assert low == 95, f"the ad's id reached the span: {span}"
+    assert high == 100
+    # And the two views agree about what is on the page.
+    assert set(page_ids(body)) == {"100", "95"}
+
+
+def _page_of(entries: list[dict[str, Any]]) -> bytes:
+    """A minimal page carrying exactly these entries."""
+    import json
+
+    return json.dumps(
+        {
+            "data": {
+                "home": {
+                    "home_timeline_urt": {
+                        "instructions": [
+                            {"type": "TimelineAddEntries", "entries": entries}
+                        ]
+                    }
+                }
+            }
+        }
+    ).encode()
+
+
+def _tweet_result(rid: int, text: str) -> dict[str, Any]:
+    return {
+        "__typename": "Tweet",
+        "rest_id": str(rid),
+        "core": {
+            "user_results": {"result": {"core": {"name": "N", "screen_name": "s"}}}
+        },
+        "legacy": {
+            "full_text": text,
+            "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+            "id_str": str(rid),
+            "conversation_id_str": str(rid),
+            "entities": {},
+        },
+    }
+
+
+def _top_item(rid: int, text: str) -> dict[str, Any]:
+    return {"itemContent": {"tweet_results": {"result": _tweet_result(rid, text)}}}
+
+
+def _module_item(rid: int, text: str, *, promoted: bool = False) -> dict[str, Any]:
+    content: dict[str, Any] = {"tweet_results": {"result": _tweet_result(rid, text)}}
+    if promoted:
+        content["promotedMetadata"] = {"advertiser_results": {}}
+    return {"entryId": f"tweet-{rid}", "item": {"itemContent": content}}
+
+
+def drafts_of(body: bytes) -> list[ItemDraft]:
+    return parse(RawPayload(url=URL, status_code=200, body=body, source_id="s"))
+
+
+@pytest.mark.unit
 def test_promoted_tweets_are_never_ingested() -> None:
     """A promoted slot carries a real tweet_results and must be excluded.
 
