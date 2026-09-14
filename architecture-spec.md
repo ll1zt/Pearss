@@ -149,7 +149,7 @@ structlog+correlation_id]
 | JobRun | id, job_id, status, **error_class**, metrics, correlation_id | P1 | 可重建 | 近期保留排障 |
 | FeedOut | id, name, filter_query, pipeline_chain, format, token | P1 | 事实源 | |
 | AuditLog | id, actor, session_id, path/tool, args, result, ts | P1 | 事实源（**30 天滚动**，ADR 0016） | API 层中间件全覆盖 |
-| ReadState | item_id, tenant_id, is_read, is_starred, updated_at | P1（原 P3） | 事实源 | Reader API 写回；复合主键使 upsert 成立 |
+| ReadState | item_id, tenant_id, is_read, is_starred, updated_at | P1（原 P3） | 事实源 | Reader API 写回；复合主键 + **单语句原子 upsert**（读-改-写会与并发 edit-tag 撞 UNIQUE，见 state-machines） |
 | ReaderCredential | username, password_hash, created_at, updated_at | P1 | 事实源 | 只存 scrypt 哈希，明文仅存在于环境（ADR 0005） |
 | IdempotencyRecord | actor, endpoint, key, status_code, response_body, expires_at | P1 | 可重建 | 支撑「写操作幂等」；带过期，非长期事实源 |
 
