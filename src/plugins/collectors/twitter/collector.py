@@ -163,21 +163,97 @@ def _entries(body: bytes | str) -> list[Json]:
 
 
 def _tweets(body: bytes | str) -> list[Json]:
-    """The tweet results on a page, in the order X sent them."""
+    """The tweet results on a page, in the order X sent them.
+
+    A page is a list of *entries*, and not all of them are tweets. Three
+    shapes carry content or must be told apart, and the distinction is
+    explicit rather than inferred from the entryId prefix:
+
+    - **top-level tweets** (`tweet-<id>`) -- one tweet each;
+    - **conversation modules** (`home-conversation-<id>`, a
+      `TimelineTimelineModule`) -- a thread whose `content.items[]` each hold
+      a full tweet. Measured on a real page these were 13 of 92 tweets, all
+      of them replies, and every one was being dropped whole;
+    - **promoted slots** (`promoted-tweet-<id>`) -- an advertisement. It
+      carries a perfectly parseable `tweet_results`, so it must be *excluded
+      on purpose*; keying off "not a `tweet-` prefix" happened to exclude it
+      and would stop doing so the moment modules were handled.
+    """
     tweets: list[Json] = []
     for entry in _entries(body):
-        if not str(entry.get("entryId", "")).startswith("tweet-"):
-            # Cursors and promoted slots carry no content.
+        entry_id = str(entry.get("entryId", ""))
+        if entry_id.startswith("promoted-tweet-") or _is_promoted(entry.get("content")):
             continue
-        result = (
-            (entry.get("content") or {})
-            .get("itemContent", {})
-            .get("tweet_results", {})
-            .get("result")
-        )
-        if isinstance(result, dict):
-            tweets.append(_unwrap_visibility(result))
+        if entry_id.startswith("tweet-"):
+            result = _result_of((entry.get("content") or {}).get("itemContent"))
+            if isinstance(result, dict):
+                tweets.append(_unwrap_visibility(result))
+            continue
+        if entry_id.startswith("home-conversation-"):
+            for item in _module_items(entry.get("content")):
+                result = _result_of(item)
+                if isinstance(result, dict):
+                    tweets.append(_unwrap_visibility(result))
     return tweets
+
+
+def _is_promoted(content: object) -> bool:
+    """Whether a top-level entry is an advertisement.
+
+    Two independent signals, both checked because they answer different
+    failure modes. The `promotedMetadata` field is what X's own clients read
+    and survives a rename of the entryId prefix; the `promoted-tweet-` prefix
+    is checked by the caller as a fast path.
+
+    Measured on two real pages: all 18 promoted entries carried the metadata
+    and the prefixed id, and none of the 168 ordinary tweets carried either --
+    the signals never disagreed. Guarding on the field is what makes this
+    falsifiable: without it, the entry would be ingested by the `tweet-`
+    branch the moment X stops prefixing the id, and nothing would notice.
+    """
+    if not isinstance(content, dict):
+        return False
+    item_content = content.get("itemContent")
+    if isinstance(item_content, dict) and "promotedMetadata" in item_content:
+        return True
+    # A module can in principle carry a promoted item too.
+    return any("promotedMetadata" in item for item in _module_items(content))
+
+
+def _module_items(content: object) -> list[Json]:
+    """The `itemContent` of a `TimelineTimelineModule`'s items.
+
+    A module wraps each of its tweets one level deeper than a top-level entry
+    does (`items[].item.itemContent` rather than `content.itemContent`), so
+    the unwrapping is named rather than inlined twice.
+
+    A module's own `sortIndex` is a layout position, not the id range of the
+    tweets inside it (measured: it differed from the items' ids by ~5e12), so
+    callers must read order from the items and never from the module.
+    """
+    if not isinstance(content, dict):
+        return []
+    contents: list[Json] = []
+    for item in content.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        inner = item.get("item")
+        if isinstance(inner, dict) and isinstance(inner.get("itemContent"), dict):
+            contents.append(inner["itemContent"])
+    return contents
+
+
+def _result_of(item_content: object) -> object:
+    """The `tweet_results.result` inside an `itemContent`.
+
+    Takes the `itemContent`, not the enclosing `content`: a top-level entry
+    keeps it at `content.itemContent` and a module item at
+    `item.itemContent`, so resolving that difference belongs to the caller
+    that knows which shape it is walking.
+    """
+    if not isinstance(item_content, dict):
+        return None
+    return (item_content.get("tweet_results") or {}).get("result")
 
 
 def page_ids(body: bytes | str) -> list[str]:

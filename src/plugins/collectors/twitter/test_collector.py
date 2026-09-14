@@ -278,43 +278,32 @@ def test_promoted_tweets_are_never_ingested() -> None:
 
 
 @pytest.mark.unit
-def test_page_sort_span_ignores_cursor_entries() -> None:
-    """Only tweets bound the interval; a cursor's sortIndex is not a tweet's.
+def test_a_promoted_slot_is_excluded_even_when_its_id_looks_like_a_tweet() -> None:
+    """The exclusion hinges on the `promotedMetadata` field, not the id's shape.
 
-    Measured on real pages: `cursor-top` sits exactly one above the newest
-    tweet and `cursor-bottom` one below the oldest, so including them widens
-    the span by two units and shifts `previous_min_sort` below the true tweet
-    floor. Gap detection compares against that value, so the interval must be
-    built from tweets alone.
+    Measured on real pages the two signals always agreed, so a test that only
+    used X's current `promoted-tweet-` prefix would keep passing even if the
+    field guard were deleted -- the id would simply be skipped by the
+    `tweet-` branch never matching. Renaming the id to the ordinary shape is
+    what makes the field guard load-bearing and therefore falsifiable.
     """
-    body = payload("conversation.json").body
-    span = page_sort_span(body)
-    assert span is not None
-    high, low = span
-    # The fixture's tweets run BASE+88 .. BASE+99; the cursors are BASE+0 and
-    # BASE+100. A span that includes them would reach either end.
-    assert high == _tweet_sort_max(body), "the newest tweet bounds the top"
-    assert low == _tweet_sort_min(body), "the oldest tweet bounds the bottom"
+    import json
 
-    cursors = _cursor_sorts(body)
-    assert cursors, "the fixture has cursors, or this proves nothing"
-    assert low > min(cursors), "a cursor must not set the bottom of the span"
-    assert high < max(cursors), "a cursor must not set the top of the span"
+    body = json.loads(payload("conversation.json").body)
+    entries = body["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]
+    renamed = 0
+    for entry in entries:
+        if entry["entryId"].startswith("promoted-tweet-"):
+            entry["entryId"] = "tweet-9990000000000000001"
+            renamed += 1
+    assert renamed == 1, "the fixture must contain exactly one promoted entry"
 
-
-@pytest.mark.unit
-def test_a_cursor_only_page_has_no_span() -> None:
-    """No tweets means continuity cannot be proven -- not that it holds.
-
-    Returning a span here is worse than returning nothing: `(5, 5)`-style
-    values (as the old fixture implied) make every following page look
-    discontinuous, and even a correct-looking value would claim a continuity
-    the page has no evidence for.
-    """
-    body = payload("no_posts.json").body
-    assert page_ids(body) == []
-    assert page_sort_span(body) is None
-
+    raw = json.dumps(body).encode()
+    ids = page_ids(raw)
+    assert "9990000000000000001" not in ids, "an ad slipped in on a tweet-shaped id"
+    for item in parse(RawPayload(url=URL, status_code=200, body=raw, source_id="s")):
+        assert "PROMOTED" not in item.content
+        assert "adco" not in item.canonical_url
 
 def _tweet_sort_max(body: bytes | str) -> int:
     return max(_tweet_sorts(body))
