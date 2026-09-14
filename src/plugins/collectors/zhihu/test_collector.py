@@ -35,6 +35,8 @@ def _payload(name: str) -> RawPayload:
         "answers_structure_changed.json": answers_url,
         "articles_valid.json": collector.BASE + "/api/v4/members/example/articles",
         "activities_valid.json": collector.BASE + "/api/v3/moments/example/activities",
+        "activities_unknown_action.json": collector.BASE
+        + "/api/v3/moments/example/activities",
     }[name]
     return RawPayload(
         url=api_url,
@@ -227,3 +229,27 @@ def test_undecodable_json_is_a_parse_error() -> None:
     with pytest.raises(CollectorError) as exc_info:
         collector.parse(broken)
     assert exc_info.value.error_class is ErrorClass.PARSE
+
+
+@pytest.mark.unit
+def test_an_unknown_action_renders_with_a_neutral_tag() -> None:
+    """An action the classifier does not know must not take the process down.
+
+    `_classify` falls through to "other" for any action_text outside its
+    marker tables -- live data sent one (a 追更-type action on an answer
+    target), the title build then did `_ACTION_TAGS[classifier]` and the
+    child died on KeyError, failing the whole collection. The sandbox
+    contract says parse failures come back as CollectorError values, not
+    crashes; and an action we cannot name still points at the target's
+    content, which is what the reader subscribed for.
+    """
+    drafts = collector.parse(_payload("activities_unknown_action.json"))
+
+    assert len(drafts) == 1
+    draft = drafts[0]
+    assert draft.title.startswith("[")
+    assert "一个被未知动作指向的普通回答" in draft.title
+    assert (
+        draft.canonical_url == "https://www.zhihu.com/question/5500099/answer/3100099"
+    )
+    assert draft.metadata["author"] == "原作者丙"

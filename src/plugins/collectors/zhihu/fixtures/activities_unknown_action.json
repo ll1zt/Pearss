@@ -1,0 +1,27 @@
+{
+ "data": [
+  {
+   "id": "4100011",
+   "action_text": "收听了直播",
+   "verb": "AUDIO_PLAY",
+   "created_time": 1767300000,
+   "actor": {
+    "name": "示例用户",
+    "url_token": "example"
+   },
+   "target": {
+    "type": "answer",
+    "id": 3100099,
+    "title": "",
+    "question": {
+     "id": 5500099,
+     "title": "一个被未知动作指向的普通回答"
+    },
+    "author": {
+     "name": "原作者丙",
+     "url_token": "author-c"
+    }
+   }
+  }
+ ]
+}
