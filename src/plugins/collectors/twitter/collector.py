@@ -350,7 +350,12 @@ def _draft_from_tweet(
         content = _build_content(tweet, full_text, prefix=None)
         published = _parse_created_at(_text(_dig(tweet, "legacy", "created_at")))
 
-    title = _title_from_text(full_text)
+    title = _title_from_text(
+        full_text,
+        marker=_type_marker(
+            retweet=retweet is not None, quoted=_quoted_result(tweet) is not None
+        ),
+    )
     author = _author_label(tweet)
 
     metadata: dict[str, str] = {}
@@ -776,18 +781,52 @@ def _resolve_span(
     return None
 
 
-def _title_from_text(text: str) -> str:
+def _title_from_text(text: str, *, marker: str = "") -> str:
     """First line, t.co links removed, cut at a word boundary.
 
     A tweet has no title, so the opening line stands in. Truncating mid-word
     reads as a defect; dropping the partial word does not.
+
+    `marker` is a short type prefix (`RT ` / `QT `) that the reader's list view
+    uses to tell a re-post or a quote from an original post. It is spent out of
+    the same `TITLE_MAX` budget rather than added on top, so a marked title is
+    never longer than an unmarked one -- the limit bounds the title a reader
+    actually sees.
     """
+    body = _plain_title(text)
+    # Reserve the marker's width, then clip the body to what is left: the two
+    # together are what TITLE_MAX bounds. With no marker this is the whole
+    # budget, which is why the truncation cannot be skipped in that case.
+    trimmed = _truncate_at_word_boundary(body, TITLE_MAX - len(marker))
+    return f"{marker}{trimmed}"
+
+
+def _plain_title(text: str) -> str:
+    """The unmarked title body: first line, links removed, no length limit yet."""
     stripped = _TCO_RE.sub("", text)
     first = stripped.split("\n", 1)[0]
     collapsed = _WS_RE.sub(" ", first).strip()
     if not collapsed:
-        return _plain_text(text)[:TITLE_MAX]
-    return _truncate_at_word_boundary(collapsed, TITLE_MAX)
+        return _plain_text(text)
+    return collapsed
+
+
+def _type_marker(*, retweet: bool, quoted: bool) -> str:
+    """The title prefix for a tweet's type, or "" for an original post.
+
+    Retweet wins when both are true -- a retweeted quote is, at the top level,
+    a re-post, and the quote is already rendered in the body's blockquote, so
+    marking it `QT ` would hide the more useful fact.
+
+    Deliberately bare: the handle is not part of the marker. X's own
+    `RT @user: text` form duplicates the author that `metadata` already
+    carries and leaves the reader guessing whose words are shown.
+    """
+    if retweet:
+        return "RT "
+    if quoted:
+        return "QT "
+    return ""
 
 
 def _truncate_at_word_boundary(value: str, limit: int) -> str:

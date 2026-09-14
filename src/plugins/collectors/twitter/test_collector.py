@@ -148,9 +148,19 @@ def test_a_retweet_title_says_rt_without_naming_the_author() -> None:
     # The original's text still follows the marker, so the reader sees what
     # was said, not who said it.
     assert "Breaking sample story text" in retweet.title
-    # No handle, no colon form -- the marker stands alone.
-    assert "@" not in retweet.title
+    # The marker itself carries no handle. Asserted on the marker rather than
+    # the whole title, because a tweet's own text may legitimately mention
+    # someone -- live titles DO contain "@handle" from the body.
+    assert _marker_of(retweet.title) == "RT "
     assert not retweet.title.startswith("RT @")
+
+
+def _marker_of(title: str) -> str:
+    """The type marker a title carries, or "" when it has none."""
+    for marker in ("RT ", "QT "):
+        if title.startswith(marker):
+            return marker
+    return ""
 
 
 @pytest.mark.unit
@@ -165,7 +175,36 @@ def test_a_quoted_tweet_title_says_qt() -> None:
     assert len(items) == 2, "the fixture holds two quote shapes"
     for item in items:
         assert item.title.startswith("QT "), f"{item.external_id} lost its marker"
-        assert "@" not in item.title
+        assert _marker_of(item.title) == "QT ", "the marker is the type, not a byline"
+
+
+@pytest.mark.unit
+def test_a_quote_has_no_marker_when_it_is_itself_original_text() -> None:
+    """Marking is about the entry's type, not about containing a link.
+
+    A tweet that merely links somewhere is not a quote, and marking it `QT `
+    would put the marker on ordinary posts -- which is how a type signal stops
+    meaning anything.
+    """
+    from plugins.collectors.twitter.collector import _type_marker
+
+    assert _type_marker(retweet=False, quoted=False) == ""
+    assert _type_marker(retweet=True, quoted=False) == "RT "
+    assert _type_marker(retweet=False, quoted=True) == "QT "
+
+
+@pytest.mark.unit
+def test_a_retweeted_quote_is_marked_rt_not_qt() -> None:
+    """Both flags true resolves to `RT `: the entry is a re-post at top level.
+
+    A retweeted quote is a re-post whose payload happens to contain a quote.
+    The quote is already rendered in the body's blockquote, whereas the
+    re-posting is not visible anywhere else in the title -- so `QT ` here
+    would bury the more useful fact.
+    """
+    from plugins.collectors.twitter.collector import _type_marker
+
+    assert _type_marker(retweet=True, quoted=True) == "RT "
 
 
 @pytest.mark.unit
@@ -184,9 +223,34 @@ def test_a_marker_is_counted_within_the_title_budget() -> None:
     `TITLE_MAX` bounds the whole title, marker included -- otherwise every
     marked title would overrun by the marker's length, which is exactly the
     kind of off-by-a-prefix that only shows up in a reader's list view.
-    """
-    from plugins.collectors.twitter.collector import TITLE_MAX
 
+    The shared fixtures cannot show this: their only title near the limit is
+    an *unmarked* one, where reserving the marker's width and not reserving it
+    are the same thing. A long title that is also marked is what makes the
+    reservation load-bearing, so this builds one inline.
+    """
+    from plugins.collectors.twitter.collector import TITLE_MAX, _title_from_text
+
+    long_text = "word " * 60  # 300 chars, far past any marker-adjusted budget
+    marked = _title_from_text(long_text, marker="RT ")
+    unmarked = _title_from_text(long_text)
+
+    assert marked.startswith("RT "), "the marker survives truncation"
+    assert len(marked) <= TITLE_MAX + 1, f"marked title is {len(marked)} chars"
+    assert len(unmarked) <= TITLE_MAX + 1, f"unmarked title is {len(unmarked)} chars"
+
+    # Whitespace-delimited text cannot show the reservation, because dropping
+    # a partial word absorbs the marker's width either way -- measured: both
+    # land inside the budget whatever the limit. A single unbroken token has
+    # no partial word to drop, so here the reservation is the only thing
+    # keeping a marked title inside the limit. This is the case that fails if
+    # the marker is added on top of the budget instead of spent from it.
+    one_token = "x" * 200
+    assert len(_title_from_text(one_token, marker="RT ")) <= TITLE_MAX + 1
+    assert len(_title_from_text(one_token, marker="QT ")) <= TITLE_MAX + 1
+
+    # And through the whole pipeline, so a title carrying a marker cannot
+    # exceed the limit either.
     for name in ("valid.json", "quoted.json"):
         for item in drafts(name):
             assert len(item.title) <= TITLE_MAX + 1, f"{name}: {item.title!r}"
