@@ -20,7 +20,6 @@ from typing import Any
 import pytest
 
 from adapters.raw_payload import RawPayload
-from adapters.sanitize import AVATAR_CLASS
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from plugins.collectors.twitter.collector import (
@@ -350,16 +349,17 @@ def test_only_positive_integer_dimensions_are_rendered() -> None:
 
 
 @pytest.mark.unit
-def test_quoted_tweets_show_the_author_avatar() -> None:
-    """The quote block names its author; the avatar makes that name a face.
+def test_a_quoted_tweet_names_its_author() -> None:
+    """The quote block says whose post it is, in text.
 
-    Every quoted tweet on a measured page carried an avatar, and the block
-    previously rendered text only -- so a quote read as an unattributed aside.
+    It carried an avatar for one revision; that is gone (see the byline tests),
+    so attribution rests on the name and handle -- which is what the block had
+    to get right in the first place, since a quote with no author reads as the
+    quoter's own aside.
     """
     quoted = next(d for d in drafts("quoted.json") if d.external_id.endswith("1"))
     block = quoted.content.split("<blockquote>", 1)[1]
-    assert "avatar/2002.png" in block, block
-    assert f'class="{AVATAR_CLASS}"' in block
+    assert "Quoted Guy (@quotedguy)" in block, block
 
 
 @pytest.mark.unit
@@ -1110,86 +1110,34 @@ def test_no_credential_appears_in_any_draft() -> None:
 
 
 # --------------------------------------------------------------------------
-# The avatar
+# No avatar: the byline is text only
+#
+# Avatars were carried for one revision with class="pearss-avatar" as a styling
+# hook for round rendering. Reviewed in a real reader, they rendered as squares
+# because custom CSS is not injected -- and rounding server-side is not open to
+# us: inline `style` is an XSS surface the sanitiser bans (ADR 0007). Rather
+# than ship a portrait that cannot look like one, the image is gone and the
+# byline stands alone.
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_avatar_is_a_small_square_with_the_author_as_alt_text() -> None:
-    """The avatar's whole presentation budget, since styling is unavailable.
+def test_the_byline_carries_no_image() -> None:
+    """Author is text: name and handle, with no portrait in front of it.
 
-    The store-time sanitiser drops `style` and `class` (ADR 0007), so the
-    square 24px box and the alt text are the only things that can make this
-    read as a portrait rather than as a picture in the body. The alt text
-    matters twice over: a blocked avatar URL degrades to the author's name
-    instead of to nothing, and screen readers announce whose face it is.
+    This also removes the only place an avatar URL could appear, so a broken
+    or blocked image can no longer affect how an item reads.
     """
-    items = drafts("valid.json")
-    photo = by_suffix(items, "2")
-    assert photo is not None
-    assert photo.metadata["author"] == "User One (@user1)"
-
-    images = re.findall(r"<img[^>]*>", photo.content)
-    # The first image is the byline portrait; any others are post media.
-    avatar = next(i for i in images if "avatar/" in i)
-    assert 'alt="User One"' in avatar
-    assert 'class="pearss-avatar"' in avatar
-    assert 'width="24"' in avatar
-    assert 'height="24"' in avatar
-    assert 'loading="lazy"' in avatar
+    for name in ("valid.json", "quoted.json", "conversation.json"):
+        for item in drafts(name):
+            for image in re.findall(r"<img[^>]*>", item.content):
+                assert "avatar/" not in image, f"{name}: {image}"
+                assert "profile_images" not in image, f"{name}: {image}"
 
 
 @pytest.mark.unit
-def test_avatar_alt_is_escaped() -> None:
-    """The name is remote data and lands inside an attribute.
-
-    A display name containing a quote would otherwise close the attribute and
-    let the rest of the name become markup.
-    """
-    from plugins.collectors.twitter.collector import _author_html
-
-    tweet = {
-        "core": {
-            "user_results": {
-                "result": {
-                    "core": {"name": 'Ada "The Quote" Lovelace', "screen_name": "ada"},
-                    "avatar": {"image_url": "https://example.com/avatar/a.png"},
-                }
-            }
-        }
-    }
-    html_out = _author_html(tweet)
-    assert html_out is not None
-    assert "&quot;" in html_out
-    assert 'alt="Ada &quot;The Quote&quot; Lovelace"' in html_out
-
-
-@pytest.mark.unit
-def test_the_avatar_attributes_survive_the_sanitiser() -> None:
-    """Unasserted through the sanitiser, the markup above proves nothing.
-
-    `class` and `style` are dropped by design, so if `alt`/`width`/`height`/
-    `loading` were also dropped the avatar would silently render full size with
-    no accessible name -- the exact failure the collector comments warn about.
-    """
-    from adapters.sanitize import sanitize_html
-
-    items = drafts("valid.json")
-    photo = by_suffix(items, "2")
-    assert photo is not None
-    cleaned = sanitize_html(photo.content)
-
-    avatar = next(i for i in re.findall(r"<img[^>]*>", cleaned) if "avatar/" in i)
-    assert 'alt="User One"' in avatar
-    assert 'class="pearss-avatar"' in avatar
-    assert 'width="24"' in avatar
-    assert 'height="24"' in avatar
-    assert 'loading="lazy"' in avatar
-
-
-@pytest.mark.unit
-def test_an_entry_without_an_avatar_still_renders_the_byline() -> None:
-    """No portrait is not a reason to lose the author."""
+def test_the_author_is_still_named_in_full() -> None:
+    """Dropping the image must not drop the attribution it sat beside."""
     from plugins.collectors.twitter.collector import _author_html
 
     tweet = {
@@ -1197,11 +1145,49 @@ def test_an_entry_without_an_avatar_still_renders_the_byline() -> None:
             "user_results": {
                 "result": {
                     "core": {"name": "Ada", "screen_name": "ada"},
+                    "avatar": {"image_url": "https://example.com/avatar/a.png"},
                 }
             }
         }
     }
     html_out = _author_html(tweet)
     assert html_out is not None
-    assert "<img" not in html_out
+    assert "<img" not in html_out, "the avatar is gone even when one exists"
     assert "Ada" in html_out and "@ada" in html_out
+
+
+@pytest.mark.unit
+def test_a_quoted_byline_carries_no_image_either() -> None:
+    """The quote block had its own copy of the avatar; both are gone."""
+    from plugins.collectors.twitter.collector import _quoted_html
+
+    quoted = next(d for d in drafts("quoted.json") if d.external_id.endswith("1"))
+    block = quoted.content.split("<blockquote>", 1)[1]
+    assert "avatar/" not in block, block
+    # The attribution and the quoted media both remain.
+    assert "Quoted Guy" in block
+    assert "media/quoted1.png" in block
+
+
+@pytest.mark.unit
+def test_a_display_name_with_markup_is_still_escaped() -> None:
+    """The name is remote data and lands in the body text.
+
+    Asserted after the avatar's removal because escaping is a property of the
+    byline, not of the `alt` attribute it used to sit in.
+    """
+    from plugins.collectors.twitter.collector import _author_html
+
+    tweet = {
+        "core": {
+            "user_results": {
+                "result": {
+                    "core": {"name": 'Ada "The Quote" <b>Lovelace', "screen_name": "ada"}
+                }
+            }
+        }
+    }
+    html_out = _author_html(tweet)
+    assert html_out is not None
+    assert "<b>" not in html_out, html_out
+    assert "&lt;b&gt;" in html_out
