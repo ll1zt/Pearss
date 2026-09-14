@@ -8,7 +8,7 @@
       "entries": [
        {
         "entryId": "tweet-1000000000000000001",
-        "sortIndex": "1000000000000000000000000000000",
+        "sortIndex": "1000000000000000001",
         "content": {
          "entryType": "TimelineTimelineItem",
          "__typename": "TimelineTimelineItem",
@@ -166,7 +166,7 @@
        },
        {
         "entryId": "tweet-1000000000000000002",
-        "sortIndex": "1000000000000000000000000000000",
+        "sortIndex": "1000000000000000002",
         "content": {
          "entryType": "TimelineTimelineItem",
          "__typename": "TimelineTimelineItem",
@@ -367,7 +367,7 @@
        },
        {
         "entryId": "tweet-1000000000000000003",
-        "sortIndex": "1000000000000000000000000000000",
+        "sortIndex": "1000000000000000003",
         "content": {
          "entryType": "TimelineTimelineItem",
          "__typename": "TimelineTimelineItem",
@@ -452,7 +452,7 @@
        },
        {
         "entryId": "tweet-1000000000000000004",
-        "sortIndex": "9000000000000000000",
+        "sortIndex": "1000000000000000004",
         "content": {
          "entryType": "TimelineTimelineItem",
          "__typename": "TimelineTimelineItem",
@@ -556,7 +556,7 @@
        },
        {
         "entryId": "cursor-bottom-4000000000000000001",
-        "sortIndex": "9999999999999999999",
+        "sortIndex": "1000000000000000000",
         "content": {
          "entryType": "TimelineTimelineCursor",
          "__typename": "TimelineTimelineCursor",

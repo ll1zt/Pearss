@@ -338,6 +338,76 @@ def _cursor_sorts(body: bytes | str) -> list[int]:
     ]
 
 
+
+@pytest.mark.unit
+def test_page_sort_span_ignores_cursor_entries() -> None:
+    """Only tweets bound the interval; a cursor's sortIndex is not a tweet's.
+
+    Measured on real pages: `cursor-top` sits exactly one above the newest
+    tweet and `cursor-bottom` one below the oldest, so including them widens
+    the span by two units and shifts `previous_min_sort` below the true tweet
+    floor. Gap detection compares against that value, so the interval must be
+    built from tweets alone.
+    """
+    body = payload("conversation.json").body
+    span = page_sort_span(body)
+    assert span is not None
+    high, low = span
+    # The fixture's tweets run BASE+88 .. BASE+99; the cursors are BASE+0 and
+    # BASE+100. A span that includes them would reach either end.
+    assert high == _tweet_sort_max(body), "the newest tweet bounds the top"
+    assert low == _tweet_sort_min(body), "the oldest tweet bounds the bottom"
+
+    cursors = _cursor_sorts(body)
+    assert cursors, "the fixture has cursors, or this proves nothing"
+    assert low > min(cursors), "a cursor must not set the bottom of the span"
+    assert high < max(cursors), "a cursor must not set the top of the span"
+
+    # The fixture puts the conversation module's oldest reply *below* every
+    # top-level tweet, as a real page does when a thread sits at the bottom.
+    # Without that, dropping module items from the span would be undetectable
+    # -- they would all fall inside the top-level range and change neither end.
+    top_level = _top_level_sort_min(body)
+    assert low < top_level, "a module tweet must be able to set the bottom"
+    module_sorts = _module_sort_sorts(body)
+    assert min(module_sorts) == low, "the module's oldest reply is the page's oldest"
+
+
+def _top_level_sort_min(body: bytes | str) -> int:
+    import json
+
+    return min(
+        int(e["sortIndex"])
+        for e in json.loads(body)["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]
+        if e["entryId"].startswith("tweet-")
+    )
+
+
+def _module_sort_sorts(body: bytes | str) -> list[int]:
+    import json
+
+    out: list[int] = []
+    for entry in json.loads(body)["data"]["home"]["home_timeline_urt"]["instructions"][0]["entries"]:
+        for item in (entry.get("content") or {}).get("items") or []:
+            if item.get("entryId", "").startswith("tweet-"):
+                out.append(int(item["entryId"].split("-", 1)[1]))
+    return out
+
+
+@pytest.mark.unit
+def test_a_cursor_only_page_has_no_span() -> None:
+    """No tweets means continuity cannot be proven -- not that it holds.
+
+    Returning a span here is worse than returning nothing: `(5, 5)`-style
+    values (as the old fixture implied) make every following page look
+    discontinuous, and even a correct-looking value would claim a continuity
+    the page has no evidence for.
+    """
+    body = payload("no_posts.json").body
+    assert page_ids(body) == []
+    assert page_sort_span(body) is None
+
+
 # --------------------------------------------------------------------------
 # Shapes the upstream comments call necessary but never tested
 # --------------------------------------------------------------------------
