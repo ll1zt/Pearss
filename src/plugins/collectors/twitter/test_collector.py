@@ -108,6 +108,12 @@ def test_retweet_keeps_the_retweeter_and_uses_the_original_body() -> None:
     Rendering the wrapper's own `RT @user2: ...` text would show the prefix
     that X already represents structurally, and the reader could not tell
     whose words they were reading.
+
+    This is *not* the same claim as the bare `RT ` marker the title carries --
+    see `test_a_retweet_title_says_rt_without_naming_the_author`. What is
+    refused here is the `RT @handle:` form, because it duplicates the author
+    metadata and obscures whose words these are; what is wanted there is a
+    two-letter type marker that names nobody.
     """
     items = drafts("valid.json")
     retweet = by_suffix(items, "1")
@@ -115,8 +121,75 @@ def test_retweet_keeps_the_retweeter_and_uses_the_original_body() -> None:
     assert "User One (@user1)" in retweet.metadata["author"]
     assert "↻" in retweet.content
     assert "转推了" in retweet.content
-    assert not retweet.title.startswith("RT @")
+    assert "RT @" not in retweet.title, "the upstream RT @handle: form is refused"
     assert retweet.metadata.get("retweet") == "true"
+
+
+# --------------------------------------------------------------------------
+# Type markers in the title
+#
+# A reader's list view shows titles and nothing else, so a type that is only
+# marked in the body is invisible there. Measured on a real page: 10 retweets
+# and 32 quotes out of 95 tweets -- 44% -- carried no title-level signal at all.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_retweet_title_says_rt_without_naming_the_author() -> None:
+    """The marker is a type, not a byline: `RT ` and nothing more.
+
+    Marking the type is what makes a retweet recognisable in a list view;
+    naming the author there would repeat `metadata["author"]` and reintroduce
+    the confusion the refused `RT @handle:` form causes.
+    """
+    retweet = by_suffix(drafts("valid.json"), "1")
+    assert retweet is not None
+    assert retweet.title.startswith("RT ")
+    # The original's text still follows the marker, so the reader sees what
+    # was said, not who said it.
+    assert "Breaking sample story text" in retweet.title
+    # No handle, no colon form -- the marker stands alone.
+    assert "@" not in retweet.title
+    assert not retweet.title.startswith("RT @")
+
+
+@pytest.mark.unit
+def test_a_quoted_tweet_title_says_qt() -> None:
+    """A quote is marked `QT ` in both shapes X has used for it.
+
+    `quoted.json` carries the same fact on two paths -- top-level
+    `quoted_status_result` and the legacy nesting -- and both must be marked,
+    or one of the two shapes silently loses its type.
+    """
+    items = drafts("quoted.json")
+    assert len(items) == 2, "the fixture holds two quote shapes"
+    for item in items:
+        assert item.title.startswith("QT "), f"{item.external_id} lost its marker"
+        assert "@" not in item.title
+
+
+@pytest.mark.unit
+def test_an_ordinary_tweet_has_no_type_marker() -> None:
+    """Only the two derived types are marked; a plain tweet starts with its text."""
+    plain = by_suffix(drafts("valid.json"), "2")
+    assert plain is not None
+    assert plain.title.startswith("A sample tweet with a photo attached")
+    assert not plain.title.startswith(("RT ", "QT "))
+
+
+@pytest.mark.unit
+def test_a_marker_is_counted_within_the_title_budget() -> None:
+    """The marker must not push the title past its own limit.
+
+    `TITLE_MAX` bounds the whole title, marker included -- otherwise every
+    marked title would overrun by the marker's length, which is exactly the
+    kind of off-by-a-prefix that only shows up in a reader's list view.
+    """
+    from plugins.collectors.twitter.collector import TITLE_MAX
+
+    for name in ("valid.json", "quoted.json"):
+        for item in drafts(name):
+            assert len(item.title) <= TITLE_MAX + 1, f"{name}: {item.title!r}"
 
 
 @pytest.mark.unit
