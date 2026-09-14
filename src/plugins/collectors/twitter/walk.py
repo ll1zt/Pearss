@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Final
 
 import httpx
 
@@ -29,6 +30,12 @@ from plugins.collectors.twitter import paging
 
 LOGGER = logging.getLogger(__name__)
 
+# A catch-up walk ends at the frontier, so this is a runaway guard rather than
+# a policy: it only bites if an origin answers cursors without advancing. Set
+# far above any real catch-up so it never truncates one -- truncating below
+# the frontier is how content goes missing between cycles.
+CATCH_UP_PAGE_CEILING: Final = 200
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PagedWalkResult:
@@ -42,12 +49,15 @@ class PagedWalkResult:
 
     drafts: list[ItemDraft]
     newest_id: int | None
-    resume_cursor: str | None
     error_class: ErrorClass | None = None
     detail: str | None = None
-    # Whether this walk ended on the interval's floor. Cursors are opaque, so
-    # only this flag authorises the host to move the stored floor.
-    reached_floor: bool = False
+    # Set only when the walk ended on budget without crossing the frontier:
+    # the one ending that establishes (or extends) the interval's depth.
+    floor_candidate: str | None = None
+    # Where a sortIndex break was seen, for reporting. Never a cursor to
+    # chase: a gap sits inside the window and following it would be a second
+    # crawl direction.
+    gap_cursor: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -87,15 +97,20 @@ def collect_pages(
         return PagedWalkResult(
             drafts=[],
             newest_id=None,
-            resume_cursor=None,
             error_class=ErrorClass.AUTH,
             detail="X session credentials are not configured",
         )
 
+    # The first walk is the only one with a page *policy*: it defines how far
+    # back the interval reaches, and that depth is the operator's choice.
+    # Every later walk ends at the frontier, so its request count tracks the
+    # origin's actual output -- a modest ceiling on those is a runaway guard
+    # (an origin that loops cursors), never a cap on catching up. Capping a
+    # catch-up walk below what it needs to reach the frontier is precisely how
+    # tweets get lost between cycles.
     first_pages = x_client.configured_first_pages()
-    has_history = state.seen_frontier is not None or bool(state.resume_cursor)
-    ceiling = max(max_pages, first_pages)
-    budget = first_pages if not has_history else ceiling
+    has_history = state.seen_frontier is not None or bool(state.floor_cursor)
+    budget = first_pages if not has_history else CATCH_UP_PAGE_CEILING
 
     credentials = x_client.Credentials.from_env(client)
     query_id = x_client.current_query_id()
@@ -151,17 +166,15 @@ def collect_pages(
             return fetch_page(cursor)
 
     try:
-        result = paging.two_phase_walk(
+        result = paging.walk(
             fetch_page=fetch_with_recovery,
             max_pages=budget,
             seen_frontier=state.seen_frontier,
             # The stored cursor is the interval's floor, not a place to resume
             # from: resuming would walk below the oldest tweet ever kept, an
             # unbounded history crawl. As a floor it is a stop sign reached
-            # from above, and unlike the old resume it is never dropped --
-            # should_drop_resume bounded a backlog that slid backwards every
-            # cycle; a floor does not slide, it only marks where history ends.
-            floor=state.resume_cursor,
+            # from above.
+            floor=state.floor_cursor,
         )
     except x_client.CredentialError as exc:
         # A credential problem, not a transport one: the operator has to act,
@@ -169,7 +182,6 @@ def collect_pages(
         return PagedWalkResult(
             drafts=[],
             newest_id=None,
-            resume_cursor=None,
             error_class=ErrorClass.AUTH,
             detail=str(exc),
         )
@@ -178,7 +190,6 @@ def collect_pages(
         return PagedWalkResult(
             drafts=[],
             newest_id=None,
-            resume_cursor=None,
             error_class=(
                 error_class
                 if isinstance(error_class, ErrorClass)
@@ -203,13 +214,25 @@ def collect_pages(
             if draft.external_id.removeprefix("twitter:") in keep:
                 drafts.append(draft)
 
+    if result.gap:
+        # Detected, reported, not chased. A gap sits between two pages the
+        # walk already read; following its cursor would be a second crawl
+        # direction, and the frontier -- which keeps advancing -- is what
+        # actually decides what gets fetched next.
+        LOGGER.warning(
+            "timeline gap for %s: content is missing around cursor %r; "
+            "the walk continues from the frontier",
+            source_id,
+            result.gap_cursor,
+        )
+
     walk_failed = result.failed is not None or not result.ok
     return PagedWalkResult(
         drafts=drafts,
         newest_id=result.newest_id,
-        resume_cursor=result.resume,
         error_class=ErrorClass.BLOCKED if walk_failed else None,
         detail=result.failed
         or ("no page could be retrieved" if not result.ok else None),
-        reached_floor=result.reached_floor,
+        floor_candidate=result.floor_candidate,
+        gap_cursor=result.gap_cursor,
     )

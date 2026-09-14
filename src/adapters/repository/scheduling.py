@@ -40,7 +40,7 @@ def paging_state(session: Session, *, source_id: str) -> PagingState:
         return PagingState()
     return PagingState(
         seen_frontier=row.seen_frontier,
-        resume_cursor=row.resume_cursor,
+        floor_cursor=row.floor_cursor,
     )
 
 
@@ -49,20 +49,23 @@ def save_paging_state(
     *,
     source_id: str,
     newest_id: int | None,
-    resume_cursor: str | None,
+    floor_candidate: str | None,
 ) -> None:
     """Persist where this walk ended.
 
-    The frontier only moves forward. A re-walk of old history reports ids
-    below it, and letting those win would drag the anchor backwards so every
-    later cycle re-reads content it already has.
+    Two anchors, each with its own direction rule:
 
-    `resume_cursor` is the interval's floor: the deepest point any walk of
-    this source has reached. The caller passes it only when the walk actually
-    ended there -- cursors are opaque, so a shallow budget-stop cursor cannot
-    be distinguished from the floor by value. Once set the floor is never
-    cleared or moved upward: erasing it would uncap the next cycle's history,
-    and a floor that drifted up would strand content outside the interval.
+    * **frontier** (`newest_id`) only moves forward. A re-walk of old history
+      reports ids below it, and letting those win would drag the anchor
+      backwards so every later cycle re-reads content it already has.
+    * **floor** (`floor_candidate`) is the interval's lower end, passed only
+      when a walk ended on budget without crossing the frontier. It is set
+      once by the first walk -- that is what gives the interval its depth --
+      and afterwards the frontier is the terminator, so a later candidate
+      normally does not arise. When one does (a first walk that failed and is
+      retried), it is accepted: cursors are opaque, so the host cannot compare
+      positions and a candidate is the walk's own statement about where it
+      stopped. It is never cleared.
     """
 
     row = session.get(SourceRow, source_id)
@@ -73,8 +76,8 @@ def save_paging_state(
     ):
         row.seen_frontier = newest_id
 
-    if resume_cursor and resume_cursor != row.resume_cursor:
-        row.resume_cursor = resume_cursor
+    if floor_candidate:
+        row.floor_cursor = floor_candidate
     row.updated_at = timestamp(datetime.now(UTC))
 
 

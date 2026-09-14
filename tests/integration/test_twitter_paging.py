@@ -150,14 +150,17 @@ def test_the_first_walk_spends_first_pages_and_records_the_floor(
     monkeypatch.setenv(x_client.FIRST_PAGES_ENV, "3")
 
     requested: list[str] = []
+    seen = {"n": 0}
 
     def route(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         cursor = body["variables"].get("cursor")
         requested.append(cursor or "NEWEST")
-        # Every page is entirely new (frontier is empty), each carries a
-        # deeper continuation.
-        return httpx.Response(200, content=timeline(["9000"], "PAGE-2"))
+        # Every page is entirely new (frontier is empty), and each carries a
+        # *distinct* deeper cursor: an origin answering the same cursor it was
+        # given is treated as the bottom, which is a different case.
+        seen["n"] += 1
+        return httpx.Response(200, content=timeline(["9000"], f"PAGE-{seen['n'] + 1}"))
 
     registration = collector_registry.by_name("twitter")
     assert registration is not None
@@ -172,10 +175,13 @@ def test_the_first_walk_spends_first_pages_and_records_the_floor(
 
     # A fresh source has no frontier to stop at, so the walk runs to its
     # three-page budget and no further.
-    assert requested == ["NEWEST", "PAGE-2", "PAGE-2"], requested
+    assert requested == ["NEWEST", "PAGE-2", "PAGE-3"], requested
     # Three pages fetched; dedupe collapses the repeated tweet.
     assert result.drafts == 3
     assert result.inserted == 1
+    # The walk ran out of budget without crossing a frontier there was none of,
+    # so its bottom is the interval's floor.
+    assert paging_state(session, source_id=SOURCE_ID).floor_cursor == "PAGE-4"
     # The deepest cursor the walk reached is the interval's floor... but note
     # the walk did not *end on* a floor (there is none yet) -- it ended on
     # budget. The floor is only ever set by a walk that reached one, so here
@@ -273,7 +279,7 @@ def test_a_successful_walk_records_the_frontier(
     assert result.inserted == 2
     state = paging_state(session, source_id=SOURCE_ID)
     assert state.seen_frontier == 900
-    assert state.resume_cursor is None
+    assert state.floor_cursor is None
 
 
 @pytest.mark.integration
@@ -329,8 +335,10 @@ def test_the_frontier_only_moves_forward(session: Session) -> None:
 
     Letting it would make every later cycle re-read content it already has.
     """
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=1000, resume_cursor=None)
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=500, resume_cursor=None)
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=1000, floor_candidate=None
+    )
+    save_paging_state(session, source_id=SOURCE_ID, newest_id=500, floor_candidate=None)
     session.commit()
     assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 1000
 
@@ -346,13 +354,15 @@ def test_the_floor_persists_when_a_walk_stops_at_the_frontier(
     source ever reached.
     """
     save_paging_state(
-        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FLOOR-1"
+        session, source_id=SOURCE_ID, newest_id=1000, floor_candidate="FLOOR-1"
     )
     # A frontier stop hands back no cursor at all.
-    save_paging_state(session, source_id=SOURCE_ID, newest_id=2000, resume_cursor=None)
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=2000, floor_candidate=None
+    )
     session.commit()
     state = paging_state(session, source_id=SOURCE_ID)
-    assert state.resume_cursor == "FLOOR-1"
+    assert state.floor_cursor == "FLOOR-1"
     assert state.seen_frontier == 2000
 
 
@@ -368,7 +378,7 @@ def test_a_budget_stop_never_moves_the_floor(
     positions would fall outside the interval the model promises to cover.
     """
     save_paging_state(
-        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FLOOR-DEEP"
+        session, source_id=SOURCE_ID, newest_id=1000, floor_candidate="FLOOR-DEEP"
     )
     session.commit()
 
@@ -398,7 +408,7 @@ def test_a_budget_stop_never_moves_the_floor(
     session.commit()
 
     state = paging_state(session, source_id=SOURCE_ID)
-    assert state.resume_cursor == "FLOOR-DEEP", (
+    assert state.floor_cursor == "FLOOR-DEEP", (
         "a budget-stop cursor overwrote the floor"
     )
     assert state.seen_frontier == 2000
@@ -407,12 +417,12 @@ def test_a_budget_stop_never_moves_the_floor(
 def test_a_first_walk_establishes_the_floor(session: Session) -> None:
     """Before any walk there is no floor; the first one that leaves a cursor
     sets it."""
-    assert paging_state(session, source_id=SOURCE_ID).resume_cursor is None
+    assert paging_state(session, source_id=SOURCE_ID).floor_cursor is None
     save_paging_state(
-        session, source_id=SOURCE_ID, newest_id=1000, resume_cursor="FIRST-BOTTOM"
+        session, source_id=SOURCE_ID, newest_id=1000, floor_candidate="FIRST-BOTTOM"
     )
     session.commit()
-    assert paging_state(session, source_id=SOURCE_ID).resume_cursor == "FIRST-BOTTOM"
+    assert paging_state(session, source_id=SOURCE_ID).floor_cursor == "FIRST-BOTTOM"
 
 
 @pytest.mark.integration
@@ -513,3 +523,64 @@ def test_collection_result_defaults_cover_paging_fields() -> None:
     result = CollectionResult(succeeded=True)
     assert result.last_cursor is None
     assert result.inserted == 0
+
+
+@pytest.mark.integration
+def test_a_busy_catch_up_walks_past_the_first_walk_page_count(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catching up is not capped by the first walk's page policy.
+
+    A cycle whose new tweets span more pages than `PEARSS_X_FIRST_PAGES` must
+    keep walking until it reaches the frontier. Stopping at that number
+    instead is exactly how content goes missing between cycles: the overflow
+    sinks below the top pages before the next tick looks again.
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+    # A deliberately small first-walk policy: the catch-up must ignore it.
+    monkeypatch.setenv(x_client.FIRST_PAGES_ENV, "1")
+
+    # A frontier exists, so this is a catch-up walk.
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=100, floor_candidate="OLDEST"
+    )
+    session.commit()
+
+    requested: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        cursor = body["variables"].get("cursor")
+        requested.append(cursor or "NEWEST")
+        if cursor is None:
+            # Entirely new: nothing at or below the frontier of 100 yet.
+            return httpx.Response(200, content=timeline(["900", "800"], "N1"))
+        if cursor == "N1":
+            return httpx.Response(200, content=timeline(["700", "600"], "N2"))
+        if cursor == "N2":
+            # This page carries the frontier id, so the walk stops here.
+            return httpx.Response(200, content=timeline(["500", "100"], "N3"))
+        raise AssertionError(f"walk went past the frontier: {cursor}")
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    # max_pages=1 is what the production path passes (collect_source's
+    # default). The point here is that a catch-up walk ignores it and keeps
+    # going until the frontier, rather than stopping after that one page.
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+        max_pages=1,
+    )
+    session.commit()
+
+    assert requested == ["NEWEST", "N1", "N2"], requested
+    # 900/800/700/600/500 are new; the page holding the frontier contributes
+    # nothing from 100 onwards.
+    assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 900

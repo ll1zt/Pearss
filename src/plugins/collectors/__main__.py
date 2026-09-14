@@ -206,7 +206,8 @@ def handle(
         return {
             "drafts": [d.as_rpc_dict() for d in result.drafts],
             "newest_id": result.newest_id,
-            "resume_cursor": result.resume_cursor,
+            "floor_candidate": result.floor_candidate,
+            "gap_cursor": result.gap_cursor,
             "error_class": (result.error_class.value if result.error_class else None),
             "detail": result.detail,
         }

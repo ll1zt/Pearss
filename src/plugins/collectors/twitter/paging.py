@@ -70,22 +70,26 @@ class Page:
 class WalkResult:
     """Outcome of one paginated walk.
 
-    `resume` is non-None when work is unfinished. `gap` says which kind: a gap
-    is a place where content is *known* to be missing, whereas a plain cursor
-    only means the budget ran out. Callers prioritise the former.
+    `gap` marks a place where content is *known* to be missing between two
+    pages (`gap_cursor` says where). Detection and recovery are separate
+    concerns: the walk surfaces the break, and the host decides what a gap
+    is worth -- it is logged, never silently chased.
 
-    `reached_floor` says the walk ended on the interval's lower end. Cursors
-    are opaque strings, so the host cannot tell a floor from a shallow
-    budget-stop cursor by comparing them -- this flag is what authorises the
-    host to move the stored floor at all.
+    `floor_candidate` is the walk's own bottom cursor, set only when the walk
+    ended by budget exhaustion without crossing the frontier. That is the one
+    situation where a floor should be established (the first walk defining
+    the interval's depth); every other ending -- frontier crossed, origin
+    bottom, floor reached, failure -- leaves the stored floor alone. Cursors
+    are opaque strings, so the host cannot compare positions; the walk saying
+    "this ended on budget" is what makes the candidate meaningful.
     """
 
     pages: list[bytes] = field(default_factory=list)
     keep_ids: list[object] = field(default_factory=list)
-    resume: str | None = None
     gap: bool = False
+    gap_cursor: str | None = None
     pages_used: int = 0
-    reached_floor: bool = False
+    floor_candidate: str | None = None
     # The newest id seen, for persisting the frontier even when nothing was kept.
     newest_id: int | None = None
     failed: str | None = None
@@ -101,30 +105,36 @@ def walk(
     fetch_page: Callable[[str | None], Page],
     max_pages: int,
     seen_frontier: int | None = None,
-    resume: str | None = None,
-    use_frontier: bool = True,
     floor: str | None = None,
 ) -> WalkResult:
-    """Page newest-first until the frontier, the floor, or the budget.
+    """Page newest-first until the frontier, the floor, the bottom, or the budget.
 
     `fetch_page` receives the cursor to request (None for the newest page) and
     returns a `Page`. It raises to signal failure; the walk then decides
     whether to keep what it has.
 
-    `use_frontier` is the single switch for that: the frontier is still passed
-    in, so a caller can see what is being ignored rather than reading `None`
-    and having to infer it.
+    Termination, in the order the loop reaches them:
 
-    `floor` is the interval's lower end: a cursor marking the oldest tweet
-    the source ever walked. Reaching it is reaching the bottom -- the walk
-    stops there exactly as if the origin had no deeper page, so history
-    below it is never crawled. It is a stop sign, never a starting cursor.
+    * **frontier** -- the first id at or below the newest ingested tweet. The
+      normal end of a catch-up walk, reached after roughly as many pages as
+      there are pages of new content, so request count tracks the origin's
+      actual output rather than a policy number.
+    * **floor** -- the interval's lower end, a cursor marking the oldest tweet
+      the source ever walked. A stop sign, never a starting cursor. Best
+      effort by nature: cursors are opaque and a later walk's chain may not
+      revisit the stored floor's exact value -- the frontier is the
+      terminator that matters, and this one is a backstop.
+    * **origin bottom** -- no next cursor.
+    * **budget** -- see the caller. For a first walk it defines the floor's
+      depth (the operator's history sample); for a catch-up walk it is a
+      runaway guard against an origin that loops cursors, not a policy cap --
+      a budget that stops a walk before the frontier is how tweets get lost.
     """
-    frontier = seen_frontier if use_frontier else None
+    frontier = seen_frontier
     budget = max(0, max_pages)
     bodies: list[bytes] = []
     keep: list[object] = []
-    cursor = resume
+    cursor: str | None = None  # a walk always starts at the top of the timeline
     pages_used = 0
     gap_cursor: str | None = None
     previous_min_sort: int | None = None
@@ -135,12 +145,14 @@ def walk(
             page = fetch_page(cursor)
         except Exception as exc:  # classified by the caller
             if bodies:
-                # Keep the progress; the failing cursor is where to continue.
+                # Keep the progress. No floor candidate: a walk that died
+                # partway has not established how deep the interval goes, and
+                # pinning a floor to a partial reach would wall off the rest.
                 return WalkResult(
                     pages=bodies,
                     keep_ids=keep,
-                    resume=cursor,
                     gap=gap_cursor is not None,
+                    gap_cursor=gap_cursor,
                     pages_used=pages_used,
                     newest_id=newest,
                     failed=str(exc),
@@ -175,67 +187,44 @@ def walk(
         at_floor = floor is not None and page.next_cursor == floor
         if crossed_frontier or page.next_cursor is None or at_floor:
             # Caught up, reached the interval's floor, or the origin has
-            # nothing deeper. A detected gap still outranks any of these:
-            # skipped content is in no page, so neither the frontier nor the
-            # floor can ever cover it.
+            # nothing deeper. No floor candidate: the interval's depth was
+            # already fixed by the first walk, and none of these endings says
+            # anything new about it.
             return WalkResult(
                 pages=bodies,
                 keep_ids=keep,
-                resume=gap_cursor,
                 gap=gap_cursor is not None,
+                gap_cursor=gap_cursor,
                 pages_used=pages_used,
                 newest_id=newest,
-                reached_floor=at_floor,
+            )
+
+        # An origin that answers every cursor with itself would otherwise spin
+        # for the whole budget; treat the repetition as the bottom.
+        if page.next_cursor == cursor:
+            return WalkResult(
+                pages=bodies,
+                keep_ids=keep,
+                gap=gap_cursor is not None,
+                gap_cursor=gap_cursor,
+                pages_used=pages_used,
+                newest_id=newest,
             )
 
         cursor = page.next_cursor
 
-    # Budget exhausted: hand back the gap if there is one, else the deep-water
-    # cursor for the next cycle to continue from.
-    resume_out = gap_cursor or cursor
+    # Budget exhausted without crossing the frontier: the walk's own bottom is
+    # the floor candidate. Deliberately not the gap cursor -- a gap sits
+    # *within* the walked window, above this point, and pinning the floor to
+    # it would strand everything between the gap and the true bottom.
     return WalkResult(
         pages=bodies,
         keep_ids=keep,
-        resume=resume_out,
         gap=gap_cursor is not None,
+        gap_cursor=gap_cursor,
         pages_used=pages_used,
         newest_id=newest,
-    )
-
-
-def two_phase_walk(
-    *,
-    fetch_page: Callable[[str | None], Page],
-    max_pages: int,
-    seen_frontier: int | None,
-    floor: str | None = None,
-) -> WalkResult:
-    """Walk from the top until the frontier, the floor, or the budget.
-
-    The interval model: the frontier is the newest ingested tweet, `floor`
-    is the oldest tweet the first walk ever reached (a cursor marking where
-    history ends for this source). One phase suffices, because the walk
-    always starts at the top of the timeline: new content sits above the
-    frontier, so a single pass that stops at either the frontier or the
-    floor cannot miss anything between them.
-
-    The floor is a stop sign, not a place to continue from. Passing it as a
-    resume cursor would walk *below* the oldest tweet ever kept -- a history
-    crawl with no natural end, observed live as a timeline dragged back to
-    2023. When the budget runs out before the frontier is crossed the walk
-    simply returns; the next cycle starts at the top again and catches up,
-    with dedupe absorbing the overlap.
-
-    `gap` detection still applies within the window: a sortIndex break means
-    tweets are known-missing between two pages, and the walk reports the
-    cursor where the break happened so an operator (or a later, more generous
-    budget) can look there deliberately.
-    """
-    return walk(
-        fetch_page=fetch_page,
-        max_pages=max_pages,
-        seen_frontier=seen_frontier,
-        floor=floor,
+        floor_candidate=cursor,
     )
 
 
@@ -244,6 +233,5 @@ __all__ = [
     "WalkResult",
     "to_int",
     "truncate_at_seen",
-    "two_phase_walk",
     "walk",
 ]

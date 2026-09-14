@@ -20,10 +20,11 @@ class WalkState:
     fields, so the child may pass any object with this shape — no adapters
     import required.
 
-    `resume_cursor` carries the interval's floor: the deepest point any walk
-    of this source has reached. It is a stop sign, not a place to resume
-    from -- resuming below it would crawl history with no end.
+    `floor_cursor` is the interval's lower end: the deepest point any walk of
+    this source has reached. A stop sign, not a place to resume from --
+    resuming below it would crawl history with no end. It is set by the first
+    walk's budget-limited bottom and only ever moved deeper.
     """
 
     seen_frontier: int | None = None
-    resume_cursor: str | None = None
+    floor_cursor: str | None = None

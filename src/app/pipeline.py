@@ -512,7 +512,7 @@ def collect_paged(
         client=client,
         state=PagingState(
             seen_frontier=state.seen_frontier,
-            resume_cursor=state.resume_cursor,
+            floor_cursor=state.floor_cursor,
         ),
         max_pages=max_pages,
     )
@@ -520,15 +520,14 @@ def collect_paged(
     set_source_title_if_absent(
         session, source_id=source.id, title=_paged_source_title(registration)
     )
-    # Only a walk that ended on the floor may move it. `resume_cursor` also
-    # carries gap cursors and budget-stop bottoms -- positions that are real
-    # but shallower -- and cursors are opaque strings, so the host cannot tell
-    # them apart without the walk saying so.
+    # Only a budget-limited walk yields a floor candidate, and the walk says
+    # so itself -- cursors are opaque, so no comparison here could tell a
+    # floor from a gap position or a frontier stop.
     save_paging_state(
         session,
         source_id=source.id,
         newest_id=walk.newest_id,
-        resume_cursor=walk.resume_cursor if walk.reached_floor else None,
+        floor_candidate=walk.floor_candidate,
     )
 
     if walk.error_class is not None:

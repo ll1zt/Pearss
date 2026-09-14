@@ -13,7 +13,6 @@ from plugins.collectors.twitter.paging import (
     WalkResult,
     to_int,
     truncate_at_seen,
-    two_phase_walk,
     walk,
 )
 
@@ -88,10 +87,10 @@ def test_the_walk_stops_at_the_frontier_without_reading_deeper() -> None:
             page(["200", "100"], next_cursor="C2"),
         ]
     )
-    result = walk(fetch_page=script, max_pages=5, seen_frontier=260, resume=None)
+    result = walk(fetch_page=script, max_pages=5, seen_frontier=260)
     assert result.pages_used == 1
     assert list(result.keep_ids) == ["300"]
-    assert result.resume is None
+    assert result.floor_candidate is None
     assert len(script.requested) == 1
 
 
@@ -114,7 +113,7 @@ def test_budget_exhaustion_hands_back_the_deep_water_cursor() -> None:
     script = Script([page([str(1000 - i)], next_cursor=f"C{i}") for i in range(3)])
     result = walk(fetch_page=script, max_pages=2)
     assert result.pages_used == 2
-    assert result.resume == "C1"
+    assert result.floor_candidate == "C1"
     assert result.gap is False
 
 
@@ -150,7 +149,7 @@ def test_a_sort_index_discontinuity_is_reported_as_a_gap() -> None:
     )
     result = walk(fetch_page=script, max_pages=5)
     assert result.gap is True
-    assert result.resume == "C1"
+    assert result.gap_cursor == "C1"
 
 
 @pytest.mark.unit
@@ -164,7 +163,7 @@ def test_contiguous_pages_report_no_gap() -> None:
     )
     result = walk(fetch_page=script, max_pages=5)
     assert result.gap is False
-    assert result.resume is None
+    assert result.floor_candidate is None
 
 
 @pytest.mark.unit
@@ -182,7 +181,7 @@ def test_a_gap_outranks_being_caught_up() -> None:
     )
     result = walk(fetch_page=script, max_pages=5, seen_frontier=150)
     assert result.gap is True
-    assert result.resume == "C1"
+    assert result.gap_cursor == "C1"
 
 
 @pytest.mark.unit
@@ -211,7 +210,8 @@ def test_a_later_failure_keeps_earlier_pages() -> None:
     result = walk(fetch_page=script, max_pages=5)
     assert result.ok
     assert len(result.pages) == 1
-    assert result.resume == "C1"
+    # A failed walk establishes no floor: it never said how deep to go.
+    assert result.floor_candidate is None
     assert result.failed == "socket blip"
 
 
@@ -224,7 +224,7 @@ def test_a_first_page_failure_propagates() -> None:
 
 
 # --------------------------------------------------------------------------
-# Two-phase walk
+# The interval: floor candidate, gap reporting, budget
 # --------------------------------------------------------------------------
 
 
@@ -232,10 +232,9 @@ def test_a_first_page_failure_propagates() -> None:
 def test_the_walk_stops_at_the_floor() -> None:
     """The floor is the interval's lower end: reaching it ends the walk.
 
-    It marks the oldest tweet the source ever walked. History below it is
-    unfetched by design, so the walk must treat the floor's cursor as the
-    bottom of the timeline -- requesting the page *after* it would be the
-    unbounded history crawl the floor exists to prevent.
+    It marks the oldest tweet the source ever walked, so the walk must treat
+    its cursor as the bottom of the timeline -- requesting the page *after*
+    it would be the unbounded history crawl the floor exists to prevent.
     """
     script = Script(
         [
@@ -243,78 +242,125 @@ def test_the_walk_stops_at_the_floor() -> None:
             page(["700", "600"], next_cursor="DEEP", sort_span=(700, 600)),
         ]
     )
-    result = two_phase_walk(
-        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
-    )
+    result = walk(fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP")
     # Page 2's next_cursor is the floor: stop without requesting it.
     assert script.requested == [None, "F1"]
     assert result.pages_used == 2
     assert result.ok
-    assert result.resume is None
+    # Ending on the floor says nothing about the interval's depth, so it is
+    # not a candidate.
+    assert result.floor_candidate is None
 
 
-def test_the_floor_never_becomes_a_resume_cursor() -> None:
-    """A walk that ends at the floor is complete, not unfinished.
-
-    Reporting the floor as a resume would make the next cycle continue from
-    below it -- the history crawl the interval model forbids.
-    """
-    script = Script(
-        [page(["700", "600"], next_cursor="DEEP")],
-    )
-    result = two_phase_walk(
-        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
-    )
-    assert result.resume is None
-    assert result.ok
-
-
-def test_budget_exhaustion_above_the_floor_stops_this_cycle() -> None:
-    """An overshooting cycle reports its own bottom cursor and stops.
-
-    The next cycle starts from the top again, not from this cursor: resuming
-    downward would skip whatever the timeline serves in between. The stored
-    floor only moves when a walk genuinely reaches deeper than before; that
-    decision belongs to the host's save_paging_state, which only accepts a
-    cursor it does not already hold.
-    """
+@pytest.mark.unit
+def test_a_budget_limited_walk_offers_its_bottom_as_the_floor() -> None:
+    """This is how the interval gets its depth: the first walk runs out of
+    budget without reaching the frontier, and where it stopped becomes the
+    floor. Nothing else in the walk's endings is allowed to set it."""
     script = Script(
         [
             page(["900", "800"], next_cursor="C1"),
             page(["700", "600"], next_cursor="C2"),
         ]
     )
-    result = two_phase_walk(
-        fetch_page=script, max_pages=2, seen_frontier=500, floor="FLOOR"
-    )
+    result = walk(fetch_page=script, max_pages=2, seen_frontier=500, floor=None)
     assert result.pages_used == 2
-    assert result.resume == "C2"
+    assert result.floor_candidate == "C2"
     assert "FLOOR" not in script.requested
 
 
-def test_a_gap_still_outranks_the_floor() -> None:
-    """A sortIndex break means tweets are known-missing; report the cursor.
+@pytest.mark.unit
+def test_crossing_the_frontier_is_not_a_floor_candidate() -> None:
+    """The common catch-up ending must leave the stored floor alone."""
+    script = Script([page(["900", "400"], next_cursor="C1")])
+    result = walk(fetch_page=script, max_pages=10, seen_frontier=500)
+    assert result.floor_candidate is None
+    assert result.ok
 
-    Even at the floor, a gap inside the window is content no page carried,
-    so neither the frontier nor the floor covers it. The walk surfaces the
-    break so a later pass can look there deliberately.
+
+@pytest.mark.unit
+def test_reaching_the_origin_bottom_is_not_a_floor_candidate() -> None:
+    script = Script([page(["800", "700"], next_cursor=None)])
+    result = walk(fetch_page=script, max_pages=10, seen_frontier=500)
+    assert result.floor_candidate is None
+
+
+@pytest.mark.unit
+def test_a_failed_walk_offers_no_floor_candidate() -> None:
+    """A walk that died partway has not established how deep to go.
+
+    Pinning a floor to a partial reach would wall off the rest of the
+    history the first walk was supposed to sample.
+    """
+    script = Script(
+        [
+            page(["900", "800"], next_cursor="C1"),
+            RuntimeError("risk control"),
+        ]
+    )
+    result = walk(fetch_page=script, max_pages=5, seen_frontier=500)
+    assert result.failed == "risk control"
+    assert result.floor_candidate is None
+
+
+@pytest.mark.unit
+def test_a_gap_is_reported_without_becoming_the_floor() -> None:
+    """A sortIndex break is surfaced, never used to bound the interval.
+
+    A gap sits *within* the walked window. Pinning the floor to the break
+    would strand everything between it and the true bottom -- which is why
+    the candidate is the walk's bottom cursor and the gap rides its own
+    field.
     """
     script = Script(
         [
             page(["900", "800"], next_cursor="C1", sort_span=(900, 800)),
             # Next page's max (850) is above the previous min (800): a break.
-            # Content sits between 800 and 850 that no page carried.
-            page(["850", "700"], next_cursor="DEEP", sort_span=(850, 700)),
+            page(["850", "700"], next_cursor="C2", sort_span=(850, 700)),
+            page(["600", "500"], next_cursor=None, sort_span=(600, 500)),
         ]
     )
-    result = two_phase_walk(
-        fetch_page=script, max_pages=10, seen_frontier=500, floor="DEEP"
-    )
+    result = walk(fetch_page=script, max_pages=10, seen_frontier=400)
     assert result.gap is True
-    assert result.resume == "C1"
+    assert result.gap_cursor == "C1"
+    # The walk ran to the origin bottom, so there is no floor candidate --
+    # the gap must not have stood in for one.
+    assert result.floor_candidate is None
+
+
+@pytest.mark.unit
+def test_an_origin_that_repeats_a_cursor_ends_the_walk() -> None:
+    """A cursor answering with itself would spin for the whole budget."""
+    script = Script([page(["900", "800"], next_cursor="SAME")])
+    result = walk(fetch_page=script, max_pages=50, seen_frontier=100)
+    assert result.pages_used == 1
+    assert result.floor_candidate is None
 
 
 @pytest.mark.unit
 def test_walk_result_ok_is_false_only_without_pages() -> None:
     assert WalkResult(pages=[], keep_ids=["x"]).ok is False
     assert WalkResult(pages=[b"body"], keep_ids=[]).ok is True
+
+
+@pytest.mark.unit
+def test_a_gap_does_not_become_the_floor_when_the_budget_runs_out() -> None:
+    """The case that made the floor wrong: gap present *and* budget exhausted.
+
+    The gap cursor sits above the walk's bottom, so using it as the floor
+    would strand every tweet between the break and the real bottom -- content
+    the walk had already fetched past. The two are separate fields precisely
+    so this cannot be conflated.
+    """
+    script = Script(
+        [
+            page(["900", "800"], next_cursor="C1", sort_span=(900, 800)),
+            # Next page's max (850) is above the previous min (800): a break.
+            page(["850", "700"], next_cursor="C2", sort_span=(850, 700)),
+        ]
+    )
+    result = walk(fetch_page=script, max_pages=2, seen_frontier=100)
+    assert result.gap is True
+    assert result.gap_cursor == "C1"
+    # The floor is where the walk stopped, not where it noticed a hole.
+    assert result.floor_candidate == "C2"

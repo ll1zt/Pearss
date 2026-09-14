@@ -97,17 +97,19 @@ class Source(Base):
         sa.String(128), nullable=True
     )
     # Paging state for sources whose origin is walked a page at a time. RSS has
-    # no such concept, so all three are unused by the other collectors.
+    # no such concept, so both are unused by the other collectors.
     # Not derivable from `item`: a cursor is an opaque string from the origin,
     # and a gap position is not recoverable from stored rows.
+    #
+    # `seen_frontier` is the newest ingested tweet id; `floor_cursor` is the
+    # oldest cursor any walk reached, the interval's lower end. Together they
+    # bound what a walk may fetch. (`resume_rounds` was removed in 0016: the
+    # interval model has no backlog to age out.)
     seen_frontier: sa.orm.Mapped[int | None] = sa.orm.mapped_column(
         sa.BigInteger, nullable=True
     )
-    resume_cursor: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+    floor_cursor: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.Text, nullable=True
-    )
-    resume_rounds: sa.orm.Mapped[int] = sa.orm.mapped_column(
-        sa.Integer, nullable=False, default=0
     )
     # Per-source scheduling: fixed interval or adaptive bounds, plus the
     # consecutive-failure count that drives backoff.

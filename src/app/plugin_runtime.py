@@ -692,7 +692,6 @@ class SandboxedCollector:
             return walk.PagedWalkResult(
                 drafts=[],
                 newest_id=None,
-                resume_cursor=None,
                 error_class=_EC(exc.code),
                 detail=exc.detail,
             )
@@ -715,7 +714,7 @@ class SandboxedCollector:
                 "source_url": source_url,
                 "state": {
                     "seen_frontier": state.seen_frontier,
-                    "resume_cursor": state.resume_cursor,
+                    "floor_cursor": state.floor_cursor,
                 },
                 "max_pages": max_pages,
             },
@@ -723,11 +722,12 @@ class SandboxedCollector:
         return walk.PagedWalkResult(
             drafts=[ItemDraft.from_rpc_dict(d) for d in result["drafts"]],
             newest_id=result["newest_id"],
-            resume_cursor=result["resume_cursor"],
             error_class=(
                 ErrorClass(result["error_class"]) if result.get("error_class") else None
             ),
             detail=result.get("detail"),
+            floor_candidate=result.get("floor_candidate"),
+            gap_cursor=result.get("gap_cursor"),
         )
 
 
