@@ -8,16 +8,21 @@ This is a **login-type collector** and exists only under the conditions in
 scope must not exceed what your account can already see, and a missing or
 expired credential stops as `auth` rather than being worked around.
 
+本文是**运维视角**：配置、行为、排障与风险。代码层面的实现在
+[`docs/guides/twitter-collector.md`](../../../../docs/guides/twitter-collector.md)
+（模块分工、数据流、翻页模型、已知缺陷）。
+
 ## 位置与结构
 
 ```text
 src/plugins/collectors/twitter/
   collector.py       # 纯解析：bytes → ItemDraft（无网络、无凭据）
   client.py          # GraphQL 请求、凭据、queryId 恢复
-  paging.py          # 翻页：frontier / 断档检测 / 可续采回填
-  test_collector.py  # 31 个解析测试
-  test_client.py     # 20 个请求与分类测试
-  test_paging.py     # 18 个翻页测试
+  paging.py          # 翻页：frontier / 断档检测 / 区间下界
+  walk.py            # 三者粘合 + 沙箱 RPC 入口
+  test_collector.py  # 35 个解析测试
+  test_client.py     # 29 个请求与分类测试
+  test_paging.py     # 21 个翻页测试
   fixtures/
     valid.json         # 上游实现记录的真实形态（RT / 图片 / 长推 / 截断）
     quoted.json        # 引用推文在顶层与在 legacy 下两种形态
@@ -144,7 +149,8 @@ floor 是**停止符**，不是续采起点。把它当 resume 会从历史最�
 ## 运行测试
 
 ```bash
-just test        # 含本目录 69 个 + tests/unit/test_cookiecloud.py 31 个，全部离线
+just test        # 含本目录 85 个 + tests/integration/test_twitter_paging.py 13 个
+                 #   + tests/unit/test_cookiecloud.py 35 个，全部离线
 ```
 
 无 fixture 含凭据；HTTP 层一律用 `httpx.MockTransport`。

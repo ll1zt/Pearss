@@ -313,7 +313,7 @@ repo/
   docs/
     api/                 # style-guide.md, mcp-tool-guide.md
     domain/              # data-model.md, state-machines.md, error-taxonomy.md
-    guides/              # collector-guide.md, testing.md
+    guides/              # collector-guide.md, twitter-collector.md, twitter-improvements.md, testing.md
     operations/          # runbook.md
     integrations/        # netnewswire.md
     adr/                 # 一决策一文件，可 supersede；0000 为索引```
