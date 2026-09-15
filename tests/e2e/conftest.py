@@ -57,10 +57,18 @@ READER_PASSWORD = "e2e-reader-pw"
 
 
 class _FixtureOrigin:
-    """A real HTTP server serving one RSS document on the loopback."""
+    """A real HTTP server serving one RSS document on the loopback.
 
-    def __init__(self, body: bytes) -> None:
+    `status` exists so a test can stand up an origin that *fails*: the
+    multi-source scenario needs a source whose fetch errors, to show that a
+    broken one does not stop the others. Serving a 200 with a malformed body
+    would test the parser instead; a 500 tests the fetch failure path the
+    scheduler is supposed to contain.
+    """
+
+    def __init__(self, body: bytes, *, status: int = 200) -> None:
         self._body = body
+        self._status = status
         self.requests = 0
         self._lock = threading.Lock()
 
@@ -70,7 +78,7 @@ class _FixtureOrigin:
             def do_GET(self) -> None:
                 with origin._lock:
                     origin.requests += 1
-                self.send_response(200)
+                self.send_response(origin._status)
                 self.send_header("content-type", "application/rss+xml")
                 self.send_header("content-length", str(len(origin._body)))
                 self.end_headers()
@@ -99,6 +107,13 @@ class _FixtureOrigin:
 @pytest.fixture
 def origin_url() -> Iterator[str]:
     with _FixtureOrigin(VALID_FEED.read_bytes()) as origin:
+        yield origin.url
+
+
+@pytest.fixture
+def failing_origin_url() -> Iterator[str]:
+    """An origin that answers 500 to every request."""
+    with _FixtureOrigin(b"upstream is down", status=500) as origin:
         yield origin.url
 
 
