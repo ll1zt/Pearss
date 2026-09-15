@@ -23,6 +23,7 @@ from core.plugins.protocol import (
     decode_message,
     decode_request,
     decode_response,
+    error_result,
 )
 
 pytestmark = pytest.mark.unit
@@ -201,3 +202,58 @@ def test_encode_is_utf8_with_unicode_preserved() -> None:
     encoded = Response(id=1, result={"text": "汉[data]字"}).encode().decode("utf-8")
 
     assert "汉[data]字" in json.loads(encoded)["result"]["text"]
+
+
+# --------------------------------------------------------------------------
+# error_result: the error object the child puts on the wire
+#
+# A classified collector failure travels as a *result* carrying this shape, and
+# the host reads `code` to decide the ErrorClass. It is therefore a wire
+# contract between two processes, and a renamed key would not raise anywhere:
+# the host would read `None` for the class and record an unclassified failure.
+# --------------------------------------------------------------------------
+
+
+def test_the_error_result_uses_the_agreed_key_names() -> None:
+    assert error_result("blocked", "403 from origin") == {
+        "code": "blocked",
+        "message": "403 from origin",
+    }
+
+
+def test_an_error_result_round_trips_as_a_response() -> None:
+    """The child sends it inside a Response; the host must read it back.
+
+    Asserted through the encoder and decoder rather than the dict alone,
+    because the keys have to survive JSON and the response wrapper both.
+    """
+    line = Response(id=7, error=error_result("auth", "token rejected")).encode()
+
+    decoded = decode_response(line)
+    assert decoded.ok is False
+    assert decoded.error == {"code": "auth", "message": "token rejected"}
+
+
+def test_a_decoded_error_result_is_not_an_ok_response() -> None:
+    """`ok` keys off `error` being present, which is what routes a failure.
+
+    A child reporting a 403 must not be read as a successful fetch returning a
+    dictionary -- the host would store the error object as content.
+    """
+    decoded = decode_response(
+        _line({"jsonrpc": "2.0", "id": 1, "error": error_result("blocked", "x")})
+    )
+
+    assert decoded.ok is False
+    assert decoded.error is not None
+
+
+def test_an_error_code_is_not_mistaken_for_a_missing_one() -> None:
+    """An empty code is still a code.
+
+    The host distinguishes "classified as <x>" from "no classification"; an
+    empty string must reach it as an empty string rather than being dropped,
+    which is what a truthiness check on the way out would do.
+    """
+    assert error_result("", "") == {"code": "", "message": ""}
+    assert "code" in error_result("", "")
