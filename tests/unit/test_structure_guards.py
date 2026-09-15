@@ -532,3 +532,139 @@ def test_every_test_module_declares_a_marker() -> None:
         "these modules define tests but declare no marker, so no `just` target "
         "selects them:\n" + "\n".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------
+# The publish gate has one definition
+#
+# `is_visible` was written as "the publish gate, made executable" and has never
+# had a production caller: the exclusion happens in SQL, at five read sites,
+# and it has to -- filtering after the fetch would let a pending row reach
+# memory where a later change could render it (see `items_ready_for_feed`).
+# So the Python predicate is not the mechanism, and ADR 0022's description of
+# it as one is what prompted this guard.
+#
+# The invariant itself held: all five copies agreed, and the E2E test asserts
+# pending is absent from every read surface. What did not hold was "one place".
+# The fix is `visible_item_rows()`, the same rule as a SQL predicate, adopted
+# at every read site -- and this guard is what keeps it that way. A rule
+# written five times is a rule that drifts once and leaks a pending item into
+# a cache that cannot be corrected.
+# --------------------------------------------------------------------------
+
+
+def _gate_sites() -> list[tuple[str, str]]:
+    """Every production line that is part of the pending exclusion.
+
+    Two shapes count: the predicate written out (`publish_status` compared
+    against a PENDING value), and a call to the shared helper. The first is
+    what must not spread; the second is what replaces it.
+    """
+    sites: list[tuple[str, str]] = []
+    for path in Path("src").rglob("*.py"):
+        if "__pycache__" in path.parts or path.name.startswith("test_"):
+            continue
+        for line in _test_bodies(path).splitlines():
+            is_inline = "PENDING" in line and "publish_status" in line
+            if is_inline or "visible_item_rows(" in line:
+                sites.append((str(path), line.strip()))
+    return sites
+
+
+def _visibility_functions() -> set[str]:
+    """Names of the functions that select rows a client may see.
+
+    Scoping by function rather than by module is what makes the guard mean
+    "these reads must share the gate". `feed.py` also holds `promote_pending`,
+    whose PENDING comparisons are an in-memory state check on a loaded `Item`
+    and a compare-and-swap guard on one row -- a different question from "may a
+    client see this", and deliberately not routed through the helper.
+    """
+    return {
+        "items_ready_for_feed",
+        "visible_items",  # adapters/rss_out
+        "count_items",
+        "list_items",
+        "stream_item_ids",
+        "stream_contents",
+    }
+
+
+def _lines_in_function(path: Path, name: str) -> list[str]:
+    """The source lines of one function, by indentation.
+
+    Not a parser: it starts at `def name(` and stops at the next line that
+    begins in column zero. Enough to scope a text check, and the guard's own
+    tests keep it honest.
+    """
+    lines = _test_bodies(path).splitlines()
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if line.startswith(f"def {name}("):
+            inside = True
+            continue
+        if inside and line and not line[0].isspace() and not line.startswith(")"):
+            break
+        if inside:
+            out.append(line)
+    return out
+
+
+def test_the_pending_exclusion_is_written_once() -> None:
+    """The visibility rule has one definition, not one per read site.
+
+    Each read that selects items for a client must go through the shared
+    predicate; a copy is a rule that drifts the first time one site is edited
+    and another is not, and the failure it produces -- a pending item in a
+    client's cache -- cannot be corrected after the fact.
+    """
+    offenders: list[str] = []
+    for path in [
+        Path("src/adapters/repository/feed.py"),
+        Path("src/adapters/repository/items_query.py"),
+        Path("src/adapters/repository/reader.py"),
+        Path("src/adapters/rss_out.py"),
+    ]:
+        for name in _visibility_functions():
+            body = _lines_in_function(path, name)
+            if not body:
+                continue
+            for line in body:
+                if (
+                    "PENDING" in line
+                    and "publish_status" in line
+                    and "visible_item_rows(" not in line
+                ):
+                    offenders.append(f"{path}:{name}: {line.strip()}")
+
+    assert not offenders, (
+        "these visibility reads restate the pending predicate instead of "
+        "calling visible_item_rows():\n" + "\n".join(offenders)
+    )
+
+
+def test_the_gate_helper_is_what_the_visibility_reads_use() -> None:
+    """The helper must be wired into the reads, not merely defined.
+
+    A helper nobody calls is how `is_visible` became a documented gate with no
+    call site. Checking the uses keeps the definition and its application from
+    drifting apart in the other direction.
+    """
+    used = {
+        str(path)
+        for path in Path("src").rglob("*.py")
+        if "__pycache__" not in path.parts
+        and not path.name.startswith("test_")
+        and "visible_item_rows()" in _test_bodies(path)
+    }
+
+    missing = sorted(
+        {
+            "src/adapters/repository/feed.py",
+            "src/adapters/repository/items_query.py",
+            "src/adapters/repository/reader.py",
+        }
+        - used
+    )
+    assert not missing, f"these visibility reads ignore the shared gate: {missing}"

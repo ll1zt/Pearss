@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from adapters.db_models import Item as ItemRow
 
@@ -75,3 +76,21 @@ def _parse(value: str | None) -> datetime | None:
 def dumps(value: object) -> str:
     """Serialise structured metadata for a text column."""
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def visible_item_rows() -> Any:
+    """The publish gate as a SQL predicate: not pending.
+
+    This exists because the gate is an invariant enforced at five read sites
+    (`feed`, `items_query` twice, `reader` twice) and one write site
+    (`enrichment_worker`), and "the same rule written five times" is how an
+    invariant drifts. The exclusion has to happen in SQL rather than in Python:
+    filtering after the fetch would let a pending row reach memory, where a
+    later change could render it -- `items_ready_for_feed`'s docstring says
+    exactly that.
+
+    `core.item_state.is_visible` is the same rule in Python and is the one
+    ADR 0022 names, but it cannot be used here for that reason; this is the
+    persistence-layer form of it.
+    """
+    return ItemRow.publish_status != PublishStatus.PENDING.value

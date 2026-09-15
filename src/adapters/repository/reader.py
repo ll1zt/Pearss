@@ -13,11 +13,8 @@ from adapters.db_models import Item as ItemRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
-from adapters.repository._shared import _parse
+from adapters.repository._shared import _parse, visible_item_rows
 from adapters.timestamps import fixed_width_utc as timestamp
-from core.enums import (
-    PublishStatus,
-)
 from core.reader_state import ReadState as ReadStateDomain
 
 LOGGER = logging.getLogger(__name__)
@@ -45,9 +42,7 @@ def visible_ids_for_stream(
     """
     from adapters import reader_api
 
-    query = select(ItemRow.id).where(
-        ItemRow.publish_status != PublishStatus.PENDING.value
-    )
+    query = select(ItemRow.id).where(visible_item_rows())
 
     source_id = reader_api.parse_feed_stream_id(stream_id)
     if source_id is not None:
@@ -230,7 +225,7 @@ def mark_all_read(
     )
 
     candidates = select(ItemRow.id).where(
-        ItemRow.publish_status != PublishStatus.PENDING.value,
+        visible_item_rows(),
         # An item with no publication date is still in the stream and must
         # still be marked; excluding it would leave undated items permanently
         # unread no matter how often a client asks.

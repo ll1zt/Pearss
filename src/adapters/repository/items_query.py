@@ -10,11 +10,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
-from adapters.repository._shared import EPOCH_FLOOR, row_to_item
+from adapters.repository._shared import EPOCH_FLOOR, row_to_item, visible_item_rows
 from adapters.timestamps import fixed_width_utc as timestamp
-from core.enums import (
-    PublishStatus,
-)
 from core.models import Item
 
 
@@ -125,7 +122,7 @@ def _filter_conditions(
         # The gate. Pending rows are invisible to every output, and a count is
         # an output -- including it here would report a total the caller can
         # never enumerate.
-        ItemRow.publish_status != PublishStatus.PENDING.value,
+        visible_item_rows(),
         ItemRow.tenant_id == tenant_id,
     ]
     if filter.source_id:
