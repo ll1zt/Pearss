@@ -344,6 +344,46 @@ async def test_unusable_url_is_refused(writer: httpx.AsyncClient) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_agent_source_can_be_created(writer: httpx.AsyncClient) -> None:
+    """An `agent://` URL is valid for an agent source (ADR 0022).
+
+    Regression: the URL check was a field validator that read `type` from
+    `info.data`, but `url` is declared first, so `type` was absent and the
+    check ran against its RSS default. Every agent source was refused as
+    "unsupported URL scheme: 'agent'" -- A3 could not be configured through
+    the API at all, which went unnoticed because the only write path that
+    existed was the scaffold binding ItemDraft directly.
+    """
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "agent-create"},
+        json={"url": "agent://intake", "type": "agent", "schedule_policy": policy()},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["canonical_url"] == "agent://intake"
+    assert response.json()["type"] == "agent"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_agent_url_is_still_refused_for_a_non_agent_source(
+    writer: httpx.AsyncClient,
+) -> None:
+    """The type still decides; the check only stopped depending on field order.
+
+    An `agent://` URL on an rss source is a mistake, and accepting it would
+    create a source no collector can serve.
+    """
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "agent-on-rss"},
+        json={"url": "agent://intake", "type": "rss", "schedule_policy": policy()},
+    )
+    assert response.status_code == 422
+
+
 # --------------------------------------------------------------------------
 # Reads, updates, deletes
 # --------------------------------------------------------------------------
