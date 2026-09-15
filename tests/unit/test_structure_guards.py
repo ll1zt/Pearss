@@ -346,3 +346,189 @@ def test_env_example_documents_every_variable_the_code_reads() -> None:
         f".env.example documents variables nothing reads: {fictional}. "
         "Either wire them up or delete the entry."
     )
+
+
+# --------------------------------------------------------------------------
+# Test hygiene
+#
+# The rules in docs/guides/testing.md that a machine can check, checked. They
+# are here rather than in a linter config because they are about the test
+# files' content, which ruff does not model -- and because a rule that lives
+# only in prose is a rule that gets forgotten by the next author.
+#
+# Each guard is deliberately narrow: it forbids a pattern that is *never*
+# right in this repository, rather than trying to judge whether a particular
+# test is well written. Judgement stays with review.
+# --------------------------------------------------------------------------
+
+
+def _test_files() -> list[Path]:
+    """Every test module, excluding this one.
+
+    This file is about test conventions, so its own docstrings quote the very
+    patterns the guards below forbid (`assert_called`, `or True`). Scanning it
+    would make each guard fail on its own explanation.
+    """
+    return sorted(
+        path
+        for path in [*Path("tests").rglob("*.py"), *Path("src").rglob("test_*.py")]
+        if "__pycache__" not in path.parts and path != Path(__file__)
+    )
+
+
+def _test_bodies(path: Path) -> str:
+    """The file's source, so a check can look at what the assertions say."""
+    return path.read_text(encoding="utf-8")
+
+
+def _code_lines(path: Path) -> list[tuple[int, str]]:
+    """The file's lines that are code, not comments or docstrings.
+
+    A rule about what a test *does* must not fire on prose that describes it.
+    Parsing with `ast` and keeping only lines that carry statements would be
+    stricter, but a comment quoting an anti-pattern would still slip through;
+    skipping `#`-comments and lines inside triple-quoted strings is what these
+    guards actually need.
+    """
+    kept: list[tuple[int, str]] = []
+    in_docstring = False
+    for lineno, line in enumerate(_test_bodies(path).splitlines(), start=1):
+        stripped = line.strip()
+        # Toggle on triple quotes; a line opening and closing one is not a
+        # docstring body. Good enough for finding code, and deliberately not a
+        # parser -- the guards below are narrow enough to tolerate that.
+        if stripped.count('"""') % 2 == 1:
+            in_docstring = not in_docstring
+            continue
+        if in_docstring or stripped.startswith("#"):
+            continue
+        kept.append((lineno, line))
+    return kept
+
+
+def test_no_test_asserts_on_mock_call_counts() -> None:
+    """`assert_called*` / `call_count` assert implementation, not behaviour.
+
+    A call count breaks on any refactor that keeps the behaviour -- which is
+    the definition of a test coupled to the implementation. The assertions
+    that matter are on the result: the response, the row, the rendered feed.
+    """
+    pattern = re.compile(r"\bassert_called|\bcall_count\b|\bassert_awaited")
+    offenders = [
+        f"{path}:{lineno}: {line.strip()}"
+        for path in _test_files()
+        for lineno, line in _code_lines(path)
+        if pattern.search(line)
+    ]
+
+    assert not offenders, (
+        "assert on the behaviour, not on how many times something was called:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_no_test_mocks_a_module_in_this_repository() -> None:
+    """`unittest.mock` is for external systems that cannot be run for real.
+
+    Mocking a module in this repository tests the mock rather than the code.
+    The suites use real SQLite, real HTTP and a real MCP client instead, so
+    there is no legitimate use to protect here -- if one appears, this guard
+    should be reconsidered rather than merely silenced.
+    """
+    forbidden = re.compile(
+        r"^\s*(from unittest import mock"
+        r"|from unittest\.mock import"
+        r"|import unittest\.mock)"
+    )
+    offenders = [
+        f"{path}:{lineno}: {line.strip()}"
+        for path in _test_files()
+        for lineno, line in _code_lines(path)
+        if forbidden.match(line)
+    ]
+
+    assert not offenders, (
+        "these suites do not mock; use a real instance:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_test_sleeps_unboundedly() -> None:
+    """A bare `sleep` is a race the suite hopes will resolve.
+
+    Waiting for a server to accept connections is legitimate, but it must be
+    bounded polling that fails loudly -- a fixed sleep either wastes time or
+    flakes, and it hides the real synchronisation requirement. The allowed
+    form is a `time.sleep` inside a bounded loop; this guard finds sleeps that
+    are not.
+
+    Two shapes are deliberately not flagged: a sleep that is part of a string
+    handed to a subprocess (there it is the payload under test, not the suite
+    waiting), and a sleep whose duration is a parameter of a threaded worker --
+    that is an interleaving control, where the test *wants* a specific overlap
+    and asserts the outcome of it rather than waiting for something to become
+    ready. Both carry a comment saying which they are.
+    """
+    offenders: list[str] = []
+    for path in _test_files():
+        numbered = _code_lines(path)
+        for index, (lineno, line) in enumerate(numbered):
+            if not re.search(r"^\s*(?:time|asyncio)\.sleep\(", line):
+                continue
+            if re.search(r"[\"'].*time\.sleep", line):
+                continue  # a subprocess payload, not the suite waiting
+            if "widen" in line or "time.sleep(delay)" in line:
+                continue  # an interleaving control, labelled as one
+            window = [text for _, text in numbered[max(0, index - 10) : index]]
+            bounded = any(
+                re.search(r"for _ in range\(|while ", text) for text in window
+            )
+            if not bounded:
+                offenders.append(f"{path}:{lineno}: {line.strip()}")
+
+    assert not offenders, (
+        "bound the wait with a polling loop that fails loudly:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_test_assertion_is_vacuously_true() -> None:
+    """`or True` makes an assertion incapable of failing.
+
+    Seen in this repository: an assertion ending in `or True`. It reads as a
+    check and is a no-op, which is worse than having no assertion because it
+    looks like coverage.
+    """
+    pattern = re.compile(r"\bassert\b.*\bor\s+True\b")
+    offenders = [
+        f"{path}:{lineno}: {line.strip()}"
+        for path in _test_files()
+        for lineno, line in _code_lines(path)
+        if pattern.search(line)
+    ]
+
+    assert not offenders, "this assertion can never fail:\n" + "\n".join(offenders)
+
+
+def test_every_test_module_declares_a_marker() -> None:
+    """A test with no level marker is excluded from every `just` target.
+
+    The recipes select by marker (`just test` runs `unit or fixture`), so an
+    unmarked test is a test that silently never runs -- it passes locally by
+    not existing. A module declares it either through `pytestmark` or on each
+    test; both are accepted, and what is rejected is having neither.
+    """
+    offenders: list[str] = []
+    for path in _test_files():
+        text = _test_bodies(path)
+        if not re.search(r"^(?:async )?def test_", text, re.MULTILINE):
+            continue  # a conftest or helper module has nothing to mark
+        marked_module = re.search(r"^pytestmark\s*=", text, re.MULTILINE)
+        marked_per_test = len(re.findall(r"@pytest\.mark\.", text)) >= len(
+            re.findall(r"^(?:async )?def test_", text, re.MULTILINE)
+        )
+        if not (marked_module or marked_per_test):
+            offenders.append(str(path))
+
+    assert not offenders, (
+        "these modules define tests but declare no marker, so no `just` target "
+        "selects them:\n" + "\n".join(offenders)
+    )
