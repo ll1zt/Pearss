@@ -278,6 +278,35 @@ video 标签被剥离时的形态。这样即使净化器改动被否决，视�
 有了它，未来可以做"把同一对话聚合成一条 Item"——**不建议现在做**，
 记录方向即可。
 
+### 13. 条目分类不能再依赖 `entryId` 前缀 ✅ 已修（2026-09-16）
+
+**背景**：P0-1 的修复是往白名单里加了 `home-conversation-` 这一个前缀。
+陷阱没变——**下一个 X 换个名字的模块仍会被整块丢弃**，且不报错、不记日志。
+
+**2026-09-16 实网复核**（经 CookieCloud，取样一页）：
+
+| 条目前缀 | 条数 | 是否带 `tweet_results` |
+|---|---|---|
+| `tweet-` | 81 | 是（81 条推文） |
+| `home-conversation-` | 9 | 是（模块内共 **20 条**推文） |
+| `promoted-tweet-` | 8 | 是（**正确排除**） |
+| `header-image-prompt-ad-` | 1 | **否**（无推文，忽略正确） |
+| `cursor-top-` / `cursor-bottom-` | 各 1 | 否 |
+
+采集器实际保留 **101** 条 = 81 + 20，推广 8 条全部排除。算术闭合。
+
+**关键观察**：这一页出现了**旧代码从未见过的新前缀**
+`header-image-prompt-ad-`。它当前不带推文，因此旧代码"碰巧"没事；
+但如果 X 让它带上模块形内容，旧的白名单实现会再次静默丢弃。
+
+**修复**：`_tweets()` 与 `page_sort_span()` 改为按**结构**判定——
+`_is_module(content)` 认 `__typename == "TimelineTimelineModule"` **或**
+`content.items` 是列表；其余带 `tweet_results.result` 的条目一律当推文。
+判据变成"带 `tweet_results` 就是推文，只有显式排除（推广/游标）才丢"。
+
+**测试**：4 个解析层（`test_a_module_under_an_unrecognized_prefix_is_still_expanded`
+等）+ 2 个入库层（`test_a_module_under_an_unknown_prefix_is_stored_too`）。
+
 ## 建议实施顺序
 
 1. **P0-1 + P0-2 配套**（`home-conversation` 展开 + 显式排除推广推文 +

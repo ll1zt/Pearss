@@ -1277,3 +1277,119 @@ def test_an_authorless_tweet_still_parses_end_to_end() -> None:
     assert len(drafts) == 1
     assert "unknown" not in drafts[0].canonical_url
     assert drafts[0].canonical_url == URL
+
+
+# --------------------------------------------------------------------------
+# Content is never dropped for having an unrecognized name
+# --------------------------------------------------------------------------
+#
+# The `home-conversation` fix added one more prefix to an allowlist, which left
+# the same silent-loss trap in place for the next module name X invents. These
+# pin the structural rule that replaced it: an entry carrying a tweet is a
+# tweet whatever it is called, and only an explicit exclusion (promotion, a
+# cursor) may drop one.
+
+
+def _module_entry(
+    prefix: str, rid: int, text: str, *, typename: str | None = "TimelineTimelineModule"
+) -> dict[str, Any]:
+    content: dict[str, Any] = {
+        "items": [{"entryId": f"tweet-{rid}", "item": _top_item(rid, text)}]
+    }
+    if typename is not None:
+        content["__typename"] = typename
+    return {"entryId": f"{prefix}-{rid}", "sortIndex": str(rid), "content": content}
+
+
+@pytest.mark.unit
+def test_a_module_under_an_unrecognized_prefix_is_still_expanded() -> None:
+    """A module X names something else must not lose its tweets.
+
+    This is the regression the allowlist invited: `_tweets` dispatched on
+    `entryId.startswith("home-conversation-")`, so a module under any other
+    prefix had every tweet inside it dropped with no error and no log line.
+    The count is asserted rather than "no exception" -- the broken version
+    parsed fine, it just returned less.
+    """
+    body = _page_of(
+        [
+            {
+                "entryId": "tweet-100",
+                "sortIndex": "100",
+                "content": _top_item(100, "top level"),
+            },
+            _module_entry("profile-conversation", 90, "inside an unnamed module"),
+        ]
+    )
+    ids = page_ids(body)
+    assert "100" in ids and "90" in ids, f"a module's tweets were dropped: {ids}"
+    assert len(drafts_of(body)) == 2
+
+
+@pytest.mark.unit
+def test_a_module_is_recognized_by_structure_not_only_by_typename() -> None:
+    """`items[]` alone is enough, because that is what carries the tweets.
+
+    A shape that arrives without the `__typename` label is still a module; the
+    list is the load-bearing part. Requiring the label would reintroduce a
+    name-based dependency one field over.
+    """
+    body = _page_of(
+        [_module_entry("home-conversation", 77, "no typename", typename=None)]
+    )
+    assert "77" in page_ids(body)
+    assert [d.title for d in drafts_of(body)] == ["no typename"]
+
+
+@pytest.mark.unit
+def test_an_unknown_entry_that_carries_no_tweet_is_ignored_quietly() -> None:
+    """Recognition must not turn into "parse anything with a result field".
+
+    The structural rule widens what is inspected, so the boundary is pinned
+    too: an entry with neither a tweet nor module items contributes nothing,
+    and -- critically -- does not raise, because a page is allowed to carry
+    entry shapes this parser has no interest in.
+    """
+    body = _page_of(
+        [
+            {
+                "entryId": "tweet-100",
+                "sortIndex": "100",
+                "content": _top_item(100, "kept"),
+            },
+            {"entryId": "who-to-follow-1", "sortIndex": "99", "content": {"items": []}},
+            {
+                "entryId": "some-other-thing",
+                "sortIndex": "98",
+                "content": {"foo": "bar"},
+            },
+        ]
+    )
+    assert page_ids(body) == ["100"]
+    assert len(drafts_of(body)) == 1
+
+
+@pytest.mark.unit
+def test_the_span_agrees_with_the_tweets_for_an_unrecognized_module() -> None:
+    """The span must cover exactly the tweets `_tweets` returns.
+
+    The two functions classify entries independently, so a drift between them
+    is silent: a span that omits a tweet reports a false gap on the next page,
+    and one that includes a dropped tweet reports a floor below the real one.
+    Asserting the relation rather than the numbers keeps this honest for any
+    page shape.
+    """
+    body = _page_of(
+        [
+            {
+                "entryId": "tweet-100",
+                "sortIndex": "100",
+                "content": _top_item(100, "a"),
+            },
+            _module_entry("profile-conversation", 90, "b"),
+            _module_entry("home-conversation", 80, "c"),
+        ]
+    )
+    span = page_sort_span(body)
+    kept = sorted(int(i) for i in page_ids(body))
+    assert span == (max(kept), min(kept)), (span, kept)

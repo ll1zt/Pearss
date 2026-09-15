@@ -8,6 +8,7 @@ The transport rejects unsigned requests, so the test cannot pass by accident.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -259,3 +260,62 @@ def test_a_policy_refusal_keeps_its_blocked_classification(
     assert not result.succeeded
     assert result.error_class == "blocked"
     assert child._proc is not None and child._proc.pid == pid
+
+
+@pytest.mark.integration
+def test_an_unknown_target_type_loses_only_itself(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A content type the dispatcher cannot render must not take the rest down.
+
+    The unit tests prove the drop is logged. This proves the *consequence* at
+    the layer a reader sees: the known activities still reach the database and
+    the gate still opens. An unknown target type is the shape Zhihu adds
+    without warning, so the failure to guard against is a run that stores
+    nothing and reports success.
+    """
+    fixture = json.loads((FIXTURES / "activities_valid.json").read_text())
+    # Splice in a content type the dispatcher does not know, keeping every
+    # recorded activity beside it so the payload stays realistic.
+    fixture["data"].append(
+        {
+            "id": 99999,
+            "action_text": "发布了想法",
+            "verb": "",
+            "actor": {"name": "示例用户", "url_token": "example"},
+            "target": {"type": "ebook", "id": 7008, "title": "示例电子书"},
+        }
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("activities"):
+            return httpx.Response(
+                200,
+                content=json.dumps(fixture).encode(),
+                headers={"content-type": "application/json"},
+            )
+        return httpx.Response(404, json={})
+
+    collector_registry._registry()
+    collector_registry.set_http_transport("zhihu", httpx.MockTransport(handler))
+    with session_factory() as session:
+        _add_source(session, "s6", "https://www.zhihu.com/people/example/activities")
+        source = session.get(Source, "s6")
+        assert source is not None
+        result = collect_source(
+            session,
+            source=source,
+            client=httpx.Client(),
+            tenant_id="default",
+        )
+        session.commit()
+
+    # The recorded activities still land; only the ebook is missing.
+    assert result.succeeded
+    assert result.inserted == 3, "the unknown target took its neighbours with it"
+
+    with session_factory() as session:
+        stored = session.execute(
+            sa.text("select count(*) from item where source_id = 's6'")
+        ).scalar()
+    assert stored == 3

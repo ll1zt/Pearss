@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import html as html_module
 import json
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,6 +48,8 @@ from core.plugins.hooks import (
     Manifest,
 )
 from plugins.collectors.zhihu import client as zhihu_client
+
+LOGGER = logging.getLogger(__name__)
 
 BASE: Final = zhihu_client.BASE
 
@@ -342,6 +345,19 @@ def _activities(data: list[Any], source_id: str) -> list[ItemDraft]:
 
         mapped = _map_target(target)
         if mapped is None:
+            # A target type this collector cannot render honestly. Dropping it
+            # is correct -- rendering an unknown shape as a title-only stub
+            # would be worse -- but dropping it *silently* is not: if Zhihu
+            # starts emitting a content type (a new module, a renamed type), the
+            # loss is partial, so `parse`'s all-unusable guard never fires and
+            # the feed just quietly thins out. Logged so that is diagnosable,
+            # the same lesson the `other` action fall-through encodes.
+            LOGGER.warning(
+                "zhihu: dropped an activity whose target type %r is not "
+                "renderable (id=%r); the feed will be missing it",
+                _text(target.get("type")),
+                target.get("id"),
+            )
             continue  # a target type we cannot render honestly
 
         action = _text(item.get("action_text"))
