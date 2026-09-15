@@ -139,7 +139,29 @@ asyncio_default_fixture_loop_scope = "function"
 # its fixtures is a parser that stops being verified.
 testpaths = ["tests", "src"]
 addopts = "-ra --strict-markers --strict-config"
-filterwarnings = ["error"]
+# Every warning is an error, with one deliberate exception.
+#
+# `unclosed database in <sqlite3.Connection ...>` is CPython's sqlite3 emitting
+# a ResourceWarning when a connection object is *collected* without close()
+# having been called on it. Under SQLAlchemy that is routine and correct: the
+# pool owns the connection and closes it when the engine is disposed, but an
+# engine whose last reference is dropped at interpreter shutdown leaves its
+# pooled connection to the collector instead.
+#
+# The escalation is what makes this unusable rather than the warning itself: it
+# fires whenever the collector happens to reach the object, which is inside
+# whichever *later* test is running at that moment. The failure therefore names
+# an innocent test and moves between runs. Observed on tests/integration
+# (test_mcp_guard, test_migrations, test_pipeline, test_app in turn) with every
+# assertion passing.
+#
+# Narrow on purpose: only this message, only for sqlite3. A genuine leak that
+# exhausts a pool still shows up as OperationalError, and every other
+# ResourceWarning (and the audit-retention filter below) stays fatal.
+filterwarnings = [
+  "error",
+  "ignore:unclosed database in <sqlite3.Connection:ResourceWarning",
+]
 markers = [
   "unit: pure domain logic, no I/O",
   "fixture: recorded RSS/HTML snapshot parsing",
