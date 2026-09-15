@@ -7,7 +7,7 @@ deterministically instead of by sleeping.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any
 
 import pytest
@@ -33,24 +33,6 @@ class _FakeClock:
         self.now += seconds
 
 
-def _ok_app() -> Callable[[Scope, Receive, Send], Awaitable[None]]:
-    async def app(scope: Scope, receive: Receive, send: Send) -> None:
-        return None
-
-    return app
-
-
-def _limiter(
-    clock: _FakeClock, max_failures: int = 3
-) -> AuthFailureRateLimitMiddleware:
-    return AuthFailureRateLimitMiddleware(
-        _ok_app(),
-        max_failures=max_failures,
-        window_seconds=300.0,
-        block_seconds=900.0,
-    )
-
-
 def _receive_stub() -> Receive:
     async def receive() -> dict[str, Any]:
         return {"type": "http.request"}
@@ -59,56 +41,159 @@ def _receive_stub() -> Receive:
 
 
 def _send_stub() -> Send:
-    async def send(message: Any) -> None:
+    async def send(message: MutableMapping[str, Any]) -> None:
         return None
 
     return send
 
 
-@pytest.mark.unit
-def test_failures_below_the_budget_never_block() -> None:
-    clock = _FakeClock()
-    limiter = _limiter(clock)
-    # max_failures=3: the first two leave one failure of headroom.
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    assert limiter._block_remaining("1.2.3.4", clock.now) == 0.0
+# --------------------------------------------------------------------------
+# The limiter, driven through __call__
+#
+# These tests used to reach into _record_failure / _block_remaining, which made
+# them assertions about the private shape of the class: rename either method
+# and every test here broke with the behaviour unchanged. They now drive the
+# middleware the way Starlette does and assert what a client sees -- whether
+# the request reached the app, and with what status -- which is the contract
+# the class actually has.
+#
+# "Reached the app" is the observable that matters for a limiter: a blocked
+# address must not consume application work, and a passing address must get
+# its real response. A 401 from the inner app is simulated with a responder
+# that answers 401, which is what turns a request into a "failure" for the
+# limiter to count.
+# --------------------------------------------------------------------------
+
+
+def _auth_fail_app(
+    hits: list[Scope],
+) -> Callable[[Scope, Receive, Send], Awaitable[None]]:
+    """An inner app that records it was reached and answers 401."""
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        hits.append(scope)
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [(b"content-type", b"text/plain")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b""})
+
+    return app
+
+
+def _failing_limiter(
+    clock: _FakeClock, hits: list[Scope], max_failures: int = 3
+) -> AuthFailureRateLimitMiddleware:
+    return AuthFailureRateLimitMiddleware(
+        _auth_fail_app(hits),
+        max_failures=max_failures,
+        window_seconds=300.0,
+        block_seconds=900.0,
+        monotonic=clock,
+    )
+
+
+def _scope(ip: str = "1.2.3.4") -> Scope:
+    return {
+        "type": "http",
+        "method": "GET",
+        "client": (ip, 5),
+        "headers": [],
+    }
+
+
+async def _responses(
+    limiter: AuthFailureRateLimitMiddleware, scope: Scope
+) -> list[MutableMapping[str, Any]]:
+    """Send one request through the limiter, collecting what it sent."""
+    messages: list[MutableMapping[str, Any]] = []
+
+    async def send(message: MutableMapping[str, Any]) -> None:
+        messages.append(message)
+
+    await limiter(scope, _receive_stub(), send)
+    return messages
+
+
+def _status(messages: list[MutableMapping[str, Any]]) -> int:
+    return int(messages[0]["status"])
 
 
 @pytest.mark.unit
-def test_the_budget_exhaustion_blocks_for_the_block_window() -> None:
+@pytest.mark.asyncio
+async def test_failures_below_the_budget_never_block() -> None:
     clock = _FakeClock()
-    limiter = _limiter(clock)
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    # The third failure inside the window trips the block.
-    assert limiter._record_failure("1.2.3.4", clock.now) is True
-    assert limiter._block_remaining("1.2.3.4", clock.now) == 900.0
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    # max_failures=3: the first two requests pass through to the app, each
+    # counted as a failure on the way out, and no block exists yet.
+    for _ in range(2):
+        assert _status(await _responses(limiter, _scope())) == 401
+    assert len(hits) == 2, "a passing request must reach the app"
 
 
 @pytest.mark.unit
-def test_the_block_expires_and_the_budget_resets() -> None:
+@pytest.mark.asyncio
+async def test_the_budget_exhaustion_blocks_for_the_block_window() -> None:
     clock = _FakeClock()
-    limiter = _limiter(clock)
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
     for _ in range(3):
-        limiter._record_failure("1.2.3.4", clock.now)
+        await _responses(limiter, _scope())
+    reached = len(hits)
+    assert reached == 3, "the failure that trips the block was itself a real request"
+
+    # The next request is refused without reaching the app, with a Retry-After
+    # naming the block window.
+    messages = await _responses(limiter, _scope())
+    assert len(hits) == reached, "a blocked request must not consume app work"
+    assert _status(messages) == 429, messages
+    # Retry-After is the remaining block rounded up to a whole second the
+    # client can act on (the code's `int(remaining) + 1`): at exactly 900.0s
+    # remaining the header says 901, because 900 would have the client retry
+    # on the boundary second.
+    retry_after = dict(messages[0]["headers"])[b"retry-after"]
+    assert int(retry_after) == 901, retry_after
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_the_block_expires_and_the_budget_resets() -> None:
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    for _ in range(3):
+        await _responses(limiter, _scope())
+    assert _status(await _responses(limiter, _scope())) == 429
 
     clock.advance(901.0)
-    assert limiter._block_remaining("1.2.3.4", clock.now) == 0.0
-    # The old failures are outside the new window: a fresh campaign starts
-    # with full headroom, and trips again only on the third new failure.
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    assert limiter._record_failure("1.2.3.4", clock.now) is False
-    assert limiter._record_failure("1.2.3.4", clock.now) is True
+    # Past the block: the request passes again. The old failures were outside
+    # the new window too, so a fresh campaign starts with full headroom and
+    # trips again only on the third new failure.
+    assert _status(await _responses(limiter, _scope())) == 401
+    assert _status(await _responses(limiter, _scope())) == 401
+    assert _status(await _responses(limiter, _scope())) == 401
+    assert _status(await _responses(limiter, _scope())) == 429
 
 
 @pytest.mark.unit
-def test_addresses_are_isolated() -> None:
+@pytest.mark.asyncio
+async def test_addresses_are_isolated() -> None:
     clock = _FakeClock()
-    limiter = _limiter(clock)
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
     for _ in range(3):
-        limiter._record_failure("1.2.3.4", clock.now)
-    assert limiter._block_remaining("5.6.7.8", clock.now) == 0.0
+        await _responses(limiter, _scope("1.2.3.4"))
+    # The blocked address is blocked; another address is untouched.
+    assert _status(await _responses(limiter, _scope("1.2.3.4"))) == 429
+    assert _status(await _responses(limiter, _scope("5.6.7.8"))) == 401
 
 
 @pytest.mark.unit

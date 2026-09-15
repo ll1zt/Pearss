@@ -262,3 +262,38 @@ PYTHONTRACEMALLOC=25 uv run pytest tests/integration -q
 
 要判断是否真有对象存活，必须**先 `gc.collect()` 再计数**，否则数到的是尚未回收的
 临时对象。
+
+## 未覆盖行的分类（2026-09-15 实测）
+
+全量测量（unit + fixture + integration，生产代码）后未覆盖 774 句，逐块看过后分四类。**这份分类是"覆盖率差在哪"的答案，也是"该往哪补"的依据**——它随代码移动，重新测量后应更新。
+
+### 一、进程外入口（~170 句，不补测试）
+
+测试进程永远走不到的代码路径，它们的正确性由别的机制保证：
+
+| 模块 | 未覆盖 | 为什么不补 |
+|---|---|---|
+| `plugins/collectors/__main__.py`（92 句，28%） | 子进程 RPC 服务循环 | 被 `test_plugin_runtime` 以**真实子进程**方式驱动（崩溃恢复、冻结超时），coverage 看不到子进程内部 |
+| `app/enrichment_backfill.py`（31 句，0%） | `just enrichment-backfill` 的 CLI 壳 | 真逻辑（`backfill_chain`）已测；壳是参数解析，`just enrichment-backfill` 手工验收过 |
+| `app/backup.py` 的 `main()`（~10 句） | CLI 参数分发 | `backup()`/`restore()` 本体含拒绝覆盖、integrity_check 均已测 |
+
+### 二、平台受限分支（少量，标注而非测试）
+
+`plugin_runtime.py:213-225` 的 `RLIMIT_AS` 分支：`sys.platform == "linux"` 下才执行，macOS 上**运行时不可达**。注释（及 `SandboxLimits` 的 docstring）已说明。同理 `hardening.py` 里平台相关的 rlimit 差异。这类分支的正确归属是**部署环境验证**（y700 是 Linux），不是单测。
+
+### 三、真实缺口（值得补，按价值排序）
+
+1. **调度器周期维护**——本轮已补（`test_scheduler_maintenance.py`，6 条）
+2. **MCP 工具的 elicitation 分支**（`mcp_server.py:488-499` 等，~70 句）：`_confirmation_verdict` 的 `action != "accept"`、`data` 非 Confirmation 形态等防御分支只在 `-32021` 拒绝路径里间接经过。**失败方向是"确认被当成功"**，值得直接单测
+3. **`adapters/http.py:113-132`**（20 句）：`PEARSS_TEST_DNS` 的 JSON 解析失败回退、DNS 解析失败返回空集。**这是 SSRF 守卫的输入解析**，failure direction 是"解析坏了退回真实 DNS"——安全相关
+4. **twitter 展示分支**（`collector.py` 47 句）：视频/动图 label 分支、`photo` 无 `expanded` 等。纯展示，按 PR1-8 的验收逐个补 fixture 即可
+
+### 四、防御性分支（~200 句，不为它们写测试）
+
+各 collector 解析器里"字段缺失/类型不对就返回 None"的卫语句簇（zhihu 43 句、telegram 27 句、zsxq 23 句里的多数）。这些**已经在**做正确的退化，且 fixture 测试覆盖了主形态；给每个卫语句造一个"字段恰好缺失"的 fixture 是在为覆盖率凑数——skill 第五条明确反对。例外：**安全方向**的卫语句（如 SSRF 的 `_is_private_ip` 对不可解析地址返回 True）不在此列，必须测。
+
+### 规则
+
+- 新增进程外入口时，在本节加一行说明由什么保证
+- 想补"真实缺口"类时，先确认它的失败方向（安全相关优先）
+- 不为第四类写测试；发现某防御分支其实可观测时（如同 `is_visible` 那样），先接线再测
