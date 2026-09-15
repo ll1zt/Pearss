@@ -133,26 +133,42 @@ class EarlyAuthMiddleware:
     _PROTECTED_PREFIXES: Final[tuple[str, ...]] = ("/v1",)
     _READ_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD", "OPTIONS"})
 
+    # Actions whose scope is neither `read` nor `write`, keyed by the `:action`
+    # suffix the API style guide already uses for non-CRUD operations.
+    #
+    # Method alone cannot decide here: `POST /v1/sources/{id}:ingest` is a
+    # write in shape but must not accept the write token, and the ingest token
+    # must not open the rest of the write surface (ADR 0022). Without this
+    # table the middleware would demand `write` and refuse a valid ingest
+    # token before the route's own dependency ever runs -- the narrow token
+    # would be unusable, and the split would be nominal.
+    _ACTION_SCOPES: Final[dict[str, str]] = {":ingest": "ingest"}
+
     def __init__(self, app: Any) -> None:
         self.app = app
+
+    def _required_scope(self, path: str, method: str) -> str:
+        for suffix, scope in self._ACTION_SCOPES.items():
+            if path.endswith(suffix):
+                return scope
+        return "read" if method in self._READ_METHODS else "write"
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        if not scope.get("path", "").startswith(self._PROTECTED_PREFIXES):
+        path = scope.get("path", "")
+        if not path.startswith(self._PROTECTED_PREFIXES):
             await self.app(scope, receive, send)
             return
 
         from app.auth import (
-            READ_SCOPE,
             SCOPE_PRINCIPAL_KEY,
-            WRITE_SCOPE,
             authenticate,
         )
 
         method = scope.get("method", "GET")
-        needed = READ_SCOPE if method in self._READ_METHODS else WRITE_SCOPE
+        needed = self._required_scope(path, method)
         principal = authenticate(_ScopeHeaders(scope))
         if principal is None:
             LOGGER.info("early auth refused: unauthenticated, method=%s", method)

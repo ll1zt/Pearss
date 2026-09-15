@@ -18,6 +18,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
+from adapters.repository import chain_for_source as _chain_for_source
 from adapters.repository import (
     create_source,
     find_idempotent,
@@ -42,12 +44,13 @@ from adapters.repository import (
 from adapters.repository import (
     delete_source_items as repository_delete_source_items,
 )
-from app.auth import Principal, read_required, write_required
+from app.auth import Principal, ingest_required, read_required, write_required
+from app.pipeline import normalise_and_store
 from app.scheduler import collect_now
 from core.enums import SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
-from core.models import schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import source_canonical_key
+from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
+from core.normalize import DedupeAction, canonicalize_url, source_canonical_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +65,10 @@ IDEMPOTENCY_WINDOW = timedelta(days=7)
 # seconds to a couple of minutes; 30 is a hint that is neither so short that a
 # retry immediately hits the same 409 nor so long that a freed slot sits idle.
 _BUSY_RETRY_AFTER_SECONDS: Final = 30
+
+# Items one ingest request may carry. See IngestRequest for why this exists
+# even though ADR 0022 declines per-source limits.
+MAX_INGEST_ITEMS: Final = 100
 
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
@@ -316,6 +323,37 @@ class SourceCreate(BaseModel):
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         return value
+
+
+class IngestItem(BaseModel):
+    """One item an agent is pushing into an agent source (ADR 0022).
+
+    Deliberately *not* ItemDraft, which carries `source_id`. Binding that
+    directly is how the endpoint this replaces let a write-scoped caller
+    inject items into any source, including ones it does not own. The field
+    is absent here so the privilege line holds at the type level: there is no
+    key to send, so no runtime check can be forgotten.
+    """
+
+    external_id: str = Field(min_length=1, max_length=512)
+    title: str = Field(default="", max_length=1024)
+    canonical_url: str = Field(default="", max_length=4096)
+    published_at: datetime | None = None
+    content: str = ""
+    metadata: dict[str, str] = Field(default_factory=dict)
+    derivation_note: str | None = Field(default=None, max_length=1024)
+
+
+class IngestRequest(BaseModel):
+    """Body for pushing items into an agent source.
+
+    The cap is body-parsing hygiene rather than per-source rate limiting
+    (which ADR 0022 explicitly declines to add): at 1 MiB per request an
+    uncapped list admits thousands of title-only items in one call, and each
+    one costs a dedupe lookup and possibly an enrichment row.
+    """
+
+    items: list[IngestItem] = Field(min_length=1, max_length=MAX_INGEST_ITEMS)
 
 
 class SourcePatch(BaseModel):
@@ -1055,3 +1093,163 @@ def trigger_source(
         body=payload,
     )
     return JSONResponse(status_code=status_code, content=payload)
+
+
+# --------------------------------------------------------------------------
+# A3: agent ingest (ADR 0022)
+# --------------------------------------------------------------------------
+
+
+def _ingest_url(item: IngestItem, *, source_url: str) -> str:
+    """The canonical_url to normalise for one submitted item.
+
+    `normalize()` calls `canonicalize_url` unconditionally and that raises on
+    anything but http(s), because the value is part of item identity and the
+    rest of the system only treats it as a fetchable article address. Agent
+    submissions may legitimately carry no URL at all, or a non-http scheme
+    (a note, a summary), and the user decided such a submission is allowed
+    (ADR 0022).
+
+    The fallback is synthesised under the item's own external_id rather than
+    reusing the source's `agent://<name>` key, for two reasons: that scheme is
+    itself refused by `canonicalize_url`, so it cannot be used; and a single
+    shared fallback URL would make every URL-less item in a source carry the
+    same link. Identity does not depend on `url` (it is
+    `sha256(tenant, source_id, external_id)`), so a per-item fallback changes
+    no dedupe outcome -- it only keeps the served link distinct and honest
+    about where it came from.
+
+    Handled here rather than by loosening `canonicalize_url`: that function
+    serves rss and web too, and relaxing it for this one caller would change
+    identity semantics for every source type to spare an agent a fallback.
+    """
+    supplied = item.canonical_url.strip()
+    if supplied:
+        try:
+            return canonicalize_url(supplied)
+        except ValueError:
+            pass
+    pod = source_url.removeprefix("agent://") or "agent"
+    return f"https://agent.invalid/{pod}/{quote(item.external_id, safe='')}"
+
+
+@router.post("/sources/{source_id}:ingest", operation_id="ingestItems")
+def ingest_items(
+    request: Request,
+    source_id: str,
+    body: IngestRequest,
+    principal: Principal = Depends(ingest_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Push items into an agent source (A3, ADR 0022).
+
+    The draft is built here and handed to `normalise_and_store`, the same call
+    a collector's parse output takes. Everything downstream -- sanitising at
+    the store boundary, content-addressed storage, the six-way dedupe, the
+    publish gate -- is therefore shared with collection rather than
+    reimplemented, which is the whole point of the design: a second writer
+    would either bypass sanitisation or force it to be duplicated.
+
+    Scope is `ingest`, not `write`: the token that pushes content must not be
+    the token that can delete sources (ADR 0022).
+
+    Items are visible on submit when the source has no chain, matching a
+    chainless rss source. The user's decision (2026-09-14) was explicit that
+    agent content should be visible without a hold-back step.
+    """
+    endpoint = f"POST /v1/sources/{source_id}:ingest"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        source = get_source(session, source_id)
+        if source is None:
+            raise api_error(
+                status_code=404,
+                code="source_not_found",
+                message=f"No source with id {source_id!r}.",
+                suggestion="Create the agent source first with POST /v1/sources.",
+            )
+        # Checked rather than assumed: pushing into an rss source would mix
+        # agent-supplied content into a source whose items are supposed to
+        # come from one origin, and the provenance would be unrecoverable.
+        if source.type != SourceType.AGENT.value:
+            raise api_error(
+                status_code=409,
+                code="not_an_agent_source",
+                message=(
+                    f"Source {source_id!r} has type {source.type!r}; only "
+                    "agent sources accept pushed items."
+                ),
+                suggestion=(
+                    "Create a source with type='agent' and a url like "
+                    "'agent://<name>', then push to that."
+                ),
+            )
+
+        source_url = source.canonical_url
+        drafts: list[ItemDraft] = []
+        for item in body.items:
+            metadata = dict(item.metadata)
+            supplied = item.canonical_url.strip()
+            resolved = _ingest_url(item, source_url=source_url)
+            if supplied and supplied != resolved:
+                # Preserved so a URL we could not use as the item's link is
+                # still readable rather than silently swallowed.
+                metadata.setdefault("submitted_url", supplied)
+            drafts.append(
+                ItemDraft(
+                    source_id=source_id,
+                    external_id=item.external_id,
+                    title=item.title,
+                    canonical_url=resolved,
+                    published_at=item.published_at,
+                    content=item.content,
+                    metadata=metadata,
+                    derivation_note=item.derivation_note,
+                )
+            )
+
+        ingested = normalise_and_store(
+            session,
+            drafts,
+            tenant_id=source.tenant_id,
+            chain=_chain_for_source(session, source_id=source_id),
+        )
+
+    results = [
+        {
+            "id": entry.result.item.id,
+            "external_id": drafts[index].external_id,
+            "action": entry.outcome.action.value,
+            "reason": entry.outcome.reason,
+        }
+        for index, entry in enumerate(ingested)
+    ]
+    payload: dict[str, Any] = {
+        "source_id": source_id,
+        "submitted": len(drafts),
+        "inserted": sum(
+            1
+            for entry in ingested
+            if entry.outcome.action
+            in (
+                DedupeAction.INSERT,
+                DedupeAction.INSERT_RELATED,
+                DedupeAction.UPDATE_PENDING,
+            )
+        ),
+        "results": results,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=201,
+        body=payload,
+    )
+    return JSONResponse(status_code=201, content=payload)

@@ -1,9 +1,10 @@
 """Core API authentication.
 
-Two tokens, deliberately separate from the Reader API credential:
+Three tokens, deliberately separate from the Reader API credential:
 
     PEARSS_API_TOKEN        read and write
     PEARSS_API_READ_TOKEN   read only; optional
+    PEARSS_INGEST_TOKEN     push content into an agent source only; optional
 
 Splitting them is what AGENTS.md means by "读写 scope 分离": a client that only
 needs to read — a dashboard, an agent doing diagnosis — can be given a token
@@ -11,6 +12,12 @@ that cannot mutate anything. The Reader API keeps its own credential because
 its clients speak Google Reader's ClientLogin and cannot present a bearer
 token; the two surfaces are authenticated independently and neither accepts
 the other's secret.
+
+The ingest token is a third split, on the same principle one level down: the
+agent that pushes content (ADR 0022) is an automated writer with a narrow job,
+so what its credential can do is narrowed to match. Leaking it costs the
+attacker the ability to add items to an agent source -- not the ability to
+delete sources, rewrite schedules, or read anyone's read state.
 
 Comparisons are constant-time. A timing difference on a token check is a real,
 if slow, side channel, and `hmac.compare_digest` costs nothing.
@@ -32,6 +39,11 @@ LOGGER = logging.getLogger(__name__)
 
 READ_SCOPE = "read"
 WRITE_SCOPE = "write"
+# A scope of its own rather than a use of WRITE_SCOPE: the ingest token must
+# not open the general write surface (source CRUD, deletion, plugin toggles),
+# and the write token must not implicitly reach ingest -- otherwise the split
+# would exist on paper only (ADR 0022).
+INGEST_SCOPE = "ingest"
 
 # auto_error=False so a missing header becomes an unauthenticated request we
 # decide about, rather than an immediate 403 from the security scheme itself.
@@ -83,13 +95,18 @@ def _configured(name: str) -> str:
 def expected_tokens() -> dict[str, frozenset[str]]:
     """Map each configured token to the scopes it grants.
 
-    Read-only token, when set, is listed first so a caller presenting it is
-    matched before the full token is considered.
+    Narrow tokens are listed first so a caller presenting one is matched
+    before a broader token is considered. With distinct secrets the order
+    cannot matter, but it keeps the intent legible: the table is meant to be
+    read as "least privilege first".
     """
     table: dict[str, frozenset[str]] = {}
     read_token = _configured("PEARSS_API_READ_TOKEN")
     if read_token:
         table[read_token] = frozenset({READ_SCOPE})
+    ingest_token = _configured("PEARSS_INGEST_TOKEN")
+    if ingest_token:
+        table[ingest_token] = frozenset({INGEST_SCOPE})
     api_token = _configured("PEARSS_API_TOKEN")
     if api_token:
         table[api_token] = frozenset({READ_SCOPE, WRITE_SCOPE})
@@ -140,7 +157,16 @@ def authenticate(request: _HasHeaders) -> Principal | None:
 
 
 def _label_for(scopes: frozenset[str]) -> str:
-    return "api:read-only" if scopes == frozenset({READ_SCOPE}) else "api:full"
+    """The actor name the audit log records for a token.
+
+    Keyed on the exact scope set, so a new token shape must be given a label
+    here rather than silently reporting as the nearest existing one.
+    """
+    if scopes == frozenset({READ_SCOPE}):
+        return "api:read-only"
+    if scopes == frozenset({INGEST_SCOPE}):
+        return "api:ingest"
+    return "api:full"
 
 
 def _dependency_for(scope: str) -> Callable[[Request], Principal]:
@@ -211,3 +237,4 @@ def _dependency_for(scope: str) -> Callable[[Request], Principal]:
 # route signatures stay readable: `principal: Principal = Depends(read_required)`.
 read_required = _dependency_for(READ_SCOPE)
 write_required = _dependency_for(WRITE_SCOPE)
+ingest_required = _dependency_for(INGEST_SCOPE)

@@ -61,6 +61,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
 API_TOKEN = "test-write-token"
 READ_TOKEN = "test-read-token"
+INGEST_TOKEN = "test-ingest-token"
 
 
 @pytest.fixture
@@ -69,6 +70,7 @@ def app(
 ) -> FastAPI:
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("PEARSS_API_READ_TOKEN", READ_TOKEN)
+    monkeypatch.setenv("PEARSS_INGEST_TOKEN", INGEST_TOKEN)
     return create_app(session_factory)
 
 
@@ -106,6 +108,18 @@ async def read_only_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         transport=transport,
         base_url="http://test",
         headers={"Authorization": f"Bearer {READ_TOKEN}"},
+    ) as opened:
+        yield opened
+
+
+@pytest_asyncio.fixture
+async def ingest_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """A client holding only the ingest scope (ADR 0022)."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {INGEST_TOKEN}"},
     ) as opened:
         yield opened
 
