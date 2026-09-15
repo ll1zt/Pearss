@@ -355,10 +355,16 @@ class Scheduler:
         on_tick: Callable[[TickReport], None] | None = None,
         prune_every: float = PRUNE_INTERVAL_SECONDS,
         concurrency: int | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
         self._tick_seconds = tick_seconds
+        # Injected so the maintenance schedules can be driven deterministically
+        # in tests: reaping orphans and pruning the audit log are both gated on
+        # elapsed monotonic time, and waiting an hour of wall clock to observe
+        # a decision is not a test. Production passes the default.
+        self._monotonic = monotonic
         self._on_tick = on_tick
         self._prune_every = prune_every
         raw = os.environ.get("PEARSS_TICK_CONCURRENCY", "").strip()
@@ -435,7 +441,7 @@ class Scheduler:
         leaked slot costs the source its next few cycles, not its whole
         week. Startup reaping keeps the tight window - see start().
         """
-        now = time.monotonic()
+        now = self._monotonic()
         if now < self._next_reap_at:
             return
         self._next_reap_at = now + self._tick_seconds * 4
@@ -459,7 +465,7 @@ class Scheduler:
             )
 
     async def _prune_audit_if_due(self) -> None:
-        now = time.monotonic()
+        now = self._monotonic()
         if now < self._next_prune_at:
             return
         self._next_prune_at = now + self._prune_every
