@@ -19,6 +19,7 @@ from core.enums import (
     ErrorClass,
     JobRunStatus,
     SourceStatus,
+    SourceType,
 )
 from core.normalize import source_display_label
 from core.paging import WalkState
@@ -280,11 +281,19 @@ def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, 
     Only `active`: a paused or disabled source is not collected, and that is
     the operator's explicit decision rather than something the scheduler
     should second-guess.
+
+    `agent` sources are excluded by type: they are pushed to, not polled
+    (ADR 0022). Nothing would collect them -- `select_for("agent", ...)` falls
+    through to `select(url)` and matches no collector -- so scheduling one
+    produces a failed run every tick. Unlike a genuinely broken source, that
+    failure never clears, and it would show up as a permanent dip in the
+    success rate rather than as an incident to fix.
     """
     rows = session.execute(
         select(SourceRow.id, SourceRow.schedule_policy).where(
             SourceRow.tenant_id == tenant_id,
             SourceRow.status == SourceStatus.ACTIVE.value,
+            SourceRow.type != SourceType.AGENT.value,
         )
     ).all()
     return [(str(row[0]), str(row[1])) for row in rows]
