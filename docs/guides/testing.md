@@ -22,8 +22,29 @@
 ### E2E（tests/e2e/）
 
 - 拓扑：一个 app 实例、一个 uvicorn 线程；REST 与 MCP（挂载于同一 app 的 `/mcp`）走同一端口；origin 是本地 `ThreadingHTTPServer` 供 RSS fixture
-- 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
+- `test_full_loop.py` 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
 - discover_feed 不存在（A5 backlog），feed URL 由测试直接给定；工具落地后补第 2 步
+
+#### 失败路径（`test_failure_paths.py`）
+
+**拒绝之后系统有没有被改动**，是这里唯一的主题。一个"拒绝了但仍然写入"的缺陷在本仓库最难发现——响应看起来完全正确，损害只在之后显形（未鉴权者建出了源、未确认的 MCP 写落地、pending 条目在 enrichment 跑完前进了客户端缓存）。happy path 永远不会暴露这类问题，所以它必须是一个文件。
+
+覆盖的四个场景：
+
+| 场景 | 断言的可观测结果 |
+|---|---|
+| 错误/缺失 token 的写请求 | 401；**source 行数为 0**（状态码本身证明不了没落库） |
+| 错误 token + 畸形 body | **401 而非 422**：body 在鉴权前不被解析 |
+| MCP 无 elicitation / 明确 decline | 拒绝；source 行数为 0 |
+| pending 条目 | RSS、`/v1/items`、Reader API **三面**都看不到；且该行确实存在（否则测的是"没存进去"） |
+| 幂等键复用但 body 不同 | 库里仍只有 1 个源，且是首个 |
+
+三个实测出来的、与本仓库设计相反的直觉，都写进了测试的 docstring：
+
+1. **401 不写审计行**——不是疏漏。`EarlyAuthMiddleware` 在 `CorrelationAndAudit` **外层**，未鉴权请求在审计写入前就被拒。`_should_audit` 本来会记录 401（鉴权失败是可审计事件），所以"审计为空"这条断言钉的是中间件顺序。
+2. **被拒的写请求会记 `outcome=rejected`**——4xx 是"我们替调用方拒绝了"，5xx 才是"我们失败了"。所以 `audit_log == 0` 是错的断言，应为 `outcomes == []`（鉴权层）或"不含 succeeded"（路由层）。
+3. **decline 由 SDK 抛成 tool error**（`is_error=True`），根本到不了工具自己的 `{"declined": True}` 分支。测的是这个可观测事实，不是代码里那条看起来会走的分支。
+
 
 ### 属性测试（hypothesis）
 
@@ -74,6 +95,25 @@ comm -23 /tmp/all.txt /tmp/ran.txt
 1. **`is not None` 系列**：`assert d.matched_id is not None` / `assert r.audit_note is not None` 看不见"某个分支丢了指针"。循环里只要有一个决策有值，整个循环就通过。正确写法是**按分支断言确切值**
 2. **只测相对性质**：`derive_item_id` 只断言"确定、租户隔离、与 guid 不同"时，**丢掉某个输入字段的变异仍然通过**——因为丢字段同时保留全部四条性质。持久化标识（item id / guid / content_hash / 密码哈希格式）必须**钉死字面值**，并注明"改这个值需要数据迁移"
 3. **mutation 视界 ≠ 覆盖率视界**：只被 integration 调用的 core 纯函数，在 mutation 报告里显示为 `no tests`（mutmut 只选 `tests/unit`），数字虚高。纯函数应在 `tests/unit` 直接测输入输出
+
+### 覆盖率：先看数字是什么意思，再看改动的行
+
+覆盖率是**诊断工具**，本仓库刻意**没有**全局 `fail_under`：在这个体量下，全局阈值最省力的达成方式是给最容易碰到的代码补测试，而剩下那 800 多句未覆盖行，百分比根本区分不了它们属于哪一类：
+
+- **进程外入口**：`plugins/collectors/__main__.py`（28%，子进程 RPC 入口）、`enrichment_backfill.py`（0%，`just enrichment-backfill` CLI）、`twitter/walk.py`（30%，经沙箱 RPC 才走到）——它们的正确性由沙箱集成测试和手工验收覆盖，不是缺口
+- **真实缺口**：失败路径与错误分支
+
+测量的前提是数字要诚实。`[tool.coverage.run]` 的 `source` **加上** `omit` 才能去掉 `src/plugins/collectors/*/test_*.py` 这类"就住在被测代码旁边、且按定义必然执行"的测试模块——`source` 单独不够，pytest-cov 会测量所有被导入的东西。去掉之后总数从 89% 降到 87%，那才是生产代码的覆盖率。
+
+**真正守住新代码的是 `just coverage-diff`**（`scripts/coverage_diff.py`）：它取零上下文 diff 里**本次新增/修改**的行，逐个问 coverage 是否被覆盖。一个改动只需为自己写的行负责，不必背上一个"顺手碰过"的模块的旧账。默认阈值 20% 未覆盖即失败。
+
+```bash
+just coverage              # 全量测量（生产代码，排除测试模块）
+just coverage-diff         # 相对 origin/main 只检查新增行
+just coverage-diff HEAD~3  # 或指定 base
+```
+
+未覆盖且**确实到不了**的行，在 commit message 里说明理由，而不是写成凑数的测试——`// unreachable: <为什么>` 是允许的，垃圾测试不允许。
 
 ### 测试驱动：先场景，后实现
 
@@ -166,14 +206,19 @@ P3 加：翻译闸门、TTS enclosure、Reader API 已读/星标同步。
 - **调度器注入时钟**：`run_tick(now=...)` 可传时钟；不传时生产用真实时间。注意**时钟必须贯穿** —— 用挂钟写 run 时间戳而用注入值判到期，会让 elapsed 为负、被时钟偏移规则判为「永远到期」，退避静默失效
 - **对外契约以对端实现为准**：Reader API 的 item id 格式与 GET/POST 动词，两次都是「读文档/读源码得出的结论」被**真实客户端流量**推翻（见 ADR 0006 与 netnewswire.md）
 - **先怀疑自己的探针**：MCP 2026-07-28 协议升级时，三个「服务端缺陷」（`server/discover` 不可达、discover 内部错误、auto 模式回退）最终全部归因于探针脚本自身的错误——`_meta` 嵌套位置、缺 `jsonrpc`/`id`、缺 auth 头。静态读代码判断协议符合度不可靠，必须以实测协商结果为准；而实测结果反常时，第一嫌疑人是测试工具的构造，不是被测系统
+- **写失败路径测试时，先确认"拒绝"的机制再断言**：本轮补 E2E 失败路径时，三条最自然的直觉断言全错——401 不写审计行（中间件顺序使然）、被拒的写记 `rejected` 而非空、decline 被 SDK 抛成 tool error 而非走工具自己的分支。**测试揭示的机制与源码读起来的印象不一致时，以实测为准，并把差异写进 docstring**；若差异说明的是别处的文档错了（见下条），记录它而不是改测试去迎合
+- **手写 INSERT 是脆弱测试**：本轮两次因为绕过 repository 直接写 SQL 而失败（漏 `created_at`、猜了一个不是 repository 派生出来的 id）。**种子数据一律走 repository**：它复现的是生产写入路径，且 schema 加列时不会碎
 
 ## 本地与 CI 命令
 
 ```bash
-just test       # unit + fixture + integration
-just contract   # OpenAPI diff + MCP snapshot
-just e2e        # Compose E2E
-just ci         # 以上全部 + lint + migration checks
+just test            # unit + fixture
+just test-integration
+just test-e2e
+just contract        # OpenAPI + MCP snapshot
+just ci              # 以上全部 + lint + migration checks
+just coverage        # 全量覆盖率（生产代码）
+just coverage-diff   # 只检查本次新增行的覆盖（默认相对 origin/main）
 ```
 
 CI 唯一入口：
