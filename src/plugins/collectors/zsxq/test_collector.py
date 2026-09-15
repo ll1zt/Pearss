@@ -231,6 +231,7 @@ def test_only_unusable_topics_is_not_a_quiet_empty() -> None:
     assert exc_info.value.error_class is ErrorClass.STRUCTURE_CHANGED
 
 
+@pytest.mark.unit
 def test_resolve_accepts_the_bare_group_form() -> None:
     """The address-bar form /group/<id> resolves like the dweb2 one.
 

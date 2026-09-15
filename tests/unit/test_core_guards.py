@@ -22,6 +22,11 @@ from core.models import SchedulePolicy
 from core.reader_state import ReadState, TagChange, hash_password, merge_state
 from core.scheduling import adaptive_interval, next_interval
 
+# Declared for the whole module. Without it these tests are invisible: the
+# recipe targets select by marker, so pytest deselects everything unmarked.
+# Only the single test that happened to carry its own decorator had ever run.
+pytestmark = pytest.mark.unit
+
 HOUR = 3600.0
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
