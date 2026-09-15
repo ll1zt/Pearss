@@ -14,6 +14,14 @@ from typing import Any
 MAX_STRING_CHARS = 200
 MAX_LIST_ITEMS = 20
 
+# `get_item_body` bounds itself rather than inheriting MAX_STRING_CHARS: the
+# whole point of that tool is to hand over a body, so the generic shrinker would
+# defeat it. These are the ceiling instead, and they exist because the tool is a
+# concession to clients that cannot read Resources -- without a cap it becomes
+# the easy way to blow up the context.
+DEFAULT_BODY_CHARS = 4000
+MAX_BODY_CHARS = 20000
+
 
 def _shrink(value: Any) -> Any:
     """Bound strings and list lengths at any depth in a response."""
