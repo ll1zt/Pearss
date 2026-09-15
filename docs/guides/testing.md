@@ -144,3 +144,29 @@ nix develop --command just ci
 - 外部页面变化：添加/更新 fixture 和 parser；不要删除 changed fixture
 - 需要更新 OpenAPI/MCP snapshot：审查其语义变化，必要时附 ADR，而不是盲目接受新 snapshot
 - flaky E2E：优先修同步/可观测性，使用显式健康检查与确定性 polling；不得无限重试
+
+## 警告即错误，与唯一例外
+
+`pyproject.toml` 的 `filterwarnings = ["error"]` 把每条警告升级为失败。理由：
+一条被忽略的警告（未处理的 deprecation、未关闭的资源）会在日后变成难查的 bug，
+而测试期是代价最低的发现点。
+
+**唯一例外**：`unclosed database in <sqlite3.Connection:ResourceWarning`。
+CPython 的 sqlite3 在连接对象**被回收**时才发这条警告；在 SQLAlchemy 下这属于
+正常情形——连接归连接池所有、由 `engine.dispose()` 关闭，但最后一个引用在解释器
+退出阶段被丢弃的 engine，会把它的池化连接留给 GC 回收。
+
+这条 filter 用词刻意很窄（只此一条消息、只 sqlite3），所以**真正的问题仍会暴露**：
+连接池被打爆表现为 `OperationalError`，而其他所有 `ResourceWarning` 依旧致命。
+
+排查此类"失败落在无辜测试上"的现象时，注意警告的**归属**取决于 GC 时机，与真实
+成因无关；不要据此去"修"被点名的那个测试。诊断建议：
+
+```bash
+# 记录分配栈：注意 tracemalloc 记录的是「分配」而非「存活」，
+# 它报告的对象可能早已被正常释放，不能作为泄漏证据
+PYTHONTRACEMALLOC=25 uv run pytest tests/integration -q
+```
+
+要判断是否真有对象存活，必须**先 `gc.collect()` 再计数**，否则数到的是尚未回收的
+临时对象。

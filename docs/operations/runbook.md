@@ -85,6 +85,63 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
   后果。它们与其它写工具的一个区别：破坏半径不在参数里，所以确认消息必须把
   「删掉什么」说出来，而不只是复述参数
 
+## Agent 源与主动接入（A3，ADR 0022）
+
+外部 agent（或你手动）向 Pearss 推送内容。与采集完全同源：推送的条目同样经过
+存储边界净化、内容寻址、去重与发布闸门。
+
+### 建源与推送
+
+```bash
+# 1. 建 agent 源（url 用合成名 agent://<name>，它同时是去重键）
+curl -sS -X POST http://127.0.0.1:8000/v1/sources \
+  -H "Authorization: Bearer $PEARSS_API_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"agent://newsletter-intake","type":"agent",
+       "schedule_policy":{"type":"fixed","interval":"1h"}}'
+
+# 2. 推送（凭据用 ingest token，不是 API token）
+curl -sS -X POST http://127.0.0.1:8000/v1/sources/<id>:ingest \
+  -H "Authorization: Bearer $PEARSS_INGEST_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"external_id":"post-1","title":"标题",
+        "canonical_url":"https://example.com/post-1","content":"<p>正文</p>"}]}'
+```
+
+MCP 客户端用工具 `submit_items`（需确认）。
+
+### 凭据
+
+| 变量 | 能做什么 |
+|---|---|
+| `PEARSS_INGEST_TOKEN` | **只能**向 agent 源推送内容 |
+| `PEARSS_API_TOKEN` | 全部（含 ingest） |
+| `PEARSS_API_READ_TOKEN` | 只读，推送返回 403 |
+
+ingest token 不配则 ingest 不可用，**其余功能不受影响**。它打不通
+`POST/PATCH/DELETE /v1/sources*` 或 `:trigger`（一律 403）——所以给外部 agent
+用它，泄漏的损失面仅限「能往 agent 源塞内容」。
+
+### 排错
+
+| 症状 | 原因 |
+|---|---|
+| 403 `insufficient_scope` | 用了 read token，或用了 ingest token 去调非 ingest 路径 |
+| 409 `not_an_agent_source` | 目标是 rss/web 源。推送只接受 `type='agent'`，避免把内容混进另一种来源的 provenance |
+| 404 `source_not_found` | 源 id 不对；先建 agent 源 |
+| 201 但 `inserted` 小于 `submitted` | **不是错误**，是去重：同源同内容为 `skip_same_source`，同内容已从别源发布过为 `suppress`。**按 `results[].action` 判断，不要按计数** |
+| 换了 body 但响应还是旧的 | 复用了同一个 `Idempotency-Key`。重放是刻意的，响应带 `Idempotent-Replay: true` 头；换操作要换 key |
+| 条目推送成功但客户端看不到 | 该源配了 `pipeline_chain`，条目滞留 `pending` 等处理器链完成（与采集源同样受闸门约束）。查 `list_enrichments` |
+
+**注意**：agent 源**不进调度器**（它是被推送的，不是被轮询的），所以它没有
+JobRun、不产生采集历史。若发现某个 agent 源在 `/v1/jobs` 里出现失败运行，
+那是缺陷而非预期。
+
+### 清空某个 agent 源的内容
+
+与普通源相同：`POST /v1/sources/{id}/items:delete`（保留源），或
+`DELETE /v1/sources/{id}`（连源一起删）。见「清理条目与订阅」。
+
 ## 日常健康检查
 
 检查以下信号：
