@@ -207,7 +207,7 @@ async def test_the_request_schema_cannot_name_a_source() -> None:
     model rather than through a request, because an extra JSON key is dropped
     by pydantic either way and would prove nothing.
     """
-    from app.sources_routes import IngestItem, IngestRequest
+    from app.ingest_routes import IngestItem, IngestRequest
 
     assert "source_id" not in IngestItem.model_fields
     assert "source_id" not in IngestRequest.model_fields
@@ -410,7 +410,7 @@ async def test_a_non_http_url_is_accepted_and_preserved(
 async def test_too_many_items_in_one_request_is_refused(
     agent_client: httpx.AsyncClient,
 ) -> None:
-    from app.sources_routes import MAX_INGEST_ITEMS
+    from app.ingest_routes import MAX_INGEST_ITEMS
 
     many = [
         item_payload(external_id=f"bulk-{index}")
