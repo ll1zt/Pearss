@@ -28,7 +28,7 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from typing import Any, Final
 
 from starlette.types import Receive, Scope, Send
@@ -289,18 +289,20 @@ class AuthFailureRateLimitMiddleware:
         max_failures: int = DEFAULT_FAILURE_MAX,
         window_seconds: float = DEFAULT_FAILURE_WINDOW_SECONDS,
         block_seconds: float = DEFAULT_FAILURE_BLOCK_SECONDS,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.app = app
         self.max_failures = max_failures
         self.window_seconds = window_seconds
         self.block_seconds = block_seconds
+        # Injected so the window arithmetic can be driven deterministically in
+        # tests: what is under test is "N failures within the window block the
+        # address", and observing that by sleeping out a real window is not a
+        # test. Production passes None, meaning the real monotonic clock.
+        self._monotonic = monotonic or time.monotonic
         self._failures: dict[str, deque[float]] = defaultdict(deque)
         self._blocked_until: dict[str, float] = {}
         self._lock = threading.Lock()
-
-    def _monotonic(self) -> float:
-        """The clock seam; tests freeze it instead of sleeping."""
-        return time.monotonic()
 
     def _client_ip(self, scope: Scope) -> str:
         client = scope.get("client")
