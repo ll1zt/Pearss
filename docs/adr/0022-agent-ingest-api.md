@@ -19,22 +19,61 @@
   约束里（`db_models.py:151`），`source_canonical_key()` 有专属 `agent://<name>`
   分支（`normalize.py:159-177`），`SourceCreate._valid_url` 的注释明确写了
   agent 源合法携带合成 URL（`sources_routes.py:305-316`）。**接缝是设计过的。**
-- 但**没有任何内容写入端点**。`grep` 全部 `/v1` 写端点：只有删除
-  （ADR 0021）与配置/消费状态。`items_routes.py` 连 `body` 都排除在可读字段外
-  （`DEFAULT_ITEMS_FIELDS` 注释：`body` is deliberately absent）。
-- 唯一会原地改写已存在行的是 `_update_pending()`，仅对 `pending` 行生效；
-  注释写明「the gate is what makes an in-place content change permissible at all」。
 - `architecture-spec.md:17,221` 已把这件事登记为 **A3「主动数据接入」**，
-  形态「外部 agent 持 token 幂等推送」，优先级 P3。
+  形态「外部 agent 持 token 幂等推送」，优先级 P3，标注未实施。
+- **但 `POST /internal/items` 已经是一个内容写入端点**（`main.py:395`），
+  且形态与本文的决策几乎相同：接受 `ItemDraft`、调用 `normalise_and_store()`。
+  它是 `@app.post` 直接注册的，不在任何 `@router` 上，也不在任何文档里 ——
+  第一轮勘察以 `@router` 为口径，因此漏掉了它。它的来历与处置见下节。
+
+### 已存在的临时端点：调查结论
+
+`git log -S` 定位到引入提交 `8911f8a`（2026-09-03，项目第一个 app 提交），
+其原始 docstring 直接说明了意图：
+
+> Internal and unauthenticated for now: authentication and the audit
+> middleware are part of the P1 control-plane work, and **this endpoint
+> exists so the pipeline can be exercised end to end before then.**
+
+即：它是 **P1 的端到端验证脚手架**，不是 A3 的实现。但它从未被拆除，
+而是在 `0b12e4f`（保护 Core API）里被**顺带加固**：加上
+`Depends(write_required)`，并把上面那句临时性说明改写成「Write-scoped:
+this mutates the corpus...」。**临时性的自我标注就此消失**，脚手架看起来
+成了正式端点。`grep` 全部文档（`docs/`、`architecture-spec.md`、`AGENTS.md`、
+`README.md`）在本次调查前对 `internal/items` 零命中，A3 也始终标注未实施 ——
+它从未作为需求交付物存在过。
+
+它现在的实际角色是**测试夹具**：`tests/integration/test_app.py` 有 15 处调用，
+用于验证审计、body 上限、幂等、scope 这些与它本身无关的行为。
+
+三个已确认的缺陷（均与「脚手架未被回收」这一根因一致）：
+
+1. **不在 `EarlyAuthMiddleware` 的保护范围内**（`hardening.py:133` 的
+   `_PROTECTED_PREFIXES` 只有 `("/v1",)`）。鉴权仍然有效（路由上有
+   `write_required`），但发生在 FastAPI 读完并校验 body 之后 —— 正是该中间件
+   存在的理由（其 docstring：否则未认证调用者可免费探测每个写端点的校验行为）。
+2. **`source_id` 由请求体提供**（`ItemDraft.source_id`，FastAPI 直接绑定这个
+   dataclass）。**持有写 token 的调用者可以往任意已存在的源注入条目**，
+   包括 rss/twitter 源。这与本文「source_id 强制取自路径」的越权防线直接冲突。
+3. **出现在公开 OpenAPI 契约里**（`tests/contract/openapi.json:1150`，
+   `operationId: ingest_draft_internal_items_post`）。按 ADR 0010，spec 是
+   MCP 工具面的生成来源，所以这个「内部」端点事实上是发布契约的一部分。
 
 ## 决策
 
-**新增 `POST /v1/sources/{source_id}:ingest`；它只接受 `ItemDraft` 字段，
-构造草稿后调用 `app.pipeline.normalise_and_store()`。**
+**新增 `POST /v1/sources/{source_id}:ingest`；它只接受内容字段，
+构造 `ItemDraft` 后调用 `app.pipeline.normalise_and_store()`。
+随后删除 `POST /internal/items`。**
 
 agent 被建模为**一个没有 `fetch` 钩子的采集器**：它不抓取，它推送，但产出物
 是同一个 `ItemDraft`，汇入同一条管线。这满足 `architecture-spec.md:189` 的收敛
 规则（一切 ingest 路径在 `ItemDraft → normalize → Item` 汇合）。
+
+**关于已存在的 `/internal/items`：不并存，而是升格后回收。** 两个都接受
+`ItemDraft` 的写端点是比现状更坏的结局（两套鉴权语义、两处越权面、契约里两个
+近义操作）。因此把脚手架的能力搬进 `/v1` 的正确形态并加固，然后删除它。
+`tests/integration/test_app.py` 里那 15 处调用改为走新端点 —— 它们断言的是审计、
+body 上限、幂等、scope，与端点路径无关，迁移不影响断言的语义。
 
 ### 为什么不新开一条写入路径
 
@@ -70,10 +109,19 @@ POST /v1/sources/{source_id}:ingest
 }
 ```
 
-**请求体不得包含**：`source_id`、`publish_status`、`content_ref`、`guid`。
-这些全部由管线推导。agent 只能提供「内容是什么」，不能提供「它处于什么状态」
-或「它属于谁」——`source_id` 强制取自路径，否则 agent 能往任意源注入内容，
-破坏来源归属。这是本决策的核心越权防线。
+**请求体不是 `ItemDraft` 本身**，而是一个只含内容字段的独立 schema
+（`IngestItem`）：`external_id`、`title`、`canonical_url`、`published_at`、
+`content`、`metadata`、`derivation_note`。`ItemDraft` 在服务端构造，
+`source_id` 由路径注入。
+
+**这一点必须如此，不能图省事直接绑定 `ItemDraft`**：`ItemDraft` 含
+`source_id`，而 `/internal/items` 正是直接绑定它，于是 `source_id` 成了
+请求方可控字段（见上文缺陷 2）。「agent 只能提供内容是什么，不能提供它属于谁」
+是本决策的核心越权防线，用一个独立 schema 是让这条防线**在类型层面无法被绕过**，
+而不是靠运行时检查 —— 后者会在某次重构里被忘记。
+
+`publish_status`、`content_ref`、`guid` 从来不在 `ItemDraft` 上，故不受影响；
+本节列它们是为了记录「这些字段永不可由请求方提供」这条不变量。
 
 ## 三个已拍板的默认（用户 2026-09-14 决定）
 
