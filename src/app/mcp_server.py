@@ -1355,6 +1355,13 @@ def build_mcp_server(app: Any) -> MCPServer:
             "are stored unless the source has a processing chain. Submitted "
             "HTML is sanitised on the way in, so it does not need pre-cleaning, "
             "and what you send is treated as data rather than trusted.\n\n"
+            "The response reports what happened per item: branch on each "
+            "result's `action`, not on the status code. A 201 means the "
+            "submission was accepted, not that every item was new -- "
+            "`skip_same_source` and `suppress` mean an identical item already "
+            "existed. Two items differing only in external_id still count as "
+            "one when their content is identical, so an empty body does not "
+            "distinguish them.\n\n"
             "Requires confirmation: this adds content to the corpus."
         )
     )

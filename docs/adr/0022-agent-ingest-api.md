@@ -123,6 +123,27 @@ POST /v1/sources/{source_id}:ingest
 `publish_status`、`content_ref`、`guid` 从来不在 `ItemDraft` 上，故不受影响；
 本节列它们是为了记录「这些字段永不可由请求方提供」这条不变量。
 
+### 响应语义（调用方须知）
+
+响应返回 `submitted` 与 `inserted` 两个计数，以及逐条的 `results[]`，每条含
+`id`、`external_id`、`action`、`reason`。**调用方应按 `action` 分支，不要按
+计数判断**：HTTP 201 只表示请求被受理，不等于每一条都入库。
+
+两个会让 `inserted` 小于 `submitted` 的原因，都是**正常的去重结果**而非错误：
+
+- **`skip_same_source`** —— 同源已有相同内容的条目。身份是
+  `sha256(tenant, source_id, external_id)`，所以**换个 `external_id` 但内容相同
+  （例如两条都只有标题、正文为空）仍会被判为同一条**：`decide_dedupe` 在身份
+  不匹配后按 `content_hash` 匹配，而空内容共享同一个 hash。agent 若把「空条目」
+  当作彼此的区分依据，会看到 201 而实际只入库一条。
+- **`suppress`** —— 相同内容已从**其他源**发布过。这是跨源去重，防止同一篇文章
+  以两个 GUID 重复出现在阅读器里。
+
+`Idempotency-Key` 必须对应**一个逻辑操作**，重试同一操作时复用、换操作时更换。
+复用同一 key 发送不同 body 会**返回首次的响应并丢弃新内容**（该仓库所有写端点
+的既有语义，响应带 `Idempotent-Replay: true` 头以示区别）。automated agent 尤其
+要注意：这个失败模式不会报错。
+
 ## 三个已拍板的默认（用户 2026-09-14 决定）
 
 **1. agent 提交的内容默认可见（不滞留）。** 初稿建议默认 `PENDING` 作为

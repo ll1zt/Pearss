@@ -10,6 +10,7 @@ that fails outright because it carries no http(s) URL.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -313,7 +314,47 @@ async def test_item_visibility_follows_the_source_chain(
 
     fetched = await writer_client.get(f"/v1/items/{item_id}")
     assert fetched.status_code == 200
-    assert fetched.json()["publish_status"] != "pending"
+    # `ready`, not merely "not pending": a status introduced later must not be
+    # able to satisfy this by accident.
+    assert fetched.json()["publish_status"] == "ready"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_chained_agent_source_holds_items_behind_the_gate(
+    app: FastAPI, agent_client: httpx.AsyncClient, writer_client: httpx.AsyncClient
+) -> None:
+    """The other half of the visibility contract, and the reason it is safe.
+
+    "Visible on submit" is a statement about a chainless source, not a rule
+    that ingest bypasses the gate. With a chain configured the submitted item
+    must wait for it exactly as a collected one does -- otherwise agent
+    content would be the one path that publishes unprocessed, and the
+    translation/summary chain would silently not apply to it.
+    """
+    with app.state.session_factory() as session:
+        session.execute(
+            sa.text(
+                "update source set pipeline_chain = :chain, target_lang = 'en'"
+                " where id = :sid"
+            ),
+            {
+                "chain": json.dumps(
+                    [{"plugin_id": "translation", "kind": "translation", "lang": "en"}]
+                ),
+                "sid": AGENT_SOURCE_ID,
+            },
+        )
+        session.commit()
+
+    response = await _post(agent_client, key="idem-key-chained")
+    assert response.status_code == 201, response.text
+    item_id = response.json()["results"][0]["id"]
+
+    # 404 rather than 403: the gate reports a pending item as absent, the same
+    # answer every other read path gives (items_routes, ADR 0016).
+    fetched = await writer_client.get(f"/v1/items/{item_id}")
+    assert fetched.status_code == 404
 
 
 @pytest.mark.integration

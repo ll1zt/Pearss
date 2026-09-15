@@ -2,7 +2,7 @@
 
 Three tokens, deliberately separate from the Reader API credential:
 
-    PEARSS_API_TOKEN        read and write
+    PEARSS_API_TOKEN        read and write and ingest
     PEARSS_API_READ_TOKEN   read only; optional
     PEARSS_INGEST_TOKEN     push content into an agent source only; optional
 
@@ -39,10 +39,16 @@ LOGGER = logging.getLogger(__name__)
 
 READ_SCOPE = "read"
 WRITE_SCOPE = "write"
-# A scope of its own rather than a use of WRITE_SCOPE: the ingest token must
-# not open the general write surface (source CRUD, deletion, plugin toggles),
-# and the write token must not implicitly reach ingest -- otherwise the split
-# would exist on paper only (ADR 0022).
+# A scope of its own rather than a use of WRITE_SCOPE, so that the ingest
+# credential opens exactly one thing: a caller holding only INGEST_SCOPE
+# cannot touch source CRUD, deletion or plugin toggles.
+#
+# Note which direction the separation runs. It restricts the *ingest* token,
+# not the full one -- PEARSS_API_TOKEN is granted INGEST_SCOPE too (see
+# expected_tokens), because it can already delete sources and rewrite
+# schedules, so withholding content-push from it would cost the "full" token
+# its name without buying any safety. ADR 0022 asks for the ingest credential
+# to be isolated; it does not ask for write to be unable to ingest.
 INGEST_SCOPE = "ingest"
 
 # auto_error=False so a missing header becomes an unauthenticated request we

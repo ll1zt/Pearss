@@ -142,6 +142,17 @@ class EarlyAuthMiddleware:
     # table the middleware would demand `write` and refuse a valid ingest
     # token before the route's own dependency ever runs -- the narrow token
     # would be unusable, and the split would be nominal.
+    #
+    # Suffix matching is deliberately method-blind: the scope belongs to the
+    # action, and an action does not change meaning with the verb. The
+    # consequence to know about is that a future GET under an `:ingest` path
+    # would require the ingest scope rather than `read` -- correct if it is
+    # genuinely the same action, wrong if it is a read that merely shares the
+    # path, in which case it needs a path of its own.
+    #
+    # Matching is on the whole suffix, so `/v1/sources/x:ingestX` and
+    # `/v1/sources/x:ingest/extra` fall through to the method rule instead of
+    # inheriting `ingest` from a prefix they happen to start with.
     _ACTION_SCOPES: Final[dict[str, str]] = {":ingest": "ingest"}
 
     def __init__(self, app: Any) -> None:

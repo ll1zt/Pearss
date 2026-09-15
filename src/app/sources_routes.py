@@ -1170,8 +1170,10 @@ def ingest_items(
     reimplemented, which is the whole point of the design: a second writer
     would either bypass sanitisation or force it to be duplicated.
 
-    Scope is `ingest`, not `write`: the token that pushes content must not be
-    the token that can delete sources (ADR 0022).
+    Scope is `ingest`: a credential that can push content is not automatically
+    one that can delete sources, rewrite schedules or read anyone's state. The
+    full token holds both, so this narrows the *ingest* credential rather than
+    the full one (ADR 0022).
 
     Items are visible on submit when the source has no chain, matching a
     chainless rss source. The user's decision (2026-09-14) was explicit that
