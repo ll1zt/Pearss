@@ -410,6 +410,31 @@
       "type": "object"
     }
   },
+  "submit_items": {
+    "description": "Push items into an agent source (A3, ADR 0022). Use this to store content you have gathered elsewhere: pass the title, the source URL, the publication time and the body, and Pearss stores it through the same pipeline as collected items.\n\nThe target must be a source of type 'agent' -- create one first with add_source using a url like 'agent://newsletter-intake'. Pushing into an rss or web source is refused, because that would mix content from one origin into another's provenance.\n\n`source_id` is the path, never an argument: an item's source is not yours to choose. Items are visible to readers as soon as they are stored unless the source has a processing chain. Submitted HTML is sanitised on the way in, so it does not need pre-cleaning, and what you send is treated as data rather than trusted.\n\nRequires confirmation: this adds content to the corpus.",
+    "input_schema": {
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "items"
+      ],
+      "title": "submit_itemsArguments",
+      "type": "object"
+    }
+  },
   "trigger_job": {
     "description": "Fetch a source now, outside its schedule. Requires confirmation: this issues a real request to the origin.",
     "input_schema": {

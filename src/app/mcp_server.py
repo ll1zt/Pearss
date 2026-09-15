@@ -374,6 +374,31 @@ def _retry_enrichments_confirmation(source_id: str) -> Elicit[Any]:
     )
 
 
+def _submit_items_confirmation(
+    source_id: str, items: list[dict[str, Any]]
+) -> Elicit[Any]:
+    """The submit_items question: names the target and what will land in it.
+
+    Item titles are listed rather than bodies: a prompt the user cannot read
+    is not a confirmation, and a body can be arbitrarily long. The count is
+    carried separately so a truncated list is still an honest one.
+    """
+    titles = "; ".join(
+        str(item.get("title") or "(untitled)")[:60] for item in items[:5]
+    )
+    more = "" if len(items) <= 5 else f" (+{len(items) - 5} more)"
+    return _confirm_resolver(
+        _summary=(
+            f"Push {len(items)} item(s) into agent source {source_id}? {titles}{more}"
+        ),
+        _fields={
+            "source_id": source_id,
+            "item_count": str(len(items)),
+            "titles": f"{titles}{more}",
+        },
+    )
+
+
 def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
     return _confirm_resolver(
         _summary=f"Set plugin {plugin_id} status to {status}?",
@@ -1314,6 +1339,60 @@ def build_mcp_server(app: Any) -> MCPServer:
         if core_status not in (200, 409):
             return _error_from(payload, core_status)
         return _truncate({**payload, "status_code": core_status})
+
+    @server.tool(
+        description=(
+            "Push items into an agent source (A3, ADR 0022). Use this to store "
+            "content you have gathered elsewhere: pass the title, the source "
+            "URL, the publication time and the body, and Pearss stores it "
+            "through the same pipeline as collected items.\n\n"
+            "The target must be a source of type 'agent' -- create one first "
+            "with add_source using a url like 'agent://newsletter-intake'. "
+            "Pushing into an rss or web source is refused, because that would "
+            "mix content from one origin into another's provenance.\n\n"
+            "`source_id` is the path, never an argument: an item's source is "
+            "not yours to choose. Items are visible to readers as soon as they "
+            "are stored unless the source has a processing chain. Submitted "
+            "HTML is sanitised on the way in, so it does not need pre-cleaning, "
+            "and what you send is treated as data rather than trusted.\n\n"
+            "Requires confirmation: this adds content to the corpus."
+        )
+    )
+    async def submit_items(
+        source_id: str,
+        items: list[dict[str, Any]],
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_submit_items_confirmation)],
+    ) -> dict[str, Any]:
+        data = _confirmation_verdict(confirmed)
+        if data is None:
+            return {
+                "declined": True,
+                "reason": (
+                    "not confirmed: the user declined, or this client does not "
+                    "support elicitation, which writes require"
+                ),
+            }
+        # The count is what the user saw; comparing it catches a list that
+        # changed between the prompt and the call, which the titles alone
+        # would not if two items were swapped.
+        if not (
+            _matches(data["source_id"], source_id)
+            and _matches(data["item_count"], str(len(items)))
+        ):
+            return {
+                "aborted": True,
+                "reason": "confirmed arguments differ from requested",
+            }
+        status, payload = await core.request(
+            "POST",
+            f"/v1/sources/{source_id}:ingest",
+            json_body={"items": items},
+            idempotency_key=_fresh_key(),
+        )
+        if status not in (200, 201):
+            return _error_from(payload, status)
+        return _truncate(payload)
 
     # -------------------------------------------------------------- resources
 

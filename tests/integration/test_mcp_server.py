@@ -318,6 +318,8 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "backfill_source",
         "list_enrichments",
         "retry_enrichments",
+        # A3 ingest (ADR 0022): the write side of an agent source.
+        "submit_items",
     }
 
 
@@ -599,6 +601,11 @@ async def test_writes_refuse_when_the_client_cannot_confirm(mcp_url: str) -> Non
 
 @pytest.mark.asyncio
 async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> None:
+    agent_id = await _an_agent_source(mcp_url)
+    before_ids = [
+        row["id"]
+        for row in (await _call(mcp_url, "list_sources", {"limit": 100}))["data"]
+    ]
     cases: list[tuple[str, dict[str, Any]]] = [
         (
             "add_source",
@@ -626,6 +633,8 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         # Deletion (ADR 0021).
         ("delete_items", {"item_ids": ["it-1"]}),
         ("delete_source_items", {"source_id": "src-1"}),
+        # A3 ingest (ADR 0022).
+        ("submit_items", {"source_id": agent_id, "items": [_submitted_item()]}),
     ]
     for tool, args in cases:
         with pytest.raises(BaseException) as excinfo:
@@ -633,9 +642,14 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         error = _rpc_error(excinfo)
         assert error.code == -32021, (tool, error.error)
 
-    # Nothing changed anywhere.
-    sources = await _call(mcp_url, "list_sources", {"limit": 10})
-    assert [row["status"] for row in sources["data"]] == ["active"]
+    # Nothing changed anywhere. Compared against a snapshot taken before the
+    # calls rather than against a fixed list: this suite shares one database
+    # across the module, so other tests' sources are legitimately present and
+    # an exact-match assertion would be testing the neighbours, not the
+    # refusals.
+    sources = await _call(mcp_url, "list_sources", {"limit": 100})
+    assert {row["status"] for row in sources["data"]} == {"active"}
+    assert [row["id"] for row in sources["data"]] == before_ids
 
 
 # --------------------------------------------------------------------------
@@ -761,6 +775,137 @@ async def test_confirmed_write_reaches_the_core_api(mcp_url: str) -> None:
     assert payload.get("aborted") is None, payload
     assert payload["id"], payload
     assert payload["canonical_url"] == "https://confirmed.example/feed.xml"
+
+
+def _submitted_item(**overrides: Any) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "external_id": "agent-entry-1",
+        "title": "Gathered Elsewhere",
+        "canonical_url": "https://example.com/gathered",
+        "content": "<p>Body.</p>",
+    }
+    item.update(overrides)
+    return item
+
+
+async def _an_agent_source(mcp_url: str) -> str:
+    """Create (or find) the ingest target, and return its id.
+
+    Created per test rather than seeded in `mcp_env`: the shared fixture's
+    source list is asserted elsewhere as exactly `["src-1"]`, and widening it
+    to save a call here would have meant weakening those assertions. `add_source`
+    is idempotent by URL, so repeated calls are safe.
+    """
+    payload = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "agent://intake",
+            "type": "agent",
+            "schedule_policy": {"type": "fixed", "interval": "1h"},
+        },
+        confirm=True,
+    )
+    source_id = payload["id"]
+    assert isinstance(source_id, str)
+    return source_id
+
+
+@pytest.mark.asyncio
+async def test_submit_items_refuses_without_confirmation(mcp_url: str) -> None:
+    """A client that cannot confirm must not be able to push content.
+
+    The refusal is the protocol's MissingRequiredClientCapability, the same
+    answer every other write tool gives -- see
+    test_writes_refuse_when_the_client_cannot_confirm for why it is not a
+    friendly {"declined": true} body.
+    """
+    source_id = await _an_agent_source(mcp_url)
+    with pytest.raises(BaseException) as excinfo:
+        await _call(
+            mcp_url,
+            "submit_items",
+            {"source_id": source_id, "items": [_submitted_item()]},
+        )
+    error = _rpc_error(excinfo)
+    assert error.code == -32021, error.error
+    assert "elicitation" in str(error.error.data), error.error
+
+    # The refusal must be real: nothing was stored.
+    stored = await _call(
+        mcp_url, "search_items", {"limit": 100, "source_id": source_id}
+    )
+    assert stored["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_confirmed_submit_items_stores_into_the_agent_source(
+    mcp_url: str,
+) -> None:
+    """The confirmed path must actually store, and land where it was told."""
+    source_id = await _an_agent_source(mcp_url)
+    payload = await _call(
+        mcp_url,
+        "submit_items",
+        {"source_id": source_id, "items": [_submitted_item()]},
+        confirm=True,
+    )
+    assert payload.get("declined") is None, payload
+    assert payload.get("aborted") is None, payload
+    assert payload["inserted"] == 1, payload
+
+    stored = await _call(
+        mcp_url, "search_items", {"limit": 100, "source_id": source_id}
+    )
+    rows = stored["data"]
+    assert [row["title"] for row in rows] == ["Gathered Elsewhere"]
+
+
+@pytest.mark.asyncio
+async def test_submit_items_refuses_a_non_agent_source(mcp_url: str) -> None:
+    """Pushing into an rss source would launder provenance.
+
+    src-1 is an rss source: its items are supposed to come from one origin,
+    so the ingest endpoint refuses it rather than mixing in content from
+    somewhere else.
+    """
+    payload = await _call(
+        mcp_url,
+        "submit_items",
+        {"source_id": "src-1", "items": [_submitted_item()]},
+        confirm=True,
+    )
+    assert payload["error"] == "not_an_agent_source", payload
+
+
+@pytest.mark.asyncio
+async def test_submitted_content_is_sanitised(mcp_url: str) -> None:
+    """The tool must not become a way to store live markup.
+
+    Ingest routes through the same store-boundary sanitiser as collection, so
+    this pins that the MCP path inherits it rather than reimplementing a write.
+    """
+    source_id = await _an_agent_source(mcp_url)
+    payload = await _call(
+        mcp_url,
+        "submit_items",
+        {
+            "source_id": source_id,
+            "items": [
+                _submitted_item(
+                    external_id="agent-entry-script",
+                    content="<p>ok</p><script>alert(1)</script>",
+                )
+            ],
+        },
+        confirm=True,
+    )
+    assert payload["inserted"] == 1, payload
+    item_id = payload["results"][0]["id"]
+
+    body = await _call(mcp_url, "get_item_body", {"item_id": item_id})
+    assert "alert(1)" not in str(body), body
+    assert "ok" in str(body), body
 
 
 @pytest.mark.asyncio
