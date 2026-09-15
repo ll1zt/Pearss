@@ -262,4 +262,8 @@ also_copy = [
   "AGENTS.md",
   "justfile",
   ".env.example",
+  # tests/unit/test_coverage_diff.py imports scripts/coverage_diff.py; without
+  # it the mutation runner dies during stats collection -- the same failure
+  # mode as a missing file above, and the same cure.
+  "scripts",
 ]
