@@ -587,3 +587,178 @@ def test_a_busy_catch_up_walks_past_the_first_walk_page_count(
     # 900/800/700/600/500 are new; the page holding the frontier contributes
     # nothing from 100 onwards.
     assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 900
+
+
+# --------------------------------------------------------------------------
+# A module's tweets reach the corpus, not just the parser
+# --------------------------------------------------------------------------
+#
+# The parser tests prove `_tweets` returns module items. That is one hop short
+# of the question a user asks ("why is this missing from my reader?"): does the
+# tweet survive the walk, the filter, and the store? These drive the whole
+# pipeline with a module-shaped page and read the result back from the
+# database, which is the only place that can answer it.
+
+
+def module_timeline(next_cursor: str | None) -> bytes:
+    """A page whose only content is a module carrying two replies.
+
+    Shaped like the real `home-conversation` entry: a `TimelineTimelineModule`
+    whose `items[].item.itemContent` each hold a complete tweet.
+    """
+
+    def item(rid: str, text: str) -> dict[str, object]:
+        return {
+            "entryId": f"tweet-{rid}",
+            "item": {
+                "itemContent": {
+                    "tweet_results": {
+                        "result": {
+                            "__typename": "Tweet",
+                            "rest_id": rid,
+                            "core": {
+                                "user_results": {
+                                    "result": {
+                                        "core": {
+                                            "name": "Tester",
+                                            "screen_name": "tester",
+                                        }
+                                    }
+                                }
+                            },
+                            "legacy": {
+                                "full_text": text,
+                                "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+                                "entities": {"urls": [], "media": []},
+                            },
+                        }
+                    }
+                }
+            },
+        }
+
+    entries: list[dict[str, object]] = [
+        {
+            "entryId": "home-conversation-500",
+            "sortIndex": "500",
+            "content": {
+                "__typename": "TimelineTimelineModule",
+                "items": [item("500", "parent post"), item("499", "a reply")],
+            },
+        }
+    ]
+    if next_cursor:
+        entries.append(
+            {
+                "entryId": f"cursor-bottom-{next_cursor}",
+                "content": {"value": next_cursor},
+            }
+        )
+    return json.dumps(
+        {
+            "data": {
+                "home": {
+                    "home_timeline_urt": {
+                        "instructions": [
+                            {"type": "TimelineAddEntries", "entries": entries}
+                        ]
+                    }
+                }
+            }
+        }
+    ).encode()
+
+
+def _stored_titles(session: Session) -> list[str]:
+    """The stored items' titles, which carry the tweet text.
+
+    `guid` holds a derived identity (a content hash), not the collector's
+    external id, so the tweet's own text is the field that says which tweet a
+    row came from. Asserting on it is also closer to the user's question --
+    "is the reply I expected in my reader?" -- than an id would be.
+    """
+    return [
+        str(row[0])
+        for row in session.execute(sa.text("select title from item")).fetchall()
+    ]
+
+
+@pytest.mark.integration
+def test_tweets_inside_a_module_are_stored_by_the_full_walk(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both tweets from a module land in the database.
+
+    The end-to-end half of the conversation-module fix: a page whose entire
+    content is a module must produce stored items. A regression here is
+    invisible to the parser tests, which stop one layer short of the store.
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["variables"].get("cursor") is None:
+            return httpx.Response(200, content=module_timeline(None))
+        raise AssertionError("the walk should stop at the origin's bottom")
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    stored = _stored_titles(session)
+    assert any("parent post" in t for t in stored), (
+        f"the module's parent was lost: {stored}"
+    )
+    assert any("a reply" in t for t in stored), f"the module's reply was lost: {stored}"
+
+
+@pytest.mark.integration
+def test_a_module_under_an_unknown_prefix_is_stored_too(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same walk with a prefix the parser has never been taught.
+
+    This is the shape the allowlist dropped silently. Pinning it at the store
+    level is the behavioural statement that matters: the tweet is not merely
+    parsed, it is in the corpus and therefore visible to readers.
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+    page = module_timeline(None).replace(
+        b"home-conversation-500", b"profile-conversation-500"
+    )
+
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["variables"].get("cursor") is None:
+            return httpx.Response(200, content=page)
+        raise AssertionError("the walk should stop at the origin's bottom")
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    stored = _stored_titles(session)
+    assert any("parent post" in t for t in stored), (
+        f"unknown prefix lost content: {stored}"
+    )
+    assert any("a reply" in t for t in stored), f"unknown prefix lost content: {stored}"

@@ -1600,6 +1600,25 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Opaque cursor from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque cursor from a previous response.",
+              "title": "Cursor"
+            }
           }
         ],
         "responses": {
@@ -1639,7 +1658,7 @@
     },
     "/v1/jobs/{job_id}/runs": {
       "get": {
-        "description": "Recent runs for one job, newest first.\n\n`error_class` is present only on failures, per the JobRun state machine,\nwhich is what makes a cluster of `structure_changed` visible as the signal\nthat a source's page shape moved.",
+        "description": "Recent runs for one job, newest first.\n\n`error_class` is present only on failures, per the JobRun state machine,\nwhich is what makes a cluster of `structure_changed` visible as the signal\nthat a source's page shape moved.\n\nA run history is append-at-the-front, so this is keyset-paginated: page two\nmust not skip a run that started while page one was being read.",
         "operationId": "listJobRuns",
         "parameters": [
           {
@@ -1661,6 +1680,25 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque cursor from a previous response.",
+              "title": "Cursor"
             }
           }
         ],

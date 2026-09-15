@@ -166,47 +166,80 @@ def _entries(body: bytes | str) -> list[Json]:
     return []
 
 
+def _is_module(content: object) -> bool:
+    """Whether an entry's `content` is a `TimelineTimelineModule`.
+
+    Decided by structure rather than by the entryId prefix, which is the whole
+    point: the previous version dispatched on `entryId.startswith(...)`, so a
+    module whose prefix X named something other than `home-conversation-` had
+    every tweet inside it dropped without a word. That is exactly the defect
+    the `home-conversation` fix addressed -- but the fix added one more prefix
+    to an allowlist instead of removing the allowlist, leaving the same trap
+    for the next module name X introduces.
+
+    `__typename` is what X labels the node; the `items` list is the shape that
+    actually carries the tweets, and either alone is enough to try. A plain
+    tweet's content has neither, so this cannot match one.
+    """
+    if not isinstance(content, dict):
+        return False
+    if content.get("__typename") == "TimelineTimelineModule":
+        return True
+    return "items" in content and isinstance(content.get("items"), list)
+
+
+def _is_cursor(entry_id: str) -> bool:
+    """Whether an entry is a timeline cursor rather than content."""
+    return entry_id.startswith("cursor-")
+
+
 def _tweets(body: bytes | str) -> list[Json]:
     """The tweet results on a page, in the order X sent them.
 
-    A page is a list of *entries*, and not all of them are tweets. Three
-    shapes carry content or must be told apart, and the distinction is
-    explicit rather than inferred from the entryId prefix:
+    A page is a list of *entries*, and not all of them are tweets. The shapes
+    are told apart by structure, not by the entryId prefix:
 
-    - **top-level tweets** (`tweet-<id>`) -- one tweet each;
-    - **conversation modules** (`home-conversation-<id>`, a
-      `TimelineTimelineModule`) -- a thread whose `content.items[]` each hold
-      a full tweet. Measured on a real page these were 13 of 92 tweets, all
-      of them replies, and every one was being dropped whole;
-    - **promoted slots** (`promoted-tweet-<id>`) -- an advertisement. It
-      carries a perfectly parseable `tweet_results`, so it must be *excluded
-      on purpose*; keying off "not a `tweet-` prefix" happened to exclude it
-      and would stop doing so the moment modules were handled.
+    - **top-level tweets** -- one tweet each (`content.itemContent`);
+    - **modules** (`TimelineTimelineModule`, any prefix) -- a thread whose
+      `content.items[].item.itemContent` each hold a full tweet. Measured on a
+      real page these were 13 of 92 tweets, all of them replies, and every one
+      was being dropped whole;
+    - **promoted slots** -- an advertisement. It carries a perfectly parseable
+      `tweet_results`, so it must be *excluded on purpose*;
+    - **cursors** -- no content, only a position.
+
+    Nothing is dropped for having an unrecognized name: an entry that carries
+    a `tweet_results.result` is a tweet, whatever X called it. Dropping by
+    name is how content goes missing silently, and it is the failure this
+    function has already had once.
     """
     tweets: list[Json] = []
     for entry in _entries(body):
         entry_id = str(entry.get("entryId", ""))
-        if entry_id.startswith("promoted-tweet-"):
+        content = entry.get("content")
+        if _is_cursor(entry_id):
             continue
-        if entry_id.startswith("tweet-"):
-            item_content = (entry.get("content") or {}).get("itemContent")
-            if _is_promoted(item_content):
-                continue
-            result = _result_of(item_content)
-            if isinstance(result, dict):
-                tweets.append(_unwrap_visibility(result))
+        if "promoted" in entry_id:
+            # Advertised ids come from the advertiser's own timeline; the
+            # metadata check below is the durable signal, this is the fast path.
             continue
-        if entry_id.startswith("home-conversation-"):
-            for item in _module_items(entry.get("content")):
+        if _is_module(content):
+            for item in _module_items(content):
                 # Promotion is decided per item. Skipping the whole module
                 # because one item is an ad would take the thread's genuine
-                # replies with it -- the same silent loss the module handling
-                # above exists to prevent.
+                # replies with it.
                 if _is_promoted(item):
                     continue
                 result = _result_of(item)
                 if isinstance(result, dict):
                     tweets.append(_unwrap_visibility(result))
+            continue
+        item_content = (content or {}).get("itemContent")
+        if _is_promoted(item_content):
+            continue
+        result = _result_of(item_content)
+        if isinstance(result, dict):
+            tweets.append(_unwrap_visibility(result))
     return tweets
 
 
@@ -296,31 +329,40 @@ def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
     value gap detection compares against. A page with no sortable tweet returns
     None: continuity cannot be *proven* from it, which is a different claim from
     proving it holds.
+
+    Entries are classified the same way `_tweets` classifies them -- by
+    structure -- so the span describes exactly the tweets that function
+    returns. Dispatching on the entryId prefix here as well would let the two
+    disagree, and a span that includes a tweet `_tweets` dropped (or omits one
+    it kept) is a false gap or a missed one.
     """
     sorts: list[int] = []
     for entry in _entries(body):
         entry_id = str(entry.get("entryId", ""))
-        if entry_id.startswith("promoted-tweet-"):
+        content = entry.get("content")
+        if _is_cursor(entry_id):
+            # Cursors hug the tweet range rather than bounding it.
+            continue
+        if "promoted" in entry_id:
             # Advertised ids come from the advertiser's own timeline, so they
             # are unrelated in magnitude to the page's own tweets.
             continue
-        if entry_id.startswith("tweet-"):
-            item_content = (entry.get("content") or {}).get("itemContent")
-            if _is_promoted(item_content):
-                continue
-            numeric = _sort_index(entry.get("sortIndex"))
-            if numeric is not None:
-                sorts.append(numeric)
-            continue
-        if entry_id.startswith("home-conversation-"):
+        if _is_module(content):
             # The module's own sortIndex is a layout position, not the items'
             # range; each tweet inside carries its own id as its order.
-            for item in _module_items(entry.get("content")):
+            for item in _module_items(content):
                 if _is_promoted(item):
                     continue
                 numeric = _id_sort_index(item)
                 if numeric is not None:
                     sorts.append(numeric)
+            continue
+        item_content = (content or {}).get("itemContent")
+        if _is_promoted(item_content):
+            continue
+        numeric = _sort_index(entry.get("sortIndex"))
+        if numeric is not None:
+            sorts.append(numeric)
     if not sorts:
         return None
     return max(sorts), min(sorts)

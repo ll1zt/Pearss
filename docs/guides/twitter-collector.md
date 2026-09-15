@@ -324,14 +324,31 @@ X 在不同时期把同一份数据放在不同位置，**只接受一种会静�
 （"不以 `tweet-` 开头就跳过"）被排除——规则偶然正确：广告确实该丢，
 对话不该。展开模块后广告会意外入库。
 
-现在的形状是**显式枚举**，不再依赖前缀：
+**但当时的修复只往白名单里又加了一个前缀**（`home-conversation-`），
+陷阱原样留着：下一个 X 换个名字的模块仍会被整块丢弃。
+
+### 第五个分叉：模块前缀是任意字符串（已修，2026-09-16）
+
+`_tweets()` 与 `page_sort_span()` 现在按**结构**判定条目，不再看 `entryId`
+前缀——`_is_module(content)` 认 `__typename == "TimelineTimelineModule"`
+**或** `content.items` 是个列表（二者任一即可；推文的 `content` 两者皆无，
+不会误判）。
 
 | 条目 | 处理 |
 |---|---|
-| `tweet-<id>` | 一条推文 |
-| `home-conversation-<id>` | 展开 `content.items[].item.itemContent`，每条是一推文 |
-| `promoted-tweet-<id>`、`itemContent.promotedMetadata` | 排除 |
+| 任意前缀 + 模块形（`items[]`） | 展开 `content.items[].item.itemContent`，每条一推文 |
+| 其余带 `tweet_results.result` 的条目 | 一条推文（**不因名字被丢**） |
+| `itemContent.promotedMetadata` 或 id 含 `promoted` | 排除 |
 | `cursor-*` | 只取游标值 |
+
+**判据**：带 `tweet_results.result` 的条目就是推文，不管 X 把它叫什么；
+只有**显式排除**（推广、游标）才允许丢弃。`page_sort_span` 用同一套分类，
+两者必须描述同一批推文——span 漏掉 `_tweets` 保留的推文会报出假断档，
+反之会报出低于真实值的 floor。
+
+**回归测试**：`test_a_module_under_an_unrecognized_prefix_is_still_expanded`
+（解析层）与 `test_a_module_under_an_unknown_prefix_is_stored_too`
+（走完整 walk 并读回 `item` 表——回答"为什么阅读器里没有"必须看到存储层）。
 
 **推广判定是 item 级，不是 entry 级**（`_is_promoted(item_content)`）。
 这一条是 review 自己代码时发现的：初版让 `_is_promoted` 递归进模块、

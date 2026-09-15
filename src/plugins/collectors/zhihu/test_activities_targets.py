@@ -75,6 +75,38 @@ def _parse(targets: list[Any], *, action: str = _CREATE_ACTION) -> list[Any]:
     )
 
 
+def _parse_mixed(entries: list[tuple[str, Any]]) -> list[Any]:
+    """Parse activities whose actions differ, so one item can be noise and
+    another content in the same payload.
+
+    `_payload` applies a single action to every entry, which cannot express
+    "this one is dropped as noise while that one is kept" -- and that
+    coexistence is what makes a drop an omission rather than an all-unusable
+    payload.
+    """
+    body = {
+        "paging": {"is_end": True},
+        "data": [
+            {
+                "id": 9000 + index,
+                "action_text": action,
+                "verb": "",
+                "actor": _ACTOR,
+                "target": target,
+            }
+            for index, (action, target) in enumerate(entries)
+        ],
+    }
+    return collector.parse(
+        RawPayload(
+            url=ACTIVITIES_URL,
+            status_code=200,
+            body=json.dumps(body).encode("utf-8"),
+            source_id=SOURCE_ID,
+        )
+    )
+
+
 def _dropped(targets: list[Any], *, action: str = _CREATE_ACTION) -> None:
     """Assert every target was skipped, which `parse` reports as structure_changed.
 
@@ -453,3 +485,90 @@ def test_a_pin_video_without_a_usable_url_adds_no_link() -> None:
 
     assert "<a href" not in draft.content
     assert "v.example" not in draft.content
+
+
+# --------------------------------------------------------------------------
+# A partial loss must be visible, not silent
+# --------------------------------------------------------------------------
+#
+# Zhihu's dispatcher is an allowlist: `_map_target` returns None for a target
+# type it does not know, and the activity is skipped. That is defensible --
+# rendering an unknown shape as a stub would be worse -- but only as long as
+# the loss is *observable*. `parse`'s all-unusable guard covers the wholesale
+# case; a new type mixed with known ones is the partial case, and nothing
+# fails there. These pin the log line that makes it diagnosable, which is the
+# same reason the unknown *action* falls through to "other" rather than
+# raising: a single unknown shape must not take a source's collection down,
+# and it must not vanish without a trace either.
+
+
+def _warning_text(caplog: pytest.LogCaptureFixture) -> str:
+    return " ".join(record.getMessage() for record in caplog.records)
+
+
+def test_an_unknown_target_type_is_logged_when_it_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dropped activity names the type it could not render.
+
+    The assertion is on the type and the id, because those are what an
+    operator needs to tell "Zhihu added a content type" from "the parser
+    broke" -- the message must not be a generic "skipped something".
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        drafts = _parse([{"type": "ebook", "id": 7008, "title": "示例电子书"}, _KEEPER])
+
+    assert len(drafts) == 1, "the usable target must still be kept"
+    logged = _warning_text(caplog)
+    assert "ebook" in logged, logged
+    assert "7008" in logged, logged
+
+
+def test_a_deliberate_noise_drop_is_not_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The follow/question-created drop stays quiet on purpose.
+
+    Those are noise by definition -- they say the person looked at something --
+    so they are dropped every cycle for every account. Logging them would bury
+    the genuinely surprising drop (an unknown *content* type) under a line per
+    activity, which is how a warning becomes something people filter out.
+
+    Paired with a usable target so the drop is an omission rather than an
+    all-unusable payload, which `parse` reports by raising.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        drafts = _parse_mixed(
+            [
+                (
+                    "关注了问题",
+                    {"type": "question", "id": 5100, "title": "被关注的问题"},
+                ),
+                (_CREATE_ACTION, _KEEPER),
+            ]
+        )
+
+    assert len(drafts) == 1, "the content activity must still be kept"
+    assert "dropped" not in _warning_text(caplog), _warning_text(caplog)
+
+
+def test_the_unknown_target_log_does_not_echo_the_payload() -> None:
+    """Only the type and id are logged, never the target's content.
+
+    AGENTS.md forbids raw untrusted content in logs. The message is built from
+    two scalar fields for that reason; a `%r` of the whole target would put an
+    attacker-influenced body into the journal.
+    """
+    import inspect
+
+    source = inspect.getsource(collector._activities)
+    warning_at = source.index("dropped an activity")
+    call = source[warning_at : warning_at + 400]
+    assert 'target.get("type")' in call, call
+    assert 'target.get("id")' in call, call
+    # Guard against a later edit widening it to the whole object.
+    assert "target," not in call, call

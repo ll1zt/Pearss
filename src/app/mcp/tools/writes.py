@@ -38,9 +38,11 @@ from app.mcp.confirmation import (
     _update_schedule_policy_confirmation,
 )
 from app.mcp.core_client import CoreAPIClient, _fresh_key, _infer_source_type
-from app.mcp.rendering import _error_from, _truncate
-from app.mcp.tools.reads import (
-    register_reads,  # noqa: F401  (docs: consumers register reads separately)
+from app.mcp.rendering import (
+    _attributed,
+    _error_from,
+    _truncate,
+    write_annotations,
 )
 
 
@@ -49,6 +51,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     # ---------------------------------------------------------------- writes
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Add a source. Requires user confirmation: this makes real "
             "outbound requests to a third party. schedule_policy is "
@@ -61,7 +64,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "pipeline_chain (a list of {plugin_id, kind, lang?, required?}) "
             "plus target_lang gates items until the chain completes: e.g. "
             "one translate/translation spec with target_lang 'en'."
-        )
+        ),
     )
     async def add_source(
         url: str,
@@ -116,13 +119,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status not in (200, 201):
             return _error_from(payload, status)
-        return _truncate({**payload, "audit": "recorded by the Core API"})
+        return _truncate(
+            _attributed(
+                {**payload, "audit": "recorded by the Core API"}, core.last_audit_id
+            )
+        )
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Change a source's schedule policy. Requires confirmation: an "
             "aggressive interval puts real load on the origin site."
-        )
+        ),
     )
     async def update_schedule_policy(
         source_id: str,
@@ -157,13 +165,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=False),
         description=(
             "Pause or resume a source. Requires confirmation. Pausing stops "
             "collection without deleting anything already gathered."
-        )
+        ),
     )
     async def set_source_status(
         source_id: str,
@@ -197,15 +206,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if code != 200:
             return _error_from(payload, code)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=False),
         description=(
             "Move a source to a sidebar folder (one folder per source; "
             "'default' is the unclassified home). Requires confirmation. "
             "Reflected in the Reader API's subscription/list, so the client "
             "sidebar follows on its next refresh."
-        )
+        ),
     )
     async def set_source_folder(
         source_id: str,
@@ -239,9 +249,10 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if code != 200:
             return _error_from(payload, code)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=True, open_world=False),
         description=(
             "Delete a source and everything it collected. Requires "
             "confirmation. Permanent: the source row, its items, their stored "
@@ -251,7 +262,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "source's items). Use delete_source_items to clear a bad crawl and "
             "keep the subscription, or set_source_status to disable it "
             "instead."
-        )
+        ),
     )
     async def remove_source(
         source_id: str,
@@ -279,15 +290,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=True, open_world=False),
         description=(
             "Permanently delete specific items by id. Requires confirmation. "
             "The bodies, read state and processor products go with them. Use "
             "this to clean up items that were fetched wrongly or are no "
             "longer wanted; ids come from search_items. Not reversible."
-        )
+        ),
     )
     async def delete_items(
         item_ids: list[str],
@@ -319,9 +331,10 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=True, open_world=False),
         description=(
             "Delete a source's items while keeping the subscription. Requires "
             "confirmation. Use this after a bad crawl: the source keeps its "
@@ -329,7 +342,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "history. Optionally narrow by since/until; pass "
             "include_published=false to spare items a client has already "
             "seen. Not reversible."
-        )
+        ),
     )
     async def delete_source_items(
         source_id: str,
@@ -373,13 +386,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Fetch a source now, outside its schedule. Requires confirmation: "
             "this issues a real request to the origin."
-        )
+        ),
     )
     async def trigger_job(
         source_id: str,
@@ -410,15 +424,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status not in (200, 502):
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Queue processing-chain products (e.g. translations) for items "
             "stored before the chain was enabled. Requires confirmation: it "
             "spends provider budget per item. The source must have a "
             "pipeline_chain configured."
-        )
+        ),
     )
     async def backfill_source(
         source_id: str,
@@ -448,32 +463,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status not in (200, 201):
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
-        description=(
-            "Processor-chain rows for one source: what translations are "
-            "queued/running/succeeded/failed, with error classes and attempt "
-            "counts. Use it to see why an item is being held by the gate."
-        )
-    )
-    async def list_enrichments(source_id: str, status: str = "") -> dict[str, Any]:
-        params: dict[str, Any] = {}
-        if status:
-            params["status"] = status
-        http_status, payload = await core.get(
-            f"/v1/sources/{source_id}/enrichments", **params
-        )
-        if http_status != 200:
-            return _error_from(payload, http_status)
-        return _truncate(payload)
-
-    @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Requeue failed processing-chain rows for one source (e.g. after "
             "fixing the provider key). Requires confirmation: rows restart "
             "the attempt budget and the provider charges again."
-        )
+        ),
     )
     async def retry_enrichments(
         source_id: str,
@@ -503,13 +501,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Enable or disable a collector plugin. Requires confirmation: a "
             "disabled plugin stops collecting every source it serves."
-        )
+        ),
     )
     async def set_plugin_status(
         plugin_id: str,
@@ -543,9 +542,12 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if core_status not in (200, 409):
             return _error_from(payload, core_status)
-        return _truncate({**payload, "status_code": core_status})
+        return _truncate(
+            _attributed({**payload, "status_code": core_status}, core.last_audit_id)
+        )
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Push items into an agent source (A3, ADR 0022). Use this to store "
             "content you have gathered elsewhere: pass the title, the source "
@@ -568,7 +570,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "one when their content is identical, so an empty body does not "
             "distinguish them.\n\n"
             "Requires confirmation: this adds content to the corpus."
-        )
+        ),
     )
     async def submit_items(
         source_id: str,
@@ -604,4 +606,4 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status not in (200, 201):
             return _error_from(payload, status)
-        return _truncate(payload)
+        return _truncate(_attributed(payload, core.last_audit_id))

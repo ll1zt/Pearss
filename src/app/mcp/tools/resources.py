@@ -34,6 +34,7 @@ from app.mcp.rendering import (
     _html_escape,
     _render_health_html,
     _truncate,
+    read_annotations,
 )
 
 # The health panel: a `ui://` resource the host renders as an MCP App.
@@ -55,6 +56,7 @@ def build_apps_extension(core: CoreAPIClient) -> Apps:
 
     @apps.tool(
         resource_uri=HEALTH_RESOURCE_URI,
+        annotations=read_annotations(),
         description=(
             "Compact system state: source and item counts by status, run counts "
             "by error class, and recent success rate. Read-only. Hosts that "

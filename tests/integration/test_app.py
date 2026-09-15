@@ -562,6 +562,49 @@ async def test_a_refused_write_is_not_audited_because_it_never_reaches_the_endpo
     assert after_refusal == 0
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_write_echoes_the_audit_id_it_recorded(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """The response header names the audit row, and that row exists.
+
+    The audit row is written by the middleware *after* the response is sent,
+    so the id cannot travel in the body; it is echoed as `X-Audit-ID` instead.
+    The correspondence is what matters: an id in a header that named nothing
+    would be worse than no id at all, so this reads the row back by that id.
+    """
+    response = await ingest(client)
+    assert response.status_code == 201
+
+    audit_id = response.headers.get("x-audit-id")
+    assert audit_id, "a write did not report the audit row it created"
+
+    with app.state.session_factory() as session:
+        row = session.execute(
+            sa.text("select operation from audit_log where id = :id"),
+            {"id": audit_id},
+        ).fetchone()
+    assert row is not None, "the echoed audit id names no row"
+    assert "ingest" in row[0]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_read_reports_no_audit_id(
+    client: httpx.AsyncClient,
+) -> None:
+    """Reads are not audited, so they must not claim an audit id.
+
+    The header is set from the request's method, not the outcome, so this is
+    the guard against that predicate drifting: a header on a read would point
+    at a row that was never written.
+    """
+    response = await client.get("/v1/items")
+    assert response.status_code == 200
+    assert "x-audit-id" not in response.headers
+
+
 # --------------------------------------------------------------------------
 # Public-exposure hardening (ADR 0016)
 # --------------------------------------------------------------------------
