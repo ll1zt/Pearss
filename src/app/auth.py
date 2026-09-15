@@ -99,6 +99,14 @@ def expected_tokens() -> dict[str, frozenset[str]]:
     before a broader token is considered. With distinct secrets the order
     cannot matter, but it keeps the intent legible: the table is meant to be
     read as "least privilege first".
+
+    The full token carries `ingest` as well. ADR 0022's requirement is that
+    the ingest credential is *isolated* -- leaking it must not grant source
+    deletion, schedule edits or read-state access -- and that holds because
+    PEARSS_INGEST_TOKEN grants nothing else. Whether the full token may also
+    push content is a separate question, and the answer is yes: it can already
+    delete sources and rewrite schedules, so withholding content-push from it
+    would add no security while making the "full" token not full.
     """
     table: dict[str, frozenset[str]] = {}
     read_token = _configured("PEARSS_API_READ_TOKEN")
@@ -109,7 +117,7 @@ def expected_tokens() -> dict[str, frozenset[str]]:
         table[ingest_token] = frozenset({INGEST_SCOPE})
     api_token = _configured("PEARSS_API_TOKEN")
     if api_token:
-        table[api_token] = frozenset({READ_SCOPE, WRITE_SCOPE})
+        table[api_token] = frozenset({READ_SCOPE, WRITE_SCOPE, INGEST_SCOPE})
     return table
 
 

@@ -20,14 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
-from app.auth import Principal, auth_configured, write_required
+from app.auth import auth_configured
 from app.hardening import (
     AuthFailureRateLimitMiddleware,
     BodySizeLimitMiddleware,
@@ -44,14 +44,12 @@ from app.mcp_guard import (
 )
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
-from app.pipeline import normalise_and_store
 from app.plugins_routes import router as plugins_router
 from app.reader_routes import ReaderAuth, configure_reader_credentials
 from app.reader_routes import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
 from app.system_routes import router as system_router
-from core.models import ItemDraft
 
 LOGGER = logging.getLogger(__name__)
 
@@ -391,30 +389,6 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     def healthz() -> dict[str, str]:
         """Liveness probe with no dependency on the database."""
         return {"status": "ok"}
-
-    @app.post("/internal/items", tags=["internal"])
-    def ingest_draft(
-        draft: ItemDraft,
-        principal: Principal = Depends(write_required),
-    ) -> dict[str, str]:
-        """Normalise and store a draft.
-
-        Write-scoped: this mutates the corpus, so the read-only token must not
-        be able to call it. The audit middleware records the request; the
-        principal is attached to the scope so the record names who did it.
-        """
-        del principal  # resolved by the dependency; read by the audit middleware
-        with app.state.session_factory() as session:
-            ingested = normalise_and_store(session, [draft])[0]
-
-        item = ingested.result.item
-        outcome = ingested.outcome
-        return {
-            "id": item.id,
-            "guid": item.guid,
-            "action": outcome.action.value,
-            "reason": outcome.reason,
-        }
 
     # The MCP sub-app. Mounted at the root because the SDK app routes on
     # `/mcp` itself: mounting it under `/mcp` nested the paths into
