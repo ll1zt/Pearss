@@ -38,6 +38,7 @@ DELETE /v1/sources/{source_id}
 
 ```text
 POST /v1/sources/{source_id}:trigger    # 立即触发抓取          ✅ 已实现
+POST /v1/sources/{source_id}:ingest     # agent 推送内容（A3）    ✅ 已实现（ADR 0022）
 POST /v1/feed-discovery                 # 输入 URL，返回候选 feed  ⏸ A5 暂缓
 POST /v1/jobs/{job_id}:pause            # 改变任务生命周期        ❌ 未实现
                                           （暂停走 PATCH /v1/sources/{id} {status}）
@@ -55,7 +56,8 @@ POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）
 ```
 
 已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`、
-`POST /v1/sources/{id}:trigger`、`POST /v1/sources/{id}/items:delete`、
+`POST /v1/sources/{id}:trigger`、`POST /v1/sources/{id}:ingest`、
+`POST /v1/sources/{id}/items:delete`、
 `GET /v1/items`、`GET /v1/items/{id}`、`GET /v1/items/{id}/body`、
 `DELETE /v1/items/{id}`、`POST /v1/items:delete`、
 `GET /v1/jobs`、`GET /v1/jobs/{id}/runs`、

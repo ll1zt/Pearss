@@ -14,9 +14,17 @@
 # 一、部署必需（NixOS 上这四项是必填的）
 # ===========================================================================
 
-# Core API（/v1 与 /internal/*）的 bearer token，读写皆可。
+# Core API（/v1）的 bearer token，read + write + ingest 皆可。
 # 未设置时所有 Core API 请求被拒（fail-closed），启动日志会警告。
 PEARSS_API_TOKEN=
+
+# 可选：只读 token（scope=read）。持它写操作返回 403。
+PEARSS_API_READ_TOKEN=
+
+# 可选：A3 主动接入专用 token（scope=ingest，ADR 0022）。只允许向 agent 型源
+# 推送内容，不能删源/改配置/读已读状态。给外部 agent 用它而不是 API_TOKEN：
+# 泄漏时的损失面仅限「能往 agent 源塞内容」。
+PEARSS_INGEST_TOKEN=
 
 # MCP 工具面的边界 token。独立于 API_TOKEN：撤销一台笔记本的 MCP 客户端
 # 不应把其他调用方一起登出。

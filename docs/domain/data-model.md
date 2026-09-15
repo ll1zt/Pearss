@@ -14,13 +14,13 @@
 
 ### Source
 
-一个内容来源：RSS/Atom feed、网页采集器目标，或 P3 的 agent 主动接入端点。
+一个内容来源：RSS/Atom feed、网页采集器目标，或 agent 主动接入端点（A3，ADR 0022）。
 
 | 字段 | 说明 |
 |---|---|
 | `id` | 稳定来源 ID |
 | `type` | `rss` / `web` / `agent` |
-| `url` | RSS 或网页 URL；agent 类型可以为空或引用配置 |
+| `url` | RSS 或网页 URL。agent 类型必须携带合成名 `agent://<name>`：它不是抓取目标，而是推送端点，去重键需要这个名字（`source_canonical_key` 对空 url 报错） |
 | `canonical_url` | 规范化后的去重 URL。**NOT NULL**：它正是唯一约束比较的列，而 SQL 中 NULL 彼此不等 —— 可空会让这些行完全落在约束之外。agent 源用合成键 `agent://<name>`（见 ADR 0008） |
 | `parser_plugin_id` | web 来源使用的采集器标识；P1 为硬编码准插件 ID |
 | `title` | 来源自报的名字，采集时发现（feed 的 `<title>` / 页面标题）。**可空且不回填**：写入器只在缺失时设置，所以往列里塞一个 URL 派生猜测会**永久挡住真实标题**；未采集源的显示标签在展示层派生（`core.source_display_label`） |

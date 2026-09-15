@@ -68,6 +68,10 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文） |
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
+| `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数） |
+| `retry_enrichments` | 重排队失败的处理器链产物 |
+| `backfill_source` | 对历史条目一次性补跑处理器链 |
+| `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 
 `list_sources`、`search_items`、`get_system_snapshot`、`list_runs` 是只读，不需要确认。
 

@@ -212,11 +212,12 @@ PEARSS_ALLOW_PRIVATE_FETCH=0       # 1 = 允许采集私网地址的源
 
 ## Core API 鉴权
 
-`/v1` 与 `/internal/*` 使用独立的 bearer token，与 Reader API 凭据互不相通：
+`/v1` 使用 bearer token，与 Reader API 凭据互不相通：
 
 ```bash
-PEARSS_API_TOKEN=<随机>        # 读 + 写
+PEARSS_API_TOKEN=<随机>        # 读 + 写 + ingest
 PEARSS_API_READ_TOKEN=<随机>   # 可选：仅读
+PEARSS_INGEST_TOKEN=<随机>     # 可选：仅可向 agent 型源推送内容（ADR 0022）
 ```
 
 生成：`uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`
@@ -228,7 +229,8 @@ curl -H "Authorization: Bearer $PEARSS_API_TOKEN" http://127.0.0.1:8000/v1/items
 行为约定：
 
 - **fail-closed**：未配置 `PEARSS_API_TOKEN` 时所有 Core API 请求被拒，启动日志会提示
-- **scope 分离**（AGENTS.md）：read-only token 写操作返回 403
+- **scope 分离**（AGENTS.md）：read-only token 写操作返回 403；ingest token 只能
+  向 agent 型源推送，不能删源或改配置
 - **审计**：写操作与 401/403 拒绝记入 `audit_log`（含 actor 与 correlation id）；
   普通读不记录，因为 AuditLog 是永久保留的事实源
 - **关联**：响应回显 `X-Request-ID`；入站值不安全（含 CRLF 等）时换用生成的值

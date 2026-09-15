@@ -218,7 +218,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 |---|---|---|---|
 | A1 RSS 采集 | 采集服务 | P1 ✅ | 增量抓取入库，ETag 生效（实测 304） |
 | A2 爬虫插件 | 准插件 → Plugin Runtime | P1→P2 ✅ | 已交付 5 个：RSS（含 WordPress 摘要 feed 的 REST 全文升级）、Telegram（公开网页）、X 时间线（登录型，ADR 0012）、知乎用户内容（登录型+签名，ADR 0014）、知识星球群组（登录型，ADR 0015）。A2 要求 2–3 个已达成；P2 冻结 hookspec 的 Rule of Three 前提**已满足** |
-| A3 主动接入 | Ingest API | P3 🔨 | `POST /v1/sources/{source_id}:ingest`，独立 `PEARSS_INGEST_TOKEN`，只接受 `ItemDraft` 字段并汇入 `normalise_and_store`（ADR 0022）。agent 默认可见、不限 http(s)、不按源限速 |
+| A3 主动接入 | Ingest API | P3 ✅ | `POST /v1/sources/{source_id}:ingest`（独立 `PEARSS_INGEST_TOKEN`，只接受内容字段、`source_id` 取自路径）+ MCP `submit_items`；汇入 `normalise_and_store`，与采集共用净化/去重/发布闸门（ADR 0022） |
 | A4 调度策略 | schedule_policy + 推导式调度器 | P1 ✅ | fixed/adaptive 可配，adaptive 自调节，失败指数退避；到期时间不落库（ADR 0009） |
 | A5 Feed 发现 | discover_feed | P1 ⏸ | **已决定暂缓**：无对应端点与 MCP 工具 |
 | A6 OPML | 导入/导出端点 | P1 ❌ | 未实现 |

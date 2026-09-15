@@ -33,6 +33,12 @@
 > **声明类型优先于 URL 猜测**（`select_for`）——`hnrss.org/frontpage` 是真
 > RSS feed 却不含任何 feed 形状的路径，纯 URL 路由会拒绝采集一个运维明确
 > 建成 `rss` 的源。
+>
+> **例外：`agent` 型源没有采集器，也不该有。** 它是被推送的，不是被轮询的
+> （ADR 0022），所以 `collectable_sources` 按类型把它排除在调度之外——否则
+> 每轮 tick 都会产生一次「无采集器」的失败运行，且永远不清除。内容由
+> `POST /v1/sources/{id}:ingest` 注入，在那之后与采集来的条目走完全相同的
+> `normalise_and_store` 管线。
 
 合约冻结于 `core/plugins/hooks.py`（ADR 0017）：每个采集器以 `@HOOKIMPL`
 声明 `collector_id` / `match_url` / `parse` / `source_config`，可选声明
