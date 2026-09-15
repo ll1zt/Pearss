@@ -28,9 +28,9 @@ from adapters.repository import (
     set_plugin_status,
     timestamp,
 )
+from app.api_conventions import api_error, idempotency_key, remember, replay_or_none
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import by_name, plugins_for_surface
-from app.sources_routes import api_error, idempotency_key, remember, replay_or_none
 from core.enums import PluginStatus
 
 if TYPE_CHECKING:
