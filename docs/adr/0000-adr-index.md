@@ -71,3 +71,5 @@ docs/adr/
 | [0018](0018-processor-chain-translation.md) | 处理器链：翻译参考实现（链挂源、OpenAI-compatible、NNW 译文+原文合并） | accepted（**修订 §6 B4、E1**） | 2026-09-09 |
 | [0019](0019-mcp-2026-07-28-and-health-panel.md) | MCP 2026-07-28 协议与健康面板 | accepted | 2026-09-13 |
 | [0020](0020-nixos-deployment-and-tunnel.md) | NixOS 部署与隧道分离（serve 全域 / funnel 仅 Reader API） | accepted（**修订 ADR 0016 的部署形态**） | 2026-09-13 |
+| [0021](0021-deletion-is-deletion.md) | 删除就是删除：条目与订阅的物理删除 | accepted | 2026-09-14 |
+| [0022](0022-agent-ingest-api.md) | A3 主动数据接入：agent 提交内容走采集器同一条管线 | accepted | 2026-09-14 |
