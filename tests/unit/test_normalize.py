@@ -107,6 +107,106 @@ def test_guid_survives_a_database_rebuild() -> None:
     assert guid == normalize(draft(), tenant_id=TENANT).item.guid
 
 
+# --------------------------------------------------------------------------
+# Golden identity values
+#
+# The tests above assert *relations*: deterministic, tenant-scoped, source-
+# scoped, distinct namespaces. Every one of them still holds if a field is
+# dropped from the digest input, because dropping a field preserves all four
+# properties at once -- so a mutant that removes `source_id` from
+# `derive_item_id` satisfies the entire relational suite while colliding two
+# different sources' entries onto one row.
+#
+# These tests pin the exact digest instead. They are the only assertions that
+# fail when the derivation's *inputs* change rather than its shape.
+#
+# A failure here is not a bug to fix in the test. It means every stored item id
+# and every published GUID changes, so the change needs a data migration and,
+# for the GUID, a client-visible duplicate the reader cannot be told about.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_the_item_id_digest_is_pinned() -> None:
+    assert (
+        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        == "7eb676ac40e283e7b68b72c240e4ad74"
+    )
+
+
+@pytest.mark.unit
+def test_the_guid_digest_is_pinned() -> None:
+    assert (
+        derive_guid(tenant_id="default", source_id="src-1", external_id="entry-42")
+        == "dcf8478f6cb2d0eb959f5a9e06aee5c6"
+    )
+
+
+@pytest.mark.unit
+def test_the_content_hash_digest_is_pinned() -> None:
+    # Pinned through the real entry point, so a change to either the scheme
+    # tag or the normalisation that feeds it shows up here.
+    assert (
+        content_hash(title="Hello  World", content="<p>Body &amp; more</p>")
+        == "dcf2e2501747ccd5e7fb20f07fdb7eb9"
+    )
+
+
+@pytest.mark.unit
+def test_every_identity_input_is_load_bearing() -> None:
+    """Each of the three inputs must change the digest on its own.
+
+    `source_id` is the one this catches: it is absent from the id's *visible*
+    behaviour (nothing else keys on it) and its removal still leaves the
+    relational suite green, but two sources sharing an external_id would then
+    produce one id and one item would silently overwrite the other.
+    """
+    base = derive_item_id(tenant_id="t", source_id="s", external_id="e")
+    assert derive_item_id(tenant_id="t2", source_id="s", external_id="e") != base
+    assert derive_item_id(tenant_id="t", source_id="s2", external_id="e") != base
+    assert derive_item_id(tenant_id="t", source_id="s", external_id="e2") != base
+
+
+@pytest.mark.unit
+def test_the_scheme_tag_separates_old_and_new_derivations() -> None:
+    """The scheme string is part of the digest input, not decoration.
+
+    It is what lets a deliberately changed derivation be rolled out beside the
+    old one instead of colliding with it, so the constant must actually reach
+    the hash. Asserted by recomputing what the digest would be if the tag were
+    dropped or altered: a test that only compared two real digests would pass
+    whether or not the tag was involved.
+    """
+    import hashlib
+
+    payload = "\x1f".join(("id1", "item", "default", "src-1", "entry-42"))
+    if_the_tag_were_dropped = hashlib.sha256(
+        "\x1f".join(("item", "default", "src-1", "entry-42")).encode()
+    ).hexdigest()[:32]
+
+    assert (
+        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        == hashlib.sha256(payload.encode()).hexdigest()[:32]
+    )
+    assert (
+        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        != if_the_tag_were_dropped
+    )
+
+
+@pytest.mark.unit
+def test_the_digest_never_splits_an_input() -> None:
+    """The separator must make the field boundaries unambiguous.
+
+    Joining the inputs with no separator (or a separator that can appear inside
+    one) would make {("ab","c")} and {("a","bc")} hash the same, so two
+    genuinely different items could collide.
+    """
+    assert derive_item_id(tenant_id="t", source_id="ab", external_id="c") != (
+        derive_item_id(tenant_id="t", source_id="a", external_id="bc")
+    )
+
+
 @pytest.mark.unit
 def test_content_hash_ignores_source_and_url() -> None:
     # Cross-source dedupe (B2) only works if the hash covers just the article.

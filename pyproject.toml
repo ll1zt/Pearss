@@ -197,6 +197,16 @@ layers = ["app", "plugins", "adapters", "core"]
 source_paths = ["src/"]
 only_mutate = ["src/core/*"]
 pytest_add_cli_args_test_selection = ["tests/unit"]
+# Everything the unit suite reads out of the repository. A missing entry is not
+# a mutant that survives -- it is the *stats collection* step raising before any
+# mutant runs, so `just mutate` exits with "failed to collect stats" and reports
+# nothing at all. `justfile` and `.env.example` were both absent: the structural
+# guard that keeps .env.example in sync with the code reads them, and without
+# them the whole gate was silently dead.
+#
+# Paths here are resolved relative to the repository root; `justfile` is read
+# through a CWD-relative Path() and `.env.example` through REPO_ROOT, and both
+# resolve to the copy mutmut makes.
 also_copy = [
   "conftest.py",
   "alembic.ini",
@@ -204,4 +214,6 @@ also_copy = [
   "docs",
   "README.md",
   "AGENTS.md",
+  "justfile",
+  ".env.example",
 ]

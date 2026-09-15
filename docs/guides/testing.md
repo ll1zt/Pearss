@@ -39,6 +39,24 @@
 - migration downgrade：upgrade 改 schema 的 migration，downgrade 必须有真实 op 调用；纯数据迁移允许有文档的 no-op（0005 的先例）
 - fixture 引用：每个 collector fixture 必须被同目录至少一个测试引用，否则是死语料
 - ADR 引用：docs/README/AGENTS 中每个 `ADR NNNN` 必须能解析到 `docs/adr/NNNN-*.md`
+- **测试卫生**（5 条，机器可判定的规则落成守卫而非文档）：无 `assert_called`/`call_count`；无 `unittest.mock` import；无无界 `sleep`；无 `assert ... or True`；每个含测试的模块必须声明 marker
+
+### 每个测试都必须带 marker（否则等于不存在）
+
+`just` 的每个目标按 marker 选择（`just test` 跑 `-m "unit or fixture"`），而 **pytest 的 `-m` 表达式会 deselect 未标记的测试**——不是跳过，是根本不运行。所以一个没写 marker 的测试**本地通过、CI 通过、永远不跑**。
+
+本仓库实际发生过：`test_deletion.py` 整个文件 32 个测试没有任何 marker（它是 class 组织的，绕过了模块级 `pytestmark` 的惯例），`test_core_guards.py` 12 个里只有 1 个带装饰器，`translate/test_processor.py` 19 个全裸——`just ci` 收集 1326、实跑 1264，差的 62 个全是"通过因为不存在"。其中 `test_deletion` 覆盖的是共享正文规则（删条目不得删掉别的条目还在引用的文件），而该文件自己的文档字符串就写着这种失败是静默的。
+
+新增测试模块时：模块级 `pytestmark = pytest.mark.<level>`，或在每个测试上写 `@pytest.mark.<level>`。守卫 `test_every_test_module_declares_a_marker` 会拦下遗漏。
+
+自查命令（应当为空）：
+
+```bash
+uv run pytest --collect-only -q | grep "::" | sort > /tmp/all.txt
+uv run pytest --collect-only -q -m "unit or fixture or integration or e2e or contract" \
+  | grep "::" | sort > /tmp/ran.txt
+comm -23 /tmp/all.txt /tmp/ran.txt
+```
 
 ### 变异测试（mutmut）
 
@@ -46,9 +64,38 @@
 
 - 范围：只对 `src/core/`（`only_mutate = ["src/core/*"]`，其余 src/ 原样复制以保证 import 完整）。core 是纯函数、毫秒级，变异结果可解释；对 app/plugins 全量变异要数小时，测的是集成测试速度而非断言强度
 - 运行：`just mutate`（几分钟量级）。**改了测试后必须 `rm -rf mutants` 重跑**——mutmut 缓存按配置 hash 失效，不感知测试文件变更，缓存会给出一模一样的旧数字
-- 首轮基线（本分支落地前）：1184 变异，killed 703 / survived 255 / no-tests 226
-- 针对性补测后：killed 807 / survived 198 / no-tests 178（score ≈ 80%，基线 ≈ 73%）。补的测试在 `test_rpc_protocol.py`（RPC 解码边界，杀了 ~46）、`test_core_guards.py`（naive-datetime / policy-bound / 处理闸门守卫的单元级断言）、`test_dedupe.py` 尾部三个 pin（identity-or 语义 + matched_id 审计指针）
-- 读法：存活的变异分两类——**测试缺口**（补一个能杀它的断言）与**等价/文案变异**（如 reason 字符串加 XX、防御性 `or` 改写后行为真不变），后者记录并放过。剩余存活集中在 normalize 的 reason 文案（84）与 models 的 dataclass 管道（no-tests 154）——前者多为等价类，后者只有集成路径执行，两者都不是断言缺口优先级。新增 core 代码时跑一次，作为 review 的断言强度证据
+- **`also_copy` 必须覆盖单测读到的所有仓库文件**。缺一个条目的后果不是"某个变异存活"，而是 *stats collection 阶段直接抛异常*，`just mutate` 以 `failed to collect stats` 退出、什么都不报告。`justfile` 与 `.env.example` 都曾缺失（结构守卫读这两个文件），整个门禁因此静默失效
+- 当前基线：1291 变异，killed 1064 / survived 207 / no-tests 20（score ≈ 82%）
+- 历史：本轮起点为 killed 884 / survived 206 / **no-tests 201**。补测后 no-tests 降到 20（剩下的全是 `hooks.py` 异常类 `__init__` 与 `with_content_ref` 这类管道），killed 升到 1064
+- 读法：存活的变异分两类——**测试缺口**（补一个能杀它的断言）与**等价/文案变异**，后者记录并放过。207 个存活里约 112 行是异常消息文案（`raise X("...")` → `raise X(None)` / `X("XX...XX")` / 全大写），测试断言的是异常**类型**，这是契约，不该为文案写断言；其余多为不可达分支（如 `host` 已 `.lower()`，集合里的大写成员永远不匹配；`SchedulePolicy.__post_init__` 已校验的重复守卫）
+
+#### 三类真实的断言缺口（都实际修过）
+
+1. **`is not None` 系列**：`assert d.matched_id is not None` / `assert r.audit_note is not None` 看不见"某个分支丢了指针"。循环里只要有一个决策有值，整个循环就通过。正确写法是**按分支断言确切值**
+2. **只测相对性质**：`derive_item_id` 只断言"确定、租户隔离、与 guid 不同"时，**丢掉某个输入字段的变异仍然通过**——因为丢字段同时保留全部四条性质。持久化标识（item id / guid / content_hash / 密码哈希格式）必须**钉死字面值**，并注明"改这个值需要数据迁移"
+3. **mutation 视界 ≠ 覆盖率视界**：只被 integration 调用的 core 纯函数，在 mutation 报告里显示为 `no tests`（mutmut 只选 `tests/unit`），数字虚高。纯函数应在 `tests/unit` 直接测输入输出
+
+### 测试驱动：先场景，后实现
+
+新功能与缺陷修复的默认顺序（本仓库已在用，写入此处以免遗忘）：
+
+1. **先写验收场景**，用 Given/When/Then 描述"用户能看到什么"，不是"调用了哪个函数"
+2. **先跑一遍确认它是红的**。对缺陷修复尤其如此：先写一条**能复现 bug** 的测试，看它因预期原因失败，再改代码
+3. 实现后确认变绿，然后**注入式验证**（见下节）确认这条测试真的会因为该回归而变红
+
+例外：纯重构不需要新测试，但**断言一行都不许改**。断言是业务契约；重构时改断言，说明它测的是实现。
+
+### 断言强度：写完要问一句
+
+写完每条测试，问："什么回归会让它失败？" 答不上来就是假测试。以下模式在本仓库实际出现过：
+
+- **恒真断言**：`assert x.isprintable() or True` —— 后半句让整条永真。删掉重写
+- **自反断言**：`assert a != a.replace("a","b")` —— 只证明了字符串不等于自己的替换，与被测逻辑无关
+- **循环里的存在性断言**：见上文缺口 1
+- **只断言长度/类型**：`assert len(drafts) == 1` 在需要确认"是哪一个 draft"时不够
+
+补完断言后，**用变异或手改源码确认它变红**——本仓库每条安全/不变量测试都这么验过。这一步不能省：本轮修复中，先写的两条断言（自反的 scheme 测试、`or`→`and` 的守卫）实测**杀不死对应变异**，其中一条是措辞误导（改写为诚实描述），另一条证实为等价变异（`""` 与 `$` 串 split 后必然少于 6 段，六段检查已覆盖）。
+
 
 ## 必测领域不变量
 

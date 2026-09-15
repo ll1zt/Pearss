@@ -40,6 +40,12 @@ from app.main import create_session_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# The recipe targets select by marker, so without this the whole file is
+# invisible to `just ci`: pytest's `-m` filter deselects unmarked tests. These
+# are organised into classes rather than module-level functions, which is how
+# the gap went unnoticed -- every other integration module declares this.
+pytestmark = pytest.mark.integration
+
 NOW = timestamp(datetime(2026, 9, 14, 12, 0, 0, tzinfo=UTC))
 
 

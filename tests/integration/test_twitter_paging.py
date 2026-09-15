@@ -367,6 +367,7 @@ def test_the_floor_persists_when_a_walk_stops_at_the_frontier(
     assert state.seen_frontier == 2000
 
 
+@pytest.mark.integration
 def test_a_budget_stop_never_moves_the_floor(
     session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -415,6 +416,7 @@ def test_a_budget_stop_never_moves_the_floor(
     assert state.seen_frontier == 2000
 
 
+@pytest.mark.integration
 def test_a_first_walk_establishes_the_floor(session: Session) -> None:
     """Before any walk there is no floor; the first one that leaves a cursor
     sets it."""

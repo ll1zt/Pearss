@@ -119,6 +119,44 @@ def test_the_threshold_sits_where_the_comment_says() -> None:
 
 
 @pytest.mark.unit
+def test_the_threshold_is_inclusive_at_the_boundary() -> None:
+    """A body exactly at the share is already-in, not translated.
+
+    The comment calls 0.4 "the point where the sampled mixed posts start
+    reading as Chinese", so the boundary belongs on the skip side. Written with
+    exactly 8 ideographs against 12 Latin letters -- a ratio of exactly 0.4 --
+    because any other ratio would pass under a strict `>` too, leaving the
+    inclusive comparison untested.
+    """
+    at_the_boundary = ("很" * 8) + ("a" * 12)
+    just_under = ("很" * 7) + ("a" * 13)
+
+    assert is_already_in(at_the_boundary, "zh") is True
+    assert is_already_in(just_under, "zh") is False
+
+
+@pytest.mark.unit
+def test_both_ends_of_a_script_range_count_as_inside_it() -> None:
+    """Range membership is inclusive at both bounds.
+
+    The ranges are written as `low <= c <= high`; a mutation to a half-open
+    comparison drops the first or last code point of every range, and those sit
+    at the edges of a block -- real characters, not sentinels. Asserted through
+    the public verdict so the range table stays an implementation detail.
+    """
+    # U+4E00 and U+9FFF are the CJK block's documented endpoints; each is a
+    # real ideograph that must be counted, and enough of them must clear the
+    # sample floor for the verdict to be about the range and not the floor.
+    first, last = "\u4e00", "\u9fff"
+    assert is_already_in(first * MIN_SCRIPTED_CHARS, "zh") is True
+    assert is_already_in(last * MIN_SCRIPTED_CHARS, "zh") is True
+
+    # One code point outside either end must not be counted as CJK.
+    assert is_already_in("\u4dff" * MIN_SCRIPTED_CHARS, "zh") is False
+    assert is_already_in("\ua000" * MIN_SCRIPTED_CHARS, "zh") is False
+
+
+@pytest.mark.unit
 def test_numeric_character_references_are_decoded_before_the_verdict() -> None:
     """A CJK body encoded as `&#NNNNN;` runs is still Chinese.
 

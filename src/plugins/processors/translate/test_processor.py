@@ -19,6 +19,12 @@ from plugins.processors.translate.processor import (
     processor_id,
 )
 
+# Declared for the whole module: the recipe targets select by marker, so
+# without this every test here is deselected and never runs. The language
+# verdicts below are this processor's gate -- they were written and then
+# invisible.
+pytestmark = pytest.mark.unit
+
 
 def test_processor_id_is_stable() -> None:
     assert processor_id() == "translate"
