@@ -66,7 +66,9 @@ def test_enrichment_failure_keeps_item_pending() -> None:
 def test_timeout_holds_by_default() -> None:
     result = transition(PublishStatus.PENDING, ItemEvent.TIMEOUT)
     assert result.status is PublishStatus.PENDING
-    assert result.audit_note is not None
+    # The note is what distinguishes "held on purpose" from "nothing happened"
+    # in the audit log, so its presence is asserted, not just its non-emptiness.
+    assert result.audit_note == "timeout: held pending per policy"
 
 
 @pytest.mark.unit
@@ -77,6 +79,9 @@ def test_timeout_can_publish_original_when_policy_says_so() -> None:
         TransitionContext(timeout_policy=TimeoutPolicy.PUBLISH_ORIGINAL),
     )
     assert result.status is PublishStatus.READY
+    # The two timeout outcomes must be distinguishable in the log: this one
+    # released content that the gate would otherwise have held.
+    assert result.audit_note == "timeout: downgraded to publish_original"
 
 
 @pytest.mark.unit
@@ -142,6 +147,9 @@ def test_ready_can_be_withdrawn_before_exposure() -> None:
         TransitionContext(withdraw_reason="processor output was wrong"),
     )
     assert result.status is PublishStatus.PENDING
+    # Withdrawing is a deliberate reversal, so it must be recorded along with
+    # the operator's reason -- the counterpart to the force_publish note.
+    assert result.audit_note == "withdrawn before exposure: processor output was wrong"
 
 
 @pytest.mark.unit
