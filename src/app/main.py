@@ -35,6 +35,7 @@ from app.hardening import (
     SecurityHeadersMiddleware,
     env_int,
 )
+from app.ingest_routes import router as ingest_router
 from app.items_routes import router as items_router
 from app.mcp_guard import (
     MCPAuthMiddleware,
@@ -322,6 +323,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.include_router(reader_router)
     warn_if_unconfigured()
     app.include_router(sources_router)
+    app.include_router(ingest_router)
     app.include_router(items_router)
     app.include_router(system_router)
     app.include_router(plugins_router)

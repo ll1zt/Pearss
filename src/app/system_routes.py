@@ -17,8 +17,8 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from adapters.correlation import current as current_correlation_id
 from adapters.repository import list_job_runs, list_jobs, system_snapshot
+from app.api_conventions import api_error
 from app.auth import Principal, read_required
-from app.sources_routes import api_error
 
 TENANT = "default"
 

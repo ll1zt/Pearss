@@ -12,30 +12,24 @@ to store the first response and replay it.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, Final
-from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
-from adapters.repository import chain_for_source as _chain_for_source
 from adapters.repository import (
     create_source,
-    find_idempotent,
     get_source,
     list_sources,
     parse_chain,
-    store_idempotent,
     timestamp,
 )
 from adapters.repository import (
@@ -44,13 +38,24 @@ from adapters.repository import (
 from adapters.repository import (
     delete_source_items as repository_delete_source_items,
 )
-from app.auth import Principal, ingest_required, read_required, write_required
-from app.pipeline import normalise_and_store
+
+# The API-wide conventions live in app.api_conventions; they are re-exported
+# so the sibling route modules keep one import shape during the move.
+from app.api_conventions import (
+    _now,
+    api_error,
+    decode_cursor,
+    encode_cursor,
+    idempotency_key,
+    remember,
+    replay_or_none,
+)
+from app.auth import Principal, read_required, write_required
 from app.scheduler import collect_now
 from core.enums import SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
-from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import DedupeAction, canonicalize_url, source_canonical_key
+from core.models import schedule_policy_from_json, schedule_policy_to_json
+from core.normalize import source_canonical_key
 
 LOGGER = logging.getLogger(__name__)
 
@@ -66,209 +71,7 @@ IDEMPOTENCY_WINDOW = timedelta(days=7)
 # retry immediately hits the same 409 nor so long that a freed slot sits idle.
 _BUSY_RETRY_AFTER_SECONDS: Final = 30
 
-# Items one ingest request may carry. See IngestRequest for why this exists
-# even though ADR 0022 declines per-source limits.
-MAX_INGEST_ITEMS: Final = 100
-
 router = APIRouter(prefix="/v1", tags=["core-api"])
-
-
-# --------------------------------------------------------------------------
-# Error envelope
-# --------------------------------------------------------------------------
-
-
-def api_error(
-    *,
-    status_code: int,
-    code: str,
-    message: str,
-    suggestion: str,
-    error_class: str | None = None,
-    details: list[Any] | None = None,
-    headers: dict[str, str] | None = None,
-) -> HTTPException:
-    """Build an HTTPException carrying the documented error envelope.
-
-    The correlation id is embedded so a client can quote one value when
-    reporting a problem, and `code` is stable while `message` is allowed to
-    change — clients branch on the former.
-
-    `headers` exists for the answers that carry a retry interval: HTTP has a
-    header for that, and a response whose body says "try later" while its
-    headers say nothing makes every caller invent its own backoff.
-    """
-    return HTTPException(
-        status_code=status_code,
-        headers=headers,
-        detail={
-            "error": {
-                "code": code,
-                "message": message,
-                "error_class": error_class,
-                "suggestion": suggestion,
-                "details": details or [],
-                "correlation_id": current_correlation_id(),
-            }
-        },
-    )
-
-
-# --------------------------------------------------------------------------
-# Pagination
-# --------------------------------------------------------------------------
-
-
-def encode_cursor(offset: int) -> str:
-    """An opaque cursor. Clients must not parse it, so its layout is free to
-    change; only the value it decodes to is meaningful."""
-    return base64.urlsafe_b64encode(f"v1:{offset}".encode()).decode().rstrip("=")
-
-
-def decode_cursor(cursor: str | None) -> int:
-    if not cursor:
-        return 0
-    try:
-        padded = cursor + "=" * (-len(cursor) % 4)
-        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        raise api_error(
-            status_code=400,
-            code="invalid_cursor",
-            message="The cursor could not be decoded.",
-            suggestion="Omit the cursor to start from the beginning.",
-        ) from None
-    prefix, _, digits = decoded.partition(":")
-    if prefix != "v1" or not digits.isdigit():
-        raise api_error(
-            status_code=400,
-            code="invalid_cursor",
-            message="The cursor is not valid for this API version.",
-            suggestion="Omit the cursor to start from the beginning.",
-        )
-    offset = int(digits)
-    if offset > 10_000_000:
-        raise api_error(
-            status_code=400,
-            code="invalid_cursor",
-            message="The cursor is not valid for this API version.",
-            suggestion="Page through the list instead of seeking.",
-        )
-    return offset
-
-
-# --------------------------------------------------------------------------
-# Idempotency
-# --------------------------------------------------------------------------
-
-
-def idempotency_key(
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> str:
-    """Require and validate the Idempotency-Key header on a write."""
-    if not idempotency_key or not idempotency_key.strip():
-        raise api_error(
-            status_code=400,
-            code="idempotency_key_required",
-            message="This write requires an Idempotency-Key header.",
-            suggestion=(
-                "Generate a UUID per logical operation and reuse it when "
-                "retrying the same operation."
-            ),
-        )
-    key = idempotency_key.strip()
-    if len(key) > 128:
-        raise api_error(
-            status_code=400,
-            code="idempotency_key_too_long",
-            message="Idempotency-Key must be at most 128 characters.",
-            suggestion="Use a UUID.",
-        )
-    return key
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _redact_queries(value: Any) -> Any:
-    """Strip query strings from URL-shaped strings in a replayed payload.
-
-    The idempotency store keeps whole response bodies for a week, and source
-    payloads carry `url`/`canonical_url` verbatim - feed URLs routinely
-    embed access tokens in their query (AGENTS.md privacy rule, same reason
-    the audit trail redacts headers and adapters.http redacts logged URLs).
-    A replay is still an exposure surface: it goes to whoever holds the key,
-    which after a leak is exactly the wrong party. Structured recursion over
-    dicts and lists; strings that parse as URLs with a query get the query
-    dropped, everything else passes through untouched.
-    """
-    if isinstance(value, dict):
-        return {key_: _redact_queries(item) for key_, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_queries(item) for item in value]
-    if isinstance(value, str) and value.count("?") == 1:
-        base, _, query = value.partition("?")
-        # Only strip when the left side plausibly is a URL (scheme://...):
-        # a schedule policy string or a title containing a lone "?" is data,
-        # not an address.
-        if "://" in base and query:
-            return base
-    return value
-
-
-def replay_or_none(
-    session_factory: sessionmaker[Any],
-    *,
-    actor: str,
-    endpoint: str,
-    key: str,
-) -> JSONResponse | None:
-    """Return a stored response for this write, if one exists.
-
-    The replayed body is query-redacted: see `_redact_queries`. The original
-    execution's response carried the full URLs; the replay deliberately does
-    not, because a client that wants the URLs again has the resource itself
-    (GET /v1/sources/{id}) under its own authenticated request.
-    """
-    now = timestamp(_now())
-    with session_factory() as session:
-        stored = find_idempotent(
-            session, actor=actor, endpoint=endpoint, key=key, now=now
-        )
-        if stored is None:
-            return None
-        payload: dict[str, Any] = _redact_queries(json.loads(stored.response_body))
-        response = JSONResponse(status_code=stored.status_code, content=payload)
-    # Replaying must be visible to the caller: without this a retry looks
-    # identical to a fresh execution, which is correct but unhelpful when
-    # debugging why nothing happened.
-    response.headers["Idempotent-Replay"] = "true"
-    return response
-
-
-def remember(
-    session_factory: sessionmaker[Any],
-    *,
-    actor: str,
-    endpoint: str,
-    key: str,
-    status_code: int,
-    body: dict[str, Any],
-) -> None:
-    created = _now()
-    with session_factory() as session:
-        store_idempotent(
-            session,
-            actor=actor,
-            endpoint=endpoint,
-            key=key,
-            status_code=status_code,
-            response_body=json.dumps(body, sort_keys=True),
-            created_at=timestamp(created),
-            expires_at=timestamp(created + IDEMPOTENCY_WINDOW),
-        )
-        session.commit()
 
 
 # --------------------------------------------------------------------------
@@ -343,37 +146,6 @@ class SourceCreate(BaseModel):
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         return self
-
-
-class IngestItem(BaseModel):
-    """One item an agent is pushing into an agent source (ADR 0022).
-
-    Deliberately *not* ItemDraft, which carries `source_id`. Binding that
-    directly is how the endpoint this replaces let a write-scoped caller
-    inject items into any source, including ones it does not own. The field
-    is absent here so the privilege line holds at the type level: there is no
-    key to send, so no runtime check can be forgotten.
-    """
-
-    external_id: str = Field(min_length=1, max_length=512)
-    title: str = Field(default="", max_length=1024)
-    canonical_url: str = Field(default="", max_length=4096)
-    published_at: datetime | None = None
-    content: str = ""
-    metadata: dict[str, str] = Field(default_factory=dict)
-    derivation_note: str | None = Field(default=None, max_length=1024)
-
-
-class IngestRequest(BaseModel):
-    """Body for pushing items into an agent source.
-
-    The cap is body-parsing hygiene rather than per-source rate limiting
-    (which ADR 0022 explicitly declines to add): at 1 MiB per request an
-    uncapped list admits thousands of title-only items in one call, and each
-    one costs a dedupe lookup and possibly an enrichment row.
-    """
-
-    items: list[IngestItem] = Field(min_length=1, max_length=MAX_INGEST_ITEMS)
 
 
 class SourcePatch(BaseModel):
@@ -1113,165 +885,3 @@ def trigger_source(
         body=payload,
     )
     return JSONResponse(status_code=status_code, content=payload)
-
-
-# --------------------------------------------------------------------------
-# A3: agent ingest (ADR 0022)
-# --------------------------------------------------------------------------
-
-
-def _ingest_url(item: IngestItem, *, source_url: str) -> str:
-    """The canonical_url to normalise for one submitted item.
-
-    `normalize()` calls `canonicalize_url` unconditionally and that raises on
-    anything but http(s), because the value is part of item identity and the
-    rest of the system only treats it as a fetchable article address. Agent
-    submissions may legitimately carry no URL at all, or a non-http scheme
-    (a note, a summary), and the user decided such a submission is allowed
-    (ADR 0022).
-
-    The fallback is synthesised under the item's own external_id rather than
-    reusing the source's `agent://<name>` key, for two reasons: that scheme is
-    itself refused by `canonicalize_url`, so it cannot be used; and a single
-    shared fallback URL would make every URL-less item in a source carry the
-    same link. Identity does not depend on `url` (it is
-    `sha256(tenant, source_id, external_id)`), so a per-item fallback changes
-    no dedupe outcome -- it only keeps the served link distinct and honest
-    about where it came from.
-
-    Handled here rather than by loosening `canonicalize_url`: that function
-    serves rss and web too, and relaxing it for this one caller would change
-    identity semantics for every source type to spare an agent a fallback.
-    """
-    supplied = item.canonical_url.strip()
-    if supplied:
-        try:
-            return canonicalize_url(supplied)
-        except ValueError:
-            pass
-    pod = source_url.removeprefix("agent://") or "agent"
-    return f"https://agent.invalid/{pod}/{quote(item.external_id, safe='')}"
-
-
-@router.post("/sources/{source_id}:ingest", operation_id="ingestItems")
-def ingest_items(
-    request: Request,
-    source_id: str,
-    body: IngestRequest,
-    principal: Principal = Depends(ingest_required),
-    key: str = Depends(idempotency_key),
-) -> JSONResponse:
-    """Push items into an agent source (A3, ADR 0022).
-
-    The draft is built here and handed to `normalise_and_store`, the same call
-    a collector's parse output takes. Everything downstream -- sanitising at
-    the store boundary, content-addressed storage, the six-way dedupe, the
-    publish gate -- is therefore shared with collection rather than
-    reimplemented, which is the whole point of the design: a second writer
-    would either bypass sanitisation or force it to be duplicated.
-
-    Scope is `ingest`: a credential that can push content is not automatically
-    one that can delete sources, rewrite schedules or read anyone's state. The
-    full token holds both, so this narrows the *ingest* credential rather than
-    the full one (ADR 0022).
-
-    Items are visible on submit when the source has no chain, matching a
-    chainless rss source. The user's decision (2026-09-14) was explicit that
-    agent content should be visible without a hold-back step.
-    """
-    endpoint = f"POST /v1/sources/{source_id}:ingest"
-    factory = request.app.state.session_factory
-    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
-    if replayed is not None:
-        return replayed
-
-    with factory() as session:
-        source = get_source(session, source_id)
-        if source is None:
-            raise api_error(
-                status_code=404,
-                code="source_not_found",
-                message=f"No source with id {source_id!r}.",
-                suggestion="Create the agent source first with POST /v1/sources.",
-            )
-        # Checked rather than assumed: pushing into an rss source would mix
-        # agent-supplied content into a source whose items are supposed to
-        # come from one origin, and the provenance would be unrecoverable.
-        if source.type != SourceType.AGENT.value:
-            raise api_error(
-                status_code=409,
-                code="not_an_agent_source",
-                message=(
-                    f"Source {source_id!r} has type {source.type!r}; only "
-                    "agent sources accept pushed items."
-                ),
-                suggestion=(
-                    "Create a source with type='agent' and a url like "
-                    "'agent://<name>', then push to that."
-                ),
-            )
-
-        source_url = source.canonical_url
-        drafts: list[ItemDraft] = []
-        for item in body.items:
-            metadata = dict(item.metadata)
-            supplied = item.canonical_url.strip()
-            resolved = _ingest_url(item, source_url=source_url)
-            if supplied and supplied != resolved:
-                # Preserved so a URL we could not use as the item's link is
-                # still readable rather than silently swallowed.
-                metadata.setdefault("submitted_url", supplied)
-            drafts.append(
-                ItemDraft(
-                    source_id=source_id,
-                    external_id=item.external_id,
-                    title=item.title,
-                    canonical_url=resolved,
-                    published_at=item.published_at,
-                    content=item.content,
-                    metadata=metadata,
-                    derivation_note=item.derivation_note,
-                )
-            )
-
-        ingested = normalise_and_store(
-            session,
-            drafts,
-            tenant_id=source.tenant_id,
-            chain=_chain_for_source(session, source_id=source_id),
-        )
-
-    results = [
-        {
-            "id": entry.result.item.id,
-            "external_id": drafts[index].external_id,
-            "action": entry.outcome.action.value,
-            "reason": entry.outcome.reason,
-        }
-        for index, entry in enumerate(ingested)
-    ]
-    payload: dict[str, Any] = {
-        "source_id": source_id,
-        "submitted": len(drafts),
-        "inserted": sum(
-            1
-            for entry in ingested
-            if entry.outcome.action
-            in (
-                DedupeAction.INSERT,
-                DedupeAction.INSERT_RELATED,
-                DedupeAction.UPDATE_PENDING,
-            )
-        ),
-        "results": results,
-        "correlation_id": current_correlation_id(),
-    }
-    remember(
-        factory,
-        actor=principal.name,
-        endpoint=endpoint,
-        key=key,
-        status_code=201,
-        body=payload,
-    )
-    return JSONResponse(status_code=201, content=payload)

@@ -297,3 +297,18 @@ PYTHONTRACEMALLOC=25 uv run pytest tests/integration -q
 - 新增进程外入口时，在本节加一行说明由什么保证
 - 想补"真实缺口"类时，先确认它的失败方向（安全相关优先）
 - 不为第四类写测试；发现某防御分支其实可观测时（如同 `is_visible` 那样），先接线再测
+
+### coverage-diff 的已知局限：代码搬移
+
+`coverage-diff` 以"新增行"为单位，因此**纯搬移**（把一段代码从 A 文件挪到 B
+文件）会把所有搬移行都计为新增——即便它们的覆盖状况与搬移前分毫不差。重构
+PR 跑 `just coverage-diff` 时若失败，先比对搬移前后的覆盖：
+
+```bash
+# 搬移前的行在 main 上是否同样未覆盖
+git show main:src/<old>.py | sed -n '<old_start>,<old_end>p'
+uv run coverage report -m | grep <old-file>
+```
+
+逐行核实等价（同代码、同覆盖状况）后放行是正当的；这不是"绕过门禁"，
+而是门禁口径的边界——它衡量的是"你新写并被执行的行"，搬移的行不是新写的。
