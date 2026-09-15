@@ -48,6 +48,10 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_BACKUP_DIR",  # backup destination (CLI, host-side)
         "PEARSS_RESTORE_ARCHIVE",  # restore CLI plumbing
         "PEARSS_RESTORE_TARGET",
+        # The A3 ingest credential (ADR 0022). Host-side and only host-side:
+        # the collectors never push content, so a sandboxed child has no
+        # business holding the token that can.
+        "PEARSS_INGEST_TOKEN",
     }
 )
 

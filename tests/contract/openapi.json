@@ -217,20 +217,24 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
-      "ItemDraft": {
-        "description": "The universal pre-normalisation shape every ingest path produces.\n\nRSS, web collectors and the future ingest API all converge here before\nnormalisation, which is what keeps one dedupe rule and one publish gate\ncovering every source.",
+      "IngestItem": {
+        "description": "One item an agent is pushing into an agent source (ADR 0022).\n\nDeliberately *not* ItemDraft, which carries `source_id`. Binding that\ndirectly is how the endpoint this replaces let a write-scoped caller\ninject items into any source, including ones it does not own. The field\nis absent here so the privilege line holds at the type level: there is no\nkey to send, so no runtime check can be forgotten.",
         "properties": {
           "canonical_url": {
+            "default": "",
+            "maxLength": 4096,
             "title": "Canonical Url",
             "type": "string"
           },
           "content": {
+            "default": "",
             "title": "Content",
             "type": "string"
           },
           "derivation_note": {
             "anyOf": [
               {
+                "maxLength": 1024,
                 "type": "string"
               },
               {
@@ -240,6 +244,8 @@
             "title": "Derivation Note"
           },
           "external_id": {
+            "maxLength": 512,
+            "minLength": 1,
             "title": "External Id",
             "type": "string"
           },
@@ -262,35 +268,36 @@
             ],
             "title": "Published At"
           },
-          "raw_fetch_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Raw Fetch Id"
-          },
-          "source_id": {
-            "title": "Source Id",
-            "type": "string"
-          },
           "title": {
+            "default": "",
+            "maxLength": 1024,
             "title": "Title",
             "type": "string"
           }
         },
         "required": [
-          "source_id",
-          "external_id",
-          "title",
-          "canonical_url",
-          "published_at",
-          "content"
+          "external_id"
         ],
-        "title": "ItemDraft",
+        "title": "IngestItem",
+        "type": "object"
+      },
+      "IngestRequest": {
+        "description": "Body for pushing items into an agent source.\n\nThe cap is body-parsing hygiene rather than per-source rate limiting\n(which ADR 0022 explicitly declines to add): at 1 MiB per request an\nuncapped list admits thousands of title-only items in one call, and each\none costs a dedupe lookup and possibly an enrichment row.",
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IngestItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "IngestRequest",
         "type": "object"
       },
       "ItemSort": {
@@ -1144,57 +1151,6 @@
         "summary": "Healthz",
         "tags": [
           "ops"
-        ]
-      }
-    },
-    "/internal/items": {
-      "post": {
-        "description": "Normalise and store a draft.\n\nWrite-scoped: this mutates the corpus, so the read-only token must not\nbe able to call it. The audit middleware records the request; the\nprincipal is attached to the scope so the record names who did it.",
-        "operationId": "ingest_draft_internal_items_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ItemDraft"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Ingest Draft Internal Items Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "summary": "Ingest Draft",
-        "tags": [
-          "internal"
         ]
       }
     },
@@ -2572,6 +2528,78 @@
           }
         ],
         "summary": "Backfill Source Chain",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:ingest": {
+      "post": {
+        "description": "Push items into an agent source (A3, ADR 0022).\n\nThe draft is built here and handed to `normalise_and_store`, the same call\na collector's parse output takes. Everything downstream -- sanitising at\nthe store boundary, content-addressed storage, the six-way dedupe, the\npublish gate -- is therefore shared with collection rather than\nreimplemented, which is the whole point of the design: a second writer\nwould either bypass sanitisation or force it to be duplicated.\n\nScope is `ingest`, not `write`: the token that pushes content must not be\nthe token that can delete sources (ADR 0022).\n\nItems are visible on submit when the source has no chain, matching a\nchainless rss source. The user's decision (2026-09-14) was explicit that\nagent content should be visible without a hold-back step.",
+        "operationId": "ingestItems",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Ingest Items",
         "tags": [
           "core-api"
         ]

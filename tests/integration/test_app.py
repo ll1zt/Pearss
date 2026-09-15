@@ -12,6 +12,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -53,6 +54,18 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
                 " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
+        # The ingestion target for these tests. Writing through the real
+        # endpoint needs an agent source (ADR 0022); src-1 stays an rss source
+        # so tests can still cover the types being distinct.
+        connection.execute(
+            text(
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, tenant_id, created_at, updated_at)"
+                " values ('agent-1', 'agent', 'agent://intake', 'agent://intake',"
+                " '{}', 'active', 'default',"
+                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+            )
+        )
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -77,6 +90,9 @@ def app(
 @pytest_asyncio.fixture
 async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     """An async client bound straight to the ASGI app, authenticated as writer.
+
+    The full token carries read, write and ingest (see app.auth), so this one
+    client covers a test that writes and then reads back.
 
     ASGITransport is async-only, so a sync httpx.Client cannot use it. Binding
     to the app rather than a port keeps requests in-process, and using the
@@ -124,14 +140,41 @@ async def ingest_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield opened
 
 
-def draft_payload() -> dict[str, object]:
+INGEST_PATH = "/v1/sources/agent-1:ingest"
+
+
+async def ingest(
+    client: httpx.AsyncClient,
+    *,
+    key: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST one item to the ingest endpoint.
+
+    Writes require an Idempotency-Key; this generates a fresh one per call so
+    callers that are not testing replay behave as independent operations.
+    """
+    merged = {"Idempotency-Key": key or f"test-{uuid4().hex}"}
+    merged.update(headers or {})
+    return await client.post(INGEST_PATH, json=ingest_body(), headers=merged)
+
+
+def ingest_body() -> dict[str, object]:
+    """A body for the ingest endpoint (ADR 0022).
+
+    No `source_id`: the endpoint takes it from the path, and the field is not
+    part of the request schema at all.
+    """
     return {
-        "source_id": "src-1",
-        "external_id": "entry-api-1",
-        "title": "Posted Through The API",
-        "canonical_url": "https://blog.example.com/2026/01/posted?utm_source=x",
-        "published_at": None,
-        "content": "<p>Posted body.</p>",
+        "items": [
+            {
+                "external_id": "entry-api-1",
+                "title": "Posted Through The API",
+                "canonical_url": "https://blog.example.com/2026/01/posted?utm_source=x",
+                "published_at": None,
+                "content": "<p>Posted body.</p>",
+            }
+        ]
     }
 
 
@@ -162,14 +205,40 @@ async def test_removed_feed_route_serves_nothing(client: httpx.AsyncClient) -> N
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_the_internal_ingest_scaffold_is_gone(client: httpx.AsyncClient) -> None:
+    """`/internal/items` is removed, not merely deprecated (ADR 0022).
+
+    It was the P1 pipeline scaffold, finished years of commits ago and never
+    retired; leaving it beside /v1/sources/{id}:ingest would mean two
+    ItemDraft-accepting writers with different auth semantics and two
+    near-identical operations in the published contract. 404 -- not 401 --
+    is the point: a leftover path must not read as "authenticate and retry".
+    """
+    response = await client.post(
+        "/internal/items",
+        json={
+            "external_id": "whatever",
+            "title": "t",
+            "canonical_url": "https://e.example/x",
+            "published_at": None,
+            "content": "",
+            "source_id": "agent-1",
+        },
+        headers={"Idempotency-Key": "k"},
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_ingested_item_is_queryable(client: httpx.AsyncClient) -> None:
-    created = await client.post("/internal/items", json=draft_payload())
-    assert created.status_code == 200
-    guid = created.json()["guid"]
-    assert created.json()["action"] == "insert"
+    created = await ingest(client)
+    assert created.status_code == 201
+    item_id = created.json()["results"][0]["id"]
+    assert created.json()["results"][0]["action"] == "insert"
 
     body = (await client.get("/v1/items?limit=10")).json()
-    rows = [row for row in body["data"] if row["guid"] == guid]
+    rows = [row for row in body["data"] if row["id"] == item_id]
     assert len(rows) == 1
     # Tracking parameter stripped during normalisation.
     assert "utm_source" not in json.dumps(rows)
@@ -179,11 +248,12 @@ async def test_ingested_item_is_queryable(client: httpx.AsyncClient) -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_ingest_is_idempotent(client: httpx.AsyncClient) -> None:
-    first = (await client.post("/internal/items", json=draft_payload())).json()
-    second = (await client.post("/internal/items", json=draft_payload())).json()
+    first = (await ingest(client)).json()
+    second = (await ingest(client)).json()
 
-    assert first["guid"] == second["guid"]
-    assert second["action"] == "skip_same_source"
+    assert first["results"][0]["id"] == second["results"][0]["id"]
+    assert second["results"][0]["action"] == "skip_same_source"
+    assert second["inserted"] == 0
 
     body = (await client.get("/v1/items?limit=10")).json()
     assert len(body["data"]) == 1
@@ -219,13 +289,12 @@ async def test_pending_items_never_appear(
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_internal_id_differs_from_public_guid(client: httpx.AsyncClient) -> None:
-    created = (await client.post("/internal/items", json=draft_payload())).json()
+    created = (await ingest(client)).json()["results"][0]["id"]
 
     # The internal row id and the public guid are different values by
     # construction; nothing in the system should treat one as the other.
-    assert created["id"] != created["guid"]
-    row = (await client.get(f"/v1/items/{created['id']}")).json()
-    assert row["guid"] == created["guid"]
+    row = (await client.get(f"/v1/items/{created}")).json()
+    assert row["id"] != row["guid"]
 
 
 @pytest.mark.integration
@@ -292,7 +361,7 @@ async def test_concurrent_query_requests_do_not_serialise(app: FastAPI) -> None:
 async def test_write_without_credentials_is_refused(
     anonymous_client: httpx.AsyncClient,
 ) -> None:
-    response = await anonymous_client.post("/internal/items", json=draft_payload())
+    response = await ingest(anonymous_client)
     assert response.status_code == 401
 
 
@@ -307,7 +376,7 @@ async def test_write_with_a_bad_token_is_refused(
         base_url="http://test",
         headers={"Authorization": "Bearer not-the-token"},
     ) as opened:
-        response = await opened.post("/internal/items", json=draft_payload())
+        response = await ingest(opened)
     assert response.status_code == 401
 
 
@@ -318,7 +387,7 @@ async def test_read_only_token_cannot_write(
 ) -> None:
     # The point of splitting scopes: a reader-shaped credential must not be
     # able to mutate the corpus.
-    response = await read_only_client.post("/internal/items", json=draft_payload())
+    response = await ingest(read_only_client)
     assert response.status_code == 403
 
 
@@ -333,8 +402,13 @@ async def test_read_only_token_can_read(client: httpx.AsyncClient) -> None:
 async def test_auth_failure_uses_the_documented_error_envelope(
     anonymous_client: httpx.AsyncClient,
 ) -> None:
-    response = await anonymous_client.post("/internal/items", json=draft_payload())
-    error = response.json()["detail"]["error"]
+    # Ingest is a /v1 path, so an unauthenticated call is refused by
+    # EarlyAuthMiddleware at the scope level and carries that layer's flat
+    # envelope -- the same shape every other /v1 write produces for a missing
+    # token.
+    response = await ingest(anonymous_client)
+    assert response.status_code == 401
+    error = response.json()["error"]
     assert error["code"] == "unauthenticated"
     assert "message" in error and "suggestion" in error
 
@@ -391,8 +465,8 @@ async def test_a_hostile_request_id_is_replaced_not_reflected(
 async def test_write_is_audited_with_actor_and_correlation(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    response = await client.post("/internal/items", json=draft_payload())
-    assert response.status_code == 200
+    response = await ingest(client)
+    assert response.status_code == 201
     correlation_id = response.headers.get("x-request-id")
 
     with app.state.session_factory() as session:
@@ -408,7 +482,7 @@ async def test_write_is_audited_with_actor_and_correlation(
     assert match, f"no audit row for correlation {correlation_id}"
     actor, operation, outcome, _, args = match[0]
     assert actor == "api:full"
-    assert "internal/items" in operation
+    assert "ingest" in operation
     assert outcome == "succeeded"
     assert "Bearer" not in args
 
@@ -424,12 +498,10 @@ async def test_reused_request_id_does_not_drop_audit_rows(
     id, which echoes this header — the second write collided and was dropped.
     """
     for _ in range(2):
-        response = await client.post(
-            "/internal/items",
-            json=draft_payload(),
-            headers={"X-Request-ID": "reused-by-the-client"},
+        response = await ingest(
+            client, headers={"X-Request-ID": "reused-by-the-client"}
         )
-        assert response.status_code == 200
+        assert response.status_code == 201
 
     with app.state.session_factory() as session:
         count = session.execute(sa.text("select count(*) from audit_log")).scalar()
@@ -441,7 +513,7 @@ async def test_reused_request_id_does_not_drop_audit_rows(
 async def test_credentials_never_reach_the_audit_log(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    await client.post("/internal/items", json=draft_payload())
+    await ingest(client)
     with app.state.session_factory() as session:
         args = session.execute(
             sa.text("select args_redacted from audit_log")
@@ -454,24 +526,40 @@ async def test_credentials_never_reach_the_audit_log(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_reads_are_not_audited_but_refusals_are(
-    app: FastAPI, client: httpx.AsyncClient, anonymous_client: httpx.AsyncClient
-) -> None:
+async def test_reads_are_not_audited(app: FastAPI, client: httpx.AsyncClient) -> None:
     # AuditLog is a fact source kept forever, so routine reads would grow it
-    # for no investigative benefit. A refused request is the opposite: worth
-    # retaining.
+    # for no investigative benefit.
     await client.get("/v1/items")
     with app.state.session_factory() as session:
         after_read = session.execute(sa.text("select count(*) from audit_log")).scalar()
 
-    await anonymous_client.post("/internal/items", json=draft_payload())
+    assert after_read == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_refused_write_is_not_audited_because_it_never_reaches_the_endpoint(
+    app: FastAPI, anonymous_client: httpx.AsyncClient
+) -> None:
+    """A /v1 request refused for want of a token leaves no audit row.
+
+    This is a property of the layering, not of ingest: EarlyAuthMiddleware
+    wraps outside CorrelationAndAuditMiddleware (it is registered later, and
+    Starlette wraps in reverse order), so a request it refuses is answered
+    before the audit layer sees it. Verified against POST /v1/sources too --
+    the same call is also unaudited -- which is why this is stated for the
+    layer rather than as an ingest behaviour.
+
+    The set of *successful* writes is still fully audited, and that is what
+    the audit log is for: an operator asking what changed the corpus.
+    """
+    await ingest(anonymous_client)
     with app.state.session_factory() as session:
         after_refusal = session.execute(
             sa.text("select count(*) from audit_log")
         ).scalar()
 
-    assert after_read == 0
-    assert after_refusal == 1
+    assert after_refusal == 0
 
 
 # --------------------------------------------------------------------------
@@ -516,8 +604,8 @@ async def test_every_response_carries_nosniff(client: httpx.AsyncClient) -> None
 async def test_html_bodies_are_served_with_a_sandbox_csp(
     client: httpx.AsyncClient,
 ) -> None:
-    created = await client.post("/internal/items", json=draft_payload())
-    item_id = created.json()["id"]
+    created = await ingest(client)
+    item_id = created.json()["results"][0]["id"]
     response = await client.get(f"/v1/items/{item_id}/body")
     assert response.status_code == 200
     assert response.headers["content-security-policy"] == "sandbox"

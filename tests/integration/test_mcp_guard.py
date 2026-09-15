@@ -58,7 +58,7 @@ MCP_HEADERS = {
 
 
 @pytest.fixture
-def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "guard.db")))
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
@@ -70,7 +70,9 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv(MCP_TOKEN_ENV, MCP_TOKEN)
     monkeypatch.delenv(MCP_ALLOWED_HOSTS_ENV, raising=False)
-    return create_app(sessionmaker(engine, expire_on_commit=False))
+    application = create_app(sessionmaker(engine, expire_on_commit=False))
+    yield application
+    engine.dispose()
 
 
 @pytest.fixture
@@ -161,7 +163,8 @@ def test_unconfigured_token_disables_the_endpoint(
     command.upgrade(config, "head")
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
-    app = create_app(sessionmaker(create_engine_for(url), expire_on_commit=False))
+    engine = create_engine_for(url)
+    app = create_app(sessionmaker(engine, expire_on_commit=False))
 
     server = Server(UvicornConfig(app, host="127.0.0.1", port=0, log_level="critical"))
     thread = threading.Thread(target=server.run, daemon=True)
@@ -182,6 +185,7 @@ def test_unconfigured_token_disables_the_endpoint(
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+        engine.dispose()
 
 
 # --------------------------------------------------------------------------

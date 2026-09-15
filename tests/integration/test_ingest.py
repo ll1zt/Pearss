@@ -262,14 +262,16 @@ async def test_unknown_source_is_404(agent_client: httpx.AsyncClient) -> None:
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_write_token_cannot_ingest(writer_client: httpx.AsyncClient) -> None:
-    """The scope split must be real in both directions.
+async def test_the_full_token_can_also_ingest(writer_client: httpx.AsyncClient) -> None:
+    """The full token carries ingest as well as read/write.
 
-    A write token is not an ingest token: otherwise the narrow credential
-    would be pointless (ADR 0022).
+    ADR 0022 requires the *ingest* credential to be isolated -- leaking it
+    must not grant anything else -- and that holds because PEARSS_INGEST_TOKEN
+    grants only ingest. Withholding ingest from the full token would add no
+    security (it can already delete sources) while making it not full.
     """
     response = await _post(writer_client)
-    assert response.status_code == 403
+    assert response.status_code == 201, response.text
 
 
 @pytest.mark.integration
