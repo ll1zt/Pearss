@@ -646,6 +646,41 @@ def test_collectable_sources_lists_only_active(
     assert [row[0] for row in rows] == ["active-one"]
 
 
+@pytest.mark.integration
+def test_agent_sources_are_not_collectable(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """An agent source is pushed to, not polled (ADR 0022).
+
+    `select_for("agent", ...)` falls through to `select(url)`, which matches no
+    collector, so scheduling one produces a failed JobRun every tick -- a
+    permanent fake failure that also corrupts the success-rate signal. The
+    exclusion belongs in this query rather than in a per-source skip inside the
+    tick: an agent source should never enter the pass at all.
+    """
+    with session_factory() as session:
+        add_source(
+            session, source_id="pushed", policy={"type": "fixed", "interval": "30m"}
+        )
+        session.execute(
+            sa.text(
+                "insert into source (id, type, url, canonical_url, schedule_policy,"
+                " status, trust_level, tenant_id, created_at, updated_at)"
+                " values ('intake', 'agent', 'agent://intake', 'agent://intake',"
+                " :policy, 'active', 'standard', 'default', :now, :now)"
+            ),
+            {
+                "policy": schedule_policy_to_json(
+                    schedule_policy_from_json({"type": "fixed", "interval": "30m"})
+                ),
+                "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
+            },
+        )
+        session.commit()
+        rows = collectable_sources(session, tenant_id="default")
+    assert [row[0] for row in rows] == ["pushed"]
+
+
 # --------------------------------------------------------------------------
 # The loop wrapper
 # --------------------------------------------------------------------------
