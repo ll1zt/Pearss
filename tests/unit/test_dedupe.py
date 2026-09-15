@@ -322,3 +322,146 @@ def test_every_non_insert_decision_names_the_item_it_matched() -> None:
     for decision in decisions:
         assert decision.action is not DedupeAction.INSERT
         assert decision.matched_id is not None, decision.reason
+
+
+# --------------------------------------------------------------------------
+# matched_id, branch by branch
+#
+# The check above is a loop over decisions, and that shape hides the failure it
+# is meant to catch: `is not None` is satisfied if *any* decision in the list
+# carries an id, so a branch returning None passes as long as another does not.
+# These assert the exact id for each action instead, which is what the audit
+# trail actually needs -- a pointer to the row that caused the decision, not
+# merely some row.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_skip_published_content_changed_points_at_the_published_twin() -> None:
+    """The branch the loop above could not see.
+
+    Same identity, changed body, already published: the decision is to leave
+    the stored row alone, and the audit trail must name *that* row. Returning
+    None here passed the loop because other decisions in the same list were
+    populated, so nothing distinguished this branch from one that lost its
+    pointer.
+    """
+    same_entry = item(item_id="same", guid="g-same", content_hash="changed")
+    stored = item(
+        item_id="same",
+        guid="g-same",
+        content_hash="old",
+        status=PublishStatus.PUBLISHED,
+    )
+
+    decision = decide_dedupe(same_entry, [stored])
+
+    assert decision.action is DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED
+    assert decision.matched_id == "same"
+
+
+@pytest.mark.unit
+def test_skip_same_source_points_at_the_stored_row() -> None:
+    stored = item(item_id="stored", content_hash="same")
+
+    decision = decide_dedupe(item(item_id="stored", content_hash="same"), [stored])
+
+    assert decision.action is DedupeAction.SKIP_SAME_SOURCE
+    assert decision.matched_id == "stored"
+
+
+@pytest.mark.unit
+def test_update_pending_points_at_the_stored_row() -> None:
+    same_entry = item(item_id="same", guid="g-same", content_hash="changed")
+    stored = item(item_id="same", guid="g-same", content_hash="old")
+
+    decision = decide_dedupe(same_entry, [stored])
+
+    assert decision.action is DedupeAction.UPDATE_PENDING
+    assert decision.matched_id == "same"
+
+
+@pytest.mark.unit
+def test_insert_related_points_at_the_twin_it_was_related_to() -> None:
+    twin = item(item_id="twin", source_id="src-other", content_hash="same")
+
+    decision = decide_dedupe(item(item_id="mine", content_hash="same"), [twin])
+
+    assert decision.action is DedupeAction.INSERT_RELATED
+    assert decision.matched_id == "twin"
+
+
+@pytest.mark.unit
+def test_suppress_points_at_the_published_twin() -> None:
+    published = item(
+        item_id="pub",
+        source_id="src-other",
+        content_hash="same",
+        status=PublishStatus.PUBLISHED,
+    )
+
+    decision = decide_dedupe(item(item_id="mine", content_hash="same"), [published])
+
+    assert decision.action is DedupeAction.SUPPRESS
+    assert decision.matched_id == "pub"
+
+
+@pytest.mark.unit
+def test_an_insert_has_no_matched_id() -> None:
+    """Nothing matched, so the field stays empty.
+
+    The counterpart to the assertions above: a mutant that populated
+    matched_id on the insert path would invent an audit pointer to a row that
+    had nothing to do with the decision.
+    """
+    decision = decide_dedupe(item(content_hash="new"), [])
+
+    assert decision.action is DedupeAction.INSERT
+    assert decision.matched_id is None
+
+
+@pytest.mark.unit
+def test_every_action_names_itself_in_the_reason() -> None:
+    """Each action's reason is a distinct, non-empty explanation.
+
+    The reason is what an operator reads when auditing why an item was
+    suppressed. It is not required to be any particular wording, but an empty
+    or shared reason would make the six actions indistinguishable in the audit
+    log, which is the one thing data-model.md says the rule must not be.
+    """
+    pending_twin = item(item_id="twin", source_id="src-other", content_hash="same")
+    published_twin = item(
+        item_id="pub",
+        source_id="src-other",
+        content_hash="same",
+        status=PublishStatus.PUBLISHED,
+    )
+    same_entry = item(item_id="same", guid="g-same", content_hash="changed")
+
+    decisions = [
+        decide_dedupe(item(content_hash="new"), []),
+        decide_dedupe(
+            item(item_id="s", content_hash="same"),
+            [item(item_id="s", content_hash="same")],
+        ),
+        decide_dedupe(item(content_hash="same"), [pending_twin]),
+        decide_dedupe(item(content_hash="same"), [published_twin]),
+        decide_dedupe(
+            same_entry, [item(item_id="same", guid="g-same", content_hash="old")]
+        ),
+        decide_dedupe(
+            same_entry,
+            [
+                item(
+                    item_id="same",
+                    guid="g-same",
+                    content_hash="old",
+                    status=PublishStatus.PUBLISHED,
+                )
+            ],
+        ),
+    ]
+
+    reasons = [decision.reason for decision in decisions]
+    assert all(reason for reason in reasons), reasons
+    assert len(set(reasons)) == len(reasons), reasons
