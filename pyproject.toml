@@ -107,6 +107,52 @@ ignore = []
 known-first-party = ["core", "adapters", "plugins", "app"]
 
 # --------------------------------------------------------------------------
+# coverage: what the number has to mean before it can gate anything.
+#
+# Two decisions, both about honesty rather than about a threshold.
+#
+# `source` is the four layers, not "everything imported". Without it the
+# report includes `conftest.py`, the test modules that live beside their
+# collectors under src/plugins/, and the fixtures package -- all of which are
+# executed by definition, so they pad the total and make it look better than
+# the production code underneath. The measured figure drops by several points
+# when they are removed, which is the number worth watching.
+#
+# There is deliberately no `fail_under` here. A global threshold on this
+# codebase would be met by writing tests for whatever is cheapest to reach,
+# and the 800-odd uncovered statements are mostly concentrated in backfill
+# tooling and error paths that a percentage cannot distinguish. The gate that
+# actually protects new work is `--cov-fail-under` against *changed* lines,
+# which `just coverage-diff` implements.
+# --------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["core", "adapters", "plugins", "app"]
+# `source` alone does not remove the test modules that live beside their
+# collectors under src/plugins/ -- pytest-cov measures whatever the run
+# imported, and those are imported to be run. They are excluded explicitly so
+# the total describes production code.
+omit = [
+  "*/test_*.py",
+  "tests/*",
+  "*/conftest.py",
+]
+
+[tool.coverage.report]
+# A branch that only calls `super().__init__` or re-raises is not worth a test;
+# `no cover` is how the code says so, and this stops `pass`/`...` bodies from
+# being reported as uncovered protocol stubs.
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "^\\.\\.\\.$",
+  "@(abc\\.)?abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# --------------------------------------------------------------------------
 # mypy: strict, because the domain invariants in docs/domain/ are only worth
 # their weight if the compiler enforces the enum and state types behind them.
 # --------------------------------------------------------------------------

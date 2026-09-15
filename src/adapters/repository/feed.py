@@ -9,7 +9,7 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
-from adapters.repository._shared import row_to_item
+from adapters.repository._shared import row_to_item, visible_item_rows
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     ItemEvent,
@@ -31,7 +31,7 @@ def items_ready_for_feed(session: Session, *, limit: int = FEED_WINDOW) -> list[
     """
     rows = session.execute(
         select(ItemRow)
-        .where(ItemRow.publish_status != PublishStatus.PENDING.value)
+        .where(visible_item_rows())
         .order_by(ItemRow.published_at.desc().nullslast(), ItemRow.guid)
         .limit(max(1, limit))
     ).scalars()

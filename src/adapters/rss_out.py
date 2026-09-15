@@ -18,7 +18,7 @@ from email.utils import format_datetime
 
 from lxml import etree
 
-from core.enums import PublishStatus
+from core.item_state import is_visible
 from core.models import Item
 
 
@@ -154,13 +154,17 @@ def visible_items(items: list[Item]) -> list[Item]:
     already be cached by the client, which is the exact failure the gate
     exists to prevent.
 
+    The exclusion goes through `core.item_state.is_visible` -- the Python form
+    of the rule, and the one ADR 0022 names. The SQL read paths cannot use it
+    (they must exclude before loading, so a pending row never reaches memory)
+    and call `adapters.repository.visible_item_rows` instead; the two are the
+    same predicate in the two places it can be expressed.
+
     Ordering is newest-first by publication time, then by guid so that items
     sharing a timestamp have a fixed order. An unstable order makes clients
     re-announce items as new on every poll.
     """
-    allowed = [
-        item for item in items if item.publish_status is not PublishStatus.PENDING
-    ]
+    allowed = [item for item in items if is_visible(item.publish_status)]
     return sorted(
         allowed,
         key=lambda item: (_sort_key(item), item.guid),
