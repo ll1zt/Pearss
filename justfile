@@ -88,6 +88,37 @@ mutate:
     uv run mutmut results
 
 # ---------------------------------------------------------------------------
+# Coverage
+#
+# A percentage over this whole codebase is a diagnostic, not a target. The
+# number that protects new work is the coverage of the lines a change *added*,
+# which is what `coverage-diff` reports. See docs/guides/testing.md for why
+# there is no global fail_under.
+# ---------------------------------------------------------------------------
+
+# Measure production coverage (test modules and conftest are excluded).
+coverage:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f .coverage
+    uv run pytest -q -m "unit or fixture or integration" -p no:cacheprovider --cov --cov-report=term-missing
+
+# Coverage of the lines this branch added or changed, against a base ref.
+# Usage: just coverage-diff [base] [threshold]   (default: origin/main 20)
+#
+# The gate that protects new work: a global percentage can be met by testing
+# whatever is cheapest to reach, but "did the lines you just wrote get run?"
+# has a direct answer. Runs the suite with instrumentation, then compares.
+# See scripts/coverage_diff.py and docs/guides/testing.md.
+coverage-diff base="origin/main" threshold="20":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f .coverage
+    uv run pytest -q -m "unit or fixture or integration" -p no:cacheprovider \
+        --cov --cov-report= >/dev/null
+    uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
+
+# ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
 
