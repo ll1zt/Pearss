@@ -235,12 +235,24 @@ def test_a_rendered_policy_parses_back_unchanged() -> None:
         assert schedule_policy_from_json(schedule_policy_to_json(policy)) == policy
 
 
-def test_two_equal_policies_render_byte_identically() -> None:
+def test_keys_are_rendered_in_sorted_order() -> None:
     """`sort_keys` is what makes the stored column comparable.
 
-    Scheduling decisions are recorded in history; if key order varied, two
-    recordings of the same policy would look like a change.
+    Scheduling decisions are recorded in history and two recordings of the same
+    policy must be byte-identical, or a re-save looks like a change. Comparing
+    two renderings of the same policy does not test this -- both would use the
+    same insertion order -- so the literal order is asserted. The adaptive
+    payload is the one that shows it: insertion order is type, min, max, and
+    sorted order is max, min, type.
     """
+    rendered = schedule_policy_to_json(
+        SchedulePolicy(type="adaptive", min_seconds=3600, max_seconds=86400)
+    )
+
+    assert rendered == '{"max": "1d", "min": "1h", "type": "adaptive"}'
+
+
+def test_two_equal_policies_render_byte_identically() -> None:
     first = schedule_policy_to_json(
         SchedulePolicy(type="adaptive", min_seconds=60, max_seconds=120)
     )

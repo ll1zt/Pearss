@@ -39,6 +39,24 @@
 - migration downgrade：upgrade 改 schema 的 migration，downgrade 必须有真实 op 调用；纯数据迁移允许有文档的 no-op（0005 的先例）
 - fixture 引用：每个 collector fixture 必须被同目录至少一个测试引用，否则是死语料
 - ADR 引用：docs/README/AGENTS 中每个 `ADR NNNN` 必须能解析到 `docs/adr/NNNN-*.md`
+- **测试卫生**（5 条，机器可判定的规则落成守卫而非文档）：无 `assert_called`/`call_count`；无 `unittest.mock` import；无无界 `sleep`；无 `assert ... or True`；每个含测试的模块必须声明 marker
+
+### 每个测试都必须带 marker（否则等于不存在）
+
+`just` 的每个目标按 marker 选择（`just test` 跑 `-m "unit or fixture"`），而 **pytest 的 `-m` 表达式会 deselect 未标记的测试**——不是跳过，是根本不运行。所以一个没写 marker 的测试**本地通过、CI 通过、永远不跑**。
+
+本仓库实际发生过：`test_deletion.py` 整个文件 32 个测试没有任何 marker（它是 class 组织的，绕过了模块级 `pytestmark` 的惯例），`test_core_guards.py` 12 个里只有 1 个带装饰器，`translate/test_processor.py` 19 个全裸——`just ci` 收集 1326、实跑 1264，差的 62 个全是"通过因为不存在"。其中 `test_deletion` 覆盖的是共享正文规则（删条目不得删掉别的条目还在引用的文件），而该文件自己的文档字符串就写着这种失败是静默的。
+
+新增测试模块时：模块级 `pytestmark = pytest.mark.<level>`，或在每个测试上写 `@pytest.mark.<level>`。守卫 `test_every_test_module_declares_a_marker` 会拦下遗漏。
+
+自查命令（应当为空）：
+
+```bash
+uv run pytest --collect-only -q | grep "::" | sort > /tmp/all.txt
+uv run pytest --collect-only -q -m "unit or fixture or integration or e2e or contract" \
+  | grep "::" | sort > /tmp/ran.txt
+comm -23 /tmp/all.txt /tmp/ran.txt
+```
 
 ### 变异测试（mutmut）
 
@@ -47,8 +65,9 @@
 - 范围：只对 `src/core/`（`only_mutate = ["src/core/*"]`，其余 src/ 原样复制以保证 import 完整）。core 是纯函数、毫秒级，变异结果可解释；对 app/plugins 全量变异要数小时，测的是集成测试速度而非断言强度
 - 运行：`just mutate`（几分钟量级）。**改了测试后必须 `rm -rf mutants` 重跑**——mutmut 缓存按配置 hash 失效，不感知测试文件变更，缓存会给出一模一样的旧数字
 - **`also_copy` 必须覆盖单测读到的所有仓库文件**。缺一个条目的后果不是"某个变异存活"，而是 *stats collection 阶段直接抛异常*，`just mutate` 以 `failed to collect stats` 退出、什么都不报告。`justfile` 与 `.env.example` 都曾缺失（结构守卫读这两个文件），整个门禁因此静默失效
-- 当前基线：1291 变异，killed 1035 / survived 232 / no-tests 24（score ≈ 82%）
-- 读法：存活的变异分两类——**测试缺口**（补一个能杀它的断言）与**等价/文案变异**，后者记录并放过。绝大多数存活是异常消息文案（`raise X("...")` → `raise X(None)` / `X("XX...XX")` / 全大写），测试断言的是异常**类型**，这是契约，不该为文案写断言
+- 当前基线：1291 变异，killed 1064 / survived 207 / no-tests 20（score ≈ 82%）
+- 历史：本轮起点为 killed 884 / survived 206 / **no-tests 201**。补测后 no-tests 降到 20（剩下的全是 `hooks.py` 异常类 `__init__` 与 `with_content_ref` 这类管道），killed 升到 1064
+- 读法：存活的变异分两类——**测试缺口**（补一个能杀它的断言）与**等价/文案变异**，后者记录并放过。207 个存活里约 112 行是异常消息文案（`raise X("...")` → `raise X(None)` / `X("XX...XX")` / 全大写），测试断言的是异常**类型**，这是契约，不该为文案写断言；其余多为不可达分支（如 `host` 已 `.lower()`，集合里的大写成员永远不匹配；`SchedulePolicy.__post_init__` 已校验的重复守卫）
 
 #### 三类真实的断言缺口（都实际修过）
 
