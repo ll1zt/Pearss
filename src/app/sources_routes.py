@@ -23,7 +23,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
@@ -312,17 +312,37 @@ class SourceCreate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def _valid_url(cls, value: str, info: Any) -> str:
-        # Validating against the dedupe key rather than a generic URL parser:
-        # rss and web sources must carry a canonicalisable URL, while agent
-        # sources legitimately carry a synthetic `agent://<name>` instead.
-        source_type = info.data.get("type", SourceType.RSS)
-        kind = getattr(source_type, "value", source_type)
+    def _url_not_empty(cls, value: str) -> str:
+        # Shape only. Whether the URL is valid *for its type* is decided in
+        # `_url_matches_type` below, which can see the type; a field validator
+        # cannot, because pydantic runs them in declaration order and `url`
+        # is declared before `type`.
+        if not value.strip():
+            raise ValueError("url must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _url_matches_type(self) -> SourceCreate:
+        """Check the URL against the dedupe key for this source's type.
+
+        Regression: this used to be a `field_validator` on `url`, which reads
+        `info.data["type"]` -- but `url` is declared first, so `type` was not
+        there yet and the validator fell back to its `RSS` default. Every
+        `agent://` source was therefore refused as "unsupported URL scheme:
+        'agent'", and A3 could not be configured through the API at all. An
+        after-validator sees every field, so the check no longer depends on
+        declaration order.
+
+        The key is the thing to validate against rather than a generic URL
+        parser: rss and web sources must carry a canonicalisable URL, while
+        agent sources legitimately carry a synthetic `agent://<name>`.
+        """
+        kind = getattr(self.type, "value", self.type)
         try:
-            source_canonical_key(source_type=str(kind), url=value)
+            source_canonical_key(source_type=str(kind), url=self.url)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
-        return value
+        return self
 
 
 class IngestItem(BaseModel):
