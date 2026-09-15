@@ -6,6 +6,7 @@ import json
 from enum import StrEnum
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
@@ -58,14 +59,39 @@ def list_jobs(session: Session) -> list[dict[str, object]]:
 
 
 def list_job_runs(
-    session: Session, *, job_id: str, limit: int = 50
+    session: Session,
+    *,
+    job_id: str,
+    limit: int = 50,
+    cursor: tuple[str, str] | None = None,
 ) -> list[dict[str, object]]:
-    """Recent runs for one job, newest first."""
+    """Recent runs for one job, newest first.
+
+    Keyset-paginated on `(started_at, id)` when a cursor is given, for the same
+    reason the item query is: runs are appended at the front of a newest-first
+    ordering, so an offset cursor would skip or repeat rows as new runs land.
+    The `id` tiebreaker matters because two runs of one job can share a
+    `started_at` to the microsecond, and a cursor on the timestamp alone would
+    either loop or drop the second one.
+    """
+    query = select(JobRunRow).where(JobRunRow.job_id == job_id)
+    if cursor is not None:
+        started_at, last_id = cursor
+        # Strictly past the cursor in the newest-first direction. `id` is the
+        # tiebreaker within one timestamp, so the comparison is per-pair.
+        query = query.where(
+            sa.or_(
+                JobRunRow.started_at < started_at,
+                sa.and_(
+                    JobRunRow.started_at == started_at,
+                    JobRunRow.id < last_id,
+                ),
+            )
+        )
     rows = session.execute(
-        select(JobRunRow)
-        .where(JobRunRow.job_id == job_id)
-        .order_by(JobRunRow.started_at.desc().nullslast())
-        .limit(limit)
+        query.order_by(
+            JobRunRow.started_at.desc().nullslast(), JobRunRow.id.desc()
+        ).limit(limit)
     ).scalars()
     return [
         {

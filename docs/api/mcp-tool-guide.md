@@ -53,7 +53,15 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
   不依赖客户端自觉
 - 确认参数必须与**实际执行参数完全相同**。若客户端确认了 A 而 server 执行了 B，
   确认机制就成了装饰
-- 工具返回值必须带 `audit_id` 与 `correlation_id`，让操作可归因、可追溯
+- 工具返回值必须带 `audit_id`，让操作可归因、可追溯。Core API 在 `X-Audit-ID`
+  响应头上回显本次写入的审计行 id（审计行由中间件在响应发出**之后**写入，因此
+  id 无法走 body），MCP 层读到后并入工具结果。读操作不被审计，因此不携带该字段
+- 每个工具必须声明 `ToolAnnotations`，且与描述里的副作用陈述一致：读工具
+  `readOnlyHint=true`、`openWorldHint=false`；删除类 `destructiveHint=true`；
+  发起外部请求或消耗 provider 预算的写 `openWorldHint=true`。写工具一律
+  `idempotentHint=false`——它们不接受调用方提供的稳定幂等键（每次调用新生成），
+  重试即新意图。注解是机器可读的副作用声明：host 依据 `destructiveHint` 决定
+  是否追加自己的确认，所以它与描述同属契约（进 snapshot）
 - 破坏性操作（删除、force publish）在描述里显式标注不可逆后果
 
 ### 需要确认的清单（当前）
@@ -177,7 +185,8 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 2. 返回值是否可能含正文、HTML、token、私有 URL？
 3. 列表是否分页、字符串是否截断、默认字段是否最小？
 4. 写操作是否走 elicitation，且确认参数 == 执行参数？
-5. 是否返回 `audit_id` 与 `correlation_id`？
-6. 错误是否用统一结构，`error_class` 是否取自 enum？
-7. 是否更新了工具 snapshot？
-8. 破坏性变更是否写了 ADR？
+5. 写操作是否返回 `audit_id`，且该 id 能在 `audit_log` 中查到对应行？
+6. 工具是否声明了与语义相符的 `ToolAnnotations`？
+7. 错误是否用统一结构，`error_class` 是否取自 enum？
+8. 是否更新了工具 snapshot？
+9. 破坏性变更是否写了 ADR？

@@ -127,6 +127,48 @@ def decode_cursor(cursor: str | None) -> int:
     return offset
 
 
+def encode_keyset_cursor(sort_value: str, last_id: str) -> str:
+    """An opaque keyset cursor: the (sort value, id) of a page's last row.
+
+    Keyset rather than offset for newest-first lists, because rows are
+    appended at the front: an offset walks a shifting window and silently
+    skips or repeats whatever arrived ahead of it. The id is carried as the
+    tiebreaker within one sort value.
+    """
+    raw = f"k1:{sort_value}\x1f{last_id}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def decode_keyset_cursor(cursor: str | None) -> tuple[str, str] | None:
+    """Decode a keyset cursor, or None when there is no cursor to honour.
+
+    A malformed cursor is a 400 rather than a silent restart from the top:
+    silently re-serving page one would look like a successful page-two
+    request and the caller would never learn their position was lost.
+    """
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise _bad_keyset_cursor() from None
+    prefix, sep, rest = decoded.partition(":")
+    sort_value, unit, last_id = rest.partition("\x1f")
+    if prefix != "k1" or not sep or not unit or not last_id:
+        raise _bad_keyset_cursor()
+    return sort_value, last_id
+
+
+def _bad_keyset_cursor() -> HTTPException:
+    return api_error(
+        status_code=400,
+        code="invalid_cursor",
+        message="The cursor could not be decoded.",
+        suggestion="Omit the cursor to start from the beginning.",
+    )
+
+
 # --------------------------------------------------------------------------
 # Idempotency
 # --------------------------------------------------------------------------

@@ -91,6 +91,14 @@ class CorrelationAndAuditMiddleware:
         correlation_id = inbound or correlation.new_correlation_id()
         token = correlation.set_correlation_id(correlation_id)
 
+        # Generated before the response starts rather than in `_record`, because
+        # the id has to be echoed in a response header and the response is
+        # already on the wire by then. Random per request, not derived from the
+        # correlation id: that id may echo a client-supplied X-Request-ID, and a
+        # client that reused one would collide on this primary key.
+        audit_id = f"audit-{secrets.token_hex(8)}"
+        will_audit = _should_audit(scope, 200)
+
         status = 500
         sent = False
 
@@ -102,6 +110,15 @@ class CorrelationAndAuditMiddleware:
                 message["headers"] = _with_header(
                     message["headers"], b"x-request-id", correlation_id
                 )
+                # A write's audit id, so an agent can name the record it caused.
+                # On the wire it is only meaningful for the rows we actually
+                # write; the header is set when the method is auditable rather
+                # than when the status lands, because the status is not known
+                # until here and a refused write (4xx) is still audited.
+                if will_audit or status >= 400:
+                    message["headers"] = _with_header(
+                        message["headers"], b"x-audit-id", audit_id
+                    )
                 sent = True
             await send(message)
 
@@ -115,18 +132,16 @@ class CorrelationAndAuditMiddleware:
         if not sent:
             return
         if _should_audit(scope, status):
-            self._record(scope, status, correlation_id)
+            self._record(scope, status, correlation_id, audit_id)
 
-    def _record(self, scope: ScopeState, status: int, correlation_id: str) -> None:
+    def _record(
+        self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
+    ) -> None:
         try:
             with self.session_factory() as session:
                 record(
                     session,
-                    # Random per record, not derived from the correlation id:
-                    # that id may echo a client-supplied X-Request-ID, and a
-                    # client that reuses one would collide on this primary
-                    # key, silently dropping every audit row after the first.
-                    audit_id=f"audit-{secrets.token_hex(8)}",
+                    audit_id=audit_id,
                     actor=_actor(scope),
                     operation=_operation(scope),
                     # <400 succeeded; any 4xx was refused by us on the caller's

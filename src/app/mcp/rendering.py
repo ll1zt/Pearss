@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from mcp.types import ToolAnnotations
+
 MAX_STRING_CHARS = 200
 MAX_LIST_ITEMS = 20
 
@@ -111,6 +113,60 @@ def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:
         "suggestion": error.get("suggestion"),
         "next_actions": ["list_sources", "get_system_snapshot"],
     }
+
+
+def _attributed(payload: dict[str, Any], audit_id: str | None) -> dict[str, Any]:
+    """Stamp a successful write result with the audit record it produced.
+
+    docs/api/mcp-tool-guide.md section 3: a tool result must name the audit
+    entry so the operation is attributable and traceable. The id comes from the
+    Core API's `X-Audit-ID` response header, not from any tool argument -- a
+    caller cannot claim an audit id, only be told which one it caused.
+
+    Absent when the Core API did not report one (an older deployment, or a path
+    that is not audited). That is a real absence and is left visible rather than
+    filled with a placeholder, matching how a missing `error_class` is handled.
+    """
+    return {**payload, **({"audit_id": audit_id} if audit_id else {})}
+
+
+def read_annotations() -> ToolAnnotations:
+    """The standard MCP hint set for a read-only tool.
+
+    Declared once rather than per tool so the seven reads cannot drift apart:
+    every one of them only queries the Core API and changes nothing.
+
+    `open_world_hint=False` because the set of things a read can return is
+    bounded by this deployment's own database -- it does not reach out to
+    arbitrary third parties the way a collection does.
+    """
+    return ToolAnnotations(
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
+
+
+def write_annotations(*, destructive: bool, open_world: bool) -> ToolAnnotations:
+    """The hint set for a mutating tool, with the two flags that vary.
+
+    `idempotent_hint=False` for all of them: the tools do not take a stable
+    idempotency key from the caller (each call mints a fresh one), so a retried
+    *call* is a new intent by construction. That is the documented design of
+    `_fresh_key`, and claiming idempotency here would contradict it.
+
+    `destructive` marks an operation whose effect cannot be undone by another
+    tool call -- the deletes. `open_world` marks one that makes a real request
+    to a third party or spends provider budget, which is what a host should
+    surface differently from a purely local mutation.
+    """
+    return ToolAnnotations(
+        read_only_hint=False,
+        destructive_hint=destructive,
+        idempotent_hint=False,
+        open_world_hint=open_world,
+    )
 
 
 def _html_escape(text: str) -> str:

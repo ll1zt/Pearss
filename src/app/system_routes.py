@@ -17,7 +17,13 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from adapters.correlation import current as current_correlation_id
 from adapters.repository import list_job_runs, list_jobs, system_snapshot
-from app.api_conventions import api_error
+from app.api_conventions import (
+    api_error,
+    decode_cursor,
+    decode_keyset_cursor,
+    encode_cursor,
+    encode_keyset_cursor,
+)
 from app.auth import Principal, read_required
 
 TENANT = "default"
@@ -30,6 +36,11 @@ def read_jobs(
     request: Request,
     _: Principal = Depends(read_required),
     limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Opaque cursor from a previous response.",
+    ),
 ) -> dict[str, Any]:
     """Declared jobs, each with its source and last run summary.
 
@@ -39,11 +50,15 @@ def read_jobs(
     reader the way a newest-first item list can.
     """
     del _
+    offset = decode_cursor(cursor)
     with request.app.state.session_factory() as session:
         rows = list_jobs(session)
+    page = rows[offset : offset + limit]
+    has_more = offset + limit < len(rows)
     return {
-        "data": rows[:limit],
+        "data": page,
         "total": len(rows),
+        "next_cursor": encode_cursor(offset + limit) if has_more else None,
         "correlation_id": current_correlation_id(),
     }
 
@@ -54,16 +69,27 @@ def read_job_runs(
     job_id: str,
     _: Principal = Depends(read_required),
     limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(
+        default=None,
+        max_length=256,
+        description="Opaque cursor from a previous response.",
+    ),
 ) -> dict[str, Any]:
     """Recent runs for one job, newest first.
 
     `error_class` is present only on failures, per the JobRun state machine,
     which is what makes a cluster of `structure_changed` visible as the signal
     that a source's page shape moved.
+
+    A run history is append-at-the-front, so this is keyset-paginated: page two
+    must not skip a run that started while page one was being read.
     """
     del _
+    parsed = decode_keyset_cursor(cursor)
     with request.app.state.session_factory() as session:
-        rows = list_job_runs(session, job_id=job_id, limit=limit)
+        # One beyond the page, so "is there a next page" is answered by the
+        # query rather than by a second count.
+        rows = list_job_runs(session, job_id=job_id, limit=limit + 1, cursor=parsed)
     if not rows:
         # An unknown job and a job that has never run are indistinguishable
         # here, so say which rather than returning an empty list and leaving the
@@ -77,9 +103,16 @@ def read_job_runs(
                 message=f"No job with id {job_id!r}.",
                 suggestion="List jobs to find the intended id.",
             )
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_cursor = None
+    if has_more and page:
+        last = page[-1]
+        next_cursor = encode_keyset_cursor(str(last["started_at"]), str(last["id"]))
     return {
-        "data": rows,
+        "data": page,
         "job_id": job_id,
+        "next_cursor": next_cursor,
         "correlation_id": current_correlation_id(),
     }
 

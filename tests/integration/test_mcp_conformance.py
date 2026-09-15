@@ -547,3 +547,125 @@ async def test_the_health_panel_is_self_contained(mcp_url: str) -> None:
 
     assert "<script" not in html.lower()
     assert "http://" not in html and "https://" not in html
+
+
+# --------------------------------------------------------------------------
+# ToolAnnotations: the standard hint set a host uses to gate and warn
+# --------------------------------------------------------------------------
+#
+# docs/api/mcp-tool-guide.md section 7 requires the description to state a
+# tool's side effects; ToolAnnotations is the machine-readable form of the same
+# fact, which is what lets a host decide without parsing English. These assert
+# the semantics rather than a field's presence: a read that claimed
+# `read_only_hint` while writing would be worse than no annotation at all.
+
+
+@pytest.mark.asyncio
+async def test_read_tools_are_annotated_read_only(mcp_url: str) -> None:
+    """The seven reads declare read_only_hint and open_world_hint=False.
+
+    Enumerated rather than derived from the surface, so a tool that quietly
+    changes category fails here instead of being grandfathered in.
+    """
+    reads = {
+        "list_sources",
+        "search_items",
+        "get_item_body",
+        "list_jobs",
+        "list_runs",
+        "list_enrichments",
+        "list_plugins",
+        "get_system_snapshot",
+    }
+    async with mcp_session(mcp_url) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+
+    for name in sorted(reads):
+        annotations = tools[name].annotations
+        assert annotations is not None, f"{name} carries no annotations"
+        assert annotations.read_only_hint is True, name
+        assert annotations.destructive_hint is False, name
+        assert annotations.open_world_hint is False, name
+
+
+@pytest.mark.asyncio
+async def test_the_deletes_are_annotated_destructive(mcp_url: str) -> None:
+    """The three irreversible tools say so in a field, not only in prose.
+
+    A host uses `destructive_hint` to add its own confirmation affordance; if
+    it were left unset on a delete, the machine-readable contract would say
+    "safe" while the description said "permanent".
+    """
+    deletes = {"remove_source", "delete_items", "delete_source_items"}
+    async with mcp_session(mcp_url) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+
+    for name in sorted(deletes):
+        annotations = tools[name].annotations
+        assert annotations is not None, f"{name} carries no annotations"
+        assert annotations.read_only_hint is False, name
+        assert annotations.destructive_hint is True, name
+
+
+@pytest.mark.asyncio
+async def test_reversible_writes_are_not_annotated_destructive(mcp_url: str) -> None:
+    """A pause or a folder move is not destructive, and must not claim to be.
+
+    Over-marking is its own failure: a host that warns on every write trains
+    the user to click through, which is exactly what makes the real delete
+    warning worthless.
+    """
+    reversible = {
+        "update_schedule_policy",
+        "set_source_status",
+        "set_source_folder",
+        "set_plugin_status",
+    }
+    async with mcp_session(mcp_url) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+
+    for name in sorted(reversible):
+        annotations = tools[name].annotations
+        assert annotations is not None, f"{name} carries no annotations"
+        assert annotations.read_only_hint is False, name
+        assert annotations.destructive_hint is False, name
+
+
+@pytest.mark.asyncio
+async def test_tools_that_reach_outward_are_annotated_open_world(mcp_url: str) -> None:
+    """Collection and provider-spending tools declare open_world_hint.
+
+    A local mutation is bounded by this database; `trigger_job` makes a real
+    request to a third party and `retry_enrichments` spends provider budget.
+    A host that wants to treat those differently has only this field to go on.
+    """
+    open_world = {
+        "add_source",
+        "trigger_job",
+        "backfill_source",
+        "retry_enrichments",
+        "submit_items",
+        "set_plugin_status",
+    }
+    async with mcp_session(mcp_url) as client:
+        tools = {t.name: t for t in (await client.list_tools()).tools}
+
+    for name in sorted(open_world):
+        annotations = tools[name].annotations
+        assert annotations is not None, f"{name} carries no annotations"
+        assert annotations.open_world_hint is True, name
+
+
+@pytest.mark.asyncio
+async def test_every_tool_declares_annotations(mcp_url: str) -> None:
+    """No tool may ship without the hint set.
+
+    The per-category tests above name the tools they know about; this one
+    catches a tool added later that nobody annotated, which is the way this
+    drifts in practice.
+    """
+    async with mcp_session(mcp_url) as client:
+        tools = (await client.list_tools()).tools
+
+    missing = [t.name for t in tools if t.annotations is None]
+    assert not missing, f"tools without annotations: {sorted(missing)}"

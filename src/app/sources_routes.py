@@ -231,6 +231,12 @@ def _source_payload(row: SourceRow) -> dict[str, Any]:
 
     `url` is echoed as given and `canonical_url` as stored, so an operator can
     see what the dedupe key actually became rather than guessing.
+
+    The paging state is included because it is the answer to "why are items
+    missing": `seen_frontier`/`floor_cursor` bound the interval a paging
+    collector has walked, and that interval is not recoverable from the stored
+    items (a gap and the end of the walk look the same from `item` alone). It
+    is null for sources that do not page, which is most of them.
     """
     return {
         "id": row.id,
@@ -250,6 +256,9 @@ def _source_payload(row: SourceRow) -> dict[str, Any]:
         "status": row.status,
         "trust_level": row.trust_level,
         "tenant_id": row.tenant_id,
+        # What the walk has covered. Both null for non-paging sources.
+        "seen_frontier": row.seen_frontier,
+        "floor_cursor": row.floor_cursor,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -309,7 +318,7 @@ def read_source(
             message=f"No source with id {source_id!r}.",
             suggestion="List sources to find the intended id.",
         )
-    return _source_payload(row)
+    return {**_source_payload(row), "correlation_id": current_correlation_id()}
 
 
 # --------------------------------------------------------------------------
@@ -395,6 +404,10 @@ def add_source(
         session.commit()
         payload = _source_payload(row)
 
+    # docs/api/style-guide.md: a response names the correlation id so a caller
+    # can ask about the request it made. Set before `remember` so the stored
+    # replay carries it too -- a retry is answered with the same fact.
+    payload["correlation_id"] = current_correlation_id()
     remember(
         factory,
         actor=principal.name,
@@ -507,6 +520,7 @@ def update_source(
         session.commit()
         payload = _source_payload(row)
 
+    payload["correlation_id"] = current_correlation_id()
     remember(
         factory,
         actor=principal.name,
@@ -565,6 +579,7 @@ def backfill_source_chain(
         "source_id": source_id,
         "queued": queued,
         "audit": "recorded by the Core API",
+        "correlation_id": current_correlation_id(),
     }
     remember(
         factory,

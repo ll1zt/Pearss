@@ -298,6 +298,10 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "get_system_snapshot",
         "list_jobs",
         "list_runs",
+        # Diagnostics: one row in full, which `list_*` truncates and
+        # `search_items` cannot address by id.
+        "get_source",
+        "get_item",
         # P2 plugin lifecycle (ADR 0017).
         "list_plugins",
         "set_plugin_status",

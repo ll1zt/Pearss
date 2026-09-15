@@ -169,6 +169,7 @@ def _set_status(
         )
 
     body = _plugin_representation(surface, status.value)
+    body["correlation_id"] = current_correlation_id()
     remember(
         factory,
         actor=principal.name,

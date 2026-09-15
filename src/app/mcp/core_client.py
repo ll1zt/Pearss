@@ -52,6 +52,7 @@ class CoreAPIClient:
 
     def __init__(self, app: Any) -> None:
         self._app = app
+        self._last_audit_id: str | None = None
 
     def _token(self) -> str:
         return os.environ.get(CORE_API_AUTH_ENV, "")
@@ -79,10 +80,23 @@ class CoreAPIClient:
             payload: dict[str, Any] = response.json()
         except (json.JSONDecodeError, ValueError):
             payload = {"text": response.text}
+        self._last_audit_id = response.headers.get("x-audit-id")
         return response.status_code, payload
 
     async def get(self, path: str, **params: Any) -> tuple[int, dict[str, Any]]:
         return await self.request("GET", path, params=params or None)
+
+    @property
+    def last_audit_id(self) -> str | None:
+        """The audit id of the most recent call, or None if the call was a read.
+
+        Read from the response header rather than the body: the audit row is
+        written by the middleware after the response is sent, so the id can only
+        travel out-of-band. It is per-call state on the client because every
+        tool call is a single request whose result is assembled immediately
+        afterwards; a concurrent caller would need its own client.
+        """
+        return self._last_audit_id
 
 
 def _infer_source_type(url: str) -> str:
