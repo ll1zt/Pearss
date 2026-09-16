@@ -13,7 +13,7 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | A02 revision gate and publication race | Fixed | `8437193` |
 | A03 shipped collector retention | Fixed | `508f9c9` |
 | A04 partial processing configuration | Fixed | `5a6a9c3` |
-| A05 host-proxied HTTP | Partial: redirect destination checks only | `69f96c3` |
+| A05 host-proxied HTTP | Partial: redirect checks and streamed 5 MiB body cap; transient decoder memory and child-wide budgets remain open | `69f96c3`, `5a26a87` |
 | A06 installed plugin restart | Fixed for approved manifests; unavailable records remain stored but absent from runtime list | `379ea62` |
 | A09 total fetch deadline | Partial: cancellable direct HTTP I/O; DNS and end-to-end child budgets remain open | `744eefa` |
 | A08 concurrent body storage | Fixed | `2142c29` |
@@ -24,8 +24,8 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
 
-**Still open:** A05 host-side body bounds; A07; A09 remaining deadline
-boundaries; A10–A15;
+**Still open:** A05 transient decoder memory and end-to-end budgets; A07;
+A09 remaining deadline boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
 again without implementation. Earlier delegation attempts for A06/A09/A12
@@ -52,6 +52,17 @@ requests. In an isolated source copy, bypassing the checksum comparison caused
 unapproved collection (HTTP 200 and one inserted item instead of rejection);
 the test failed, then passed after restoring the guard. See ADR 0025 for
 startup validation, runtime-list limitations and manifest-only checksums.
+
+**A05 body-cap verification:** `5a26a87` streams responses and enforces the
+shared 5 MiB decoded-body ceiling before RPC serialization. Real sockets cover
+plain, gzip and unfinished oversized responses with both HTTPX and the lifespan
+transport, rejection followed by successful client reuse, and exact-limit
+preservation. Original code failed with `DID NOT RAISE FetchError`; an isolated
+cap bypass failed all six oversized cases, then passed after restoration.
+Full `nix develop --command just ci` passed **1,490 tests** (918 unit/fixture,
+512 integration, 57 E2E, 3 contract), lint/type/import checks and migration
+roundtrip. This is not a strict peak-memory bound on HTTPX decoding, and does
+not complete the child/RPC/API acceptance coverage tracked by B02.
 
 **Combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,

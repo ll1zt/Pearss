@@ -23,6 +23,17 @@ As of this change it:
    returning the redirect to the child. Refusals surface as
    `FetchError(ErrorClass.BLOCKED)`, which the RPC layer maps to the same
    classified failure an in-process fetch would produce.
+4. Caps every decoded response body at `adapters.http.DEFAULT_MAX_BYTES`
+   (5 MiB) by streaming the shared client's response in chunks
+   (`adapters.http.read_capped`, the same helper the direct fetch path uses)
+   and closing the response even on refusal. Oversized bodies, including
+   gzip-decoded bodies, raise `FetchError(ErrorClass.NETWORK)` rather than
+   crossing RPC. An oversized unfinished stream is rejected without waiting
+   for EOF. Subsequent requests on the shared client still succeed.
+   Exactly-at-limit bodies pass through intact. This caps accepted cumulative
+   decoded body bytes, not transient per-chunk allocation: HTTPX can allocate
+   a large decoded chunk before the helper checks its length, and final
+   joining/base64 serialization also require additional bounded copies.
 
 The child retains redirect authority: it performs method rewriting (303),
 credential-header handling, and its own hop limit, exactly as the in-process
@@ -60,13 +71,9 @@ Known limits, recorded rather than hidden:
 
 ## Not yet enforced host-side (known gaps)
 
-- **No host-side response-size cap.** The child-side size checks in
-  `adapters.http._read_capped` run after the host has buffered the full
-  response into an RPC message (`protocol.MAX_MESSAGE_BYTES` bounds the
-  line, not the response). That RPC cap does not bound the memory already
-  allocated while buffering the origin response. Enforcing `max_bytes` during host-side streaming
-  before base64 RPC serialization is the remaining half of A05. Not
-  implemented here.
+- **No child-wide elapsed deadline.** The child's policy deadline is not
+  propagated across RPC or multiple child requests; reverse-proxied requests
+  receive only the transport's default 60-second per-request cap.
 - **DNS re-resolution window.** `check_destination` resolves the hostname
   once; the connection re-resolves. Textbook DNS rebinding remains possible;
   the recorded threat model (ADR 0016) is a leaked token probing an internal
@@ -93,3 +100,16 @@ Known limits, recorded rather than hidden:
 - Injection verified in an isolated worktree: restoring the original
   `HostClientTransport` reproduced the missing refusal (one failed test).
   Restoring the fix passed the same test. No shared source was mutated.
+- Body cap red: a 5 MiB + 1 response returned successfully rather than raising
+  `FetchError`. The fix passes seven new real-socket cases: oversized plain,
+  gzip and unfinished bodies on both plain HTTPX and the lifespan transport,
+  plus exact-limit preservation. The plain HTTPX variant limits the pool to
+  one connection; the lifespan transport owns a separate internal pool, so
+  that variant proves continued client usability, not one-slot pool release.
+- In an isolated source copy, replacing the capped read with `response.read()`
+  made all six oversized cases fail; restoring it passed all six. The unfinished
+  fixture withholds EOF until after the assertion, detecting eager buffering.
+- Full `nix develop --command just ci` passed: 918 unit/fixture, 512 integration,
+  57 E2E and 3 contract tests (1,490 total), plus Ruff, mypy, import boundaries
+  and migration roundtrip. These new cases exercise the host HTTP boundary,
+  not the complete child/RPC/API journey; B02 remains open.
