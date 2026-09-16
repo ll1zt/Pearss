@@ -43,19 +43,9 @@ fix:
     uv run ruff format .
     uv run ruff check --fix .
 
-# pytest exits 5 for "no tests collected". The skeleton has an empty suite,
-# and a gate that fails for having nothing to check is a gate people learn to
-# ignore, so 5 is treated as success. Real test failures still fail.
+# Required suites must fail when selection is empty (pytest exit 5).
 _test marker:
-    #!/usr/bin/env bash
-    set -uo pipefail
     uv run pytest -m "{{marker}}" -q
-    status=$?
-    if [ "$status" -eq 5 ]; then
-        echo "no tests collected for marker '{{marker}}' — treating as pass"
-        exit 0
-    fi
-    exit "$status"
 
 # Unit and fixture tests (offline and deterministic).
 test:

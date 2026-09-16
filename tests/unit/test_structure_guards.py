@@ -16,7 +16,10 @@ future accident:
 from __future__ import annotations
 
 import ast
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -508,30 +511,105 @@ def test_no_test_assertion_is_vacuously_true() -> None:
     assert not offenders, "this assertion can never fail:\n" + "\n".join(offenders)
 
 
-def test_every_test_module_declares_a_marker() -> None:
-    """A test with no level marker is excluded from every `just` target.
-
-    The recipes select by marker (`just test` runs `unit or fixture`), so an
-    unmarked test is a test that silently never runs -- it passes locally by
-    not existing. A module declares it either through `pytestmark` or on each
-    test; both are accepted, and what is rejected is having neither.
-    """
-    offenders: list[str] = []
-    for path in _test_files():
-        text = _test_bodies(path)
-        if not re.search(r"^(?:async )?def test_", text, re.MULTILINE):
-            continue  # a conftest or helper module has nothing to mark
-        marked_module = re.search(r"^pytestmark\s*=", text, re.MULTILINE)
-        marked_per_test = len(re.findall(r"@pytest\.mark\.", text)) >= len(
-            re.findall(r"^(?:async )?def test_", text, re.MULTILINE)
-        )
-        if not (marked_module or marked_per_test):
-            offenders.append(str(path))
-
-    assert not offenders, (
-        "these modules define tests but declare no marker, so no `just` target "
-        "selects them:\n" + "\n".join(offenders)
+def _collect_levels(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - fixed interpreter and owned helper
+        [
+            sys.executable,
+            str(REPO_ROOT / "tests/marker_guard.py"),
+            "--collect-only",
+            "-c",
+            str(REPO_ROOT / "pyproject.toml"),
+            "-q",
+            *(
+                [str(REPO_ROOT / "tests"), str(REPO_ROOT / "src")]
+                if path == REPO_ROOT
+                else [str(path)]
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
     )
+
+
+def test_every_test_module_declares_a_marker() -> None:
+    """User running marked suites must not silently lose any collected test."""
+    result = _collect_levels(REPO_ROOT)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("source", "expected", "missing"),
+    [
+        (
+            "@pytest.mark.unit\n@pytest.mark.parametrize('x', [1])\n"
+            "def test_marked(x): pass\ndef test_missing(): pass\n",
+            4,
+            "test_missing",
+        ),
+        ("@pytest.mark.asyncio\nasync def test_async(): pass\n", 4, "test_async"),
+        (
+            "@pytest.mark.parametrize('x', [1, 2])\ndef test_parameter(x): pass\n",
+            4,
+            "test_parameter",
+        ),
+        ("class TestUnmarked:\n    def test_method(self): pass\n", 4, "test_method"),
+        (
+            "pytestmark = pytest.mark.unit\n"
+            "class TestInherited:\n    def test_method(self): pass\n",
+            0,
+            "",
+        ),
+        (
+            "@pytest.mark.integration\nclass TestInherited:\n"
+            "    def test_method(self): pass\n",
+            0,
+            "",
+        ),
+        (
+            "pytestmark = pytest.mark.asyncio\nasync def test_nonlevel(): pass\n",
+            4,
+            "test_nonlevel",
+        ),
+    ],
+)
+def test_user_gets_effective_execution_level_coverage(
+    tmp_path: Path, source: str, expected: int, missing: str
+) -> None:
+    """Given real pytest modules, inherited levels count; unrelated marks do not."""
+    module = tmp_path / "test_levels.py"
+    module.write_text("import pytest\n" + source, encoding="utf-8")
+    result = _collect_levels(module)
+    assert result.returncode == expected, result.stdout + result.stderr
+    if missing:
+        assert "missing execution-level marker:" in result.stderr
+        assert missing in result.stderr
+
+
+def test_user_required_suite_fails_when_no_tests_are_selected(tmp_path: Path) -> None:
+    """Given a valid marked test, selecting an empty suite must fail in just."""
+    module = tmp_path / "test_selected.py"
+    module.write_text(
+        "import pytest\n@pytest.mark.unit\ndef test_present(): pass\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 - fixed recipe and generated fixture
+        ["just", "--justfile", str(REPO_ROOT / "justfile"), "_test", "e2e"],  # noqa: S607
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={
+            **os.environ,
+            "PYTEST_ADDOPTS": f"-c {REPO_ROOT / 'pyproject.toml'} {module}",
+        },
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "code 5" in result.stderr
 
 
 # --------------------------------------------------------------------------
