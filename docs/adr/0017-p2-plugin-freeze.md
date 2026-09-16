@@ -137,3 +137,30 @@ E4 的子进程隔离按本 ADR 兑现，要点：
 写回 RawFetch 的回路未接线，`not_modified` 路径目前对所有采集器不可达。
 
 后续：第三方加载器（:import/:uninstall 的文件落盘与校验）在独立 ADR 中设计。
+
+## 修订记录
+
+### 2026-09-16：生命周期表的 import/uninstall/reload 不再是占位（ADR 0023）
+
+ADR 0023 交付了第三方装载器，本文「生命周期」表中
+`import/uninstall/reload = 显式 409 占位` 一行随之到期。**本文的决定未被改动**——
+hookspec 冻结、pluggy 注册表、manifest 双向校验、P2b 子进程隔离全部有效，
+装载器是在它们之上追加的一层。新增/到期项：
+
+- 三个路由改为真实端点：`:import`（子进程 import 校验 manifest ↔ hookimpl +
+  checksum 入库）、`:uninstall`（有活跃源时 409；不删用户文件）、`:reload`
+  （杀 child 重 spawn，即本 ADR 预定的语义）
+- **协议新增 `verify` 方法**：本文冻结的方法集因此扩展一项。它与既有方法同类
+  （宿主↔子进程的固定契约），不是可变探测
+- **`backfill` 改为 `getattr` 探测**：它是本文定义的**可选** hookimpl。四个内置
+  采集器都定义它（返回 None），所以属性探测此前从未暴露问题；运行时装载的插件
+  可以不定义，`module.backfill()` 会 `AttributeError` 崩掉 child
+- **未捕获异常的分类**：内置采集器的 `parse` 受本文失败契约约束（只抛
+  `CollectorError`），插件不受约束。代理层把插件抛出的任意异常归类为 `parse`
+  失败，避免它逃逸成调度器级未处理错误
+- **`_DECLARATIONS` 不再等于全集**：内置集合是常量，运行时装载的插件是另一个
+  映射（`_INSTALLED_PLUGINS`），且 `select()` 先试插件——rss 匹配几乎所有
+  http URL，排在它后面的插件永远够不到
+
+「明确不做」中的**内置插件热重载：永久裁剪**依然成立，且被 `:reload` 的实现
+印证：它杀进程重 spawn，而不是进程内 reload。

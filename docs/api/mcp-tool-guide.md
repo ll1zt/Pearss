@@ -81,7 +81,9 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `backfill_source` | 对历史条目一次性补跑处理器链 |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 
-`list_sources`、`search_items`、`get_system_snapshot`、`list_runs` 是只读，不需要确认。
+只读工具不需要确认：`list_sources`、`get_source`、`search_items`、`get_item`、
+`get_item_body`、`list_jobs`、`list_runs`、`list_enrichments`、`list_plugins`、
+`get_system_snapshot`。
 
 ## 四、错误返回
 

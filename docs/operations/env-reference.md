@@ -50,6 +50,7 @@ PEARSS_DOCS_ENABLED=0
 # PEARSS_PORT=8000
 # PEARSS_DATABASE_URL=sqlite+pysqlite:////var/lib/pearss/pearss.db
 # PEARSS_STORAGE_DIR=/var/lib/pearss/bodies
+# PEARSS_PLUGIN_DIR=/var/lib/pearss/plugins   # 默认值；放状态目录旁，一次备份覆盖
 # PEARSS_FORWARDED_ALLOW_IPS=127.0.0.1
 
 
@@ -76,6 +77,18 @@ PEARSS_DOCS_ENABLED=0
 # 审计行保留天数，0 = 永久。默认 30。
 # 公网部署下每个未授权探测都写一行审计，取证窗口即此值。
 # PEARSS_AUDIT_RETENTION_DAYS=30
+
+# 第三方插件目录（ADR 0023）。其下每个子目录名即 collector_id，须含
+# manifest.json 与 collector.py（模块名固定为 collector）；插件自带依赖放
+# 同目录的 .venv/，Pearss 不解析插件依赖。装载走
+# POST /v1/plugins/{id}:import，它在子进程里 import 插件并校验声明与实现一致。
+#
+# ⚠️ 装载器**不判断插件是否安全**：子进程隔离（env allowlist + 宿主代理出网 +
+#    资源限额）限制的是故障半径，不是恶意行为——信任决定属于运行者。
+#    若插件声明了 PEARSS_COOKIECLOUD_ 前缀，它会拿到 CookieCloud 服务端主密钥，
+#    而那把密钥能解密你同步过的全部站点会话（见 ADR 0012）。
+# 本变量是 host-side：绝不下发给子进程，插件无权知道其他插件在哪。
+# PEARSS_PLUGIN_DIR=/var/lib/pearss/plugins
 
 
 # ===========================================================================

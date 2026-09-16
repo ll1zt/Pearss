@@ -67,7 +67,7 @@ docs/adr/
 | [0014](0014-zhihu-collector-fetch-hook.md) | 知乎采集器与注册表的可选 fetch 钩子 | accepted | 2026-09-06 |
 | [0015](0015-zsxq-collector-scope-query-param.md) | 知识星球采集器：scope 即 URL 查询参数 | accepted | 2026-09-06 |
 | [0016](0016-public-exposure-hardening.md) | 公网暴露：移除公开 RSS 输出，隧道优先，防御内移 | accepted（**修订 §1.2 Swagger 兜底、§6 C1、§2.1 AuditLog 保留**） | 2026-09-06 |
-| [0017](0017-p2-plugin-freeze.md) | P2 插件化：hookspec 冻结、pluggy 注册表、manifest 与生命周期 | accepted（**修订 §3、§6 E1–E4**） | 2026-09-06 |
+| [0017](0017-p2-plugin-freeze.md) | P2 插件化：hookspec 冻结、pluggy 注册表、manifest 与生命周期 | accepted（**修订 §3、§6 E1–E4**；**2026-09-16 生命周期表 import/uninstall/reload 到期于 0023**） | 2026-09-06 |
 | [0018](0018-processor-chain-translation.md) | 处理器链：翻译参考实现（链挂源、OpenAI-compatible、NNW 译文+原文合并） | accepted（**修订 §6 B4、E1**） | 2026-09-09 |
 | [0019](0019-mcp-2026-07-28-and-health-panel.md) | MCP 2026-07-28 协议与健康面板 | accepted | 2026-09-13 |
 | [0020](0020-nixos-deployment-and-tunnel.md) | NixOS 部署与隧道分离（serve 全域 / funnel 仅 Reader API） | accepted（**修订 ADR 0016 的部署形态**） | 2026-09-13 |

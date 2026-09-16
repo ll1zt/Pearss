@@ -43,9 +43,28 @@
 合约冻结于 `core/plugins/hooks.py`（ADR 0017）：每个采集器以 `@HOOKIMPL`
 声明 `collector_id` / `match_url` / `parse` / `source_config`，可选声明
 `fetch` / `collect_pages` / `backfill`。manifest 的 features 与实际
-hookimpl 在启动时双向校验——声明了没有的能力即启动失败。失败契约：
-`fetch` 只抛 `FetchError(ErrorClass)`，`parse` 只抛
+hookimpl **双向校验**：随部署来的采集器在**启动时**校验（声明了没有的能力
+即启动失败），运行时装载的插件在**安装时**校验（不一致即拒绝装载，见
+ADR 0023）。失败契约：`fetch` 只抛 `FetchError(ErrorClass)`，`parse` 只抛
 `CollectorError(ErrorClass)`（从 `core.plugins.hooks` 导入，不得自定义）。
+**插件例外**：装载器把插件未捕获的异常归类为 `parse` 失败，因为它的
+`parse` 不受这条契约约束（内置采集器只抛 `CollectorError`，插件不保证）。
+
+### 两种形态：随部署来 vs 运行时装载
+
+采集器有两种来源，隔离模型相同，摆放形态不同：
+
+| | 随部署来的（rss + 四个第三方） | 运行时装载的插件（ADR 0023） |
+|---|---|---|
+| 代码位置 | 仓库内 `plugins/collectors/<name>/` | `PEARSS_PLUGIN_DIR/<collector_id>/` |
+| 模块名 | `plugins.collectors.<name>.collector` | `collector`（固定，宿主把它加进 `sys.path`） |
+| 依赖 | 与宿主同一 venv（uv.lock 管） | 插件自带 `.venv/`，宿主只把它加进 `PYTHONPATH` |
+| 校验时机 | 启动时（`_build_registry`） | 安装时（`:import`，在子进程里 import） |
+| 凭据来源 | `_COLLECTOR_ENV_PREFIXES` 硬编码 | 插件 manifest 的 `required_config` 声明 |
+| 路由优先级 | 内置集合内按声明序 | **先于内置集合**——rss 匹配几乎所有 http URL，排在它后面的插件永远够不到 |
+
+两者的 `Registration` 形状一致，pipeline 与各路由无需分支：装进来的插件
+和随部署来的采集器走同一条采集路径。
 
 ### 执行模型：进程内 vs 子进程沙箱（ADR 0017）
 
@@ -59,10 +78,11 @@ hookimpl 在启动时双向校验——声明了没有的能力即启动失败�
 
 写新第三方采集器时的硬性约束：
 
-- **凭据前缀必须登记**：`app/plugin_runtime.py` 的
-  `_COLLECTOR_ENV_PREFIXES` 按采集器 id 列出它可读的 `PEARSS_*` 前缀。
-  未登记的变量不会进入子进程——child 读不到凭据会归 `auth`，这是
-  allowlist 生效的表现，不是 bug。
+- **凭据前缀必须登记**：随部署来的采集器在 `app/plugin_runtime.py` 的
+  `_COLLECTOR_ENV_PREFIXES` 里按 id 列出它可读的 `PEARSS_*` 前缀；运行时
+  装载的插件改由 manifest 的 `required_config` 声明（ADR 0023）。两条路径
+  都走同一个 `child_environment` allowlist。未登记的变量不会进入子进程——
+  child 读不到凭据会归 `auth`，这是 allowlist 生效的表现，不是 bug。
 - **child 不 import `adapters`/`app`**：子进程只从请求参数与环境取值，
   不碰数据库与文件存储。SQLAlchemy 等宿主持久化机器不进沙箱。
 - **child 的 stderr 继承宿主流**：崩溃 traceback 由 journald 收集，排查

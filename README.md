@@ -32,7 +32,8 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - **调度器**：每轮从 `schedule_policy` + 历史推导到期集合（不存 next_run_time），fixed/adaptive 两种策略、失败指数退避、并发 claim 保护；随 systemd 服务常驻，`PEARSS_SCHEDULER_ENABLED=0` 可关
 - **采集器（5 个）**：`rss`（RSS 2.0 + Atom，**进程内**，含 WordPress 摘要 feed 的 REST 全文升级）、`telegram`（公开频道预览页）、`twitter`（X Following 时间线，**登录型**，见 ADR 0012）、`zhihu`（知乎用户动态/回答/文章，**登录型**，Cookie 或 CookieCloud，见 ADR 0014）、`zsxq`（知识星球群组，**登录型**，见 ADR 0015）。后四个为第三方插件，**各运行于独立子进程沙箱**（ADR 0017）：崩溃与内存失控不伤宿主，凭据经 env allowlist 注入，出网经宿主代理（SSRF 拦截生效）。按 URL 选，但**声明类型优先**于 URL 猜测
 - **插件生命周期 API**：`GET /v1/plugins`、`POST /v1/plugins/{id}:enable|:disable`（幂等写、全程审计）；manifest 经启动双向校验
-- **MCP 控制平面**：11 个工具经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数；正文优先走 `item://{item_id}` Resource，不支持 Resource 的客户端可用 `get_item_body`（带截断，ADR 0013）；工具面 snapshot 由 `just contract` 校验
+- **第三方插件装载器（ADR 0023）**：`:import` / `:uninstall` / `:reload` 已实现。插件放在 `PEARSS_PLUGIN_DIR`（默认 `/var/lib/pearss/plugins`）下的一个目录里，目录名即 collector_id，需含 `manifest.json` + `collector.py`（模块名固定为 `collector`），依赖自带 `.venv`。装载在**子进程**里 import 并校验「manifest 声明 ↔ 实际 hookimpl」双向一致，不一致即拒绝且不留痕。**装载器不判断插件是否安全**：子进程隔离限制的是故障半径，信任决定属于运行者
+- **MCP 控制平面**：22 个工具（10 读 + 12 写）经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数；**每个工具声明 `ToolAnnotations`**（读/破坏性/开放世界），写操作成功返回带 `audit_id`；正文优先走 `item://{item_id}` Resource，不支持 Resource 的客户端可用 `get_item_body`（带截断，ADR 0013）；工具面 snapshot 由 `just contract` 校验
 - **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
 ### 尚未接线
@@ -41,7 +42,6 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 - `just contract`：MCP 工具面 snapshot + OpenAPI 全文档 snapshot，均已接（OpenAPI 用 snapshot 手法替代 nixpkgs 缺失的 oasdiff）
 - `just test-e2e`：单进程全链路已接（真 uvicorn + MCP 客户端 + 本地 fixture origin）；Compose 多容器拓扑暂不需要
-- `/v1/plugins` 的 `:import`/`:uninstall`/`:reload`：**409 占位**，等第三方 loader（独立 ADR）
 
 其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
 **备份与恢复演练**（§7.5）、**条件请求持久化回路**（`record_raw_fetch` 生产路径

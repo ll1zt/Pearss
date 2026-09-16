@@ -208,6 +208,8 @@ P3 加：翻译闸门、TTS enclosure、Reader API 已读/星标同步。
 - **先怀疑自己的探针**：MCP 2026-07-28 协议升级时，三个「服务端缺陷」（`server/discover` 不可达、discover 内部错误、auto 模式回退）最终全部归因于探针脚本自身的错误——`_meta` 嵌套位置、缺 `jsonrpc`/`id`、缺 auth 头。静态读代码判断协议符合度不可靠，必须以实测协商结果为准；而实测结果反常时，第一嫌疑人是测试工具的构造，不是被测系统
 - **写失败路径测试时，先确认"拒绝"的机制再断言**：本轮补 E2E 失败路径时，三条最自然的直觉断言全错——401 不写审计行（中间件顺序使然）、被拒的写记 `rejected` 而非空、decline 被 SDK 抛成 tool error 而非走工具自己的分支。**测试揭示的机制与源码读起来的印象不一致时，以实测为准，并把差异写进 docstring**；若差异说明的是别处的文档错了（见下条），记录它而不是改测试去迎合
 - **手写 INSERT 是脆弱测试**：本轮两次因为绕过 repository 直接写 SQL 而失败（漏 `created_at`、猜了一个不是 repository 派生出来的 id）。**种子数据一律走 repository**：它复现的是生产写入路径，且 schema 加列时不会碎
+- **模块级全局状态必须由 teardown 清理，且清理要是幂等的**：本轮引入「运行时装载的插件」后，`_INSTALLED_PLUGINS` / `_SANDBOX_CHILDREN` 是模块全局，`conftest` 的 autouse teardown 一度只是 `stop()` 子进程而没清插件表——于是一个测试装的插件在下一个测试里仍然注册，且**优先于内置采集器匹配 URL**，把 `test_zhihu_collector` / `test_twitter_paging` 全弄红。更隐蔽的是第二次尝试：teardown 里做了 `_REGISTRY = None` 强制重建，反而让「持有 registry 引用」的测试（`test_scheduler`）莫名其妙地失败。**判据**：teardown 只在「确实有东西要清」时动状态（早返回），且清完后的状态要与从未装载过一致——不要用重建来"顺便"重置，重建会波及没被污染的部分
+- **跨文件运行时依赖：单独跑通 ≠ 全量跑通**。`pytest 单独一个文件` 与 `pytest tests/integration/` 结果不同时，几乎总是全局状态或导入副作用；发现后不要满足于"单独跑是绿的"，要定位是哪个先跑的测试留下的状态（二分：把可疑文件与受害文件放一起跑即可复现）
 
 ## 本地与 CI 命令
 

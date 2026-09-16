@@ -184,15 +184,17 @@ ReadState 是事实源；清理 Item 时它随 Item 一起删除（`ON DELETE CA
 
 ### Plugin（P2）
 
-插件注册表记录，不是插件代码本身。
+插件注册表记录，不是插件代码本身。随部署来的采集器在启动时 upsert；运行时
+装载的插件由 `:import` 写入、`:uninstall` 删除（ADR 0023）。
 
 | 字段 | 说明 |
 |---|---|
-| `id` / `version` / `type` | 稳定身份与 collector/processor 类型 |
-| `manifest` | 声明的 hooks、权限、配置 schema、入口 |
-| `checksum` / `signature` | 导入校验材料 |
-| `status` | 生命周期状态 |
-| `trust` | `trusted` / `sandboxed` 等执行隔离决策 |
+| `id` | collector_id，也是运行时插件的目录名 |
+| `manifest_json` | 声明的 identity 与 features（`core/plugins/hooks.py` 的 `Manifest.as_dict()`）；**不含**执行体与入口路径 |
+| `checksum` | canonical JSON 的 sha256。**不是签名**：没有签名机制，字段名容易误读。它记录「status 决策是针对哪个 manifest 内容做出的」 |
+| `status` | `enabled` / `disabled`，运维的启停决定 |
+| `trust` | `builtin` / `third-party`。**纯描述性，不产生行为差异**——与 `source.trust_level` 同构：区分「随 Pearss 来」与「你自己装的」，供运维辨识。真正的隔离由子进程沙箱提供（ADR 0017），不由此字段决定（ADR 0023） |
+| `tenant_id` / `created_at` / `updated_at` | 预留与时间戳 |
 
 ### IdempotencyRecord（P1）
 
