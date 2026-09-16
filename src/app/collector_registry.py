@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
@@ -255,10 +256,83 @@ def _build_registry(
                 trust="third-party" if sandboxed else "builtin",
             )
         )
+
+    # Installed plugins last, so a shipped collector that already claimed the
+    # id wins: `install_plugin` refuses such an id at import time, and this is
+    # the second line of that defence.
+    for plugin_id, manifest in sorted(_INSTALLED_PLUGINS.items()):
+        if plugin_id in {name for name, _, _ in _DECLARATIONS}:
+            continue
+        registrations.append(_installed_registration(plugin_id, manifest))
     return tuple(registrations)
 
 
+def _installed_registration(plugin_id: str, manifest: dict[str, Any]) -> Registration:
+    """A registration for a plugin installed at runtime (ADR 0023).
+
+    The child is built with the plugin directory and its bundled venv on
+    `PYTHONPATH` (that is the "bring your own venv" decision), and with the
+    credential prefixes the plugin declared rather than the shipped map --
+    an installed plugin gets exactly what its manifest asked for.
+    """
+    from app import plugin_loader
+    from app.plugin_runtime import PluginChild, SandboxedCollector, SandboxLimits
+
+    directory = plugin_loader.plugin_directory(plugin_id)
+    prefixes = plugin_loader.required_credential_prefixes(manifest)
+    features = frozenset(manifest.get("features") or [])
+    child = PluginChild(
+        plugin_id,
+        limits=SandboxLimits(),
+        pythonpath=plugin_loader.child_pythonpath(directory),
+        env=_plugin_env(prefixes),
+    )
+    _SANDBOX_CHILDREN[plugin_id] = child
+    # Inherit the egress wiring the app installed. The lifespan wires
+    # transports once at startup; a plugin installed later was not there for
+    # it, and a child with no transport has its egress refused -- which would
+    # surface as a collection failure that looked like the origin's fault.
+    if _SANDBOX_TRANSPORT is not None:
+        child.set_http_transport(_SANDBOX_TRANSPORT)
+    return Registration(
+        name=plugin_id,
+        collector=cast("Collector", SandboxedCollector(child)),
+        paged="paged" in features,
+        fetches="fetch" in features,
+        manifest=manifest,
+        checksum=str(manifest.get("checksum", "")) or _installed_checksum(manifest),
+        trust="third-party",
+    )
+
+
+def _plugin_env(prefixes: tuple[str, ...]) -> dict[str, str]:
+    """The credential values a plugin declared, taken from the host env.
+
+    Empty for a plugin that declared nothing, which is the common case: a
+    collector with no credentials needs no environment beyond the base
+    allowlist, and gets none.
+    """
+    if not prefixes:
+        return {}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if any(key.startswith(prefix) for prefix in prefixes)
+    }
+
+
+def _installed_checksum(manifest: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
+
 _SANDBOX_CHILDREN: dict[str, Any] = {}
+
+# The egress transport the app wired into the sandboxed children, held so a
+# plugin installed later can receive the same one. None until `set_http_transport`
+# runs, which is the app's lifespan in production and the fixture in tests.
+_SANDBOX_TRANSPORT: Any = None
 
 
 def set_http_transport(collector_id: str, transport: Any) -> None:
@@ -268,14 +342,25 @@ def set_http_transport(collector_id: str, transport: Any) -> None:
     reverse http calls run through the SSRF guard; tests pass a
     MockTransport so fixtures flow to the child.
     """
+    global _SANDBOX_TRANSPORT
     from app.plugin_runtime import PluginChild
 
+    # Recorded so a plugin installed later inherits the same egress wiring.
+    # Set only through this function (the app's lifespan and the tests' fixture
+    # are its callers), so it always describes a transport the running app
+    # actually chose rather than a leftover from a previous scenario.
+    _SANDBOX_TRANSPORT = transport
     child = _SANDBOX_CHILDREN.get(collector_id)
     if not isinstance(child, PluginChild):
         raise ValueError(f"no sandboxed collector {collector_id!r}")
     child.set_http_transport(transport)
 
 
+# The transport appliers handed to `for_each_sandboxed_collector`, replayed
+# for children built later. The lifespan wires egress once at startup, but an
+# installed plugin's child does not exist yet at that point (ADR 0023) -- and
+# a child with no transport has its egress refused, which surfaces as a
+# collection failure that looks like the origin's fault. Keeping the appliers
 def for_each_sandboxed_collector(apply: Callable[[str, Any], None]) -> None:
     """Run `apply(id, child)` over every sandboxed collector.
 
@@ -290,6 +375,103 @@ def for_each_sandboxed_collector(apply: Callable[[str, Any], None]) -> None:
 
 
 _REGISTRY: tuple[Registration, ...] | None = None
+
+# Plugin ids installed at runtime from the plugin directory (ADR 0023). The
+# loader registers them here after a successful `:import`, and clears them on
+# `:uninstall`. Kept as module state beside the built registry for the same
+# reason the registry itself is: both are rebuilt together, and a plugin that
+# is installed but not in this set is one the operator removed.
+_INSTALLED_PLUGINS: dict[str, dict[str, Any]] = {}
+
+
+def install_plugin(plugin_id: str, manifest: dict[str, Any]) -> None:
+    """Make an installed plugin part of the registry.
+
+    The caller (the `:import` route) has already validated the plugin on
+    disk and verified its declarations in a child; this records the decision
+    and adds its registration.
+
+    Rebuilds only the installed registrations rather than the whole registry:
+    a full rebuild would stop and respawn every shipped collector's child,
+    which an install has no reason to disturb -- a running collection would
+    be cut off mid-flight.
+    """
+    _INSTALLED_PLUGINS[plugin_id] = manifest
+    _rebuild_installed()
+
+
+def uninstall_plugin(plugin_id: str) -> None:
+    """Remove an installed plugin from the registry, keeping its files."""
+    global _REGISTRY
+    _INSTALLED_PLUGINS.pop(plugin_id, None)
+    child = _SANDBOX_CHILDREN.pop(plugin_id, None)
+    stop = getattr(child, "stop", None)
+    if callable(stop):
+        stop()
+    if _REGISTRY is not None:
+        _REGISTRY = tuple(r for r in _REGISTRY if r.name != plugin_id)
+
+
+def _rebuild_installed() -> None:
+    """Replace the installed registrations, leaving the shipped ones alone.
+
+    Any child for an id being replaced is stopped first: a reload mints a new
+    child, and leaving the old one running would hold a subprocess (and its
+    environment) for a plugin that is no longer registered.
+    """
+    global _REGISTRY
+    if _REGISTRY is None:
+        # Nothing built yet; the next `_registry()` will include them.
+        return
+    for plugin_id in list(_INSTALLED_PLUGINS):
+        previous = _SANDBOX_CHILDREN.pop(plugin_id, None)
+        stop = getattr(previous, "stop", None)
+        if callable(stop):
+            stop()
+    shipped = tuple(r for r in _REGISTRY if r.trust == "builtin")
+    installed = tuple(
+        _installed_registration(plugin_id, manifest)
+        for plugin_id, manifest in sorted(_INSTALLED_PLUGINS.items())
+        if plugin_id not in {name for name, _, _ in _DECLARATIONS}
+    )
+    _REGISTRY = shipped + installed
+
+
+def installed_plugin_ids() -> tuple[str, ...]:
+    """The ids currently installed at runtime."""
+    return tuple(sorted(_INSTALLED_PLUGINS))
+
+
+def forget_installed_plugins() -> None:
+    """Drop every installed plugin from the registry and stop its child.
+
+    Exists for teardown, not for the operator: `:uninstall` removes one plugin
+    and leaves the rest alone. This is what a test suite calls between cases,
+    and what a clean shutdown would call, where "the registry keeps a plugin
+    from a previous scenario" is a leak rather than a decision.
+
+    Deliberately does not `refresh_registry()`: that rebuilds the *shipped*
+    children too, leaving the previous generation of processes running. The
+    only registrations this removes are its own.
+    """
+    if not _INSTALLED_PLUGINS:
+        # Nothing installed: leave the registry alone. This is the common case
+        # for a teardown that runs after every test, and rebuilding when there
+        # is nothing to remove would invalidate a registry the current test is
+        # still using.
+        return
+    _INSTALLED_PLUGINS.clear()
+    # A full rebuild, because an installed plugin's child carries the plugin's
+    # code and its `PYTHONPATH`: stopping just that child would leave the
+    # registry describing a plugin that no longer exists. The shipped children
+    # are respawned as part of the same rebuild, which is what a caller
+    # resetting registry state wants.
+    refresh_registry()
+    # The remembered transport belonged to the generation just torn down; a
+    # test suite that ran one scenario would otherwise replay its egress onto
+    # the next scenario's plugin. Production re-wires it on the next lifespan.
+    global _SANDBOX_TRANSPORT
+    _SANDBOX_TRANSPORT = None
 
 
 def _registry() -> tuple[Registration, ...]:
@@ -317,11 +499,26 @@ def select(url: str) -> Registration | None:
 
     URL matching alone is a heuristic: it looks for path fragments that a feed
     often but not always carries. Use `select_for` when a source type is known.
+
+    Installed plugins are tried before the shipped set, and before rss in
+    particular: rss matches nearly any http URL, so anything ordered after it
+    can only be reached by a URL rss declines. An installed plugin states a
+    specific claim -- it was installed *for* particular sites -- and the
+    shipping order exists to let a specific matcher beat a general one, which
+    is the same reason telegram precedes rss.
     """
-    for registration in _registry():
+    for registration in _installed_first():
         if registration.collector.match_url(url):
             return registration
     return None
+
+
+def _installed_first() -> tuple[Registration, ...]:
+    """The registry with installed plugins ahead of the shipped collectors."""
+    registry = _registry()
+    installed = tuple(r for r in registry if r.trust != "builtin")
+    shipped = tuple(r for r in registry if r.trust == "builtin")
+    return installed + shipped
 
 
 def select_for(source_type: str, url: str) -> Registration | None:

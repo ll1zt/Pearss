@@ -44,6 +44,7 @@ from adapters.repository import PagingState
 from core.enums import ErrorClass
 from core.plugins import protocol
 from core.plugins.hooks import BackfillHooks
+from core.plugins.hooks import CollectorError as SpecCollectorError
 from core.plugins.protocol import ProtocolError
 
 if TYPE_CHECKING:
@@ -186,6 +187,7 @@ class PluginChild:
         call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
         startup_timeout: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
         http_transport: httpx.BaseTransport | None = None,
+        pythonpath: str | None = None,
     ) -> None:
         self._collector_id = collector_id
         self._env = env
@@ -195,6 +197,11 @@ class PluginChild:
         # httpx transport (e.g. a MockTransport) the child's egress is
         # proxied through; None = the child speaks HTTP directly.
         self._http_transport = http_transport
+        # Extra sys.path entries for the child, used for installed plugins
+        # (ADR 0023): the plugin directory and its bundled venv. Set on the
+        # child rather than through the environment so one plugin's path
+        # cannot leak into another's process.
+        self._pythonpath = pythonpath
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[bytes] | None = None
         self._next_id = 0
@@ -211,6 +218,15 @@ class PluginChild:
         child_env = child_environment(self._collector_id)
         if self._env is not None:
             child_env = {**child_env, **self._env}
+        if self._pythonpath is not None:
+            # Prepended, so the plugin's own code and dependencies win over
+            # anything of the same name the host happens to carry.
+            existing = child_env.get("PYTHONPATH", "")
+            child_env["PYTHONPATH"] = (
+                f"{self._pythonpath}{os.pathsep}{existing}"
+                if existing
+                else self._pythonpath
+            )
 
         def apply_limits() -> None:  # runs inside the forked child
             import resource
@@ -659,7 +675,17 @@ class SandboxedCollector:
         from core.models import ItemDraft
 
         self._ensure_running()
-        result = self._child.call("parse", {"raw": raw.as_rpc_dict()})
+        try:
+            result = self._child.call("parse", {"raw": raw.as_rpc_dict()})
+        except PluginChildError as exc:
+            # An installed plugin may raise anything, where a shipped
+            # collector's parse is limited to CollectorError (ADR 0017). An
+            # uncaught exception from the plugin is still a *parse* failure of
+            # this source -- classifying it here keeps it on the run rather
+            # than letting it escape into the scheduler as an unhandled
+            # error, which is the difference between a failed source and a
+            # service that looks broken.
+            raise SpecCollectorError(ErrorClass.PARSE, f"plugin raised: {exc}") from exc
         return [ItemDraft.from_rpc_dict(d) for d in result]
 
     def collect_pages(

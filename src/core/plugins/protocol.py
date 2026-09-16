@@ -31,6 +31,12 @@ METHODS: Final[frozenset[str]] = frozenset(
         "oldest_cursor",
         "http",
         "ping",
+        # The install-time contract check for an installed plugin (ADR 0023):
+        # the host asks the child what its code actually implements and
+        # compares that against the manifest. It belongs in the frozen set
+        # rather than being probed, because a method the child might not know
+        # is precisely what this set exists to rule out.
+        "verify",
     }
 )
 

@@ -73,3 +73,4 @@ docs/adr/
 | [0020](0020-nixos-deployment-and-tunnel.md) | NixOS 部署与隧道分离（serve 全域 / funnel 仅 Reader API） | accepted（**修订 ADR 0016 的部署形态**） | 2026-09-13 |
 | [0021](0021-deletion-is-deletion.md) | 删除就是删除：条目与订阅的物理删除 | accepted | 2026-09-14 |
 | [0022](0022-agent-ingest-api.md) | A3 主动数据接入：agent 提交内容走采集器同一条管线 | accepted | 2026-09-14 |
+| [0023](0023-third-party-plugin-loader.md) | 第三方插件加载器：用户自负其责 | accepted | 2026-09-16 |

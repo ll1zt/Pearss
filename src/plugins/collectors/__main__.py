@@ -94,7 +94,14 @@ def child_client(host_http: Any = None) -> httpx.Client:
 
 
 def _collector_for(collector_id: str) -> Any:
-    """The collector module serving this child, imported on first use."""
+    """The collector module serving this child, imported on first use.
+
+    A shipped collector is found in its package. An installed third-party
+    plugin is found instead as module `collector` on `sys.path` (the host
+    puts the plugin directory there at spawn, ADR 0023) -- distinguished by
+    whether the id is in the shipped set, so an installed plugin can never
+    shadow a shipped collector.
+    """
     if not _COLLECTORS:
         from plugins.collectors.rss import collector as rss
         from plugins.collectors.telegram import collector as telegram
@@ -106,8 +113,50 @@ def _collector_for(collector_id: str) -> Any:
             _COLLECTORS[collector_module.collector_id()] = collector_module
     module = _COLLECTORS.get(collector_id)
     if module is None:
-        raise protocol.ProtocolError(f"no collector with id {collector_id!r}")
+        module = _import_installed_plugin(collector_id)
+        _COLLECTORS[collector_id] = module
     return cast(Any, module)
+
+
+def _import_installed_plugin(collector_id: str) -> Any:
+    """Import an installed plugin as the module `collector`.
+
+    Raises `PluginVerificationError` (not ProtocolError) when the plugin is
+    missing or does not call itself what the host asked for: the loader's
+    verification path reports that distinction to the operator, and the
+    import happens here because this is the process the plugin may execute
+    in (ADR 0023).
+    """
+    import importlib
+
+    try:
+        module = importlib.import_module(_INSTALLED_MODULE)
+    except ImportError as exc:
+        raise PluginVerificationError(
+            f"no installed plugin to import as {_INSTALLED_MODULE!r}: {exc}"
+        ) from exc
+    declared = module.collector_id()
+    if declared != collector_id:
+        raise PluginVerificationError(
+            f"the installed plugin calls itself {declared!r} but the host "
+            f"expects {collector_id!r}"
+        )
+    return module
+
+
+# The module name a plugin directory must expose. Kept in step with
+# `app.plugin_loader.MODULE_NAME`, which is what puts the directory on
+# `sys.path`; the child does not import app, so the constant is restated
+# rather than shared across the process boundary.
+_INSTALLED_MODULE = "collector"
+
+
+class PluginVerificationError(Exception):
+    """An installed plugin could not be loaded or contradicts itself."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
 
 
 def handle(
@@ -126,12 +175,45 @@ def handle(
     if method == "ping":
         return {"collector_id": collector_id, "alive": True}
 
+    if method == "verify":
+        # The loader's install-time contract check (ADR 0023), run where the
+        # plugin's code is allowed to execute. Two things are reported: what
+        # the module implements, and what its own `source_config()` claims --
+        # the declared/implemented comparison is between those, exactly as
+        # the startup check does it for shipped collectors. The manifest.json
+        # on disk is the operator-facing copy; the code's own manifest is the
+        # one the registry will use, so the two must agree.
+        declared: dict[str, Any] = {}
+        try:
+            config = module.source_config()
+            declared = config.as_dict() if hasattr(config, "as_dict") else dict(config)
+        except Exception as exc:  # a plugin whose own manifest will not build
+            raise PluginVerificationError(
+                f"source_config() could not be read: {type(exc).__name__}: {exc}"
+            ) from exc
+        return {
+            "has_fetch": bool(getattr(module, "fetch", None)),
+            "has_parse": bool(getattr(module, "parse", None)),
+            "has_match_url": bool(getattr(module, "match_url", None)),
+            "has_source_config": bool(getattr(module, "source_config", None)),
+            "has_collect_pages": bool(getattr(module, "collect_pages", None)),
+            "has_backfill": bool(getattr(module, "backfill", None)),
+            "declared_features": sorted(declared.get("features") or []),
+        }
+
     if method == "source_config":
         return module.source_config().as_dict()
 
     if method == "backfill":
-        hooks = module.backfill()
-        return hooks is not None
+        # `backfill` is an *optional* hookimpl (ADR 0017): a collector that
+        # has no backward walk simply does not define it. Shipped collectors
+        # all define one returning None, so the absence only shows up for an
+        # installed plugin -- where probing the attribute would crash the
+        # child and make an ordinary collection look like a plugin fault.
+        backfill = getattr(module, "backfill", None)
+        if backfill is None:
+            return False
+        return backfill() is not None
 
     if method in {"before_url", "oldest_cursor"}:
         # The BackfillHooks surface, one method per RPC call. The collector
