@@ -1,13 +1,9 @@
-"""Code review 实证: 审计脱敏是否真的挡住凭据。
-
-`redact_headers` 声称敏感头被替换成 `<redacted>`。本文件把这条不变量变成
-可执行事实: 带着真实的 Bearer token 发一次写请求, 然后到 audit_log 里搜明文。
-"""
+"""Authenticated writes retain attributable audit evidence without credentials."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
@@ -17,11 +13,9 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.main import create_app, create_engine_for
+from adapters.db_models import AuditLog
+from app.main import create_app
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-# Deliberately looks like a real credential: if redaction regresses, this
-# string is what would land in a permanently-retained audit table.
 WRITE_TOKEN = "pearss-live-token-9f3a2b7c"
 FEED_URL = "https://planetpython.org/rss20.xml"
 
@@ -47,89 +41,90 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         yield opened
 
 
-@contextmanager
-def _audit_engine(tmp_path: Path) -> Iterator[sa.Engine]:
-    """A short-lived engine over the audit database.
-
-    Opens its own engine rather than reusing the request's session factory: by
-    the time an async test's assertions run, that factory's engine may already
-    be disposed, and a closed engine here would look like an empty audit table
-    rather than the error it is.
-    """
-    url = str(
-        sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "integration.db"))
-    )
-    engine = create_engine_for(url)
-    try:
-        yield engine
-    finally:
-        engine.dispose()
-
-
-def _audit_blob(tmp_path: Path) -> str:
-    """Every retained `args_redacted` row, concatenated for a substring search."""
-    with _audit_engine(tmp_path) as engine, engine.connect() as conn:
-        rows = conn.execute(
-            sa.text("select coalesce(args_redacted, '') from audit_log")
-        ).fetchall()
-    return "\n".join(r[0] for r in rows)
-
-
-def _audit_count(tmp_path: Path) -> int:
-    """Rows in the audit table, so an empty table cannot fake a pass."""
-    with _audit_engine(tmp_path) as engine, engine.connect() as conn:
-        return int(
-            conn.execute(sa.text("select count(*) from audit_log")).scalar() or 0
-        )
+def _audit_for(
+    session_factory: sessionmaker[Session], response: httpx.Response
+) -> AuditLog:
+    # scalar_one fails for absent evidence, not merely leaked credentials.
+    with session_factory() as session:
+        return session.scalars(
+            sa.select(AuditLog).where(AuditLog.id == response.headers["x-audit-id"])
+        ).one()
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_bearer_token_never_reaches_audit_log(
-    client: httpx.AsyncClient, tmp_path: Path
+    client: httpx.AsyncClient, session_factory: sessionmaker[Session]
 ) -> None:
-    await client.post(
+    """User writes with a credential; the matching successful audit is redacted."""
+    response = await client.post(
         "/v1/sources",
-        headers={"Idempotency-Key": "audit-redaction-1"},
-        json={"url": FEED_URL, "type": "rss"},
+        headers={"Idempotency-Key": "audit-redaction-1", "X-Request-ID": "redaction-1"},
+        json={
+            "url": FEED_URL,
+            "type": "rss",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
     )
-
-    blob = _audit_blob(tmp_path)
-    # Guard against the empty-table trap: if nothing was audited, the
-    # "token absent" assertion below is vacuously true and would pass even
-    # with redaction completely removed.
-    assert _audit_count(tmp_path) > 0, "audit table empty; assertion is vacuous"
-    assert WRITE_TOKEN not in blob, "bearer token leaked into audit_log"
+    assert response.status_code == 201
+    row = _audit_for(session_factory, response)
+    assert (row.operation, row.outcome, row.correlation_id) == (
+        "POST /v1/sources",
+        "succeeded",
+        "redaction-1",
+    )
+    assert '"authorization": "<redacted>"' in json.loads(row.args_redacted)["headers"]
+    assert WRITE_TOKEN not in row.args_redacted
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_credential_header_is_marked_not_dropped(
-    client: httpx.AsyncClient, tmp_path: Path
+    client: httpx.AsyncClient, session_factory: sessionmaker[Session]
 ) -> None:
-    """脱敏应在原位留标记, 而不是让「有凭据」和「无认证」变得无法区分。"""
-    await client.post(
+    """User can distinguish a redacted credential from an absent credential."""
+    response = await client.post(
         "/v1/sources",
-        headers={"Idempotency-Key": "audit-redaction-2"},
-        json={"url": FEED_URL, "type": "rss"},
+        headers={"Idempotency-Key": "audit-redaction-2", "X-Request-ID": "redaction-2"},
+        json={
+            "url": FEED_URL,
+            "type": "rss",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
     )
-
-    blob = _audit_blob(tmp_path)
-    if blob:
-        assert "<redacted>" in blob
+    assert response.status_code == 201
+    row = _audit_for(session_factory, response)
+    assert (row.operation, row.outcome, row.correlation_id) == (
+        "POST /v1/sources",
+        "succeeded",
+        "redaction-2",
+    )
+    assert '"authorization": "<redacted>"' in json.loads(row.args_redacted)["headers"]
+    assert WRITE_TOKEN not in row.args_redacted
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_rejected_write_is_still_audited(
-    client: httpx.AsyncClient, tmp_path: Path
+    client: httpx.AsyncClient, session_factory: sessionmaker[Session]
 ) -> None:
-    """越权/非法写必须留下审计痕迹; 静默拒绝等于审计缺口。"""
-    await client.post(
+    """User submits invalid configuration with valid authentication.
+
+    Then the validation rejection has a matching redacted audit. This is not
+    an unauthenticated perimeter refusal, deliberately unaudited by ADR 0016.
+    """
+    response = await client.post(
         "/v1/sources",
-        headers={"Idempotency-Key": "audit-redaction-3"},
+        headers={"Idempotency-Key": "audit-redaction-3", "X-Request-ID": "redaction-3"},
         json={"url": FEED_URL, "type": "rss", "schedule_policy": {"type": "nope"}},
     )
-
-    blob = _audit_blob(tmp_path)
-    assert WRITE_TOKEN not in blob
+    assert response.status_code == 422
+    row = _audit_for(session_factory, response)
+    assert (row.operation, row.outcome, row.correlation_id) == (
+        "POST /v1/sources",
+        "rejected",
+        "redaction-3",
+    )
+    assert response.headers["x-request-id"] == "redaction-3"
+    assert '"authorization": "<redacted>"' in json.loads(row.args_redacted)["headers"]
+    assert WRITE_TOKEN not in row.args_redacted
