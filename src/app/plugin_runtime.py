@@ -533,18 +533,28 @@ class HostClientTransport(httpx.BaseTransport):
 
     The lifespan owns one shared `httpx.Client` (connection pool, timeouts);
     the sandbox expects `httpx.BaseTransport.handle_request`. This adapter
-    forwards into the client's send path. Egress policy note: the SSRF
-    private-address guard lives in `adapters.http._request`, the path
-    *host-initiated* fetches take; reverse-proxied child egress through this
-    adapter is gated by whatever fronts the client (a proxy, a firewall), or
-    by wrapping it in a policy transport at wiring time.
+    forwards into the client's send path with redirects disabled, validating
+    both each requested destination and any returned redirect destination.
+    The child retains redirect method/header handling. Host-side response-size
+    and elapsed-deadline enforcement remain separate, unfinished work.
     """
 
     def __init__(self, client: httpx.Client) -> None:
         self._client = client
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        response = self._client.send(request)
+        from urllib.parse import urljoin
+
+        from adapters.http import REDIRECT_STATUSES, check_destination
+
+        check_destination(str(request.url))
+        # The child owns redirect method/cookie handling. Never let the shared
+        # client's follow_redirects=True bypass the host's per-hop guard.
+        response = self._client.send(request, follow_redirects=False)
+        if response.status_code in REDIRECT_STATUSES:
+            location = response.headers.get("location")
+            if location:
+                check_destination(urljoin(str(request.url), location))
         response.read()
         # `send` returns content already decompressed, but the original
         # content-encoding header travels with it; a child-side httpx would

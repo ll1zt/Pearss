@@ -29,6 +29,7 @@ __all__ = [
     "ConditionalState",
     "FetchError",
     "FetchPolicy",
+    "check_destination",
     "fetch",
     "post_json",
 ]
@@ -404,6 +405,14 @@ def _request(
         last_modified=last_modified,
         correlation_id=correlation_id,
     )
+
+
+def check_destination(url: str) -> None:
+    """Refuse unsupported/private HTTP destinations before host egress."""
+    if urlsplit(url).scheme not in {"http", "https"}:
+        raise FetchError(ErrorClass.BLOCKED, "non-HTTP destination refused")
+    if not allow_private_fetch() and _resolves_private(url):
+        raise FetchError(ErrorClass.BLOCKED, "private-address fetch refused")
 
 
 def _request_headers(
