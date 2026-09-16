@@ -1,6 +1,6 @@
 # 0023 · 第三方插件加载器：用户自负其责
 
-- 状态：accepted
+- 状态：accepted（2026-09-17 部分修订：安装来源判定与「无源插件永不执行」由 [0025](0025-restore-approved-plugin-installations.md) 取代）
 - 日期：2026-09-16
 - 关联：ADR 0017（hookspec 冻结 / pluggy 注册表 / P2b 子进程沙箱）、ADR 0016（公网暴露收口）、ADR 0012（登录型采集器，风险承担范式）、ADR 0020（NixOS 部署）
 - 前置：ADR 0017 把 `:import` / `:uninstall` / `:reload` 留为 409 占位（"P2b 的 loader 才有意义"），本 ADR 交付该 loader

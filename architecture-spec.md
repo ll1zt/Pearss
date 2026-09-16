@@ -334,6 +334,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 审计位置 | Core API 层中间件 | 可逆 | 覆盖一切调用方 |
 | 网关时机 | P3 随子模块拆分引入 | 可逆 | 单 server 阶段 YAGNI |
 | 插件落地 | 准插件先行，P2 冻结 hookspec | 可逆 | Rule of Three |
+| 插件重启恢复 | 从持久化审批记录恢复；清单 checksum 匹配后才子进程校验 | 可逆 | 不扫描未审批目录，不把 trust 当安装来源；见 ADR 0025 |
 | 写操作安全 | elicitation 确认 + server 侧执行 | 难逆 | 防注入驱动写操作 |
 | 插件隔离 | L1 进程内 / L2 子进程 / L3 WASM 观望 | 可逆 | 信任分级 |
 | 处理产物 | ItemEnrichment 独立存储 | 难逆 | 可重放、多版本共存 |
