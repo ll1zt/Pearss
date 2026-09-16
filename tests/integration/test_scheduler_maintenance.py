@@ -39,13 +39,15 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.audit import record
 from adapters.db_models import AuditLog
 from adapters.repository import (
     claim_job_run,
     create_job_run,
+    create_source,
     ensure_collect_job,
 )
-from core.enums import JobRunStatus
+from core.enums import AuditOutcome, JobRunStatus, SourceStatus
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -325,69 +327,92 @@ def test_retention_of_zero_disables_pruning(
 
 
 # --------------------------------------------------------------------------
-# Scenario: the loop actually calls the maintenance passes
+# Scenario: the loop itself closes orphans and prunes expired audit rows
 # --------------------------------------------------------------------------
 #
 # The tests above drive the passes directly, which proves they work but not
 # that anything invokes them. That distinction is the whole reason this file
 # exists -- the repository functions were already tested while the loop's calls
-# to them were not -- so the wiring gets its own check.
+# to them were not -- so the wiring gets its own check: the real loop, real
+# repositories, and only the timer replaced.
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_the_tick_loop_calls_both_maintenance_passes(
+async def test_user_abandoned_runs_close_and_expired_audits_disappear_in_the_loop(
     session_factory: sessionmaker[Session],
     idle_client: httpx.Client,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`_loop` must run both passes after each tick.
+    """Given stale and live facts, when the loop runs, only stale facts change.
 
-    Written against the loop body rather than by starting a background task
-    with a real sleep: the assertion is "these three things happen in this
-    order, every iteration", and `asyncio.sleep` is what makes an iteration
-    long. Replacing only the sleep keeps the ordering real while removing the
-    wait.
+    Drive the real loop, not startup reaping or substituted maintenance methods.
+    Paused sources keep collection idle without replacing tick_once. Only the
+    timer is virtual: each wait advances time and bounds the loop's lifetime.
     """
-    called: list[str] = []
-    from app.scheduler import Scheduler
+    monkeypatch.setenv("PEARSS_AUDIT_RETENTION_DAYS", "30")
+    with session_factory() as session:
+        for run_id, claimed in (
+            ("abandoned", _claimed_ago(days=1)),
+            ("live", _claimed_ago(minutes=1)),
+        ):
+            url = f"https://{run_id}.example/feed"
+            source = create_source(
+                session,
+                source_type="rss",
+                url=url,
+                canonical_url=url,
+                schedule_policy='{"type":"fixed","interval":"30m"}',
+                tenant_id="default",
+                at=claimed,
+            )
+            source.status = SourceStatus.PAUSED.value
+            job_id = ensure_collect_job(
+                session,
+                source_id=source.id,
+                tenant_id="default",
+                at=claimed,
+            )
+            create_job_run(
+                session,
+                run_id=run_id,
+                job_id=job_id,
+                correlation_id=run_id,
+                at=claimed,
+            )
+            claim_job_run(session, run_id=run_id, at=claimed)
+        for audit_id, occurred in (
+            ("expired", datetime(2020, 1, 1, tzinfo=UTC)),
+            ("retained", datetime(2099, 1, 1, tzinfo=UTC)),
+        ):
+            record(
+                session,
+                audit_id=audit_id,
+                actor="user",
+                operation="POST /v1/sources",
+                outcome=AuditOutcome.SUCCEEDED,
+                correlation_id=audit_id,
+                occurred_at=occurred,
+            )
+        session.commit()
 
-    scheduler = Scheduler(
-        session_factory,
-        client=idle_client,
-        tick_seconds=3600,
-        monotonic=_Clock(),
-    )
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    waits = 0
 
-    async def _tick() -> None:
-        called.append("tick")
-
-    async def _reap() -> None:
-        called.append("reap")
-
-    async def _prune() -> None:
-        called.append("prune")
-
-    monkeypatch.setattr(scheduler, "tick_once", _tick)
-    monkeypatch.setattr(scheduler, "_reap_orphaned_runs_if_due", _reap)
-    monkeypatch.setattr(scheduler, "_prune_audit_if_due", _prune)
-
-    slept: list[float] = []
-
-    async def _fake_sleep(seconds: float) -> None:
-        # The loop sleeps *before* its body, so the body runs once per sleep.
-        # Letting three sleeps through yields two complete iterations, which is
-        # what shows the ordering is a loop body and not a one-shot sequence.
-        slept.append(seconds)
-        if len(slept) > 2:
+    async def advance_timer(seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        if waits > 2:
             raise asyncio.CancelledError
+        clock.advance(seconds)
 
-    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
-
+    monkeypatch.setattr(asyncio, "sleep", advance_timer)
     with pytest.raises(asyncio.CancelledError):
         await scheduler._loop()
 
-    # The sleep is the tick interval, and the three passes run in this order
-    # after every wait -- twice, so a reordering or a dropped call is visible.
-    assert slept == [3600, 3600, 3600], slept
-    assert called == ["tick", "reap", "prune"] * 2, called
+    assert _run_status(session_factory, "abandoned") == "timed_out"
+    assert _run_status(session_factory, "live") == "running"
+    with session_factory() as session:
+        remaining = session.scalars(sa.select(AuditLog.id)).all()
+    assert remaining == ["retained"]
