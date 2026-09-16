@@ -17,9 +17,17 @@ docs/integrations/readyou-freshrss-compat-findings.md.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import httpx
 import pytest
+from fastapi import FastAPI
+from sqlalchemy.orm import Session
 
+from app.pipeline import normalise_and_store
+from core.models import ItemDraft
+
+from .conftest import TENANT
 from .test_reader_api import (
     READ_TAG,
     READING_LIST,
@@ -481,3 +489,317 @@ async def test_rename_and_disable_reject_a_non_label_stream(
             data={"T": token, **body},
         )
         assert response.status_code == 400, f"{path}: {response.text}"
+
+
+# --------------------------------------------------------------------------
+# Pagination: `continuation`
+# --------------------------------------------------------------------------
+
+
+async def walk_ids(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    include: str | None = None,
+    exclude: str | None = None,
+    limit: int,
+    max_pages: int = 50,
+) -> list[str]:
+    """Walk `stream/items/ids` the way Read You does: follow `continuation`.
+
+    This is `fetchItemIdsAndContinue` in `GoogleReaderRssService.kt`, which
+    loops while the reply carries a non-null `continuation`. Replaying that
+    loop is the point: the client's ability to see every item depends on our
+    cursor, so asserting against our own paging (rather than the client's
+    abstraction) would be testing the wrong contract.
+    """
+    params: dict[str, str] = {"output": "json", "s": READING_LIST, "n": str(limit)}
+    if include is not None:
+        params["it"] = include
+    if exclude is not None:
+        params["xt"] = exclude
+
+    collected: list[str] = []
+    cursor: str | None = None
+    for _ in range(max_pages):
+        query = dict(params)
+        if cursor is not None:
+            query["c"] = cursor
+        response = await client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params=query,
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        collected.extend(ref["id"] for ref in payload.get("itemRefs", []))
+        cursor = payload.get("continuation")
+        if cursor is None:
+            return collected
+    raise AssertionError(f"pagination did not terminate after {max_pages} pages")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_limited_query_offers_a_cursor_for_the_rest(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """A short page must say there is more, or the client believes it has all.
+
+    Given three items and a page size of two
+    When Read You asks for the first page
+    Then the reply carries a continuation, and following it yields the third
+
+    Without the cursor the client's loop terminates after one page and it
+    concludes the two ids it saw are the whole stream. That is the same
+    failure as returning a wrong set: a silent, plausible-looking subset.
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+    assert len(everything) == 3, "this scenario needs exactly three items"
+
+    first = await reader_client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "s": READING_LIST, "n": "2"},
+    )
+    payload = first.json()
+    assert len(payload["itemRefs"]) == 2
+    assert payload.get("continuation"), (
+        f"a partial page must offer a cursor; got {payload.get('continuation')!r}"
+    )
+
+    walked = await walk_ids(reader_client, token, limit=2)
+    assert sorted(walked) == sorted(everything)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_walking_the_pages_reaches_every_item_exactly_once(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """The union of the pages is the stream, with no gaps and no repeats.
+
+    Given three items
+    When the stream is walked two at a time
+    Then every item appears exactly once
+
+    Repeats would be worse than useless: Read You accumulates ids into a
+    Set and then treats membership as "read", so a cursor that re-served an
+    earlier page would inflate the set rather than fail visibly.
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+
+    for page_size in (1, 2, 3, 4):
+        walked = await walk_ids(reader_client, token, limit=page_size)
+        assert sorted(walked) == sorted(everything), (
+            f"page size {page_size} walked {walked}, expected {everything}"
+        )
+        assert len(walked) == len(set(walked)), f"page size {page_size} repeated ids"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_last_page_carries_no_cursor(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """Terminating matters as much as continuing: a cursor forever hangs the client.
+
+    Given a page size larger than the stream
+    When the query is answered
+    Then there is no continuation
+
+    Read You's loop is `while continuation != null`, so a cursor on the
+    final page would make it page endlessly, re-fetching the same ids.
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+
+    response = await reader_client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "s": READING_LIST, "n": str(len(everything) + 5)},
+    )
+    payload = response.json()
+    assert len(payload["itemRefs"]) == len(everything)
+    assert payload.get("continuation") in (None, ""), (
+        f"the last page must not offer a cursor; got {payload.get('continuation')!r}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_paging_a_filtered_stream_walks_only_matching_items(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """Filters apply to every page, not just the first.
+
+    Given two read items out of three
+    When the read stream is walked one item at a time
+    Then exactly the read items arrive, and the cursor still terminates
+
+    This is the shape Read You uses for its read set on a FreshRSS account
+    (`s=reading-list&it=read`), and the shape whose truncation caused the
+    missed read propagation. With a cursor the client can now see all of it.
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+    await edit(reader_client, token, everything[:2], add=[READ_TAG])
+
+    walked = await walk_ids(reader_client, token, include=IT_READ, limit=1)
+    assert sorted(walked) == sorted(everything[:2])
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_cursor_at_the_depth_cap_terminates_the_walk(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """The depth cap must end the stream, not serve the same page forever.
+
+    Given a cursor already at the server's maximum offset
+    When the next page is requested
+    Then it comes back empty and offers no further cursor
+
+    A clamped cursor that kept being offered would make Read You's
+    `while continuation != null` loop run forever, re-requesting one offset
+    -- a hang rather than a wrong answer, and one caused purely by our own
+    guard.
+    """
+    token = await login(reader_client)
+    for cursor in ("100000", "100001", "999999999"):
+        response = await reader_client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params={"output": "json", "s": READING_LIST, "n": "2", "c": cursor},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["itemRefs"] == [], f"cursor {cursor} returned items"
+        assert payload.get("continuation") in (None, ""), (
+            f"cursor {cursor} offered another cursor; the client would loop"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_malformed_cursor_restarts_rather_than_failing(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """A cursor we cannot parse is treated as "start over", not an error.
+
+    The cursor is ours to mint and the client only echoes it, so a bad value
+    means a bug on this side or a hand-written request. Neither is improved
+    by a 500, and Read You would surface that as a failed sync.
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+
+    response = await reader_client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"output": "json", "s": READING_LIST, "n": "1000", "c": "not-a-number"},
+    )
+    assert response.status_code == 200, response.text
+    got = [ref["id"] for ref in response.json()["itemRefs"]]
+    assert got == everything
+
+
+# --------------------------------------------------------------------------
+# The scale at which the missing cursor actually bit
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_read_item_marked_beyond_the_first_page_still_propagates(
+    reader_app: FastAPI, reader_client: httpx.AsyncClient
+) -> None:
+    """The regression this endpoint's cursor exists for, at real scale.
+
+    Given more items than fit in one page
+    And an item far enough back to sit outside a first page of 1000
+    When another client marks it read and this client syncs
+    Then the read is visible in the client's read set
+
+    This is the exact shape of the reported bug: NetNewsWire marked items
+    read, Read You never showed them read. Read You's sync intersects the
+    remote read set with its local unread set, so an item missing from the
+    read set -- because the read query returned only its first page and we
+    never offered a cursor -- could not be reconciled. The reverse direction
+    worked because it writes through edit-tag, which is not paged.
+
+    The count is deliberately past the page size: with 1200 items a single
+    1000-item page cannot contain the oldest ones, which is what makes this
+    a regression test rather than a restatement of the paging tests above.
+    """
+    token = await login(reader_client)
+    headers = auth_header(token)
+    factory = reader_app.state.session_factory
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+
+    drafts = [
+        ItemDraft(
+            source_id="src-1",
+            external_id=f"scale-{index}",
+            title=f"Scale item {index}",
+            canonical_url=f"https://blog.example.com/scale/{index}",
+            published_at=base + timedelta(minutes=index),
+            content=f"<p>body {index}</p>",
+        )
+        for index in range(1200)
+    ]
+    with Session(factory.kw["bind"]) as session:
+        for start in range(0, len(drafts), 200):
+            normalise_and_store(session, drafts[start : start + 200], tenant_id=TENANT)
+        session.commit()
+
+    async def walk(include: str | None = None) -> list[str]:
+        """Read You's `fetchItemIdsAndContinue`: follow the cursor to the end."""
+        collected: list[str] = []
+        cursor: str | None = None
+        for _ in range(60):
+            params: dict[str, str] = {
+                "output": "json",
+                "s": READING_LIST,
+                "n": str(READYOU_LIMIT),
+            }
+            if include is not None:
+                params["it"] = include
+            if cursor is not None:
+                params["c"] = cursor
+            response = await reader_client.get(
+                "/api/greader.php/reader/api/0/stream/items/ids",
+                headers=headers,
+                params=params,
+            )
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            collected.extend(ref["id"] for ref in payload["itemRefs"])
+            cursor = payload.get("continuation")
+            if cursor is None:
+                return collected
+        raise AssertionError("the walk never terminated")
+
+    everything = await walk()
+    assert len(everything) >= 1200, f"expected the whole stream, got {len(everything)}"
+
+    # The oldest item: last in newest-first order, so far outside one page.
+    oldest = everything[-1]
+    written = await reader_client.post(
+        "/api/greader.php/reader/api/0/edit-tag",
+        data={"T": token, "i": [oldest], "a": [READ_TAG]},
+    )
+    assert written.status_code == 200
+
+    # The client's local view is its pre-sync state: it holds every item and
+    # still considers this one unread, because the mark happened elsewhere.
+    local_unread = set(everything)
+    read_set = set(await walk(include=IT_READ))
+
+    assert oldest in read_set, (
+        "the read set is missing an item that was marked read; a client "
+        "cannot reconcile what it is not told about"
+    )
+    assert read_set & local_unread == {oldest}

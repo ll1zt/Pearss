@@ -585,6 +585,15 @@ def stream_items_ids(
 ) -> dict[str, object]:
     """Item ids for a stream.
 
+    `c` is a continuation cursor: the reply carries `continuation` while more
+    items remain, and the client follows it. That is part of the protocol,
+    not an optimisation -- a client that cannot page can only ever see the
+    first page, and it has no way to tell a truncated answer from a complete
+    one. Read You's `fetchItemIdsAndContinue` loops `while continuation !=
+    null`, so omitting the cursor made it treat the first 1000 ids as the
+    whole read set, which is how a read item marked in another client failed
+    to propagate.
+
     `xt` excludes a state, `it` includes one -- both are how a client fetches
     a subset, and both are applied in SQL so `n` bounds the *answer* rather
     than the pre-filter set. That ordering is load-bearing: Read You asks for
@@ -598,6 +607,12 @@ def stream_items_ids(
     the result as "these are read", it marked every unread item read on each
     sync, while a parallel branch flipped them back. The unread count
     oscillated between 0 and the total.
+
+    The page size bounds the *answer*, so a short page is meaningful: if
+    fewer ids come back than were asked for, the stream is exhausted. That is
+    what lets the cursor below be a plain offset rather than something the
+    client has to interpret -- it never has to compare pages, only to keep
+    asking while a cursor is offered.
 
     Pending items are always excluded: the gate applies to the Reader API just
     as it does to RSS.
@@ -613,37 +628,80 @@ def stream_items_ids(
     if xt and not exclude_states:
         return {"itemRefs": [], "continuation": None}
 
+    offset = _offset(c)
+    limit = max(1, min(n, 10000))
     with request.app.state.session_factory() as session:
+        # One row beyond the page: its presence is how "there is more" is
+        # known without a second COUNT over the same filtered set. A count
+        # would also have to repeat every filter, and a rule written twice is
+        # a rule that drifts.
         ids = visible_ids_for_stream(
             session,
             stream_id=s,
             tenant_id=TENANT,
-            limit=max(1, min(n, 10000)),
-            offset=_offset(c),
+            limit=limit + 1,
+            offset=offset,
             include_states=include_states,
             exclude_states=exclude_states,
         )
 
+    has_more = len(ids) > limit and _more_than(c)
+    page = ids[:limit]
+    next_offset = offset + len(page)
+
     # Decimal, not hex: NetNewsWire does Int(id)! on these values and drops
     # every entry it cannot parse as an integer.
     return {
-        "itemRefs": [{"id": str(reader_api.reader_id(item_id))} for item_id in ids],
-        "continuation": None,
+        "itemRefs": [{"id": str(reader_api.reader_id(item_id))} for item_id in page],
+        # A cursor, never null-unless-exhausted. Read You loops
+        # `while continuation != null`, so omitting it here would terminate
+        # its walk after one page and it would treat what it saw as the whole
+        # stream -- the silent-subset failure this endpoint has already
+        # produced twice (the ignored `it=`, the post-LIMIT `xt` filter).
+        # miniflux returns the same numeric offset (`len(itemRefs) + offset`).
+        "continuation": str(next_offset) if has_more else None,
     }
 
 
 # A continuation cursor deeper than this many items is a client bug or an
-# attacker; either way the answer is an empty stream, not an unbounded scan.
+# attacker; either way the walk stops there rather than scanning without
+# bound. The cap must terminate the stream, not clamp to the same value
+# forever: a client looping `while continuation != null` would otherwise
+# re-request the same offset indefinitely.
 _MAX_OFFSET: Final[int] = 100_000
 
 
 def _offset(cursor: str | None) -> int:
+    """The starting row for a page, from the client's opaque cursor.
+
+    An unparseable cursor restarts at the beginning rather than erroring:
+    the cursor is ours to produce and the client only echoes it, so a
+    malformed one means a bug on this side or a hand-written request, and
+    neither is improved by a 500.
+    """
     if not cursor:
         return 0
     try:
         return min(max(0, int(cursor)), _MAX_OFFSET)
     except ValueError:
         return 0
+
+
+def _more_than(cursor: str | None) -> bool:
+    """Whether the walk has reached its depth cap and must report the end.
+
+    Called with the cursor the client sent: if it was already at (or past)
+    the cap, `_offset` returned the cap, so the next cursor would be the
+    same value or greater and the client would loop. Answering "no more"
+    here converts that into a terminating walk that is honest about where it
+    stopped.
+    """
+    if not cursor:
+        return True
+    try:
+        return int(cursor) < _MAX_OFFSET
+    except ValueError:
+        return True
 
 
 @router.post("/reader/api/0/stream/items/contents")

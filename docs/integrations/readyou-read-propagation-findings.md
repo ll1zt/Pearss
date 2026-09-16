@@ -3,12 +3,26 @@
 - 日期：2026-09-16
 - 现象（用户报告）：**在 NetNewsWire 里读到一些文章 → 刷新同步；Read You 里这些
   文章**没有**变成已读。反向（Read You 标记 → NNW 可见）正常。**
-- 结论：**服务端行为正确，问题在 Read You 客户端的全局同步逻辑。**
-  我们无法在服务端修复，但可以解释清楚、并判断是否有服务端缓解手段。
+- 结论：**Read You 客户端的全局同步逻辑有缺陷，但它之所以被触发，是因为
+  我们少实现了一个协议能力（`continuation`）。服务端已补上，问题消除。**
+- 状态：**已修复**。修复为 `stream/items/ids` 实现 `continuation` 游标；
+  回归测试 `test_a_read_item_marked_beyond_the_first_page_still_propagates`
+  （1200 条规模，标记最早一条，验证其出现在已读集合里）。
 
 证据档位：以下"实测"均为 A 档（对一个已迁移实例回放对端真实请求序列）。
 
 ---
+
+## 结论摘要（先看这个）
+
+| 层 | 状态 |
+|---|---|
+| 服务端的已读**存储** | ✅ 一直是对的 |
+| 服务端的 `it=` 已读**查询** | ✅ 正确（ADR 0024 已修） |
+| 服务端的**翻页** | ❌ 恒返回 `continuation: null` → **已修复** |
+| Read You 的全局 sync | ⚠️ 依赖翻页；有游标后不再漏 |
+| Read You 的 per-feed sync | ✅ 本来就对（自洽推导，不依赖翻页） |
+
 
 ## 一、先证明服务端是对的
 
@@ -158,25 +172,69 @@ miniflux 正是这么做的：`continuation` 是"数字 offset 编码成 JSON �
 
 ---
 
-## 四、建议
+## 四、修复（已实施）
 
-| 方案 | 说明 | 判断 |
-|---|---|---|
-| **A. 实现 `continuation` 游标**（推荐） | `c` 已经解析为 offset，只需在"还有更多"时返回 `continuation=str(next_offset)`。Read You 的标准翻页循环会自行拉全 | 修的是服务端真实缺陷（协议要求），且直接解决本问题 |
-| B. 什么都不做 | 它是 Read You 的客户端逻辑问题 | 本问题持续存在；已读量大时全局同步持续漏 |
-| C. 提高 `n` 上限 | 只是把阈值推后，不解决"必须翻页"的协议缺陷 | 不推荐 |
+采用方案 A：`stream/items/ids` 现在返回真正的 `continuation` 游标。
 
-**A 的理由**：这不是"为了迁就一个客户端"——`continuation` 是 greader 协议
-规定的能力，我们返回 `null` 等于宣称数据只有一页（不实）。ADR 0024 修的
-`it=`/`xt` 也是同类：**参数被忽略 → 静默给出错误集合**。
+### 实现
 
-A 的实现要点（待确认后再动手）：
-- `visible_ids_for_stream` 已知 `offset`；多取一条（`limit+1`）即可判断有无下一页
-- 返回 `continuation=str(offset + limit)`；取完则 `null`
-- 保持 `_MAX_OFFSET` 上限，避免无界翻页
-- 必须保证**同一查询的翻页结果稳定**（我们的排序 `published_at DESC, id`
-  是确定的，满足）
-- 按 behavior-first：先写"翻页能取全"的 e2e，再改实现
+`src/app/reader_routes.py`：
+
+```python
+offset = _offset(c)
+limit = max(1, min(n, 10000))
+ids = visible_ids_for_stream(..., limit=limit + 1, offset=offset)
+#                          ^^^^^^^^^^^ 多取一条，用它的存在判断"还有更多"
+
+has_more = len(ids) > limit and _more_than(c)
+page = ids[:limit]
+return {
+    "itemRefs": [...],
+    "continuation": str(offset + len(page)) if has_more else None,
+}
+```
+
+要点：
+
+- **多取一条**判断有无下一页，而不是再跑一次 COUNT。COUNT 必须重复应用
+  全部过滤条件，而"同一条规则写两遍"就是规则漂移的来源。
+- **游标是数字 offset**，与 miniflux 同形（`len(itemRefs) + offset`）；
+  其 README 明确说这不是不透明 token。
+- **深度上限必须终止，而不是夹紧**。原来的 `_offset` 把超限游标夹到
+  `_MAX_OFFSET`；若照此继续返回游标，客户端会**永远请求同一个 offset**
+  （`while continuation != null` 死循环）。新增 `_more_than(c)`：
+  游标已达上限时回答"没有更多"，让遍历结束。
+- **解析不了的游标回到开头**，不报错：游标由我们生成、客户端只是回传，
+  非法值要么是我们的 bug 要么是手写请求，两者都不会因为 500 变好。
+
+### 验证（A 档，实测）
+
+**1. 小规模契约**（保留为常驻测试，20 个场景）：
+- 分页取全：`page_size ∈ {1,2,3,4}` 都能走完全部条目，且无重复
+- 最后一页不带游标（防无限翻页）
+- 过滤流翻页：`it=read` 每页都过滤，游标仍终止
+- 深度上限终止 / 非法游标回退
+
+**2. 真实规模回归**（1200 条，保留为常驻测试）：
+
+```
+total walked: 1203 in 2 pages        ← 修复前只有 1 页、1000 条
+marked oldest read: 200
+read set walked: contains target? True
+toBeReadLocal = remoteRead ∩ localUnread = 2 -> [两个被标记的条目]
+```
+
+即：**一个位于"最新 1000 条"之外的条目，现在能正常传播到客户端。**
+这正是用户报告的场景。
+
+**3. 修复前对照**：同一探针在修复前，`read set` 被截断在 1000 条，
+目标条目不在其中，`toBeReadLocal` 漏掉它。
+
+### 一个诚实的限制
+
+此修复让**今后**不再漏，但**不会自动补回**客户端本地已经漏掉的已读状态。
+Read You 若已经同步过并标记为未读，需要它重新拉全（例如清数据重同步），
+或等这些条目因其他原因重新进入同步窗口。
 
 ---
 
@@ -187,3 +245,8 @@ A 的实现要点（待确认后再动手）：
 - **同一客户端的不同代码路径可以有不同结论**：Read You 的 `syncFeed` 正确、
   `sync` 错误。只看一处会得出相反结论。
 - **返回"没有下一页"是一个肯定性断言**，和返回错误集合一样可以是错的。
+- **"客户端 bug"不等于"服务端无责"**：如果协议能力本身没实现，
+  客户端依赖它就是一个坐在那里等着被触发的缺陷。判断"是谁的错"和
+  判断"该不该修"是两个问题。
+- **上限夹紧（clamp）在分页里等于无限循环**：任何"超出范围就取边界值"的
+  保护，在"客户端按游标循环"的语境下都必须改成"到边界就终止"。

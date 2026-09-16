@@ -85,7 +85,7 @@ FreshRSS API。
 | `/reader/api/0/user-info` | GET | 账号校验 |
 | `/reader/api/0/subscription/list` | GET | 订阅列表 |
 | `/reader/api/0/tag/list` | GET | 星标状态 |
-| `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，`xt` 排除、`it` 包含（均在 SQL 中生效） |
+| `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，`xt` 排除、`it` 包含（均在 SQL 中生效），带 `continuation` 翻页 |
 | `/reader/api/0/stream/items/contents` | POST | 条目正文 |
 | `/reader/api/0/edit-tag` | POST | 已读 / 星标回写 |
 | `/reader/api/0/mark-all-as-read` | POST | 批量标记已读 |

@@ -162,3 +162,23 @@ Read You 的 `deleteFeed` 发 `subscription/edit?ac=unsubscribe`，我们返回 
 的 SQL 下推可退回 Python 过滤（但会重新引入震荡）。
 **不可逆的只有已发生的写入**：quickadd 创建的 source、rename/disable 改过的
 `source.folder` 都已是事实数据，需要按常规 source 管理处置。
+
+## 修订（2026-09-16）：`stream/items/ids` 补上 `continuation`
+
+本 ADR 决策 2 修掉了 `it=`/`xt` 的"静默给出错误集合"，但**同一个端点还有
+第三个同类缺陷当时没被发现**：响应恒返回 `continuation: null`。
+
+后果（用户报告）：**NNW 标记的已读传不到 Read You**（反向正常）。Read You
+全局 sync 把远程已读集合与本地未读求交，而已读集合受 `n=1000` 约束；
+没有游标就只取到最新 1000 条已读，超出窗口的条目两个分支都漏掉。
+用户观察到的"方向性"正是线路差异 —— 反向走 `edit-tag`（不经过分页）。
+
+修复：按 `limit + 1` 多取一条判断有无下一页，返回
+`continuation = str(offset + len(page))`，取完为 `null`。
+miniflux 同形（`len(itemRefs) + offset`）。另修正深度上限语义：
+原 `_offset` 把超限游标**夹紧**到 `_MAX_OFFSET`，若继续返回游标会让客户端
+永久循环；改为达到上限即报告结束。
+
+本 ADR 的决策 1–5 不变；决策 2 的推理同样适用于本次（**参数/字段被忽略
+→ 静默给出子集**）。完整排障见
+[`readyou-read-propagation-findings.md`](../integrations/readyou-read-propagation-findings.md)。
