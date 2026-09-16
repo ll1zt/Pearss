@@ -85,10 +85,18 @@ FreshRSS API。
 | `/reader/api/0/user-info` | GET | 账号校验 |
 | `/reader/api/0/subscription/list` | GET | 订阅列表 |
 | `/reader/api/0/tag/list` | GET | 星标状态 |
-| `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，支持 `xt` 排除已读 |
+| `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，`xt` 排除、`it` 包含（均在 SQL 中生效） |
 | `/reader/api/0/stream/items/contents` | POST | 条目正文 |
 | `/reader/api/0/edit-tag` | POST | 已读 / 星标回写 |
 | `/reader/api/0/mark-all-as-read` | POST | 批量标记已读 |
+| `/reader/api/0/subscription/quickadd` | POST | 按 URL 订阅（Read You 加订阅） |
+| `/reader/api/0/rename-tag` | POST | 重命名分组（Read You） |
+| `/reader/api/0/disable-tag` | POST | 删除分组，组内源回 `default`（Read You） |
+
+后三个端点只有 Read You 使用（NNW 的 FreshRSS 账号是只读的）。它的
+`ac=unsubscribe` 有意未实现——删除不可逆、发生在用户看不见的同步里、
+失败即重试，三者叠加使误操作代价过高，故增删订阅走 `/v1` 或 MCP。
+完整决策与其余已知缺口见 ADR 0024。
 
 ### 认证（关键约束）
 
