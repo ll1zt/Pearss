@@ -14,6 +14,7 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | A03 shipped collector retention | Fixed | `508f9c9` |
 | A04 partial processing configuration | Fixed | `5a6a9c3` |
 | A05 host-proxied HTTP | Partial: redirect destination checks only | `69f96c3` |
+| A09 total fetch deadline | Fixed for connect/headers/redirects/streaming; DNS and child-policy propagation excluded | `744eefa` |
 | A08 concurrent body storage | Fixed | `2142c29` |
 | A16 failure backoff floor | Fixed | `6e6b130` |
 | A17 IPv6 canonicalization | Fixed for new normalization; no stored-data migration | `5b9651a` |
@@ -22,11 +23,14 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
 
-**Still open:** A05 host-side body bounds; A06/A07/A09–A15;
+**Still open:** A05 host-side body bounds; A06/A07/A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
 again without implementation. Attempts to delegate A06/A09/A12 failed due to
 provider authentication/rate limits; no repair completion is claimed for them.
+A09 was repaired directly (`744eefa`): the total timeout now cancels real
+streaming I/O; DNS resolution and child-side policy propagation remain
+recorded limits in `docs/guides/host-http-boundaries.md`.
 
 **Combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,
