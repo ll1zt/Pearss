@@ -535,8 +535,8 @@ class HostClientTransport(httpx.BaseTransport):
     the sandbox expects `httpx.BaseTransport.handle_request`. This adapter
     forwards into the client's send path with redirects disabled, validating
     both each requested destination and any returned redirect destination.
-    The child retains redirect method/header handling. Host-side response-size
-    and elapsed-deadline enforcement remain separate, unfinished work.
+    The child retains redirect method/header handling. Decoded response bodies
+    share the direct-fetch size ceiling; child-wide elapsed budgets remain separate.
     """
 
     def __init__(self, client: httpx.Client) -> None:
@@ -545,33 +545,40 @@ class HostClientTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         from urllib.parse import urljoin
 
-        from adapters.http import REDIRECT_STATUSES, check_destination
+        from adapters.http import (
+            DEFAULT_MAX_BYTES,
+            REDIRECT_STATUSES,
+            check_destination,
+            read_capped,
+        )
 
         check_destination(str(request.url))
         # The child owns redirect method/cookie handling. Never let the shared
         # client's follow_redirects=True bypass the host's per-hop guard.
-        response = self._client.send(request, follow_redirects=False)
-        if response.status_code in REDIRECT_STATUSES:
-            location = response.headers.get("location")
-            if location:
-                check_destination(urljoin(str(request.url), location))
-        response.read()
-        # `send` returns content already decompressed, but the original
-        # content-encoding header travels with it; a child-side httpx would
-        # then try to gunzip plain bytes and die with zlib -3. Drop the
-        # transfer-state headers and restate the true length.
+        response = self._client.send(request, stream=True, follow_redirects=False)
+        try:
+            if response.status_code in REDIRECT_STATUSES:
+                location = response.headers.get("location")
+                if location:
+                    check_destination(urljoin(str(request.url), location))
+            body = read_capped(response, DEFAULT_MAX_BYTES, str(request.url))
+        finally:
+            response.close()
+        # Decoded bytes must not retain the original encoding or transfer framing:
+        # the child would otherwise decompress them twice or reapply chunk framing.
         headers = [
             *(
                 (name, value)
                 for name, value in response.headers.raw
-                if name.lower() not in (b"content-encoding", b"content-length")
+                if name.lower()
+                not in (b"content-encoding", b"content-length", b"transfer-encoding")
             ),
-            (b"content-length", str(len(response.content)).encode()),
+            (b"content-length", str(len(body)).encode()),
         ]
         return httpx.Response(
             response.status_code,
             headers=headers,
-            content=response.content,
+            content=body,
         )
 
 

@@ -383,7 +383,7 @@ def _request(
                     error_class = classify(http_status=status) or ErrorClass.NETWORK
                     raise FetchError(error_class, f"HTTP {status} for {_redact(url)}")
 
-                body = _read_capped(response, limits.max_bytes, url)
+                body = read_capped(response, limits.max_bytes, url)
                 response_headers = _safe_headers(response.headers)
                 etag = response.headers.get("etag")
                 last_modified = response.headers.get("last-modified")
@@ -461,7 +461,7 @@ def _accept_header() -> str:
     )
 
 
-def _read_capped(response: httpx.Response, max_bytes: int, url: str) -> bytes:
+def read_capped(response: httpx.Response, max_bytes: int, url: str) -> bytes:
     """Read a response body, refusing to exceed `max_bytes`."""
     chunks: list[bytes] = []
     total = 0
