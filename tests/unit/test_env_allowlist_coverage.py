@@ -38,6 +38,10 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_AUTH_RATELIMIT_WINDOW_SECONDS",
         "PEARSS_AUTH_RATELIMIT_BLOCK_SECONDS",
         "PEARSS_ALLOW_PRIVATE_FETCH",
+        # Where the plugin loader reads installed plugins from (ADR 0023);
+        # host-side, never passed to a child -- a plugin has no business
+        # knowing where other plugins live.
+        "PEARSS_PLUGIN_DIR",
         "PEARSS_SANDBOXED",  # set by the allowlist itself, a marker
         "PEARSS_READER_USERNAME",  # Reader API credentials (app-side)
         "PEARSS_READER_PASSWORD",

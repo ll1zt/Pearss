@@ -85,6 +85,37 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
   后果。它们与其它写工具的一个区别：破坏半径不在参数里，所以确认消息必须把
   「删掉什么」说出来，而不只是复述参数
 
+## 第三方插件装载（ADR 0023）
+
+插件放在 `PEARSS_PLUGIN_DIR`（默认 `/var/lib/pearss/plugins`）下的一个目录里，
+目录名就是 collector_id：
+
+```text
+/var/lib/pearss/plugins/my-collector/
+  manifest.json    # id / version / name / features / required_config
+  collector.py     # hookimpls，模块名必须能被 import 为 `collector`
+  .venv/           # 作者自带的依赖（可选）
+```
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/v1/plugins/my-collector:import \
+  -H "Authorization: Bearer $PEARSS_API_TOKEN" -H "Idempotency-Key: $(uuidgen)"
+```
+
+| 症状 | 查什么 | 说明 |
+|---|---|---|
+| `plugin_load_failed`，消息指明目录 | `PEARSS_PLUGIN_DIR` 与目录名 | 目录名必须等于 manifest 的 `id` |
+| `declares feature 'paged' but implements no …` | 插件的 `source_config()` 与 hookimpl | 声明与实现不符是契约问题（同 ADR 0017 的启动校验），拒绝且不留痕 |
+| 装了但不采集 | 该插件的源是否 `active`、URL 是否被 `match_url` 命中 | **`enabled` ≠ 在运行**：真正执行发生在某个 active 源路由到它、调度器 tick 触发延迟 spawn 时 |
+| 改了代码不生效 | 是否执行了 `:reload` | `:reload` 杀子进程重 spawn；不 reload 则仍在跑旧代码 |
+| `uninstall` 返回 409 | 该插件的活跃源 | 先暂停/删除那些源。卸载**不删磁盘文件**，那是你的目录 |
+| 日志出现 `plugin raised: …` | 插件自身的异常 | 插件未捕获的异常被归类为 `parse` 失败（记录在该源的 run 上），不会逃逸成服务级错误 |
+
+**装载器不判断插件是否安全**（ADR 0023）：它只校验结构与声明一致性。子进程隔离
+（env allowlist + 宿主代理出网 + 资源限额）限制的是**故障半径**，不是**恶意行为** ——
+信任决定属于运行者。若插件声明了 `PEARSS_COOKIECLOUD_` 前缀，它会拿到 CookieCloud
+服务端主密钥（能解密你同步过的全部站点会话），见 ADR 0012 的既有要求。
+
 ## Agent 源与主动接入（A3，ADR 0022）
 
 外部 agent（或你手动）向 Pearss 推送内容。与采集完全同源：推送的条目同样经过
