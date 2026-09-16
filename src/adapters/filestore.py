@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -59,15 +60,18 @@ def store_body(content: str, *, root: Path | None = None) -> str:
         return f"{REF_SCHEME}{digest}"
 
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".tmp")
+    # A unique temporary name per writer: concurrent writers of the same
+    # digest share the destination, and a shared "<digest>.tmp" name would let
+    # one writer's rename remove the file another is still writing to.
+    descriptor, name = tempfile.mkstemp(prefix=f".{digest}.", dir=target.parent)
+    temporary = Path(name)
     try:
-        temporary.write_bytes(data)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
         os.replace(temporary, target)
-    except OSError:
-        # A failed write must not leave a partial file behind for the next
-        # process to mistake for a complete body.
+    finally:
+        # Clean up only this writer's temporary file, including on failure.
         temporary.unlink(missing_ok=True)
-        raise
 
     return f"{REF_SCHEME}{digest}"
 
