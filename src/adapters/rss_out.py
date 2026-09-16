@@ -144,6 +144,7 @@ def _strip_illegal_xml_chars(text: str) -> str:
         if char in "\t\n\r"
         or ("\u0020" <= char <= "\ud7ff")
         or ("\ue000" <= char <= "\ufffd")
+        or ("\U00010000" <= char <= "\U0010ffff")
     )
 
 
