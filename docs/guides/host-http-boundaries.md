@@ -32,24 +32,31 @@ request).
 
 ## Total elapsed deadline (A09)
 
-Direct and proxied fetches now enforce the `FetchPolicy.total_timeout`
-budget as an elapsed wall-clock deadline across connect, headers, redirects
-and streaming. `adapters.deadline_transport.DeadlineTransport` owns an async
-connection pool on a dedicated event-loop thread and caps every blocking
-operation by the remaining budget; expiry cancels the pending I/O, surfaces
-as `FetchError(ErrorClass.NETWORK)` through the existing timeout mapping,
-and releases the socket. The lifespan client (`app.main`) uses it, and
-`tests/integration/test_http_deadline.py` covers a slow body, slow headers,
-cumulative redirects and post-expiry reuse on real loopback sockets.
+Status: **partial**. Direct `fetch`/`post_json` calls using the lifespan-owned
+client propagate one monotonic `FetchPolicy.total_timeout` deadline through
+HTTP redirects and streamed response reads. `DeadlineTransport` bridges the
+synchronous interface to cancellable asynchronous HTTP I/O on its own loop.
+Expiry maps to `FetchError(ErrorClass.NETWORK)` through the fetch adapter.
+Real loopback tests cover slow headers, slow bodies, cumulative redirects,
+connection release after slow-stream expiry, and subsequent client reuse.
+
+The application also uses this transport for reverse-proxied child requests,
+but those receive only the transport's default 60-second **per-request** cap.
+The child's policy deadline is not propagated across RPC or multiple child
+requests. This is not an end-to-end deadline for a plugin collection.
 
 Known limits, recorded rather than hidden:
 
-- DNS resolution is not inside the deadline: a stalled `getaddrinfo` can
-  still exceed the budget before the socket phase starts.
-- A proxied fetch is one host-side RPC; the child's call budget bounds the
-  pipe read between calls, not each blocking reverse-HTTP operation. Each
-  host-side request is capped by the transport's default total budget, but
-  a policy tuned below the RPC budget is not propagated from the child.
+- The synchronous destination-policy DNS checks run outside cancellable I/O.
+  Connection-time resolver work may also outlive cancellation in its resolver
+  thread. No hard bound on resolver resource lifetime is claimed.
+- A plain injected `httpx.Client` without `DeadlineTransport` still provides
+  only phase timeouts. Custom synchronous upload streams are materialized
+  before asynchronous I/O; that materialization is not cancellable.
+- The child's call budget bounds pipe reads, not a blocking reverse-HTTP
+  operation. Its requested policy and remaining call budget still need explicit
+  host-side propagation. TLS stalls, pool contention and cancellation under
+  concurrent shutdown have not received dedicated acceptance tests.
 
 ## Not yet enforced host-side (known gaps)
 

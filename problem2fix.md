@@ -14,7 +14,8 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | A03 shipped collector retention | Fixed | `508f9c9` |
 | A04 partial processing configuration | Fixed | `5a6a9c3` |
 | A05 host-proxied HTTP | Partial: redirect destination checks only | `69f96c3` |
-| A09 total fetch deadline | Fixed for connect/headers/redirects/streaming; DNS and child-policy propagation excluded | `744eefa` |
+| A06 installed plugin restart | Fixed for approved manifests; unavailable records remain stored but absent from runtime list | `379ea62` |
+| A09 total fetch deadline | Partial: cancellable direct HTTP I/O; DNS and end-to-end child budgets remain open | `744eefa` |
 | A08 concurrent body storage | Fixed | `2142c29` |
 | A16 failure backoff floor | Fixed | `6e6b130` |
 | A17 IPv6 canonicalization | Fixed for new normalization; no stored-data migration | `5b9651a` |
@@ -23,14 +24,34 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
 
-**Still open:** A05 host-side body bounds; A06/A07/A10–A15;
+**Still open:** A05 host-side body bounds; A07; A09 remaining deadline
+boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
-again without implementation. Attempts to delegate A06/A09/A12 failed due to
-provider authentication/rate limits; no repair completion is claimed for them.
-A09 was repaired directly (`744eefa`): the total timeout now cancels real
-streaming I/O; DNS resolution and child-side policy propagation remain
-recorded limits in `docs/guides/host-http-boundaries.md`.
+again without implementation. Earlier delegation attempts for A06/A09/A12
+failed due to provider authentication/rate limits. A09 was partially repaired
+directly (`744eefa`): direct slow HTTP streams are cancellable with the new
+transport, but DNS and child-side budget propagation remain open. See
+`docs/guides/host-http-boundaries.md` for the precise boundary.
+
+**A09 verification:** full `just ci` passed: 918 unit/fixture, 505 integration,
+54 E2E and 3 contract tests (**1,480 total**), plus formatting, Ruff, mypy
+(198 files), import boundaries and migration roundtrip. The original slow-body
+regression failed because the 0.2-second policy did not finish within the
+1-second test safety window. Slow body/header disconnect and client reuse,
+and cumulative redirects, pass with the new transport. An isolated cancellation
+bypass made all three deadline cases fail; restoring the transport passed all three.
+
+**A06 verification:** full `nix develop --command just ci` and a separate full
+`uv run pytest -q` passed **1,483 tests**: 918 unit/fixture, 505 integration,
+57 E2E, 3 contract; mypy checked 199 files. The original fresh-process test
+failed with RSS fallback parsing instead of installed-plugin collection.
+Three real-process E2E scenarios now cover restart, disabled status, uninstall,
+disk-only directories, broken code, missing manifests and changed credential
+requests. In an isolated source copy, bypassing the checksum comparison caused
+unapproved collection (HTTP 200 and one inserted item instead of rejection);
+the test failed, then passed after restoring the guard. See ADR 0025 for
+startup validation, runtime-list limitations and manifest-only checksums.
 
 **Combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,
