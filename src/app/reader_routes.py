@@ -1143,10 +1143,21 @@ def mark_all_as_read(
     from adapters.repository import mark_all_read
 
     when = _parse_ts(ts) or datetime.now(UTC)
-    source_id = reader_api.parse_feed_stream_id(s)
+    if reader_api.is_state_stream(s, state="reading-list"):
+        source_id: str | None = None
+        folder: str | None = None
+    elif (feed := reader_api.parse_feed_stream_id(s)) is not None:
+        source_id = feed
+        folder = None
+    elif (label := reader_api.label_stream_name(s)) is not None:
+        source_id = None
+        folder = label
+    else:
+        # A scope we do not model gets a refusal, never an unfiltered sweep.
+        raise HTTPException(status_code=400, detail=f"unsupported stream {s!r}")
     with request.app.state.session_factory() as session:
         changed = mark_all_read(
-            session, tenant_id=TENANT, before=when, source_id=source_id
+            session, tenant_id=TENANT, before=when, source_id=source_id, folder=folder
         )
         session.commit()
     LOGGER.info("reader mark-all-as-read: %d item(s)", changed)

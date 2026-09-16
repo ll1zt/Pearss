@@ -292,12 +292,19 @@ def mark_all_read(
     tenant_id: str,
     before: datetime,
     source_id: str | None = None,
+    folder: str | None = None,
 ) -> int:
     """Mark items published before `before` as read.
 
     Only touches items that are unread, so a repeated call is a no-op rather
     than repeatedly rewriting rows and bumping their timestamps.
+
+    `source_id` and `folder` narrow the sweep to one feed or one folder. At
+    most one may be given: a caller that can name both has misparsed the
+    stream, and the safe answer is to refuse rather than intersect.
     """
+    if source_id is not None and folder is not None:
+        raise ValueError("mark_all_read takes a source or a folder, not both")
     cutoff = timestamp(before)
     existing = select(ReadStateRow.item_id).where(
         ReadStateRow.tenant_id == tenant_id, ReadStateRow.is_read.is_(True)
@@ -313,6 +320,16 @@ def mark_all_read(
     )
     if source_id:
         candidates = candidates.where(ItemRow.source_id == source_id)
+    if folder is not None:
+        # A folder no source carries is an empty scope, not the whole library:
+        # the same rule the folder *read* path applies.
+        candidates = candidates.where(
+            ItemRow.source_id.in_(
+                select(SourceRow.id).where(
+                    SourceRow.folder == folder, SourceRow.tenant_id == tenant_id
+                )
+            )
+        )
 
     ids = list(session.execute(candidates).scalars())
     if not ids:

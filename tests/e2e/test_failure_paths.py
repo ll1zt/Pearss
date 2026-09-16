@@ -31,7 +31,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
-from tests.e2e.conftest import API_TOKEN
+from tests.e2e.conftest import API_TOKEN, READER_PASSWORD, READER_USERNAME
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 
@@ -39,6 +39,59 @@ pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 # route that rejected it for a length reason would fail this test rather than
 # accidentally passing it.
 WRONG_TOKEN = "e2e-wrong-token-that-is-not-configured"
+
+
+@pytest.mark.parametrize("scope", ["bogus", "feed/", "user/-/state/com.google/bogus"])
+async def test_user_cannot_mark_an_unsupported_stream_read(
+    served: str, session_factory: sessionmaker[Session], scope: str
+) -> None:
+    """Given unread items, an unsupported bulk scope is rejected without writes."""
+    from adapters.db_models import ReadState
+    from app.pipeline import normalise_and_store
+    from core.models import ItemDraft
+
+    source_id = _seed_source(session_factory)
+    with session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source_id,
+                    external_id="unread",
+                    title="Unread item",
+                    canonical_url="https://pending.example/unread",
+                    published_at=None,
+                    content="<p>Unread content</p>",
+                )
+            ],
+            tenant_id="default",
+        )
+        session.commit()
+        before = session.execute(sa.select(ReadState.__table__)).all()
+    async with httpx.AsyncClient(base_url=served) as client:
+        login = await client.post(
+            "/api/greader.php/accounts/ClientLogin",
+            data={"Email": READER_USERNAME, "Passwd": READER_PASSWORD},
+        )
+        assert login.status_code == 200
+        token = next(
+            line[5:] for line in login.text.splitlines() if line.startswith("Auth=")
+        )
+        response = await client.post(
+            "/api/greader.php/reader/api/0/mark-all-as-read",
+            data={"T": token, "s": scope},
+        )
+        assert response.status_code == 400
+        assert response.json() == {"detail": f"unsupported stream {scope!r}"}
+        unread = await client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers={"Authorization": f"GoogleLogin auth={token}"},
+            params={"xt": "user/-/state/com.google/read"},
+        )
+        assert unread.status_code == 200
+        assert len(unread.json()["itemRefs"]) == 1
+    with session_factory() as session:
+        assert session.execute(sa.select(ReadState.__table__)).all() == before
 
 
 def _count(session_factory: sessionmaker[Session], table: str) -> int:
