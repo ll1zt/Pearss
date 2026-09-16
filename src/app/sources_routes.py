@@ -887,6 +887,11 @@ def trigger_source(
         "inserted": result.inserted,
         "skipped": result.skipped,
         "error_class": result.error_class,
+        # The classification alone does not say what went wrong; without this
+        # a failed run reports "parse" and the operator has to go digging in
+        # the job_run table. It is origin-side text on a fetch failure, so it
+        # is data: the docs' untrusted-content rule applies to it.
+        "detail": result.detail,
         "correlation_id": current_correlation_id(),
     }
     status_code = 200 if result.succeeded else 502
