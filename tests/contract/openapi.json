@@ -195,6 +195,11 @@
             },
             "title": "S",
             "type": "array"
+          },
+          "t": {
+            "default": "",
+            "title": "T",
+            "type": "string"
           }
         },
         "title": "Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
@@ -1078,7 +1083,7 @@
     },
     "/api/greader.php/reader/api/0/subscription/edit": {
       "post": {
-        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.\n\nRenaming is not implemented, and a `t=` is answered with the same OK the\nrest of the edit produces. That is deliberate rather than lazy: a source's\ntitle belongs to the origin (it is discovered at collection time and\nrecorded once), so honouring it would be undone by the next fetch. The\nreply is honest about everything this endpoint owns; the title is not its\nto change.\n\n`ac=unsubscribe` is refused with 400, and the refusal is the decision\nrather than an omission. Read You calls it to delete a subscription, so\nthe consequence of implementing it is a delete -- and deletion in Pearss\nremoves the row with its history (ADR 0021), with nothing to undo it. The\nclient sends this during a sync the user did not watch, and its failure\nmode is a retry loop rather than a dialog, so a mis-tap would destroy\ncollected history silently. Subscriptions are removed through `/v1` or\nMCP, where the caller states intent explicitly. This is the one Read You\nfeature knowingly left unavailable; the client guide records it.",
+        "description": "Move, rename and remove subscriptions -- the app's management writes.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove, `t` a new title. A feed can only be in one category,\nso an `a` wins and the folder is set; an `r` without an `a` moves back to\nthe default. Unknown feeds are skipped rather than 404'd, the same\nleniency edit-tag applies to item ids -- a client works from the ids\nsubscription/list gave it, and one that was withdrawn since should not\nfail the whole edit.\n\n`t=` renames the source. It was refused silently until 2026-09-16, on\nthe reasoning that the next fetch would overwrite the name; reading\n`set_source_title_if_absent` shows that reasoning was wrong -- the\nconditional write fills an absent title and never replaces a present\none, exactly to protect an operator's rename. A client rename is that\nsame choice expressed from an app, so it now lands through the same\nguarded write and sticks (ADR 0024, revision).\n\n`ac=unsubscribe` deletes the source with everything it collected -- the\nADR 0021 semantics, through the same repository entry point\n`DELETE /v1/sources` uses. It was refused outright for a day; the\nrefusal was reversed because refusing a client whose UI already showed\na confirmation dialog achieved nothing except a permanent retry loop\n(`deleteFeed` failing reads as sync failure). The delete is real and\nirreversible, as it is through `/v1`; a replay answers OK rather than\nan error, matching the \"already gone is done\" rule the /v1 endpoint\nestablished. `ac=subscribe` stays unsupported: subscribing goes through\n`quickadd`, which is what the one client that subscribes actually\ncalls.",
         "operationId": "subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
         "requestBody": {
           "content": {

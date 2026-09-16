@@ -33,6 +33,7 @@ from typing import Any
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from tests.e2e.conftest import (
@@ -672,48 +673,145 @@ async def test_j8_group_changes_propagate_to_the_other_client(
         assert (await folders(b))[feed_id] == "default"
 
 
-async def test_j9_deleting_a_subscription_from_the_app_is_refused_and_deletes_nothing(
-    served: str, origin_url: str
+async def test_j9_unsubscribing_from_the_app_deletes_for_real_and_replays_cleanly(
+    served: str, origin_url: str, session_factory: sessionmaker[Session]
 ) -> None:
-    """Unsubscribe is refused, and the refusal changes nothing.
+    """Unsubscribe deletes the source with its history, and a replay stays done.
 
     Given a source with collected items
-    When client B asks to unsubscribe it (the App's delete path)
-    Then the request is refused, and both clients still see the source
-    and its items
+    When client B unsubscribes it (the App's delete path, `ac=unsubscribe`)
+    Then the subscription vanishes from BOTH clients' lists, the source row
+    and its items are really gone (ADR 0021), and sending the same request
+    again answers OK rather than an error
 
-    ADR 0024 keeps this door shut on purpose: the delete is irreversible,
-    the client sends it from a sync the user is not watching, and its
-    failure mode is a retry loop rather than a dialog. This scenario pins
-    the refusal AND the absence of side effects -- a 400 that still
-    deleted would be worse than the 404 it replaced.
+    The 2026-09-16 revision of ADR 0024 reverses the original refusal. What
+    tipped it was reading the failure chain with fresh eyes: refusing with
+    400 put Read You's deleteFeed into the same Result.retry() loop as any
+    other failure, so the user's delete *looked broken forever* -- worse,
+    not safer, than an honest delete. The delete itself is exactly what
+    DELETE /v1/sources does, through the same repository entry point, so
+    the irreversibility argument applies to a caller who states intent
+    through this endpoint just as it does to one using /v1: the app shows
+    a confirmation dialog before sending. Idempotence follows the
+    "already gone answers done" rule the /v1 endpoint established.
     """
     source_id = await _seed_two_sources(served, origin_url)
+
+    async with httpx.AsyncClient(base_url=served) as http:
+        a = Client(http, NNW)
+        b = Client(http, READYOU)
+        await a.login()
+        await b.login()
+        assert b.token is not None
+
+        removed = await http.post(
+            "/api/greader.php/reader/api/0/subscription/edit",
+            headers=b._header(),
+            data={"T": b.token, "ac": "unsubscribe", "s": f"feed/{source_id}"},
+        )
+        assert removed.status_code == 200, removed.text
+
+        # Gone from both clients' subscription lists.
+        for client in (a, b):
+            subs = await http.get(
+                "/api/greader.php/reader/api/0/subscription/list",
+                headers=client._header(),
+            )
+            assert f"feed/{source_id}" not in {
+                s["id"] for s in subs.json()["subscriptions"]
+            }, client.dialect
+
+        # Really gone: the row and its items, not a tombstone.
+        async with httpx.AsyncClient(
+            base_url=served,
+            headers={"Authorization": f"Bearer {API_TOKEN}"},
+        ) as api:
+            shown = await api.get(f"/v1/sources/{source_id}")
+            assert shown.status_code == 404, shown.status_code
+        with session_factory() as db:
+            items = db.execute(
+                sa.text("select count(*) from item where source_id = :s"),
+                {"s": source_id},
+            ).scalar_one()
+            assert items == 0, items
+
+        # A retry (dropped response, resync) is done, not an error.
+        again = await http.post(
+            "/api/greader.php/reader/api/0/subscription/edit",
+            headers=b._header(),
+            data={"T": b.token, "ac": "unsubscribe", "s": f"feed/{source_id}"},
+        )
+        assert again.status_code == 200, again.text
+
+
+# --------------------------------------------------------------------------
+# J11: renaming a subscription from the app
+# --------------------------------------------------------------------------
+
+
+async def test_j11_renaming_a_subscription_sticks_across_recollection(
+    served: str, origin_url: str
+) -> None:
+    """A client rename becomes the subscription's name and survives a fetch.
+
+    Given a subscribed source whose title is still the origin's
+    When client B renames it (`ac=edit` with `t=`, Read You's renameFeed)
+    Then both clients list it under the new name
+    And after another collection the name is still the user's
+
+    The name was previously answered with a silent OK and nothing else,
+    on the reasoning that the next fetch would overwrite it. That
+    reasoning was wrong: `set_source_title_if_absent` writes only when the
+    column is empty, so a client-set title is protected by the same
+    conditional-write rule an operator's rename through the API gets. The
+    fetch fills an absent title; it does not replace a present one.
+    """
+    await _seed_two_sources(served, origin_url)
 
     async with httpx.AsyncClient(base_url=served) as http:
         b = Client(http, READYOU)
         await b.login()
         assert b.token is not None
 
-        refused = await http.post(
-            "/api/greader.php/reader/api/0/subscription/edit",
-            headers=b._header(),
-            data={"T": b.token, "ac": "unsubscribe", "s": f"feed/{source_id}"},
-        )
-        assert refused.status_code == 400, refused.text
-
-        # Nothing moved: the subscription survives on both clients, and
-        # the Core API still reports the source.
         subs = await http.get(
             "/api/greader.php/reader/api/0/subscription/list", headers=b._header()
         )
-        assert f"feed/{source_id}" in {s["id"] for s in subs.json()["subscriptions"]}
+        feed_id = subs.json()["subscriptions"][0]["id"]
+        source_id = feed_id.removeprefix("feed/")
+
+        renamed = await http.post(
+            "/api/greader.php/reader/api/0/subscription/edit",
+            headers=b._header(),
+            data={"T": b.token, "ac": "edit", "s": feed_id, "t": "My rename"},
+        )
+        assert renamed.status_code == 200, renamed.text
+
+        def names(payload: dict[str, Any]) -> dict[str, str]:
+            return {x["id"]: x["title"] for x in payload["subscriptions"]}
+
+        # Both clients see the new name.
+        for client in (b,):
+            listing = await http.get(
+                "/api/greader.php/reader/api/0/subscription/list",
+                headers=client._header(),
+            )
+            assert names(listing.json())[feed_id] == "My rename", names(listing.json())
+
+        # A collection happens; the rename must survive it.
         async with httpx.AsyncClient(
             base_url=served,
             headers={"Authorization": f"Bearer {API_TOKEN}"},
         ) as api:
-            shown = await api.get(f"/v1/sources/{source_id}")
-            assert shown.status_code == 200, shown.text
+            triggered = await api.post(
+                f"/v1/sources/{source_id}:trigger",
+                headers={"Idempotency-Key": "journey-rename-trigger-1"},
+            )
+            assert triggered.status_code == 200, triggered.text
+
+        listing = await http.get(
+            "/api/greader.php/reader/api/0/subscription/list", headers=b._header()
+        )
+        assert names(listing.json())[feed_id] == "My rename"
 
 
 # --------------------------------------------------------------------------

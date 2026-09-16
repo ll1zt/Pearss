@@ -969,41 +969,76 @@ def subscription_edit(
     s: list[str] = Form(default=[]),
     a: list[str] = Form(default=[]),
     r: list[str] = Form(default=[]),
+    t: str = Form(default=""),
 ) -> PlainTextResponse:
-    """Move subscriptions between folders -- the drag-and-drop write path.
+    """Move, rename and remove subscriptions -- the app's management writes.
 
     FreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,
-    `r` one to remove. A feed can only be in one category, so an `a` wins and
-    the folder is set; an `r` without an `a` moves back to the default.
-    Unknown feeds are skipped rather than 404'd, the same leniency edit-tag
-    applies to item ids -- a client works from the ids subscription/list gave
-    it, and one that was withdrawn since should not fail the whole edit.
+    `r` one to remove, `t` a new title. A feed can only be in one category,
+    so an `a` wins and the folder is set; an `r` without an `a` moves back to
+    the default. Unknown feeds are skipped rather than 404'd, the same
+    leniency edit-tag applies to item ids -- a client works from the ids
+    subscription/list gave it, and one that was withdrawn since should not
+    fail the whole edit.
 
-    Renaming is not implemented, and a `t=` is answered with the same OK the
-    rest of the edit produces. That is deliberate rather than lazy: a source's
-    title belongs to the origin (it is discovered at collection time and
-    recorded once), so honouring it would be undone by the next fetch. The
-    reply is honest about everything this endpoint owns; the title is not its
-    to change.
+    `t=` renames the source. It was refused silently until 2026-09-16, on
+    the reasoning that the next fetch would overwrite the name; reading
+    `set_source_title_if_absent` shows that reasoning was wrong -- the
+    conditional write fills an absent title and never replaces a present
+    one, exactly to protect an operator's rename. A client rename is that
+    same choice expressed from an app, so it now lands through the same
+    guarded write and sticks (ADR 0024, revision).
 
-    `ac=unsubscribe` is refused with 400, and the refusal is the decision
-    rather than an omission. Read You calls it to delete a subscription, so
-    the consequence of implementing it is a delete -- and deletion in Pearss
-    removes the row with its history (ADR 0021), with nothing to undo it. The
-    client sends this during a sync the user did not watch, and its failure
-    mode is a retry loop rather than a dialog, so a mis-tap would destroy
-    collected history silently. Subscriptions are removed through `/v1` or
-    MCP, where the caller states intent explicitly. This is the one Read You
-    feature knowingly left unavailable; the client guide records it.
+    `ac=unsubscribe` deletes the source with everything it collected -- the
+    ADR 0021 semantics, through the same repository entry point
+    `DELETE /v1/sources` uses. It was refused outright for a day; the
+    refusal was reversed because refusing a client whose UI already showed
+    a confirmation dialog achieved nothing except a permanent retry loop
+    (`deleteFeed` failing reads as sync failure). The delete is real and
+    irreversible, as it is through `/v1`; a replay answers OK rather than
+    an error, matching the "already gone is done" rule the /v1 endpoint
+    established. `ac=subscribe` stays unsupported: subscribing goes through
+    `quickadd`, which is what the one client that subscribes actually
+    calls.
     """
     from adapters.db_models import Source as SourceRow
     from core.enums import SourceStatus
     from core.folders import DEFAULT_FOLDER, normalize_folder
 
+    if ac == "unsubscribe":
+        return _unsubscribe_feeds(request, s)
+
     if ac != "edit":
         raise HTTPException(
             status_code=400,
-            detail=f"unsupported subscription/edit action {ac!r}; only 'edit'",
+            detail=f"unsupported subscription/edit action {ac!r}; "
+            "only 'edit' and 'unsubscribe'",
+        )
+
+    feed_ids = [
+        value
+        for value in (reader_api.parse_feed_stream_id(raw) for raw in s)
+        if value is not None
+    ]
+    new_title = t.strip()
+    if new_title and feed_ids:
+        now = datetime.now(UTC)
+        with request.app.state.session_factory() as session:
+            rows = (
+                session.query(SourceRow)
+                .filter(
+                    SourceRow.id.in_(feed_ids),
+                    SourceRow.tenant_id == TENANT,
+                    SourceRow.status != SourceStatus.DISABLED.value,
+                )
+                .all()
+            )
+            for row in rows:
+                row.title = new_title
+                row.updated_at = timestamp(now)
+            session.commit()
+        LOGGER.info(
+            "reader subscription rename: %d feed(s) -> %r", len(rows), new_title
         )
 
     add_label = next((v for v in a if v), None)
@@ -1024,7 +1059,7 @@ def subscription_edit(
     elif remove_label:
         folder = DEFAULT_FOLDER
     else:
-        # A rename (t=) or a no-op edit: nothing this endpoint owns changes.
+        # A rename-only edit: the title above already landed.
         return PlainTextResponse("OK")
 
     feed_ids = [
@@ -1060,6 +1095,40 @@ def subscription_edit(
         len(rows),
         folder,
     )
+    return PlainTextResponse("OK")
+
+
+def _unsubscribe_feeds(request: Request, s: list[str]) -> PlainTextResponse:
+    """Delete the named sources and their history (ADR 0021 semantics).
+
+    The same repository entry point `DELETE /v1/sources` uses, so the
+    delete carries identical consequences -- items, bodies, read state,
+    processor products, fetch records. "Already gone" answers OK rather
+    than an error: a client resending after a dropped response is asking
+    for the subscription to be gone, and it is.
+    """
+    from adapters.repository import delete_source as repository_delete_source
+
+    feed_ids = [
+        value
+        for value in (reader_api.parse_feed_stream_id(raw) for raw in s)
+        if value is not None
+    ]
+    if not feed_ids:
+        return PlainTextResponse("OK")
+
+    with request.app.state.session_factory() as session:
+        for source_id in feed_ids:
+            result = repository_delete_source(session, source_id)
+            session.commit()
+            # Files after the commit: an unlink cannot be rolled back, rows can.
+            removed = result.reclaim.reclaim()
+            LOGGER.info(
+                "reader unsubscribe: %s removed (items=%d, files=%d)",
+                source_id,
+                result.counts.get("items", 0),
+                removed,
+            )
     return PlainTextResponse("OK")
 
 

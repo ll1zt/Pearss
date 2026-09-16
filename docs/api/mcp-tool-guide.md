@@ -146,15 +146,14 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 |---|---|
 | `POST /v1/sources` | 创建时带 `folder` 即可归入 |
 | `PATCH /v1/sources/{id}` | `{"folder": "阅读"}` 改分类；`{"folder": null}` 回 `default` |
-| `POST /reader/api/0/subscription/edit` | 客户端拖拽：`ac=edit`、`s=<feed id>`、`a=user/-/label/名字` 加入、`r=...` 回默认。**不支持 `subscribe`/`unsubscribe`** |
+| `POST /reader/api/0/subscription/edit` | 拖拽改名/移组 + App 内退订：`ac=edit`、`s=<feed id>`、`a=user/-/label/名字` 加入、`r=...` 回默认、`t=新名` 改名；`ac=unsubscribe` 删除该源（ADR 0021 语义，重放仍 OK） |
 | `POST /reader/api/0/rename-tag` | 重命名分组：`s`、`dest` 都是 `user/-/label/<name>`，批量改该名字下的所有源 |
 | `POST /reader/api/0/disable-tag` | 删除分组：组内源回 `default`，源本身保留 |
 | `POST /reader/api/0/subscription/quickadd` | 按 URL 订阅（Read You 加订阅），返回 `streamId` |
 
-`unsubscribe` 的三条路径都不提供，且这是决定而非缺口：删除在 Pearss 是
-物理删除并带走历史（ADR 0021），而客户端在用户看不见的同步里发这个请求，
-失败模式是重试循环而非对话框——一次误操作会静默销毁历史。**删除订阅只能走
-`/v1` 或 MCP**，调用方在那里显式表达意图。详见 ADR 0024。
+`t=`（改名）与 `ac=unsubscribe`（删除）现已支持（2026-09-16 修订，ADR 0024）：改名由
+`set_source_title_if_absent` 的条件写入保护，采集不会覆盖；删除走 `DELETE /v1/sources`
+的同一仓储入口，完整 ADR 0021 语义。`ac=subscribe` 仍不提供——订阅走 `quickadd`。
 
 名称校验在 `core/folders`：trim、长度上限、禁控制字符、**禁 `/`**（名字会变成 stream id，
 斜杠会产生客户端无法往返的路径）。MCP 侧对应 `set_source_folder` 与 `add_source` 的
