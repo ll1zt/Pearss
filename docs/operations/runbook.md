@@ -173,6 +173,33 @@ JobRun、不产生采集历史。若发现某个 agent 源在 `/v1/jobs` 里出�
 与普通源相同：`POST /v1/sources/{id}/items:delete`（保留源），或
 `DELETE /v1/sources/{id}`（连源一起删）。见「清理条目与订阅」。
 
+## 修改源的处理链与目标语言（A04）
+
+`PATCH /v1/sources/{id}` 对 `pipeline_chain` 和 `target_lang` 分别使用三态语义：
+
+| 请求体 | 结果 |
+|---|---|
+| `{"target_lang":"de"}` | 只改默认目标语言，原链（含顺序、逐项 `lang` / `required`）保持不变 |
+| `{"pipeline_chain":[{"plugin_id":"translate","kind":"translation"}]}` | 替换链，保留已有 `target_lang` |
+| `{"pipeline_chain":null}` 或 `{"pipeline_chain":[]}` | 显式清空链，保留目标语言；之后新采集条目无需等待处理链 |
+| `{"target_lang":null}` | 只清空默认语言，不清空链；逐项显式 `lang` 不受影响 |
+| `{"pipeline_chain":null,"target_lang":null}` | 同时清空两项配置 |
+
+省略不是 `null`。服务先将请求中明确提供的字段与存储中的未提供字段合并，
+再校验最终链；未知处理器或非法 kind 返回 `422 invalid_pipeline_chain`，
+整个 PATCH（包括同时发送的 folder / schedule 等字段）不落库。
+清空默认语言不等于保证翻译处理器能运行：当前链校验允许空语言，
+使用翻译时应保留默认目标语言或逐项设置 `lang`。
+
+写请求仍需 API 鉴权和 `Idempotency-Key`，不同修改使用不同 key。
+变更后的最小冒烟检查（使用测试源，避免改写已发布条目）：
+
+1. 先 GET 源配置，记录原 `pipeline_chain` 与 `target_lang`。
+2. 只 PATCH `target_lang`，再 GET 确认原链逐项不变。
+3. 手动触发采集新条目；必需处理尚未完成时，条目仍为 `pending`，
+   `/v1/sources/{id}/enrichments` 显示相应任务及目标语言。
+4. 对测试源提交非法 kind 并同时修改 folder；确认收到 422，GET 后两者均未变。
+
 ## 日常健康检查
 
 检查以下信号：

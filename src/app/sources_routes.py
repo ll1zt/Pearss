@@ -466,35 +466,15 @@ def update_source(
         changes["status"] = body.status.value
     if body.trust_level is not None:
         changes["trust_level"] = body.trust_level.value
-    if body.sent("pipeline_chain") or body.sent("target_lang"):
-        # Validate the pair against the enrichment domain before writing:
-        # a chain that parse_chain rejects would gate every future item on
-        # nothing and surface as a surprise at collection time.
-        from app.enrichment_worker import registered_processor_ids
-
-        try:
-            parse_chain(
-                json.dumps(body.pipeline_chain)
-                if body.pipeline_chain is not None
-                else None,
-                target_lang=body.target_lang,
-                known_plugins=registered_processor_ids(),
-            )
-        except (ValueError, KeyError) as exc:
-            raise api_error(
-                status_code=422,
-                code="invalid_pipeline_chain",
-                message=str(exc),
-                suggestion=(
-                    "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
-                    "translation, summary, tts_audio."
-                ),
-            ) from exc
-        # json.dumps of None clears the chain; a chain forces the lang to
-        # something explicit so the worker never has to guess.
+    if body.sent("pipeline_chain"):
+        # json.dumps of None clears the chain; an empty list also clears it
+        # (parse_chain normalises both to "no chain"). A sent-but-omitted
+        # companion field is merged with the stored value below, before the
+        # pair is validated -- a language-only PATCH must not wipe the chain.
         changes["pipeline_chain"] = (
             json.dumps(body.pipeline_chain) if body.pipeline_chain is not None else None
         )
+    if body.sent("target_lang"):
         changes["target_lang"] = body.target_lang
     if body.sent("folder"):
         # Null resets to the default folder; the validator normalized any
@@ -514,6 +494,27 @@ def update_source(
 
     with factory() as session:
         row = _require_source(session, source_id)
+        if body.sent("pipeline_chain") or body.sent("target_lang"):
+            # Validate the resulting pair before mutating anything. dict.get
+            # preserves explicit null while omitted fields use stored values.
+            from app.enrichment_worker import registered_processor_ids
+
+            try:
+                parse_chain(
+                    changes.get("pipeline_chain", row.pipeline_chain),
+                    target_lang=changes.get("target_lang", row.target_lang),
+                    known_plugins=registered_processor_ids(),
+                )
+            except (ValueError, KeyError) as exc:
+                raise api_error(
+                    status_code=422,
+                    code="invalid_pipeline_chain",
+                    message=str(exc),
+                    suggestion=(
+                        "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
+                        "translation, summary, tts_audio."
+                    ),
+                ) from exc
         for column, value in changes.items():
             setattr(row, column, value)
         row.updated_at = timestamp(_now())
