@@ -71,6 +71,22 @@ def visible_ids_for_stream(
                     )
                 )
             )
+        elif state == "read":
+            # The read stream itself. A client that asks for it by name --
+            # NetNewsWire's Google-Reader mode and Read You's non-FreshRSS
+            # branch both do -- got the "unhandled stream" answer, i.e. an
+            # empty read list forever, while the same server answered the
+            # `it=read` include-tag form correctly. Both spellings must
+            # agree; this branch delegates to the same predicate the tag
+            # filter applies, so they cannot drift again.
+            query = query.where(
+                ItemRow.id.in_(
+                    select(ReadStateRow.item_id).where(
+                        ReadStateRow.is_read.is_(True),
+                        ReadStateRow.tenant_id == tenant_id,
+                    )
+                )
+            )
         elif (label := reader_api.label_stream_name(stream_id)) is not None:
             # A folder stream: items of the sources in that folder. A name no
             # source carries is an empty stream, not "everything" -- serving

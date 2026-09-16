@@ -25,6 +25,50 @@
 - `test_full_loop.py` 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
 - discover_feed 不存在（A5 backlog），feed URL 由测试直接给定；工具落地后补第 2 步
 
+#### 客户端同步旅程（`test_client_sync_journey.py`）
+
+**这个系统有两条用户腿，e2e 曾经只长了 agent 那条。** 2026-09 的五轮修复
+（`it=`、`xt` 截断、`continuation`、quickadd/rename-tag/disable-tag、
+长式 id 零填充）全部发生在**阅读器客户端的状态同步旅程**上，且全部由用户
+报告、事后才补测——因为 e2e 的 Reader API 用法只有登录 + ids + contents
+三个只读步骤。下面是这条旅程的验收场景清单，测试按此逐条验收；
+**新客户端兼容问题先落到这里成为场景，再写代码**（场景先行，不是事后回归）。
+
+**状态（2026-09-16）**：J1–J10 已全部实现为 e2e（`test_client_sync_journey.py`，
+10 个场景）。**该套件在编写过程中就抓到一个此前任何层都没发现的真 bug**：
+`s=user/-/state/com.google/read` 流（NNW 的 Google-Reader 形态与 Read You 的
+非 FreshRSS 分支使用）命中 `visible_ids_for_stream` 的 unhandled 分支，恒返回
+空——已读条目对所有按名查询已读流的客户端不可见。已修复并经变异验证
+（撤掉修复分支，J3/J5/J6 等 4 个场景立刻变红）。
+
+旅程的前提约束：两个客户端用**各自真实的请求形态**连同一个服务器
+（NNW 与 Read You 的形态差异是已记录的契约：`s=` vs `it=`、header vs `T`、
+十进制 vs 长式 id），走真实 uvicorn 端口——ASGI 直连测不出中间件顺序回归，
+而本仓库在中间件顺序上真实出过事。
+
+| # | Scenario（user 开头，Given/When/Then） | 拦过的 bug |
+|---|---|---|
+| J1 | 用户在客户端 A 登录并看到订阅与条目（NNW 形态：十进制 id、`s=read`） | 长式 id 未填充（0006 修订） |
+| J2 | 用户在客户端 A 读了一篇 → 客户端 B 同步后它也是已读（Read You 形态：`it=read` + 翻页拉全） | `it=` 忽略（ADR 0024）、`continuation` 恒 null |
+| J3 | 用户在客户端 B 把它改回未读 → A 同步后也是未读（反向必须同样成立，方向性是排障的决定性线索） | 同上 |
+| J4 | 用户给一篇加星 → 两个客户端同步后都看到星标 | 星标此前无跨客户端 e2e |
+| J5 | 用户的未读数在无操作时两次同步结果一致（read+unread 恰好划分全集，不重不漏） | 未读数震荡（`it=` 全集） |
+| J6 | 用户的条目超过一页时，同步能取全（翻页跟 `continuation`，深度上限终止） | `continuation` 缺失；`xt` LIMIT 后过滤 |
+| J7 | 用户在客户端 App 里加一个订阅（quickadd），刷新后订阅与条目都在 | quickadd 404 |
+| J8 | 用户在 App 里把订阅移入分组 / 改组名 / 删组，两个客户端的侧边栏都跟着变 | rename-tag / disable-tag 404 |
+| J9 | 用户在 App 里删订阅被拒绝，且源与条目原样还在（删除的不可逆性不暴露给同步路径） | `ac=unsubscribe` 决策（ADR 0024） |
+| J10 | 用户订阅了带翻译链的源，Reader API 里译文在分隔线之上、原文保存在下（对两种请求形态都成立） | 翻译链此前无 e2e（provider 用本地 OpenAI 兼容真 origin） |
+
+失败模式备注（来自真实教训，写给将来的排查者）：
+
+- **方向性症状先当约束用**："A→B 不行但 B→A 行"立即把范围缩到一条读取路径
+  （J2/J3 成对存在就是这个原因）
+- **"没有下一页"是肯定性断言**：`continuation: null` 与返回错误集合同罪
+  （J6）
+- **同一客户端的两条路径结论可以相反**（Read You 的 syncFeed 对、sync 错），
+  所以 J2–J6 断言的是**服务端响应**在两种请求形态下都正确，不模拟客户端内部
+  集合运算——那是它的实现，不是我们的契约
+
 #### 失败路径（`test_failure_paths.py`）
 
 **拒绝之后系统有没有被改动**，是这里唯一的主题。一个"拒绝了但仍然写入"的缺陷在本仓库最难发现——响应看起来完全正确，损害只在之后显形（未鉴权者建出了源、未确认的 MCP 写落地、pending 条目在 enrichment 跑完前进了客户端缓存）。happy path 永远不会暴露这类问题，所以它必须是一个文件。
