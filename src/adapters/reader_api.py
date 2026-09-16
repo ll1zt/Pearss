@@ -112,7 +112,6 @@ def tag_states(stream_ids: list[str]) -> list[str]:
     return seen
 
 
-
 def _normalise_state_stream(stream_id: str) -> str | None:
     """Reduce a state stream id to its bare state name, or None."""
     for pattern in (_USER_STATE_STREAM, _STATE_STREAM):

@@ -86,9 +86,7 @@ def migrated_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
 
 @pytest.fixture
-def reader_app(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[FastAPI]:
+def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[FastAPI]:
     """A migrated app with the Reader API credential configured and one feed.
 
     Seeded through `normalise_and_store` rather than `store_item`: it is the

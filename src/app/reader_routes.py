@@ -360,6 +360,215 @@ def tag_list(request: Request, _: str = Depends(authenticate_any)) -> dict[str, 
 
 
 # --------------------------------------------------------------------------
+# Subscription writes
+# --------------------------------------------------------------------------
+#
+# Read You adds, renames and removes subscriptions from its own UI, and it
+# is the only client that does: NetNewsWire's FreshRSS account is read-only
+# over this surface. These three endpoints therefore exist for one client,
+# and each is a real write -- audited by the middleware like any POST, and
+# attributed in the log.
+#
+# `subscription/edit`'s `ac=unsubscribe` stays unimplemented on purpose; see
+# its docstring for why a delete is not offered to a client that retries.
+
+
+@router.post("/reader/api/0/subscription/quickadd")
+def subscription_quickadd(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    quickadd: str = Form(default=""),
+) -> dict[str, object]:
+    """Subscribe to a feed URL -- Read You's "add feed" path.
+
+    The URL arrives already resolved. Read You fetches the address the user
+    typed, parses it, follows any `<link rel=alternate>` to the actual feed,
+    and only then calls this with the *feed's* URL (`RssHelper.searchFeed` ->
+    `discoverFeedLink`, then `subscribe(feedLink = resolvedFeedLink)`). So
+    this is not a discovery endpoint: it subscribes to what it is given, and
+    A5 `discover_feed` -- deferred by decision, not by omission -- stays
+    deferred.
+
+    What it does share with discovery is the failure mode worth guarding: the
+    client `requireNotNull`s `streamId` and lets the exception escape into
+    `sync`, whose catch answers `Result.retry()`. An endpoint that returned
+    no id would therefore not fail one "add feed" -- it would put the whole
+    account into a retry loop. Hence a real subscription and a real id, or an
+    error, never a well-formed empty reply.
+
+    Idempotent by the identity of the source: re-adding a URL returns the
+    existing subscription, which is what `create_source` already does for the
+    same reason (`POST /v1/sources` relies on it).
+    """
+    from adapters.repository import create_source
+    from core.enums import SourceType
+    from core.folders import DEFAULT_FOLDER
+    from core.models import schedule_policy_from_json, schedule_policy_to_json
+    from core.normalize import source_canonical_key
+
+    target = quickadd.strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="quickadd requires a feed URL")
+
+    try:
+        canonical = source_canonical_key(source_type=SourceType.RSS.value, url=target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # A default the operator would recognise: the same adaptive policy a feed
+    # gets when nothing is specified. The client sends no schedule, so the
+    # subscription must still be collectable -- a source that never collects
+    # would look like a broken feed.
+    policy = schedule_policy_to_json(
+        schedule_policy_from_json({"type": "adaptive", "min": "15m", "max": "24h"})
+    )
+
+    with request.app.state.session_factory() as session:
+        row = create_source(
+            session,
+            source_type=SourceType.RSS.value,
+            url=target,
+            canonical_url=canonical,
+            schedule_policy=policy,
+            tenant_id=TENANT,
+            folder=DEFAULT_FOLDER,
+            at=timestamp(datetime.now(UTC)),
+        )
+        session.commit()
+        source_id, title = row.id, row.title
+
+    LOGGER.info("reader quickadd: %r -> source %s", target, source_id)
+    return {
+        "numResults": 1,
+        "query": target,
+        "streamId": reader_api.feed_stream_id(source_id),
+        # Null until the first collection names it, which is the honest
+        # answer: the origin's title is discovered at collection time.
+        "streamName": title,
+    }
+
+
+@router.post("/reader/api/0/rename-tag")
+def rename_tag(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    s: str = Form(default=""),
+    dest: str = Form(default=""),
+) -> PlainTextResponse:
+    """Rename a folder -- Read You's group rename.
+
+    Folders in Pearss are not entities: a source carries a `folder` name and
+    the set of folders is derived from those names (`tag/list` reads them
+    back with a DISTINCT). So renaming is a rename of the *value*, applied to
+    every source that carries it, and an empty folder needs no handling
+    because an empty folder does not exist.
+
+    Both ids arrive as `user/-/label/<name>` streams. A `dest` that is not a
+    label stream is a client bug worth refusing rather than guessing at.
+    """
+    from adapters.db_models import Source as SourceRow
+    from core.folders import DEFAULT_FOLDER, normalize_folder
+
+    origin = reader_api.label_stream_name(s)
+    if origin is None:
+        raise HTTPException(
+            status_code=400, detail="s must be a user/-/label/ stream id"
+        )
+    target = reader_api.label_stream_name(dest)
+    if target is None:
+        raise HTTPException(
+            status_code=400, detail="dest must be a user/-/label/ stream id"
+        )
+    try:
+        new_folder = normalize_folder(target)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if new_folder == DEFAULT_FOLDER:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{DEFAULT_FOLDER!r} is the default folder and "
+                "cannot be a rename target"
+            ),
+        )
+
+    now = timestamp(datetime.now(UTC))
+    with request.app.state.session_factory() as session:
+        rows = (
+            session.query(SourceRow)
+            .filter(
+                SourceRow.tenant_id == TENANT,
+                SourceRow.folder == origin,
+            )
+            .all()
+        )
+        for row in rows:
+            row.folder = new_folder
+            row.updated_at = now
+        session.commit()
+
+    LOGGER.info(
+        "reader rename-tag: folder %r -> %r (%d source(s))",
+        origin,
+        new_folder,
+        len(rows),
+    )
+    return PlainTextResponse("OK")
+
+
+@router.post("/reader/api/0/disable-tag")
+def disable_tag(
+    request: Request,
+    _: str = Depends(_auth_from_form),
+    s: str = Form(default=""),
+) -> PlainTextResponse:
+    """Remove a folder -- Read You's group delete.
+
+    Read You deletes a group's feeds first (`deleteFeed` per feed) and then
+    calls this. Since a folder is a value on the sources rather than a row,
+    "removing" it means moving its sources back to the default folder: the
+    group stops existing because nothing carries its name any more, and the
+    subscriptions inside it survive rather than vanishing with it.
+
+    Refusing when sources remain would be defensible, but it would break the
+    client's intent: it has already unsubscribed the feeds it meant to, and
+    a refusal here leaves the remainder in a folder the user just deleted.
+    """
+    from adapters.db_models import Source as SourceRow
+    from core.folders import DEFAULT_FOLDER
+
+    origin = reader_api.label_stream_name(s)
+    if origin is None:
+        raise HTTPException(
+            status_code=400, detail="s must be a user/-/label/ stream id"
+        )
+    if origin == DEFAULT_FOLDER:
+        raise HTTPException(
+            status_code=400, detail="the default folder cannot be removed"
+        )
+
+    now = timestamp(datetime.now(UTC))
+    with request.app.state.session_factory() as session:
+        rows = (
+            session.query(SourceRow)
+            .filter(SourceRow.tenant_id == TENANT, SourceRow.folder == origin)
+            .all()
+        )
+        for row in rows:
+            row.folder = DEFAULT_FOLDER
+            row.updated_at = now
+        session.commit()
+
+    LOGGER.info(
+        "reader disable-tag: folder %r removed, %d source(s) returned to default",
+        origin,
+        len(rows),
+    )
+    return PlainTextResponse("OK")
+
+
+# --------------------------------------------------------------------------
 # Item streams
 # --------------------------------------------------------------------------
 
@@ -715,9 +924,19 @@ def subscription_edit(
     Renaming is not implemented, and a `t=` is answered with the same OK the
     rest of the edit produces. That is deliberate rather than lazy: a source's
     title belongs to the origin (it is discovered at collection time and
-    recorded once), so a client rename would be overwritten by the next fetch
-    anyway. Accepting it silently and failing to honour it would be worse than
-    this -- the reply is honest about everything this endpoint owns.
+    recorded once), so honouring it would be undone by the next fetch. The
+    reply is honest about everything this endpoint owns; the title is not its
+    to change.
+
+    `ac=unsubscribe` is refused with 400, and the refusal is the decision
+    rather than an omission. Read You calls it to delete a subscription, so
+    the consequence of implementing it is a delete -- and deletion in Pearss
+    removes the row with its history (ADR 0021), with nothing to undo it. The
+    client sends this during a sync the user did not watch, and its failure
+    mode is a retry loop rather than a dialog, so a mis-tap would destroy
+    collected history silently. Subscriptions are removed through `/v1` or
+    MCP, where the caller states intent explicitly. This is the one Read You
+    feature knowingly left unavailable; the client guide records it.
     """
     from adapters.db_models import Source as SourceRow
     from core.enums import SourceStatus
