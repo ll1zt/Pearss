@@ -105,6 +105,11 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 
 - `guid`、主体内容、`content_hash` 在 `published` 后不可修改
 - `pending` 不得在 RSS 或 Reader API 可见
+- 内容修订让已就绪但未发布的条目回到 `pending`：`store_item` 的替换分支在
+  一条带状态守卫的 UPDATE 里同时换正文并复位 `publish_status=pending`，
+  处理链对新 `content_hash` 重新排队；仅当该行仍是 `pending`/`ready` 且未
+  发布时替换才生效，先到一步的发布冻结旧正文，迟到的采集会话得到
+  `skip_published_content_changed`
 - `content_hash` 相同的 Item 必须依据明确规则合并、关联或抑制，不允许无声重复发布
 - 处理结果不写回原 Item，见 ItemEnrichment
 

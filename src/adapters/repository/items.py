@@ -6,14 +6,16 @@ what lets the dedupe rule be tested without a database."""
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import UTC, datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
 from adapters.repository._shared import StoreOutcome, _optional_timestamp, row_to_item
 from adapters.timestamps import fixed_width_utc as timestamp
+from core.enums import PublishStatus
 from core.models import Item
 from core.normalize import DedupeAction, decide_dedupe
 
@@ -80,7 +82,16 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
                 decision.matched_id,
             )
     elif decision.action is DedupeAction.UPDATE_PENDING:
-        _update_pending(session, candidate, matched_id=decision.matched_id or "")
+        if not _update_pending(
+            session, candidate, matched_id=decision.matched_id or ""
+        ):
+            decision = replace(
+                decision,
+                action=DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED,
+                reason=(
+                    "entry published before content replacement; keeping frozen content"
+                ),
+            )
     else:
         if decision.action is DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED:
             # Worth a warning rather than a debug line: the article a reader
@@ -106,22 +117,31 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
     )
 
 
-def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> None:
-    """Replace a pending row's content with the freshly fetched version.
-
-    Safe only because nothing has seen it yet: the gate is what makes an
-    in-place content change permissible at all.
-    """
-    row = session.get(ItemRow, matched_id)
-    if row is None:  # pragma: no cover - the lookup above found it
-        return
-    row.title = candidate.title
-    row.url = candidate.url
-    row.author = candidate.author
-    row.content_hash = candidate.content_hash
-    row.content_ref = candidate.content_ref
-    row.published_at = _optional_timestamp(candidate.published_at)
-    row.updated_at = timestamp(datetime.now(UTC))
+def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> bool:
+    """Replace unseen content and close its gate atomically with the status check."""
+    result = session.execute(
+        update(ItemRow)
+        .where(
+            ItemRow.id == matched_id,
+            ItemRow.tenant_id == candidate.tenant_id,
+            ItemRow.publish_status.in_(
+                [PublishStatus.PENDING.value, PublishStatus.READY.value]
+            ),
+            ItemRow.published_to_feed_at.is_(None),
+        )
+        .values(
+            title=candidate.title,
+            url=candidate.url,
+            author=candidate.author,
+            content_hash=candidate.content_hash,
+            content_ref=candidate.content_ref,
+            publish_status=PublishStatus.PENDING.value,
+            published_at=_optional_timestamp(candidate.published_at),
+            updated_at=timestamp(datetime.now(UTC)),
+        )
+        .returning(ItemRow.id)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 def _insert(session: Session, item: Item) -> None:
