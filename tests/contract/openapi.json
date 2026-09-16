@@ -1768,6 +1768,7 @@
     },
     "/v1/plugins/{plugin_id}": {
       "delete": {
+        "description": "Remove an installed plugin from the registry, leaving its files.\n\nThe files are the operator's, not the host's: deleting them would fuse a\nreversible act (uninstall) with an irreversible one (deleting data).\n\nRefused while the plugin still serves an active source -- pulling a\ncollector out from under its sources would make them fail on the next\ntick with a classification that blamed the origin.",
         "operationId": "uninstallPlugin",
         "parameters": [
           {
@@ -1781,7 +1782,7 @@
           }
         ],
         "responses": {
-          "409": {
+          "200": {
             "content": {
               "application/json": {
                 "schema": {}
@@ -1800,6 +1801,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Uninstall Plugin",
         "tags": [
           "plugins"
@@ -1977,6 +1983,7 @@
     },
     "/v1/plugins/{plugin_id}:import": {
       "post": {
+        "description": "Install a plugin from the plugin directory.\n\nThe work, in order: read and validate the manifest, then verify *in a\nchild process* that the plugin's code provides what the manifest\ndeclares. Running the check in a child is what keeps the host from\nexecuting a plugin's top-level code, and it is also the only way to know\nthe plugin is importable before it is recorded as installed.",
         "operationId": "importPlugin",
         "parameters": [
           {
@@ -1987,10 +1994,26 @@
               "title": "Plugin Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
           }
         ],
         "responses": {
-          "409": {
+          "200": {
             "content": {
               "application/json": {
                 "schema": {}
@@ -2009,6 +2032,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Import Plugin",
         "tags": [
           "plugins"
@@ -2017,6 +2045,7 @@
     },
     "/v1/plugins/{plugin_id}:reload": {
       "post": {
+        "description": "Pick up edited plugin code without restarting the service.\n\nA child is killed and respawned rather than reloaded in place, which is\nwhat makes this safe where the on-disk reload of a shipped collector is\nnot (ADR 0017): the plugin's state lives in its own process, and the host\nkeeps none.",
         "operationId": "reloadPlugin",
         "parameters": [
           {
@@ -2030,7 +2059,7 @@
           }
         ],
         "responses": {
-          "409": {
+          "200": {
             "content": {
               "application/json": {
                 "schema": {}
@@ -2049,6 +2078,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
         "summary": "Reload Plugin",
         "tags": [
           "plugins"

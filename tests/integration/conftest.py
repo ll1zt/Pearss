@@ -83,3 +83,7 @@ def _reap_sandboxed_children() -> Iterator[None]:
     from app import collector_registry
 
     collector_registry.for_each_sandboxed_collector(lambda name, child: child.stop())
+    # Installed plugins are module state too (ADR 0023) and they outrank the
+    # shipped collectors in URL matching, so a plugin left registered by one
+    # test would claim a later test's sources.
+    collector_registry.forget_installed_plugins()
