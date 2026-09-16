@@ -13,22 +13,66 @@
 （临时探针，已删除），以响应为准，不靠文档或推断。这与 ADR 0005/0006 两轮教训
 一致——对外契约以对端实现为准。
 
+## 我们对照的到底是哪份契约？
+
+**是 Google Reader API，但必须带上 FreshRSS 的差异。** 这不是一个可选的措辞问题，
+搞错会修错地方。
+
+Read You 内部有 6 种账号类型（`AccountType.kt`），其中：
+
+```kotlin
+// RssService.kt:39-40
+AccountType.GoogleReader.id -> googleReaderRssService
+AccountType.FreshRSS.id     -> googleReaderRssService   // ← 同一个实现
+```
+
+两者**共用同一个 `GoogleReaderRssService`**，全部请求都由 `GoogleReaderAPI.kt`
+发出。FreshRSS 类型与 GoogleReader 类型的差别，在客户端整个代码库里只有**一处**：
+
+```kotlin
+// GoogleReaderRssService.kt:284
+val isFreshRss = account.type.id == FreshRSS.id
+// GoogleReaderAPI.kt:305 -- useIt 决定用 `s=` 还是 `it=`
+if (useIt) add("s" to Stream.AllItems.tag)
+add(Pair(if (useIt) "it" else "s", Stream.Read.tag))
+```
+
+所以准确的表述是：
+
+> Read You 说的是 **Google Reader 协议**，只是对 FreshRSS 后端打了一个
+> `it=` 的补丁（因为 FreshRSS 不把 `user/-/state/com.google/read` 当作
+> 可查询的 `s=` 流，而是把它当 include tag）。
+
+**我们实现的是 Google Reader 的子集**（ADR 0004 明确写了 scope「derived from
+the maintained reference implementation documented in miniflux's
+internal/googlereader README, not a full Google Reader reissue」）。
+按这个口径，"全面支持"= **把 Read You 实际会发的 Google Reader 请求全部覆盖**，
+其中包含 FreshRSS 那个 `it=` 补丁。
+
+需要澄清一个常见误解：**FreshRSS 官方 API 是另一套东西**（`/api/fever.php` 与
+`/api/greader.php` 下的 FreshRSS 自有扩展），Read You 并没有用它的自有扩展，
+走的是标准 greader 路径。所以"支持 FreshRSS"在这里 == "支持 greader +
+`it=` 语义"，不需要去实现 FreshRSS 的私有接口。
+
 ## 结论摘要
 
 Read You 与 Pearss 的问题分三类：**完全缺失的端点**（功能直接不可用）、
-**语义被忽略的参数**（能连上但状态同步是错的）、**约定差异**（能跑但有偏差）。
+**语义被忽略的参数**（能连上但状态同步是错的，且会自激振荡）、
+**约定差异**（能跑但有偏差）。
 PR #1302 之后的 Read You 对 greader 的用法已经比上次（ADR 0006）更广，
 它不再只用 NNW 那 8 个端点。
 
 | # | 问题 | 严重度 | 现象 |
 |---|---|---|---|
-| 1 | `/reader/api/0/stream/items/ids` 忽略 `it=`（include tag） | **高** | 「已读」同步彻底失效，且是静默的 |
-| 2 | `/reader/api/0/subscription/quickadd` 不存在（404） | **高** | 无法在 App 内添加订阅 |
+| 1 | `/reader/api/0/stream/items/ids` 忽略 `it=`（include tag） | **高** | 「已读」同步失效，**并引起未读数震荡（见 #8）** |
+| 2 | `/reader/api/0/subscription/quickadd` 不存在（404） | **高** | 无法在 App 内添加订阅，且触发无限重试 |
 | 3 | `/reader/api/0/rename-tag` 不存在（404） | 中 | 重命名分组失败 |
 | 4 | `/reader/api/0/disable-tag` 不存在（404） | 中 | 删除分组失败 |
 | 5 | `subscription/edit` 只认 `ac=edit`，拒绝 `unsubscribe` | 中 | 无法在 App 内退订 |
 | 6 | `ac=edit` 带 `t=`（重命名 feed）时静默 OK 但不生效 | 低 | 重命名订阅源无效 |
 | 7 | `addGroup`：`ac=edit` 只有 `a=` 没有 `s=` 时是 no-op | 低 | 新建空分组不落库 |
+| 8 | `xt=` 在 `n=` 截断**之后**才在 Python 里过滤 | **高** | 未读列表被截断，未读数偏低且随刷新跳变 |
+| 9 | `subscription/quickadd` 之外的 405/404 让 sync 整体 `retry()` | 中 | 失败被放大成无限重试 |
 
 ---
 
@@ -76,7 +120,7 @@ unread (s= + xt=read): 2   -> 正确
 read   (s= + it=read): 3   -> 应为 1，实际 3   ← BUG
 ```
 
-### 影响链（为什么判「高」但**不是**立即的数据损坏）
+### 影响链：这是一个自激振荡，不是"暂时无害"
 
 Read You 的同步用三个远程集合做集合运算（`GoogleReaderRssService.kt:270-390`）：
 
@@ -88,26 +132,116 @@ Read You 的同步用三个远程集合做集合运算（`GoogleReaderRssService
 
 两个在用的消费点：
 
-- `toBeReadLocal = remoteReadIds ∩ localUnreadIds`（`:349-355`）
-  → 本机未读 ⊂ 全集，**恒等于 `localUnreadIds`**，即把本机所有未读标记为已读。
-  这与「服务端确实全读了」的期望不同，但**恰好**与 `remoteUnreadIds` 一致时无害；
-  不一致时会把本机未读误标为已读（下一轮 unread 查询又会纠正回来）。
-- `toBeUnreadLocal = localReadIds ∩ remoteUnreadIds`（`:361-368`）→ 与本次 bug 无关。
+```kotlin
+// :349-355  本机未读 -> 已读
+val toBeReadLocal = remoteReadIds.await().intersect(localUnreadIds)
+// 因为 remoteReadIds == localItemIds（全集），这个交集
+// 恒等于 localUnreadIds —— 于是"把所有本机未读标记为已读"
 
-另外两处**依赖 `remoteReadIds` 的回写逻辑在当前 revision 被注释掉了**
-（`:315-323` 的 `toBeStarredRemote`、`:379-387` 的 `toBeReadRemote`）。
+// :361-368  本机已读 -> 未读（反向，基于正确的 unread 集合）
+val toBeUnreadLocal = localReadIds.intersect(remoteUnreadIds.await())
+```
 
-所以当前版本的**可观测**后果是：
+两条 `launch` 是**并行**的，谁后提交谁赢。服务端状态不变的情况下，
+客户端每轮同步都会先把全部未读读成已读、再被翻回未读，**未读数在 0 和 N 之间
+反复跳**。这正是用户报告的"每次刷新未读数在两种情况间变来变去"。
 
-1. **语义被静默忽略**：客户端以为拿到的是「已读集合」，实际是全集。
-2. **每轮同步多拉全库 id**（在 `n=1000` 上限内），条目多时浪费明显。
-3. **`n=1000` 截断**：全库 > 1000 时 `remoteReadIds` 不完整，集合运算开始出错。
-4. **潜在的数据损坏**：一旦上游取消注释那两段回写分支，错误的
-   `toBeReadRemote = localReadIds ∩ remoteUnreadIds`（注意它用的是 unread）
-   与 `remoteReadIds` 语义混用会立刻产生错误的回写。
+实测（临时探针，已删除；3 条条目全部未读）：
 
-判「高」的理由是**语义静默错误 + 位于活跃请求路径 + 有明确的升级为数据损坏的路径**，
-而不是「现在就丢数据」。
+```
+total: 3
+round1 remote_unread=3  remote_read=3 (应为 0)
+  -> client marks 3 items READ locally (of 3 unread)
+round2 remote_unread=3; client flips 3 back to UNREAD
+```
+
+### 修复方向
+
+在 `stream_items_ids` 增加 `it: list[str]`，语义为「只要带这些 tag 的条目」。
+与 `xt`（排除）对称，与 `s` 取交集。`it` 与 `xt` 同时出现时（Read You 不这么发）
+按 Google Reader 原语义：先按 `it` 取交集，再按 `xt` 排除。
+
+**这一条同时修掉 #8**（见下），因为两者都在同一个端点、同一段排序/过滤逻辑里。
+
+---
+
+## 8（高）`xt=` 在 `n=` 截断之后才过滤 —— 未读数偏低且随刷新跳变
+
+### 现状
+
+`reader_routes.py:386-399`：
+
+```python
+ids = visible_ids_for_stream(session, stream_id=s, tenant_id=TENANT,
+                             limit=max(1, min(n, 10000)), offset=_offset(c))
+#      ^^^ SQL 里 LIMIT n，只按 published_at 排序，不看已读状态
+if not ids:
+    return {"itemRefs": []}
+exclude_read = any(reader_api.is_state_stream(t, state="read") for t in xt)
+if exclude_read:
+    states = read_states_for(session, ids, tenant_id=TENANT)
+    ids = [i for i in ids if not (states.get(i) and states[i].is_read)]
+#      ^^^ 已读过滤在 Python 里，n 已经生效
+```
+
+`visible_ids_for_stream` 的 docstring 说「Pending items are excluded here, in SQL,
+for the same reason the RSS path excludes them」——**同样的理由对 `xt` 也成立，
+但 `xt` 没走 SQL**。
+
+### 后果（实测）
+
+8 条条目，标记最新 2 条已读：
+
+```
+n=3    xt=read -> 1 个 id   （真实未读是 6）
+n=1000 xt=read -> 6 个 id   （正确）
+```
+
+Read You 用 `n=1000`：
+
+- 未读 ≤ 1000 时正确 —— 所以**这不是每天都能看到**
+- 未读 > 1000 时，取 1000 条最新、剔除其中已读，返回**少于 1000**，
+  客户端把剩下那些算作"不存在的条目"，**未读数偏低**
+- 更糟的是与已读率耦合：最新 1000 条里已读越多，返回越少。
+  用户一边读、一边刷新，**返回集合随已读分布变化 → 未读数跳变**
+
+### 与 #1 的区别
+
+| | 触发条件 | 表现 |
+|---|---|---|
+| #1 `it=` 忽略 | 每次同步，立刻 | `remoteReadIds` = 全集 → 未读震荡（0 与 N） |
+| #8 `xt` 后置过滤 | 未读 > `n=1000` | 返回少于 `n` → 未读偏低、随已读分布漂移 |
+
+两者都会让未读数看起来"跑来跑去"，但**成因不同、修法不同**，必须分别验证。
+#8 的修法是把已读过滤下推到 SQL（`NOT IN (select item_id from read_state
+where is_read)`），让 `LIMIT` 作用于**已过滤后**的结果集。
+
+---
+
+## 9（中）缺失端点导致整个 sync 失败并被放大成无限重试
+
+`GoogleReaderRssService.sync` 的整个函数体在一个 `try/catch` 里，catch 末尾：
+
+```kotlin
+} catch (e: Exception) {
+    Timber.tag("RLog").e(e, "On sync exception: ${e.message}")
+    syncLogger.log(e)
+    ListenableWorker.Result.retry()      // ← 无限重试
+}
+```
+
+且 `subscribe()` / `addGroup()` / `deleteGroup()` 里的
+`requireNotNull(feedId)`、`requireNotNull(...)` 会直接抛异常。
+
+这意味着 #2（quickadd 404）、#3、#4 不只是"某个按钮不好用"：
+`quickAdd.streamId` 为 null → `requireNotNull` 抛 → **整个账号同步失败并重试**，
+用户看到的是"一直转圈/一直不同步"，而不是"添加订阅失败"。
+这解释了为什么这些问题会表现为"整体不可用"而不是局部功能缺失。
+
+### 修复优先级含义
+
+#2 必须最先修（它污染整个 sync），其次是 #1/#8（状态正确性），
+再次 #3/#4。
 
 ### 修复方向
 
@@ -258,14 +392,65 @@ Pearss `reader_routes.py:739-741`：`feed_ids` 为空 → 直接 `OK`，不落�
 
 ---
 
-## 下一步
+## 全量支持范围
 
-修复范围（#1–#4）触及**新增写端点**（quickadd/unsubscribe/rename-tag/disable-tag），
-超出 ADR 0004 的只读+已读回写范围，**需要新 ADR**。建议：
+用户要求"全面支持"。按上面「我们对照的是哪份契约」一节，范围 =
+**Read You 实际会发出的全部 greader 请求**。下表是它在 `GoogleReaderAPI.kt`
+里定义的所有调用，与我们的现状一一对应：
 
-1. 先修 #1（纯读语义补全，无需新 ADR，风险最低、影响最大）
-2. #2–#4 合并为一个新 ADR「Read You 订阅管理的写端点」，明确每条的语义与
-   与 ADR 0021 的关系
-3. #5 维持现状 + 文档记录
-4. #6/#7 文档记录
-5. 全部按 behavior-first：先写 e2e（回放 Read You 的真实请求形状），再改实现
+| Read You 调用 | 端点 | 我们 | 待办 |
+|---|---|---|---|
+| `reAuthenticate` | `POST accounts/ClientLogin` | ✅ | — |
+| `reAuthenticate` | `GET reader/api/0/token` | ✅ | — |
+| `getUserInfo` | `GET reader/api/0/user-info` | ✅ | — |
+| `getSubscriptionList` | `GET subscription/list` | ✅ | — |
+| `getReadItemIds` | `GET stream/items/ids`（`s`+**`it`**+`ot`） | ⚠️ 忽略 `it`/`ot` | **#1** |
+| `getItemIdsForFeed` | `GET stream/items/ids`（`s=feed/x`+`xt`） | ✅ | — |
+| `getItemIdsForCategory` | `GET stream/items/ids`（`s=label`） | ✅ | — |
+| `getUnreadItemIds` | `GET stream/items/ids`（`xt`） | ⚠️ `n` 后置过滤 | **#8** |
+| `getStarredItemIds` | `GET stream/items/ids`（`s=starred`） | ✅ | — |
+| `getItemsContents` | `POST stream/items/contents` | ✅ | — |
+| `subscriptionQuickAdd` | `POST subscription/quickadd` | ❌ 404 | **#2** |
+| `editTag` | `POST edit-tag` | ✅ | — |
+| `disableTag` | `POST disable-tag` | ❌ 404 | **#4** |
+| `renameTag` | `POST rename-tag` | ❌ 404 | **#3** |
+| `subscriptionEdit(ac=edit)` | `POST subscription/edit` | ⚠️ 部分 | #6 #7 |
+| `subscriptionEdit(ac=unsubscribe)` | `POST subscription/edit` | ❌ 400（有意） | **#5** |
+| `markAllAsRead` | `POST mark-all-as-read` | ✅ | — |
+| （未用）`tag/list` | `GET tag/list` | ✅ | — |
+
+结论：**18 个调用点里 11 个已经正确，7 个有问题**。其中
+「能连上、列表正常、正文正常」这部分是对的，问题集中在
+**状态同步正确性**（#1 #8）和**订阅管理写路径**（#2–#5）。
+
+## 下一步（按优先级）
+
+1. **#2 `quickadd`** —— 它污染整个 sync（#9），最先修。
+   需要"源发现"能力：给定 URL 探测 feed 并取标题。这**正好是 A5
+   `discover_feed` 那件待做事项**，实现它可以顺带解决 A5。
+2. **#1 `it=` + #8 `xt` 下推** —— 纯读语义补全，同一个端点同一段逻辑，
+   一起修。**影响最大**（未读数震荡）。不需要新 ADR。
+3. **#3 `rename-tag` / #4 `disable-tag`** —— 分组管理。folder 在 Pearss 是
+   派生值，改文件夹 = 改 `source.folder`；删分组 = 该 folder 下 source 回
+   `default`。需要新 ADR。
+4. **#5 `unsubscribe`** —— 需你定夺语义（见下）。
+5. **#6 #7** —— 文档记录，不改代码。
+
+新增写端点（#2–#5）超出 ADR 0004「只读 + 已读回写」的范围，
+**需要一个新 ADR**，建议题为「Read You 订阅管理写端点」，逐条说明：
+- quickadd 的源发现与"写入即采集"的关系
+- unsubscribe / disable-tag 与 ADR 0021「删除即删除」的关系
+- 每个端点的审计与幂等要求（ADR 0004 已有约束："已读/星标写入仍走审计与幂等"）
+
+### #5 待定夺（唯一需要用户决策的点）
+
+`ac=unsubscribe` 有三个选项：
+
+- **A（建议）**：不实现，文档写明 App 内退订不可用，增删订阅走 `/v1` 或 MCP。
+  与既有决策一致；删除是破坏性且不可逆的动作，暴露给一个每轮同步都会尝试
+  调用的客户端路径风险偏高。
+- **B**：映射到 `disabled`（保留历史，可恢复，符合"诚实"原则但与客户端预期不符）。
+- **C**：实现为真删（与 ADR 0021 一致，但客户端一次误操作即不可逆）。
+
+全部按 behavior-first 执行：**先写回放 Read You 真实请求形状的 e2e**
+（包括 `it=`、`n=` 截断、振荡场景），再改实现。
