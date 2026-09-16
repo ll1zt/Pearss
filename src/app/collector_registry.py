@@ -428,7 +428,11 @@ def _rebuild_installed() -> None:
         stop = getattr(previous, "stop", None)
         if callable(stop):
             stop()
-    shipped = tuple(r for r in _REGISTRY if r.trust == "builtin")
+    # Provenance comes from the shipped declarations, not trust: shipped
+    # sandboxed collectors also carry trust="third-party". Keep their existing
+    # registrations and children, including the running app's egress wiring.
+    shipped_ids = {name for name, _, _ in _DECLARATIONS}
+    shipped = tuple(r for r in _REGISTRY if r.name in shipped_ids)
     installed = tuple(
         _installed_registration(plugin_id, manifest)
         for plugin_id, manifest in sorted(_INSTALLED_PLUGINS.items())
