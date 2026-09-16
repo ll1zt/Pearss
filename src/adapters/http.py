@@ -15,11 +15,13 @@ import os
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Final
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 
+from adapters import deadline_transport
 from adapters.raw_payload import ConditionalState, RawPayload
 
 # Re-exported: fetch() takes one, so it is part of this module's public surface
@@ -302,6 +304,7 @@ def _request(
     )
 
     headers = _request_headers(limits, conditional, json_body=json_body is not None)
+    deadline = monotonic() + limits.total_timeout
 
     # The guard runs before the socket: an unresolvable or private target is
     # refused without spending a connection. When the guard is active,
@@ -318,6 +321,7 @@ def _request(
 
     try:
         while True:
+            extensions = {deadline_transport.DEADLINE_EXTENSION: deadline}
             # Streaming so an oversized response is abandoned mid-body instead
             # of being buffered in full before the cap can be applied.
             with client.stream(
@@ -327,6 +331,7 @@ def _request(
                 headers=headers,
                 follow_redirects=follow_redirects and not manual_redirects,
                 json=json_body,
+                extensions=extensions,
             ) as response:
                 status = response.status_code
 

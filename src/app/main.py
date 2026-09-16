@@ -27,6 +27,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.correlation import current as current_correlation_id
+from adapters.deadline_transport import DeadlineTransport
 from app.auth import auth_configured
 from app.hardening import (
     AuthFailureRateLimitMiddleware,
@@ -174,7 +175,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # about a third of requests to slow origins. pool is the wait for a free
     # connection, not the time to establish one, so it gets the total budget.
     timeout = httpx.Timeout(connect=15.0, read=15.0, write=15.0, pool=60.0)
-    client = httpx.Client(timeout=timeout, follow_redirects=True)
+    client = httpx.Client(
+        transport=DeadlineTransport(),
+        timeout=timeout,
+        follow_redirects=True,
+        trust_env=False,
+    )
     app.state.http_client = client
 
     # Entered before the yield so the session manager is running by the time

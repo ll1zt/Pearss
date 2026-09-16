@@ -30,16 +30,29 @@ path does. Regression: `tests/integration/test_host_http_boundaries.py`
 (real loopback origin; asserts the forbidden destination receives no
 request).
 
+## Total elapsed deadline (A09)
+
+Direct and proxied fetches now enforce the `FetchPolicy.total_timeout`
+budget as an elapsed wall-clock deadline across connect, headers, redirects
+and streaming. `adapters.deadline_transport.DeadlineTransport` owns an async
+connection pool on a dedicated event-loop thread and caps every blocking
+operation by the remaining budget; expiry cancels the pending I/O, surfaces
+as `FetchError(ErrorClass.NETWORK)` through the existing timeout mapping,
+and releases the socket. The lifespan client (`app.main`) uses it, and
+`tests/integration/test_http_deadline.py` covers a slow body, slow headers,
+cumulative redirects and post-expiry reuse on real loopback sockets.
+
+Known limits, recorded rather than hidden:
+
+- DNS resolution is not inside the deadline: a stalled `getaddrinfo` can
+  still exceed the budget before the socket phase starts.
+- A proxied fetch is one host-side RPC; the child's call budget bounds the
+  pipe read between calls, not each blocking reverse-HTTP operation. Each
+  host-side request is capped by the transport's default total budget, but
+  a policy tuned below the RPC budget is not propagated from the child.
+
 ## Not yet enforced host-side (known gaps)
 
-- **No total elapsed fetch deadline.** `limits.total_timeout` configures
-  httpx's pool-acquisition timeout, and read timeout bounds inactivity, not
-  total duration. A slow-drip origin can hold a proxied fetch beyond its
-  advertised budget (review A09). A robust fix needs a per-attempt
-  wall-clock deadline across connect, redirects, and streaming; for the
-  synchronous httpx path this means a deadline-aware wrapper around
-  `handle_request` plus bounded streaming reads, and it must remain true
-  through the child's reverse-call round trip. Not implemented here.
 - **No host-side response-size cap.** The child-side size checks in
   `adapters.http._read_capped` run after the host has buffered the full
   response into an RPC message (`protocol.MAX_MESSAGE_BYTES` bounds the
