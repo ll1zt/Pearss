@@ -171,19 +171,38 @@ async def test_write_without_idempotency_key_is_refused(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_p2b_operations_are_honest_placeholders(
+async def test_the_loader_operations_reject_a_shipped_collector(
     writer: httpx.AsyncClient,
 ) -> None:
-    """Import/uninstall/reload need the loader; saying so beats faking it."""
-    for method, path in (
-        ("POST", "/v1/plugins/rss:import"),
-        ("DELETE", "/v1/plugins/rss"),
-        ("POST", "/v1/plugins/rss:reload"),
+    """A collector that ships with Pearss cannot be installed or removed.
+
+    These three operations were 409 placeholders until the loader existed
+    (ADR 0023). They are real now, and their first honest answer is about the
+    shipped set: `rss` arrives with the deployment, so importing it would
+    shadow a collector the host owns, and uninstalling it would remove
+    something no operator installed. Both are refused for that reason rather
+    than for "not implemented".
+
+    `:reload` answers 404 instead: a shipped collector is not installed, so
+    there is nothing of the operator's to reload. (`test_p2b_operations...`
+    asserted the old placeholder text; this replaces it with the behaviour the
+    loader actually has.)
+    """
+    imported = await writer.post("/v1/plugins/rss:import")
+    assert imported.status_code == 409, imported.text
+    assert imported.json()["detail"]["error"]["code"] == "plugin_id_taken"
+
+    # Removing and reloading answer about *installed* plugins, and a shipped
+    # collector is not one: the operator never installed it, so there is
+    # nothing of theirs to remove or reload.
+    for path, method in (
+        ("/v1/plugins/rss", "DELETE"),
+        ("/v1/plugins/rss:reload", "POST"),
     ):
         response = await writer.request(method, path)
-        assert response.status_code == 409, path
-        assert (
-            response.json()["detail"]["error"]["code"] == "plugin_operation_unavailable"
+        assert response.status_code == 404, (path, response.text)
+        assert response.json()["detail"]["error"]["code"] == "plugin_not_installed", (
+            path
         )
 
 

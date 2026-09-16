@@ -131,7 +131,12 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 - 登录型/签名源在注册表声明 `fetches=True` 自取页面（ADR 0014）；钩子的失败
   契约是 `FetchError(ErrorClass)`——凭据缺失在采集器边界映射为 `auth`，不得
   让其他异常类型逃过 pipeline 的分类
-- P1 不引入 manifest/动态安装；硬编码注册的准插件即可
+- 第三方插件从 `PEARSS_PLUGIN_DIR`（默认 `/var/lib/pearss/plugins`）装载，目录名即
+  collector_id，需含 `manifest.json` + `collector.py`（模块名固定为 `collector`），
+  依赖自带 venv。安装走 `POST /v1/plugins/{id}:import`，它在**子进程**里 import
+  插件并校验「manifest 声明 ↔ 实际 hookimpl」双向一致，不一致即拒绝且不留痕
+- 装载器不判断插件是否安全（ADR 0023）：隔离限制的是故障半径，信任决定属于运行者。
+  因此 `:import` 的确认文本必须列出插件请求的凭据前缀，`uninstall` 不删用户的文件
 
 ### 安全与隐私
 

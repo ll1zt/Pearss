@@ -165,6 +165,9 @@ def _reap_sandboxed_children() -> Iterator[None]:
     from app import collector_registry
 
     collector_registry.for_each_sandboxed_collector(lambda name, child: child.stop())
+    # Installed plugins are module state too (ADR 0023), so a plugin one test
+    # imported would otherwise still be registered for the next one.
+    collector_registry.forget_installed_plugins()
 
 
 def _free_port() -> int:

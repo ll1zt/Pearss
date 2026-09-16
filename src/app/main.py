@@ -215,6 +215,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with mcp_inner.router.lifespan_context(mcp_inner):
         from app.collector_registry import (
             for_each_sandboxed_collector,
+            set_http_transport,
             sync_plugin_table,
         )
 
@@ -226,8 +227,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # the wiring is load-bearing, not cosmetic.
         from app.plugin_runtime import HostClientTransport
 
+        transport = HostClientTransport(client)
+        # Registered, not just applied: an installed plugin's child is built
+        # later (ADR 0023), and `_installed_registration` reads this back to
+        # give it the same egress path. Applying it to the current children is
+        # the other half.
         for_each_sandboxed_collector(
-            lambda name, child: child.set_http_transport(HostClientTransport(client))
+            lambda name, child: set_http_transport(name, transport)
         )
         sync_plugin_table(app.state.session_factory)
         if scheduler_enabled():
