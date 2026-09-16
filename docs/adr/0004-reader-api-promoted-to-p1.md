@@ -64,3 +64,18 @@ C4 提前到 P1，本次交付完整能力（只读 + 已读回写）：
 ## 可逆性
 
 可逆，成本中等：端点集可停用，但 `ReadState` 作为事实源一旦有数据就不能删掉重来（清理 Item 前须先按保留策略处理，见 `data-model.md`）。若最终判断不需要，应停用端点而保留表与数据。
+
+## 修订（2026-09-14）：端点范围扩大，见 ADR 0024
+
+上文「决策」一节列出的端点集，是按 **NetNewsWire 实际调用**归纳的
+（8 个：ClientLogin、token、user-info、subscription/list、tag/list、
+stream/items/ids、stream/items/contents、edit-tag）。
+
+接入 Android 的 **Read You** 后，这个范围不够用：它除上述之外还调用
+`subscription/quickadd`、`rename-tag`、`disable-tag`，并在 `stream/items/ids`
+上用 `it=` 表达 include 过滤器（FreshRSS 账号类型的读路径）。这些端点的
+**语义、与 ADR 0021 的关系、以及有意不实现的部分（`ac=unsubscribe`）**
+记录在 ADR 0024。
+
+本 ADR 的决策本身不变——「只读 + 已读回写」仍是当时这次交付的范围，
+「已读写入走审计与幂等」这条约束同样适用于 ADR 0024 新增的写端点。

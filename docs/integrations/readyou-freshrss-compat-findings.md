@@ -2,6 +2,10 @@
 
 - 日期：2026-09-14
 - 分支：`fix/readyou-freshrss-compat`
+- **状态：9 项全部处置完毕**（#1–#4 已修；#5 决定不实现；#6/#7 记录为有意缺口；
+  #8/#9 随 #1/#2 消除）。决策落在 ADR 0024，行为测试在
+  `tests/integration/test_readyou_compat.py`。本文保留**核查过程与判定依据**，
+  它是"为什么这么修"的叙述记录，与 ADR 的可执行结论互补。
 - 对照对象：
   - 客户端：`Ashinch/ReadYou` @ `d2b979c`
     - `infrastructure/rss/provider/greader/GoogleReaderAPI.kt`
@@ -12,6 +16,22 @@
 核查方式：读对端源码取出**它实际发出的请求**，再对一个已迁移的测试实例逐条回放
 （临时探针，已删除），以响应为准，不靠文档或推断。这与 ADR 0005/0006 两轮教训
 一致——对外契约以对端实现为准。
+
+结论与修复状态见下表，其余各节保留判定依据。**实测数据均为 A 档证据**
+（受控回放 + 可复现），标「未确证」处只有机制推演。
+
+| # | 问题 | 状态 | 处置 |
+|---|---|---|---|
+| 1 | `it=` include tag 被忽略 | ✅ 已修 | 下推 SQL，与 `xt` 对称 |
+| 2 | `subscription/quickadd` 404 | ✅ 已实现 | 接收已解析的 feed URL |
+| 3 | `rename-tag` 404 | ✅ 已实现 | 批量改 `source.folder` |
+| 4 | `disable-tag` 404 | ✅ 已实现 | 组内源回 `default` |
+| 5 | `ac=unsubscribe` 被拒 | ⛔ 决定不实现 | 理由记录在 ADR 0024 决策 5 |
+| 6 | `t=` 重命名静默 OK | 📄 记录为缺口 | 标题属于 origin，兑现也会被覆盖 |
+| 7 | 空分组不落库 | 📄 记录为缺口 | folder 是派生值，无实体可存 |
+| 8 | `xt` 在 `LIMIT` 之后过滤 | ✅ 已修 | 与 #1 同一下推 |
+| 9 | 缺失端点放大成无限重试 | ✅ 随 #2–#4 消除 | — |
+
 
 ## 我们对照的到底是哪份契约？
 
@@ -172,8 +192,13 @@ round2 remote_unread=3; client flips 3 back to UNREAD
 `reader_routes.py:386-399`：
 
 ```python
-ids = visible_ids_for_stream(session, stream_id=s, tenant_id=TENANT,
-                             limit=max(1, min(n, 10000)), offset=_offset(c))
+ids = visible_ids_for_stream(
+    session,
+    stream_id=s,
+    tenant_id=TENANT,
+    limit=max(1, min(n, 10000)),
+    offset=_offset(c),
+)
 #      ^^^ SQL 里 LIMIT n，只按 published_at 排序，不看已读状态
 if not ids:
     return {"itemRefs": []}
@@ -275,16 +300,20 @@ subscriptionEdit(destFeedId = feedId, destCategoryId = groupId.dollarLast(), des
 `requireNotNull(feedId)` 会抛异常 → 整个 sync 的 try/catch 把结果置为
 `ListenableWorker.Result.retry()` → **无限重试**。
 
-### 修复方向
+### 修复方向（已实现，含一处修正）
 
-新增 `POST/GET /reader/api/0/subscription/quickadd`：
+新增 `POST /reader/api/0/subscription/quickadd`：
 - 解析 `quickadd`（query 或 form，Read You 两处都发）
-- 复用现有「源发现」逻辑（P3 `discover_feed` / RFC 探测，A5 待做）
 - 返回 `{numResults, query, streamId: "feed/<id>", streamName}`
-- 必须同时兼容 `output=json`（Read You 总是带）
+- 幂等：复用 `create_source` 的"同 URL 返回既有行"
 
-注意：这与 ADR 0004 的「只读+已读回写」范围外，是新增写能力；**需要新 ADR 记录**，
-且要遵守 ADR 0021 与审计/幂等约束。
+> **修正**：本节初稿写「复用现有源发现逻辑（A5）」。实现前读
+> `RssHelper.searchFeed` 确认这**不成立**——Read You 在客户端完成发现
+> （抓取、解析、跟随 alternate link），发来的是**已解析的 feed URL**。
+> 所以这里不做发现，**A5 继续暂缓**（ADR 0010 有效）。详见文末「一处判定修正」。
+
+注意：这与 ADR 0004 的「只读+已读回写」范围外，是新增写能力；决策记录在
+**ADR 0024**，并遵守其中与 ADR 0021 及审计/幂等相关的约束。
 
 ---
 
@@ -327,7 +356,9 @@ Pearss `reader_routes.py:708-712` 直接 400：
 
 ```python
 if ac != "edit":
-    raise HTTPException(400, f"unsupported subscription/edit action {ac!r}; only 'edit'")
+    raise HTTPException(
+        400, f"unsupported subscription/edit action {ac!r}; only 'edit'"
+    )
 ```
 
 `mcp-tool-guide.md:149` 明确写了「**不支持 subscribe/unsubscribe**——增删订阅走
@@ -396,7 +427,8 @@ Pearss `reader_routes.py:739-741`：`feed_ids` 为空 → 直接 `OK`，不落�
 
 用户要求"全面支持"。按上面「我们对照的是哪份契约」一节，范围 =
 **Read You 实际会发出的全部 greader 请求**。下表是它在 `GoogleReaderAPI.kt`
-里定义的所有调用，与我们的现状一一对应：
+里定义的所有调用，与**修复前**的现状一一对应（保留为基线快照，
+当前状态看文首的结论表）：
 
 | Read You 调用 | 端点 | 我们 | 待办 |
 |---|---|---|---|
@@ -423,34 +455,40 @@ Pearss `reader_routes.py:739-741`：`feed_ids` 为空 → 直接 `OK`，不落�
 「能连上、列表正常、正文正常」这部分是对的，问题集中在
 **状态同步正确性**（#1 #8）和**订阅管理写路径**（#2–#5）。
 
-## 下一步（按优先级）
+## 实际执行结果
 
-1. **#2 `quickadd`** —— 它污染整个 sync（#9），最先修。
-   需要"源发现"能力：给定 URL 探测 feed 并取标题。这**正好是 A5
-   `discover_feed` 那件待做事项**，实现它可以顺带解决 A5。
-2. **#1 `it=` + #8 `xt` 下推** —— 纯读语义补全，同一个端点同一段逻辑，
-   一起修。**影响最大**（未读数震荡）。不需要新 ADR。
-3. **#3 `rename-tag` / #4 `disable-tag`** —— 分组管理。folder 在 Pearss 是
-   派生值，改文件夹 = 改 `source.folder`；删分组 = 该 folder 下 source 回
-   `default`。需要新 ADR。
-4. **#5 `unsubscribe`** —— 需你定夺语义（见下）。
-5. **#6 #7** —— 文档记录，不改代码。
+按优先级全部完成，三次提交：
 
-新增写端点（#2–#5）超出 ADR 0004「只读 + 已读回写」的范围，
-**需要一个新 ADR**，建议题为「Read You 订阅管理写端点」，逐条说明：
-- quickadd 的源发现与"写入即采集"的关系
-- unsubscribe / disable-tag 与 ADR 0021「删除即删除」的关系
-- 每个端点的审计与幂等要求（ADR 0004 已有约束："已读/星标写入仍走审计与幂等"）
+| 提交 | 内容 |
+|---|---|
+| `9ca5cb9` | #1 + #8：`it=` 支持与 `xt` 下推 SQL（含夹具移入 conftest） |
+| `c641a5a` | #2 + #3 + #4：三个订阅管理写端点 |
+| 本次 | ADR 0024 + 文档同步（本文件、netnewswire、mcp-tool-guide、README） |
 
-### #5 待定夺（唯一需要用户决策的点）
+行为测试：`tests/integration/test_readyou_compat.py`（13 个场景），
+全部回放 Read You 的真实请求形状，先失败后实现。
 
-`ac=unsubscribe` 有三个选项：
+### 一处判定修正（记录，因为它是本轮最有价值的发现）
 
-- **A（建议）**：不实现，文档写明 App 内退订不可用，增删订阅走 `/v1` 或 MCP。
-  与既有决策一致；删除是破坏性且不可逆的动作，暴露给一个每轮同步都会尝试
-  调用的客户端路径风险偏高。
-- **B**：映射到 `disabled`（保留历史，可恢复，符合"诚实"原则但与客户端预期不符）。
-- **C**：实现为真删（与 ADR 0021 一致，但客户端一次误操作即不可逆）。
+计划阶段我判断 quickadd「需要源发现能力，正好顺带解决 A5」。**这个判断是错的**，
+实现前读 `RssHelper.searchFeed` 才确认：Read You **在客户端完成发现** ——
+抓地址、解析、跟随 `<link rel=alternate>`，然后把**已解析的 feed URL** 发来。
 
-全部按 behavior-first 执行：**先写回放 Read You 真实请求形状的 e2e**
-（包括 `it=`、`n=` 截断、振荡场景），再改实现。
+所以 quickadd 不需要服务端发现，**A5 的暂缓决定完全不受影响**（ADR 0010 继续有效）。
+若按原判断去实现服务端发现，就会在不知情的情况下复活一个被用户明确暂缓的功能，
+并写一个客户端根本不会调用的代码路径。这正是"读对端源码而不是推测"的价值。
+
+### #5 的处置
+
+采用原建议的 A 方案（不实现 `ac=unsubscribe`），理由已写入 ADR 0024 决策 5 与
+`subscription_edit` 的 docstring。核心三点叠加：**不可逆**（ADR 0021 物理删除）、
+**用户不可见**（发生在同步过程中）、**失败即重试**（不是对话框）。
+
+### 已知缺口（有意保留）
+
+三项记录在 ADR 0024 与 mcp-tool-guide，不改代码：
+
+1. App 内不能退订（#5）
+2. `t=` 重命名订阅源不生效（#6）—— 标题属于 origin
+3. 新建空分组刷新后消失（#7）—— folder 是派生值，无实体可存
+

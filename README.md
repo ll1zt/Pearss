@@ -342,6 +342,10 @@ PEARSS_READER_PASSWORD=<your-password>
 
 > **改密码会让 token 失效**，所有已登录客户端需要重新登录——token 由哈希派生，见 ADR 0005。
 
+同一地址也适用于 Android 的 **Read You**（FreshRSS 账号类型）。它在 NNW 的只读能力
+之上还能在 App 内加订阅、建/改/删分组；**唯一不可用的是在 App 内退订**——删除不可逆
+且发生在用户看不见的同步里，故增删订阅走 MCP 或 `/v1`（ADR 0024）。
+
 ## X（Twitter）源：登录型采集
 
 X 源读取**你自己的** Following 时间线，需要会话 cookie（ADR 0012 的条件与风险）。两种配法：

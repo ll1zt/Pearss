@@ -74,3 +74,4 @@ docs/adr/
 | [0021](0021-deletion-is-deletion.md) | 删除就是删除：条目与订阅的物理删除 | accepted | 2026-09-14 |
 | [0022](0022-agent-ingest-api.md) | A3 主动数据接入：agent 提交内容走采集器同一条管线 | accepted | 2026-09-14 |
 | [0023](0023-third-party-plugin-loader.md) | 第三方插件加载器：用户自负其责 | accepted | 2026-09-16 |
+| [0024](0024-readyou-subscription-writes.md) | Read You 的订阅管理写端点（quickadd / rename-tag / disable-tag，`it=` 与 `xt=` 下推 SQL） | accepted（**修订 ADR 0004 的端点范围**；**修订 ADR 0010 只澄清 A5 不受影响**） | 2026-09-14 |

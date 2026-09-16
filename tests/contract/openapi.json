@@ -17,6 +17,28 @@
         "title": "Body_client_login_api_greader_php_accounts_ClientLogin_post",
         "type": "object"
       },
+      "Body_disable_tag_api_greader_php_reader_api_0_disable_tag_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "s": {
+            "default": "",
+            "title": "S",
+            "type": "string"
+          }
+        },
+        "title": "Body_disable_tag_api_greader_php_reader_api_0_disable_tag_post",
+        "type": "object"
+      },
       "Body_edit_tag_api_greader_php_reader_api_0_edit_tag_post": {
         "properties": {
           "T": {
@@ -91,6 +113,33 @@
         "title": "Body_mark_all_as_read_api_greader_php_reader_api_0_mark_all_as_read_post",
         "type": "object"
       },
+      "Body_rename_tag_api_greader_php_reader_api_0_rename_tag_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "dest": {
+            "default": "",
+            "title": "Dest",
+            "type": "string"
+          },
+          "s": {
+            "default": "",
+            "title": "S",
+            "type": "string"
+          }
+        },
+        "title": "Body_rename_tag_api_greader_php_reader_api_0_rename_tag_post",
+        "type": "object"
+      },
       "Body_stream_items_contents_api_greader_php_reader_api_0_stream_items_contents_post": {
         "properties": {
           "i": {
@@ -149,6 +198,28 @@
           }
         },
         "title": "Body_subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
+        "type": "object"
+      },
+      "Body_subscription_quickadd_api_greader_php_reader_api_0_subscription_quickadd_post": {
+        "properties": {
+          "T": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "T"
+          },
+          "quickadd": {
+            "default": "",
+            "title": "Quickadd",
+            "type": "string"
+          }
+        },
+        "title": "Body_subscription_quickadd_api_greader_php_reader_api_0_subscription_quickadd_post",
         "type": "object"
       },
       "DeleteItemsRequest": {
@@ -612,6 +683,45 @@
         ]
       }
     },
+    "/api/greader.php/reader/api/0/disable-tag": {
+      "post": {
+        "description": "Remove a folder -- Read You's group delete.\n\nRead You deletes a group's feeds first (`deleteFeed` per feed) and then\ncalls this. Since a folder is a value on the sources rather than a row,\n\"removing\" it means moving its sources back to the default folder: the\ngroup stops existing because nothing carries its name any more, and the\nsubscriptions inside it survive rather than vanishing with it.\n\nRefusing when sources remain would be defensible, but it would break the\nclient's intent: it has already unsubscribed the feeds it meant to, and\na refusal here leaves the remainder in a folder the user just deleted.",
+        "operationId": "disable_tag_api_greader_php_reader_api_0_disable_tag_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_disable_tag_api_greader_php_reader_api_0_disable_tag_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disable Tag",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
     "/api/greader.php/reader/api/0/edit-tag": {
       "post": {
         "description": "Mark items read/unread and starred/unstarred.\n\nIdempotent by construction: the same request replayed produces the same\nstate, because every write is last-write-wins on a fixed pair of flags.",
@@ -690,6 +800,45 @@
         ]
       }
     },
+    "/api/greader.php/reader/api/0/rename-tag": {
+      "post": {
+        "description": "Rename a folder -- Read You's group rename.\n\nFolders in Pearss are not entities: a source carries a `folder` name and\nthe set of folders is derived from those names (`tag/list` reads them\nback with a DISTINCT). So renaming is a rename of the *value*, applied to\nevery source that carries it, and an empty folder needs no handling\nbecause an empty folder does not exist.\n\nBoth ids arrive as `user/-/label/<name>` streams. A `dest` that is not a\nlabel stream is a client bug worth refusing rather than guessing at.",
+        "operationId": "rename_tag_api_greader_php_reader_api_0_rename_tag_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_rename_tag_api_greader_php_reader_api_0_rename_tag_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Tag",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
     "/api/greader.php/reader/api/0/stream/items/contents": {
       "post": {
         "description": "Content for specific items.\n\nAuthenticated like a read, not like a write. This endpoint changes nothing\n-- it is POST only because the item ids are too numerous for a query\nstring -- and NetNewsWire sends it with the Authorization header and no\nform `T`. Requiring `T` here returned 401 to every real client request,\nwhich surfaced as a populated article list whose bodies were all blank.",
@@ -735,7 +884,7 @@
     },
     "/api/greader.php/reader/api/0/stream/items/ids": {
       "get": {
-        "description": "Item ids for a stream.\n\nSupports `xt` to exclude the read state, which is how a client fetches\nonly unread items. Pending items are always excluded: the gate applies to\nthe Reader API just as it does to RSS.",
+        "description": "Item ids for a stream.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.",
         "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_get",
         "parameters": [
           {
@@ -768,6 +917,19 @@
                 "type": "string"
               },
               "title": "Xt",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "it",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "It",
               "type": "array"
             }
           },
@@ -818,7 +980,7 @@
         ]
       },
       "post": {
-        "description": "Item ids for a stream.\n\nSupports `xt` to exclude the read state, which is how a client fetches\nonly unread items. Pending items are always excluded: the gate applies to\nthe Reader API just as it does to RSS.",
+        "description": "Item ids for a stream.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.",
         "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_post",
         "parameters": [
           {
@@ -851,6 +1013,19 @@
                 "type": "string"
               },
               "title": "Xt",
+              "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "it",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "It",
               "type": "array"
             }
           },
@@ -903,7 +1078,7 @@
     },
     "/api/greader.php/reader/api/0/subscription/edit": {
       "post": {
-        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.\n\nRenaming is not implemented, and a `t=` is answered with the same OK the\nrest of the edit produces. That is deliberate rather than lazy: a source's\ntitle belongs to the origin (it is discovered at collection time and\nrecorded once), so a client rename would be overwritten by the next fetch\nanyway. Accepting it silently and failing to honour it would be worse than\nthis -- the reply is honest about everything this endpoint owns.",
+        "description": "Move subscriptions between folders -- the drag-and-drop write path.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove. A feed can only be in one category, so an `a` wins and\nthe folder is set; an `r` without an `a` moves back to the default.\nUnknown feeds are skipped rather than 404'd, the same leniency edit-tag\napplies to item ids -- a client works from the ids subscription/list gave\nit, and one that was withdrawn since should not fail the whole edit.\n\nRenaming is not implemented, and a `t=` is answered with the same OK the\nrest of the edit produces. That is deliberate rather than lazy: a source's\ntitle belongs to the origin (it is discovered at collection time and\nrecorded once), so honouring it would be undone by the next fetch. The\nreply is honest about everything this endpoint owns; the title is not its\nto change.\n\n`ac=unsubscribe` is refused with 400, and the refusal is the decision\nrather than an omission. Read You calls it to delete a subscription, so\nthe consequence of implementing it is a delete -- and deletion in Pearss\nremoves the row with its history (ADR 0021), with nothing to undo it. The\nclient sends this during a sync the user did not watch, and its failure\nmode is a retry loop rather than a dialog, so a mis-tap would destroy\ncollected history silently. Subscriptions are removed through `/v1` or\nMCP, where the caller states intent explicitly. This is the one Read You\nfeature knowingly left unavailable; the client guide records it.",
         "operationId": "subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
         "requestBody": {
           "content": {
@@ -991,6 +1166,49 @@
           }
         },
         "summary": "Subscription List",
+        "tags": [
+          "reader-api"
+        ]
+      }
+    },
+    "/api/greader.php/reader/api/0/subscription/quickadd": {
+      "post": {
+        "description": "Subscribe to a feed URL -- Read You's \"add feed\" path.\n\nThe URL arrives already resolved. Read You fetches the address the user\ntyped, parses it, follows any `<link rel=alternate>` to the actual feed,\nand only then calls this with the *feed's* URL (`RssHelper.searchFeed` ->\n`discoverFeedLink`, then `subscribe(feedLink = resolvedFeedLink)`). So\nthis is not a discovery endpoint: it subscribes to what it is given, and\nA5 `discover_feed` -- deferred by decision, not by omission -- stays\ndeferred.\n\nWhat it does share with discovery is the failure mode worth guarding: the\nclient `requireNotNull`s `streamId` and lets the exception escape into\n`sync`, whose catch answers `Result.retry()`. An endpoint that returned\nno id would therefore not fail one \"add feed\" -- it would put the whole\naccount into a retry loop. Hence a real subscription and a real id, or an\nerror, never a well-formed empty reply.\n\nIdempotent by the identity of the source: re-adding a URL returns the\nexisting subscription, which is what `create_source` already does for the\nsame reason (`POST /v1/sources` relies on it).",
+        "operationId": "subscription_quickadd_api_greader_php_reader_api_0_subscription_quickadd_post",
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_subscription_quickadd_api_greader_php_reader_api_0_subscription_quickadd_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Subscription Quickadd Api Greader Php Reader Api 0 Subscription Quickadd Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Subscription Quickadd",
         "tags": [
           "reader-api"
         ]
