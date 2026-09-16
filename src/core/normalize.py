@@ -109,7 +109,11 @@ def canonicalize_url(url: str) -> str:
     if port is not None and str(port) == _DEFAULT_PORTS.get(scheme):
         port = None
 
-    netloc = host if port is None else f"{host}:{port}"
+    # An IPv6 literal parses only with its brackets, which `hostname` strips;
+    # restoring them keeps the canonical form re-parseable so the same origin
+    # cannot become two different identities.
+    host_text = f"[{host}]" if ":" in host else host
+    netloc = host_text if port is None else f"{host_text}:{port}"
 
     path = parts.path or "/"
     # Collapse duplicate slashes, which otherwise make the same resource look
