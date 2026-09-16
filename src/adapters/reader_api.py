@@ -81,6 +81,38 @@ def is_state_stream(stream_id: str, *, state: str) -> bool:
     return _normalise_state_stream(stream_id) == state
 
 
+# The states a tag filter can name, mapped to the read-state column that
+# carries them. `read` is inverted at the call site (`is_read` false means
+# unread) and `kept-unread` is the same column read the other way -- Google
+# Reader's `kept-unread` marks an item the user deliberately left unread, and
+# we model that as "not read", which is what the column already says.
+TAG_STATE_COLUMNS = {"read": "is_read", "starred": "is_starred"}
+
+
+def tag_states(stream_ids: list[str]) -> list[str]:
+    """The state names among a list of tag stream ids, in order, deduped.
+
+    Used for `it=`/`xt=` on `stream/items/ids`, where a client names states
+    rather than streams. Unrecognised ids are dropped rather than rejected:
+    a client sending a state we do not model (say `com.google/like`) should
+    get the items matching the states we *do* model, or nothing -- but never
+    an error, and never the unfiltered list. The caller decides which of
+    those two emptiness rules applies based on whether any state survived.
+
+    `kept-unread` maps to `read` because our model has one boolean: an item
+    is either read or not, and `kept-unread` (in Remove) means "not read".
+    """
+    seen: list[str] = []
+    for stream_id in stream_ids:
+        state = _normalise_state_stream(stream_id)
+        if state == "kept-unread":
+            state = "read"
+        if state in TAG_STATE_COLUMNS and state not in seen:
+            seen.append(state)
+    return seen
+
+
+
 def _normalise_state_stream(stream_id: str) -> str | None:
     """Reduce a state stream id to its bare state name, or None."""
     for pattern in (_USER_STATE_STREAM, _STATE_STREAM):

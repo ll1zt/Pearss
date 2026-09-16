@@ -371,15 +371,38 @@ def stream_items_ids(
     s: str = Query(default=reader_api.READING_LIST),
     n: int = Query(default=10000),
     xt: list[str] = Query(default=[]),
+    it: list[str] = Query(default=[]),
     c: str | None = Query(default=None),
 ) -> dict[str, object]:
     """Item ids for a stream.
 
-    Supports `xt` to exclude the read state, which is how a client fetches
-    only unread items. Pending items are always excluded: the gate applies to
-    the Reader API just as it does to RSS.
+    `xt` excludes a state, `it` includes one -- both are how a client fetches
+    a subset, and both are applied in SQL so `n` bounds the *answer* rather
+    than the pre-filter set. That ordering is load-bearing: Read You asks for
+    "the newest 1000 unread", and filtering after a limit would hand it fewer
+    than it asked for, which it counts as items that do not exist.
+
+    FreshRSS clients express the read stream with `it=`, not `s=`. Read You
+    sends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for
+    a Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`
+    made that query return the whole library -- and because the client reads
+    the result as "these are read", it marked every unread item read on each
+    sync, while a parallel branch flipped them back. The unread count
+    oscillated between 0 and the total.
+
+    Pending items are always excluded: the gate applies to the Reader API just
+    as it does to RSS.
     """
-    from adapters.repository import read_states_for, visible_ids_for_stream
+    from adapters.repository import visible_ids_for_stream
+
+    # An unrecognised state yields nothing rather than being dropped: a filter
+    # we cannot honour must not widen into the unfiltered list.
+    include_states = tuple(reader_api.tag_states(it))
+    exclude_states = tuple(reader_api.tag_states(xt))
+    if it and not include_states:
+        return {"itemRefs": [], "continuation": None}
+    if xt and not exclude_states:
+        return {"itemRefs": [], "continuation": None}
 
     with request.app.state.session_factory() as session:
         ids = visible_ids_for_stream(
@@ -388,14 +411,9 @@ def stream_items_ids(
             tenant_id=TENANT,
             limit=max(1, min(n, 10000)),
             offset=_offset(c),
+            include_states=include_states,
+            exclude_states=exclude_states,
         )
-        if not ids:
-            return {"itemRefs": []}
-
-        exclude_read = any(reader_api.is_state_stream(t, state="read") for t in xt)
-        if exclude_read:
-            states = read_states_for(session, ids, tenant_id=TENANT)
-            ids = [i for i in ids if not (states.get(i) and states[i].is_read)]
 
     # Decimal, not hex: NetNewsWire does Int(id)! on these values and drops
     # every entry it cannot parse as an integer.

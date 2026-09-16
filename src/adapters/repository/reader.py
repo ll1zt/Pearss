@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -27,6 +28,8 @@ def visible_ids_for_stream(
     tenant_id: str,
     limit: int = 10000,
     offset: int = 0,
+    include_states: tuple[str, ...] = (),
+    exclude_states: tuple[str, ...] = (),
 ) -> list[str]:
     """Item ids for a Reader API stream, newest first.
 
@@ -39,6 +42,14 @@ def visible_ids_for_stream(
     library, which a client then renders as every item being starred. Serving an
     empty list for a filter we do not implement is an honest gap; serving the
     unfiltered list is a wrong answer that looks like data.
+
+    `include_states`/`exclude_states` are the `it=`/`xt=` tag filters Read You
+    sends. They are applied **in SQL, before `limit`** -- filtering afterwards
+    would let the limit silently drop items that match, so a client asking for
+    "the newest 1000 unread" would receive fewer than 1000 and count the
+    difference as items that do not exist. That is a wrong answer that looks
+    like data, and it drifts as items are read, which is exactly the bug the
+    unread badge was showing.
     """
     from adapters import reader_api
 
@@ -81,6 +92,13 @@ def visible_ids_for_stream(
             LOGGER.info("unhandled Reader stream %r; returning no items", stream_id)
             return []
 
+    query = _apply_state_filters(
+        query,
+        tenant_id=tenant_id,
+        include_states=include_states,
+        exclude_states=exclude_states,
+    )
+
     return list(
         session.execute(
             query.order_by(ItemRow.published_at.desc().nullslast(), ItemRow.id)
@@ -88,6 +106,51 @@ def visible_ids_for_stream(
             .offset(offset)
         ).scalars()
     )
+
+
+def _apply_state_filters(
+    query: Any,
+    *,
+    tenant_id: str,
+    include_states: tuple[str, ...],
+    exclude_states: tuple[str, ...],
+) -> Any:
+    """Narrow a stream query by `it=`/`xt=` states, in SQL.
+
+    Every modelled state lives in `read_state`: an item with no row there is
+    unread and unstarred (see `read_states_for`). So "must be read" is
+    `IN (row WHERE is_read)` and "must not be read" is its complement.
+
+    A state that matches nothing yields a query that matches nothing on its
+    own -- an empty subquery -- rather than a special case here. That keeps
+    the rule "a filter we cannot honour must not widen into the unfiltered
+    list" in one place: the caller rejects unrecognised states before this
+    runs, so anything reaching here is a state we do model, and an empty
+    result is then the honest answer.
+    """
+    from adapters import reader_api
+
+    for state in include_states:
+        column = reader_api.TAG_STATE_COLUMNS[state]
+        query = query.where(
+            ItemRow.id.in_(
+                select(ReadStateRow.item_id).where(
+                    getattr(ReadStateRow, column).is_(True),
+                    ReadStateRow.tenant_id == tenant_id,
+                )
+            )
+        )
+    for state in exclude_states:
+        column = reader_api.TAG_STATE_COLUMNS[state]
+        query = query.where(
+            ItemRow.id.not_in(
+                select(ReadStateRow.item_id).where(
+                    getattr(ReadStateRow, column).is_(True),
+                    ReadStateRow.tenant_id == tenant_id,
+                )
+            )
+        )
+    return query
 
 
 def upsert_reader_credential(
