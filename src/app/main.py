@@ -221,9 +221,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with mcp_inner.router.lifespan_context(mcp_inner):
         from app.collector_registry import (
             for_each_sandboxed_collector,
+            restore_installed_plugins,
             set_http_transport,
             sync_plugin_table,
         )
+
+        # Recover approved installations before wiring their egress or starting jobs.
+        restore_installed_plugins(app.state.session_factory)
 
         # The sandboxed collectors' egress is host-proxied (ADR 0017): the
         # child's reverse http calls ride back here and run through the same

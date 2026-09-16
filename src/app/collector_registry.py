@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -382,6 +383,56 @@ _REGISTRY: tuple[Registration, ...] | None = None
 # reason the registry itself is: both are rebuilt together, and a plugin that
 # is installed but not in this set is one the operator removed.
 _INSTALLED_PLUGINS: dict[str, dict[str, Any]] = {}
+
+
+def restore_installed_plugins(
+    session_factory: Any, *, tenant_id: str = "default"
+) -> None:
+    """Recover explicit installations before startup wires egress or starts jobs.
+
+    The database is the consent record, not a directory scan. A changed manifest
+    (including credential prefixes) requires a new explicit import. Check it
+    *before* running plugin code or giving a verification child any credentials.
+    Missing/broken installations remain recorded, but unavailable, so repairing
+    their files permits a later restart or explicit import to recover them.
+    Startup does not change the operator's enabled/disabled decision.
+    """
+    from adapters.repository import list_plugin_rows
+    from app import plugin_loader
+
+    shipped_ids = {name for name, _, _ in _DECLARATIONS}
+    with session_factory() as session:
+        records = [
+            (row.id, row.checksum)
+            for row in list_plugin_rows(session, tenant_id=tenant_id)
+            if row.id not in shipped_ids
+        ]
+
+    recovered: dict[str, dict[str, Any]] = {}
+    for plugin_id, checksum in records:
+        try:
+            on_disk = plugin_loader.read_manifest(plugin_id)
+            if on_disk.checksum != checksum:
+                raise plugin_loader.PluginLoadError("manifest changed; import again")
+            impls = plugin_loader.verify_in_child(on_disk)
+            plugin_loader.verify_declarations(on_disk, impls)
+        except (plugin_loader.PluginLoadError, OSError, ValueError, TypeError):
+            # Never log exception text: child errors and manifests can contain
+            # credentials or private URLs. The id identifies the recovery action.
+            logging.getLogger(__name__).warning(
+                "Installed plugin %r unavailable; check files and explicitly import "
+                "again if its manifest changed",
+                plugin_id,
+            )
+            continue
+        recovered[plugin_id] = {**on_disk.manifest, "checksum": on_disk.checksum}
+
+    # A lifespan may be entered again by an embedding application. Drop stale
+    # in-memory installations too, without touching shipped children or DB rows.
+    for plugin_id in tuple(_INSTALLED_PLUGINS):
+        uninstall_plugin(plugin_id)
+    _INSTALLED_PLUGINS.update(recovered)
+    _rebuild_installed()
 
 
 def install_plugin(plugin_id: str, manifest: dict[str, Any]) -> None:
