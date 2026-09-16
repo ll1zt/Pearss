@@ -15,9 +15,8 @@ from datetime import datetime, timedelta
 
 from core.models import SchedulePolicy
 
-# Longest backoff we will schedule. Beyond about a day, a fixed-interval source
-# is indistinguishable from one that has been abandoned, and the operator
-# should be looking at it rather than the scheduler quietly deferring it.
+# Ceiling for fixed-interval backoff, unless the configured interval is longer:
+# failures must never make a source fetch more frequently than its policy.
 MAX_BACKOFF_SECONDS = 24 * 60 * 60
 
 # Backoff growth base. Exponential so that a persistently failing source stops
@@ -78,9 +77,15 @@ def next_interval(
             raise ValueError("fixed policy requires interval_seconds")
         interval = float(policy.interval_seconds)
         if consecutive_failures > 0:
-            interval = min(
-                interval * _backoff_multiplier(consecutive_failures),
-                float(MAX_BACKOFF_SECONDS),
+            # Backoff may lengthen the wait but never shorten it below the
+            # configured interval: for a weekly source, the 24h ceiling would
+            # otherwise make a failure fetch seven times more often.
+            interval = max(
+                interval,
+                min(
+                    interval * _backoff_multiplier(consecutive_failures),
+                    float(MAX_BACKOFF_SECONDS),
+                ),
             )
         return interval
     return adaptive_interval(
