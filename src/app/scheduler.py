@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as SourceRow
@@ -426,9 +426,12 @@ class Scheduler:
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._tick_seconds)
-            await self.tick_once()
-            await self._reap_orphaned_runs_if_due()
-            await self._prune_audit_if_due()
+            try:
+                await self.tick_once()
+                await self._reap_orphaned_runs_if_due()
+                await self._prune_audit_if_due()
+            except OperationalError:
+                LOGGER.warning("scheduler storage operation failed; retrying next poll")
 
     async def _reap_orphaned_runs_if_due(self) -> None:
         """Close runs left `running`, on every tick (with a wide grace).

@@ -23,8 +23,11 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B01 real scheduler maintenance assertions | Fixed | `fd74926` |
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
+| A07 worker recovery and stop | Partial: scheduler loop survives temporary SQLite failures and retries on the next poll; enrichment recovery, maintenance deadline advance on failure and stop cleanup remain open | (this change) |
 
-**Still open:** A05 transient decoder memory and end-to-end budgets; A07;
+**Still open:** A05 transient decoder memory and end-to-end budgets; A07
+remaining boundaries (enrichment recovery, maintenance deadline advance on
+failure, stop cleanup, health wiring);
 A09 remaining deadline boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
@@ -63,6 +66,17 @@ Full `nix develop --command just ci` passed **1,490 tests** (918 unit/fixture,
 512 integration, 57 E2E, 3 contract), lint/type/import checks and migration
 roundtrip. This is not a strict peak-memory bound on HTTPX decoding, and does
 not complete the child/RPC/API acceptance coverage tracked by B02.
+
+**A07 partial verification:** a real second-connection `BEGIN EXCLUSIVE` lock
+on migrated rollback-journal SQLite made `collectable_sources` raise
+`sqlalchemy.exc.OperationalError` out of the loop (red, 1 failed in 1.7s);
+after the loop-level catch the same test passes and expired audit rows are
+pruned on the next poll. The fix catches `OperationalError` only, so
+cancellation and programming errors still terminate the task. No claim is
+made for enrichment recovery, maintenance deadline behavior on failure, stop
+cleanup or health endpoints. Full `nix develop --command just ci` passed:
+918 unit/fixture, 513 integration, 57 E2E and 3 contract tests (**1,491 total**),
+plus formatting, Ruff, mypy, import boundaries and migration roundtrip.
 
 **Combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,

@@ -25,6 +25,12 @@ journalctl --user -u pearss.service -f
 
 ## 调度器
 
+运行中的调度循环遇到 SQLAlchemy `OperationalError` 时会记录不含 SQL、参数或异常正文的
+警告，结束当前轮并按原 `PEARSS_TICK_SECONDS` 间隔重试；这不是数据库自动修复，持续失败
+仍需检查磁盘、权限和锁竞争。其他异常不会被当作临时存储故障无限重试。
+此恢复边界不含启动阶段和 enrichment worker；`/healthz` 也不代表后台任务健康。
+维护计时在失败前推进、失败任务的停止清理仍是已记录的待修问题（A07）。
+
 **到期时间不落库**，每轮从 `source.schedule_policy` + `job_run`/`item` 历史推导（ADR 0009）。
 所以「为什么没抓」要按推导的输入去查，而不是找一张 next_run 表：
 
