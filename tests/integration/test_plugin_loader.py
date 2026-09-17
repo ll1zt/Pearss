@@ -431,6 +431,87 @@ async def test_uninstalling_a_plugin_with_a_live_source_is_refused(
     )
 
 
+async def test_user_retries_uninstall_without_losing_the_successful_result(
+    writer: httpx.AsyncClient, plugin_dir: Path, session_factory: sessionmaker[Session]
+) -> None:
+    """Given an uninstall, when its identical key is retried, then success replays."""
+    _write_plugin(plugin_dir, "my-collector")
+    assert (await writer.post("/v1/plugins/my-collector:import")).status_code == 200
+    first = await writer.delete("/v1/plugins/my-collector")
+    retry = await writer.delete("/v1/plugins/my-collector")
+    assert first.status_code == retry.status_code == 200
+    assert retry.json() == first.json()
+    assert retry.headers["Idempotent-Replay"] == "true"
+    assert _plugin_rows(session_factory, "my-collector") == []
+
+
+@pytest.mark.parametrize("action", ["uninstall", "reload"])
+async def test_user_lifecycle_write_without_key_is_refused_without_effect(
+    writer: httpx.AsyncClient,
+    plugin_dir: Path,
+    action: str,
+) -> None:
+    """An installed plugin stays installed when the write arrives without a key."""
+    _write_plugin(plugin_dir, "my-collector")
+    assert (await writer.post("/v1/plugins/my-collector:import")).status_code == 200
+    before = await _listed(writer)
+    request = writer.build_request(
+        "DELETE" if action == "uninstall" else "POST",
+        "/v1/plugins/my-collector" + (":reload" if action == "reload" else ""),
+    )
+    del request.headers["Idempotency-Key"]
+    response = await writer.send(request)
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "idempotency_key_required"
+    assert await _listed(writer) == before
+
+
+@pytest.mark.parametrize("action", ["uninstall", "reload"])
+async def test_user_lifecycle_key_with_changed_body_is_refused(
+    writer: httpx.AsyncClient,
+    plugin_dir: Path,
+    action: str,
+) -> None:
+    """Given completed lifecycle work, a mismatched retry is 409 without new effects."""
+    _write_plugin(plugin_dir, "my-collector")
+    assert (await writer.post("/v1/plugins/my-collector:import")).status_code == 200
+    method = "DELETE" if action == "uninstall" else "POST"
+    path = "/v1/plugins/my-collector" + (":reload" if action == "reload" else "")
+    first = await writer.request(method, path, json={"request": "original"})
+    assert first.status_code == 200
+    before = await _listed(writer)
+    refused = await writer.request(method, path, json={"request": "changed"})
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["code"] == "idempotency_key_conflict"
+    assert "Idempotent-Replay" not in refused.headers
+    assert await _listed(writer) == before
+
+
+async def test_user_retried_reload_keeps_the_loaded_version(
+    writer: httpx.AsyncClient,
+    plugin_dir: Path,
+) -> None:
+    """A reload retried under its key never replaces the loaded plugin again."""
+    directory = _write_plugin(plugin_dir, "my-collector")
+    assert (await writer.post("/v1/plugins/my-collector:import")).status_code == 200
+    first = await writer.post("/v1/plugins/my-collector:reload")
+    assert first.status_code == 200
+    # A real on-disk edit would be picked up by a second lifecycle execution.
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = "0.2.0"
+    manifest_path.write_text(json.dumps(manifest))
+    code_path = directory / "collector.py"
+    code_path.write_text(
+        code_path.read_text().replace('version="0.1.0"', 'version="0.2.0"')
+    )
+    retry = await writer.post("/v1/plugins/my-collector:reload")
+    assert retry.status_code == 200
+    assert retry.json() == first.json()
+    assert retry.headers["Idempotent-Replay"] == "true"
+    assert (await _listed(writer))["my-collector"]["version"] == "0.1.0"
+
+
 async def test_uninstalling_an_unknown_plugin_is_404(
     writer: httpx.AsyncClient, plugin_dir: Path
 ) -> None:

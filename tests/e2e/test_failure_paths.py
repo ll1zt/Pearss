@@ -160,6 +160,30 @@ def _seed_source(session_factory: sessionmaker[Session]) -> str:
 # --------------------------------------------------------------------------
 
 
+async def test_user_cannot_reuse_a_write_key_for_a_different_body(
+    served: str, session_factory: sessionmaker[Session]
+) -> None:
+    """Given a completed write, when its key has a new body, then 409 and no change."""
+    source_id = _seed_source(session_factory)
+    async with httpx.AsyncClient(
+        base_url=served,
+        headers={
+            "Authorization": f"Bearer {API_TOKEN}",
+            "Idempotency-Key": "body-conflict",
+        },
+    ) as client:
+        first = await client.patch(f"/v1/sources/{source_id}", json={"folder": "First"})
+        assert first.status_code == 200
+        refused = await client.patch(
+            f"/v1/sources/{source_id}", json={"folder": "Second"}
+        )
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["error"]["code"] == "idempotency_key_conflict"
+        assert "Idempotent-Replay" not in refused.headers
+        current = await client.get(f"/v1/sources/{source_id}")
+        assert current.json()["folder"] == "First"
+
+
 async def test_a_wrong_token_cannot_create_a_source(
     served: str, session_factory: sessionmaker[Session]
 ) -> None:

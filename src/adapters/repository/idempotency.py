@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from adapters.db_models import IdempotencyRecord as IdempotencyRow
@@ -22,7 +23,7 @@ def find_idempotent(
     row = session.get(IdempotencyRow, (actor, endpoint, key))
     if row is None:
         return None
-    if row.expires_at < now:
+    if row.status_code != 0 and row.expires_at < now:
         return None
     return row
 
@@ -38,26 +39,103 @@ def store_idempotent(
     created_at: str,
     expires_at: str,
 ) -> None:
-    row = session.get(IdempotencyRow, (actor, endpoint, key))
-    if row is None:
-        session.add(
-            IdempotencyRow(
-                actor=actor,
-                endpoint=endpoint,
-                key=key,
-                status_code=status_code,
-                response_body=response_body,
-                created_at=created_at,
-                expires_at=expires_at,
-            )
+    # Compatibility writer for legacy responses: immutable once stored.
+    session.execute(
+        insert(IdempotencyRow)
+        .values(
+            actor=actor,
+            endpoint=endpoint,
+            key=key,
+            status_code=status_code,
+            response_body=response_body,
+            created_at=created_at,
+            expires_at=expires_at,
         )
-    else:
-        # Overwrite rather than raise: the first response was already delivered,
-        # and a 500 here would surface a normal retry race as a server fault.
-        row.status_code = status_code
-        row.response_body = response_body
-        row.created_at = created_at
-        row.expires_at = expires_at
+        .on_conflict_do_nothing()
+    )
+
+
+def reserve_idempotent(
+    session: Session,
+    *,
+    actor: str,
+    endpoint: str,
+    key: str,
+    fingerprint: str,
+    owner_token: str,
+    now: str,
+    expires_at: str,
+) -> IdempotencyRow:
+    """Atomically open the mutation window, or return its existing owner/result.
+
+    Only completed expired responses may be replaced. Unknown outcomes never
+    expire into permission to execute again: an external effect may have landed.
+    """
+    statement = insert(IdempotencyRow).values(
+        actor=actor,
+        endpoint=endpoint,
+        key=key,
+        fingerprint=fingerprint,
+        owner_token=owner_token,
+        status_code=0,
+        response_body="{}",
+        created_at=now,
+        expires_at=expires_at,
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=["actor", "endpoint", "key"],
+            set_={
+                name: getattr(statement.excluded, name)
+                for name in (
+                    "fingerprint",
+                    "owner_token",
+                    "status_code",
+                    "response_body",
+                    "created_at",
+                    "expires_at",
+                )
+            },
+            where=(IdempotencyRow.status_code != 0) & (IdempotencyRow.expires_at < now),
+        )
+    )
+    return session.execute(
+        select(IdempotencyRow).where(
+            IdempotencyRow.actor == actor,
+            IdempotencyRow.endpoint == endpoint,
+            IdempotencyRow.key == key,
+        )
+    ).scalar_one()
+
+
+def complete_idempotent(
+    session: Session,
+    *,
+    actor: str,
+    endpoint: str,
+    key: str,
+    owner_token: str,
+    status_code: int,
+    response_body: str,
+    expires_at: str,
+) -> None:
+    """Fence completion; a stale executor cannot overwrite a newer response."""
+    completed = session.execute(
+        update(IdempotencyRow)
+        .where(
+            IdempotencyRow.actor == actor,
+            IdempotencyRow.endpoint == endpoint,
+            IdempotencyRow.key == key,
+            IdempotencyRow.owner_token == owner_token,
+            IdempotencyRow.status_code == 0,
+        )
+        .values(
+            status_code=status_code, response_body=response_body, expires_at=expires_at
+        )
+        .returning(IdempotencyRow.key)
+    ).scalar_one_or_none()
+    if completed is None:
+        raise RuntimeError("idempotency reservation no longer owned")
 
 
 def last_conditional_state(

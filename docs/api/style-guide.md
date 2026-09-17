@@ -76,8 +76,9 @@ POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）
 
 写动作的幂等键决定重复请求的语义，两种情况必须区分：
 
-- **同 key 重试**：返回**首次结果的重放**（200，`Idempotent-Replay: true`）——
-  重试不是错误；
+- **同 key、同请求且已有持久化结果的重试**：返回**首次结果的重放**（原状态码，`Idempotent-Replay: true`）；
+- **同 key、不同请求**：409 `idempotency_key_conflict`，不执行新请求；
+- **同 key 的操作仍未保存响应**：409 `idempotency_in_progress`，不是成功重放；
 - **新 key 的重复操作**（资源已处于目标状态）：409 `*_unchanged`——调用方
   在没有重放凭证的情况下要求执行一个已完成的动作，是请求本身的冲突。
 
@@ -94,7 +95,21 @@ POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）
 Idempotency-Key: <client-generated-uuid>
 ```
 
-服务端以 `actor + endpoint + key` 去重并在合理窗口内复用首次结果。重复请求不可生成重复 Source、Job 或发布行为。
+服务端以 `actor + endpoint + key` 去重，并把键绑定到**规范化的请求指纹**
+（method + path + 规范化 body/query，JSON 键序与空白不敏感）：重放要求请求一致，
+不同请求复用同一 key 返回 409 `idempotency_key_conflict`。预留通过单次原子
+数据库写入打开业务执行窗口，并先持久化，随后才允许业务变更；响应未持久化前的
+重复请求得到 409 `idempotency_in_progress`（`Retry-After: 5`），不重复执行业务操作。
+成功响应保留七天，重放中的 URL 查询参数会脱敏；旧数据的 NULL 指纹仍按旧行为重放。
+
+预留五分钟后仍没有持久化响应的请求返回 409 `idempotency_outcome_unknown`，
+**不自动重新执行**，也不伪造成功。数据库提交后、响应记录前的崩溃可能已产生效果；
+插件子进程替换、文件删除等外部效果不能与 SQLite 原子提交。操作者必须先核对资源、
+任务及外部状态，必要时重启以从持久状态重建插件注册表，确认原执行者已停止后，
+才为确实尚需执行的操作生成新 key。未知结果预留不随七天响应缓存过期而删除。
+缺少 key（含卸载/重载）返回 400 `idempotency_key_required`。
+业务校验拒绝或异常发生在预留之后时，也保留预留并按上述未知结果流程处理。
+重复请求不可生成重复 Source、Job 或发布行为。
 
 ### 异步任务
 

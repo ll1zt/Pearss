@@ -280,6 +280,7 @@ def uninstall_plugin(
     request: Request,
     plugin_id: str,
     principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
 ) -> JSONResponse:
     """Remove an installed plugin from the registry, leaving its files.
 
@@ -292,6 +293,12 @@ def uninstall_plugin(
     """
     from app import collector_registry
 
+    endpoint = f"DELETE /v1/plugins/{plugin_id}"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
     if plugin_id not in collector_registry.installed_plugin_ids():
         raise api_error(
             status_code=404,
@@ -300,7 +307,6 @@ def uninstall_plugin(
             suggestion="List plugins to see what is loaded.",
         )
 
-    factory: sessionmaker[Any] = request.app.state.session_factory
     with factory() as session:
         # Matched the way routing matches, not by `source.type`: a third-party
         # collector serves `type=web` sources and is selected by its own
@@ -340,6 +346,14 @@ def uninstall_plugin(
 
     body = {"id": plugin_id, "uninstalled": True, "files": "left in place"}
     body["correlation_id"] = current_correlation_id()
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=body,
+    )
     return JSONResponse(status_code=200, content=body)
 
 
@@ -348,6 +362,7 @@ def reload_plugin(
     request: Request,
     plugin_id: str,
     principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
 ) -> JSONResponse:
     """Pick up edited plugin code without restarting the service.
 
@@ -357,6 +372,12 @@ def reload_plugin(
     keeps none.
     """
     from app import collector_registry, plugin_loader
+
+    endpoint = f"POST /v1/plugins/{plugin_id}:reload"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
 
     if plugin_id not in collector_registry.installed_plugin_ids():
         raise api_error(
@@ -388,6 +409,14 @@ def reload_plugin(
     body = _plugin_representation(manifest, PluginStatus.ENABLED.value)
     body["reloaded"] = True
     body["correlation_id"] = current_correlation_id()
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=body,
+    )
     return JSONResponse(status_code=200, content=body)
 
 

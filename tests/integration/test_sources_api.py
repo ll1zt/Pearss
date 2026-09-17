@@ -7,6 +7,8 @@ scope separation between the read and write tokens.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
@@ -79,6 +81,197 @@ async def reader(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
         headers={"Authorization": f"Bearer {READ_TOKEN}"},
     ) as opened:
         yield opened
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_user_legacy_response_survives_migration_and_remains_replayable(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A pre-fingerprint response survives upgrade with its replay contract."""
+    from adapters.db_models import IdempotencyRecord
+    from adapters.repository import store_idempotent
+
+    with session_factory() as session:
+        store_idempotent(
+            session,
+            actor="api:full",
+            endpoint="POST /v1/sources",
+            key="legacy",
+            status_code=201,
+            response_body='{"id":"legacy-source"}',
+            created_at=NOW,
+            expires_at="2099-01-01T00:00:00.000000Z",
+        )
+        session.commit()
+        url = session.connection().engine.url
+    config = Config(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", str(url))
+    command.downgrade(config, "0019")
+    command.upgrade(config, "0020")
+    with session_factory() as session:
+        row = session.get(IdempotencyRecord, ("api:full", "POST /v1/sources", "legacy"))
+        assert row is not None
+        assert (
+            row.fingerprint,
+            row.owner_token,
+            row.response_body,
+            row.created_at,
+        ) == (
+            None,
+            None,
+            '{"id":"legacy-source"}',
+            NOW,
+        )
+    response = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "legacy"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    assert response.status_code == 201
+    assert response.json() == {"id": "legacy-source"}
+    assert response.headers["Idempotent-Replay"] == "true"
+    assert (await writer.get("/v1/sources")).json()["data"] == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_user_identical_retry_normalizes_json_and_replays_without_mutation(
+    writer: httpx.AsyncClient,
+) -> None:
+    """Given a completed PATCH, reordered JSON replays its exact durable result."""
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "seed"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    path = f"/v1/sources/{created.json()['id']}"
+    headers = {"Idempotency-Key": "normalized", "Content-Type": "application/json"}
+    first = await writer.patch(
+        path, headers=headers, json={"folder": "Pinned", "status": "paused"}
+    )
+    retry = await writer.patch(
+        path, headers=headers, content=' { "status":"paused", "folder" : "Pinned" } '
+    )
+    assert first.status_code == retry.status_code == 200
+    assert retry.json() == first.json()
+    assert retry.headers["Idempotent-Replay"] == "true"
+    assert (await writer.get(path)).json()["updated_at"] == first.json()["updated_at"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_user_overlapping_retry_does_not_enter_the_mutation_window(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """With a mutation committed and held, a retry gets 409, not another write."""
+    from adapters.db_models import Source
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "seed"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    path = f"/v1/sources/{created.json()['id']}"
+    committed, release = threading.Event(), threading.Event()
+
+    def mark(session: Session, *_: object) -> None:
+        if any(
+            isinstance(row, Source) and row.folder == "Held" for row in session.dirty
+        ):
+            session.info["hold_response"] = True
+
+    def hold(session: Session) -> None:
+        if session.info.pop("hold_response", False) and not committed.is_set():
+            committed.set()
+            if not release.wait(10):
+                raise TimeoutError("test did not release mutation")
+
+    sa.event.listen(Session, "before_flush", mark)
+    sa.event.listen(Session, "after_commit", hold)
+    first = asyncio.create_task(
+        writer.patch(
+            path, headers={"Idempotency-Key": "overlap"}, json={"folder": "Held"}
+        )
+    )
+    try:
+        assert await asyncio.to_thread(committed.wait, 5)
+        second = await asyncio.wait_for(
+            writer.patch(
+                path, headers={"Idempotency-Key": "overlap"}, json={"folder": "Held"}
+            ),
+            3,
+        )
+        assert second.status_code == 409
+        assert second.json()["detail"]["error"]["code"] == "idempotency_in_progress"
+        assert "Idempotent-Replay" not in second.headers
+    finally:
+        release.set()
+        result = await first
+        sa.event.remove(Session, "before_flush", mark)
+        sa.event.remove(Session, "after_commit", hold)
+    assert result.status_code == 200
+    assert (await writer.get(path)).json()["updated_at"] == result.json()["updated_at"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_user_crash_after_mutation_never_reexecutes_or_replays_success(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """After committed state with no response, retries fail closed after expiry."""
+    from adapters.db_models import Source
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "seed"},
+        json={"url": FEED_URL, "schedule_policy": policy()},
+    )
+    path = f"/v1/sources/{created.json()['id']}"
+    headers = {"Idempotency-Key": "crashed"}
+
+    def mark(session: Session, *_: object) -> None:
+        if any(
+            isinstance(row, Source) and row.folder == "Committed"
+            for row in session.dirty
+        ):
+            session.info["crash_response"] = True
+
+    def crash(session: Session) -> None:
+        if session.info.pop("crash_response", False):
+            raise RuntimeError("injected crash after business commit")
+
+    sa.event.listen(Session, "before_flush", mark)
+    sa.event.listen(Session, "after_commit", crash)
+    try:
+        with pytest.raises(RuntimeError, match="injected crash"):
+            await writer.patch(path, headers=headers, json={"folder": "Committed"})
+    finally:
+        sa.event.remove(Session, "before_flush", mark)
+        sa.event.remove(Session, "after_commit", crash)
+    before = (await writer.get(path)).json()
+    assert before["folder"] == "Committed"
+    retry = await writer.patch(path, headers=headers, json={"folder": "Committed"})
+    assert retry.status_code == 409
+    assert retry.json()["detail"]["error"]["code"] == "idempotency_in_progress"
+    assert "Idempotent-Replay" not in retry.headers
+    # Advance persisted deadline, not wall-clock sleeps; never re-admit unknown work.
+    from adapters.db_models import IdempotencyRecord
+
+    with session_factory() as session:
+        row = session.get(IdempotencyRecord, ("api:full", f"PATCH {path}", "crashed"))
+        assert row is not None
+        row.expires_at = "2000-01-01T00:00:00.000000Z"
+        session.commit()
+    recovered = await writer.patch(path, headers=headers, json={"folder": "Committed"})
+    assert recovered.status_code == 409
+    assert recovered.json()["detail"]["error"]["code"] == "idempotency_outcome_unknown"
+    assert "Idempotent-Replay" not in recovered.headers
+    assert (await writer.get(path)).json()["updated_at"] == before["updated_at"]
 
 
 # --------------------------------------------------------------------------

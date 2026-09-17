@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.repository import find_idempotent, store_idempotent
 
+pytestmark = pytest.mark.integration
+
 NOW = "2026-06-01T12:00:00.000000Z"
 LATER = "2026-06-02T12:00:00.000000Z"
 
@@ -38,6 +40,91 @@ def _store(
         expires_at=LATER,
     )
     session.commit()
+
+
+def test_user_stored_response_cannot_be_overwritten_by_a_late_writer(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Given a durable response, another writer cannot replace the replay result."""
+    with session_factory() as session:
+        _store(session, actor="api:full", key="immutable", body='{"first":true}')
+        _store(session, actor="api:full", key="immutable", body='{"second":true}')
+    with session_factory() as session:
+        stored = find_idempotent(
+            session,
+            actor="api:full",
+            endpoint="POST /v1/sources",
+            key="immutable",
+            now=NOW,
+        )
+        assert stored is not None
+        assert stored.response_body == '{"first":true}'
+
+
+def test_user_expired_complete_response_can_be_replaced_but_old_owner_is_fenced(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Given expiry and a new operation, the old owner cannot overwrite its result."""
+    from adapters.repository.idempotency import complete_idempotent, reserve_idempotent
+
+    common = {"actor": "api:full", "endpoint": "POST /v1/sources", "key": "expired"}
+    with session_factory() as session:
+        reserve_idempotent(
+            session,
+            **common,
+            fingerprint="a" * 64,
+            owner_token="old",
+            now=NOW,
+            expires_at=LATER,
+        )
+        complete_idempotent(
+            session,
+            **common,
+            owner_token="old",
+            status_code=201,
+            response_body='{"old":true}',
+            expires_at=LATER,
+        )
+        session.commit()
+    with session_factory() as session:
+        reserved = reserve_idempotent(
+            session,
+            **common,
+            fingerprint="b" * 64,
+            owner_token="new",
+            now="2026-06-03T00:00:00.000000Z",
+            expires_at="2026-06-04T00:00:00.000000Z",
+        )
+        assert (reserved.owner_token, reserved.status_code, reserved.response_body) == (
+            "new",
+            0,
+            "{}",
+        )
+        session.commit()
+    with session_factory() as session:
+        with pytest.raises(RuntimeError, match="no longer owned"):
+            complete_idempotent(
+                session,
+                **common,
+                owner_token="old",
+                status_code=201,
+                response_body='{"late":true}',
+                expires_at=LATER,
+            )
+        session.rollback()
+    with session_factory() as session:
+        complete_idempotent(
+            session,
+            **common,
+            owner_token="new",
+            status_code=202,
+            response_body='{"new":true}',
+            expires_at="2026-06-04T00:00:00.000000Z",
+        )
+        session.commit()
+        stored = find_idempotent(session, **common, now="2026-06-03T00:00:00.000000Z")
+        assert stored is not None
+        assert (stored.status_code, stored.response_body) == (202, '{"new":true}')
 
 
 @pytest.mark.integration

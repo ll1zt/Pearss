@@ -435,6 +435,10 @@ class IdempotencyRecord(Base):
     actor: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, primary_key=True)
     endpoint: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, primary_key=True)
     key: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(128), primary_key=True)
+    # NULL fingerprints are pre-reservation legacy responses, left unchanged.
+    fingerprint: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.String(64))
+    owner_token: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.String(64))
+    # status_code=0 is reserved work, never a replayable response.
     # Enough to rebuild the response: status plus the body.
     status_code: sa.orm.Mapped[int] = sa.orm.mapped_column(sa.Integer, nullable=False)
     response_body: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)

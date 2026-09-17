@@ -22,17 +22,20 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import sessionmaker
 
 from adapters.correlation import current as current_correlation_id
-from adapters.repository import find_idempotent, store_idempotent, timestamp
+from adapters.repository import timestamp
+from adapters.repository.idempotency import complete_idempotent, reserve_idempotent
 
 LOGGER = logging.getLogger(__name__)
 
@@ -174,7 +177,21 @@ def _bad_keyset_cursor() -> HTTPException:
 # --------------------------------------------------------------------------
 
 
-def idempotency_key(
+class WriteKey(str):
+    """Validated key plus request-local fingerprint and reservation ownership."""
+
+    fingerprint: str
+    owner_token: str
+
+    def __new__(cls, value: str, fingerprint: str) -> WriteKey:
+        instance = super().__new__(cls, value)
+        instance.fingerprint = fingerprint
+        instance.owner_token = secrets.token_hex(32)
+        return instance
+
+
+async def idempotency_key(
+    request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> str:
     """Require and validate the Idempotency-Key header on a write."""
@@ -196,7 +213,19 @@ def idempotency_key(
             message="Idempotency-Key must be at most 128 characters.",
             suggestion="Use a UUID.",
         )
-    return key
+    raw = await request.body()
+    try:
+        normalized = json.dumps(
+            json.loads(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+    except (ValueError, UnicodeDecodeError):
+        normalized = raw
+    # Query parameters also affect destructive writes (e.g. hard deletion).
+    target = request.url.path + "?" + str(sorted(request.query_params.multi_items()))
+    digest = hashlib.sha256(
+        request.method.encode() + b"\n" + target.encode() + b"\n" + normalized
+    ).hexdigest()
+    return WriteKey(key, digest)
 
 
 def _now() -> datetime:
@@ -243,13 +272,44 @@ def replay_or_none(
     not, because a client that wants the URLs again has the resource itself
     (GET /v1/sources/{id}) under its own authenticated request.
     """
-    now = timestamp(_now())
+    if not isinstance(key, WriteKey):
+        raise TypeError("write requires a validated request key")
+    created = _now()
+    now = timestamp(created)
     with session_factory() as session:
-        stored = find_idempotent(
-            session, actor=actor, endpoint=endpoint, key=key, now=now
+        stored = reserve_idempotent(
+            session,
+            actor=actor,
+            endpoint=endpoint,
+            key=key,
+            now=now,
+            fingerprint=key.fingerprint,
+            owner_token=key.owner_token,
+            expires_at=timestamp(created + timedelta(minutes=5)),
         )
-        if stored is None:
+        session.commit()
+        if stored.owner_token == key.owner_token:
             return None
+        if stored.fingerprint is not None and stored.fingerprint != key.fingerprint:
+            raise api_error(
+                status_code=409,
+                code="idempotency_key_conflict",
+                message="This key is bound to a different request.",
+                suggestion="Use the original request or a new key for a new operation.",
+            )
+        if stored.status_code == 0:
+            expired = stored.expires_at < now
+            raise api_error(
+                status_code=409,
+                code="idempotency_outcome_unknown"
+                if expired
+                else "idempotency_in_progress",
+                message="The previous execution has no durable response.",
+                suggestion="Reconcile resources and state before a new operation."
+                if expired
+                else "Retry this same request later.",
+                headers=None if expired else {"Retry-After": "5"},
+            )
         payload: dict[str, Any] = _redact_queries(json.loads(stored.response_body))
         response = JSONResponse(status_code=stored.status_code, content=payload)
     # Replaying must be visible to the caller: without this a retry looks
@@ -268,16 +328,18 @@ def remember(
     status_code: int,
     body: dict[str, Any],
 ) -> None:
+    if not isinstance(key, WriteKey):
+        raise TypeError("write requires a validated request key")
     created = _now()
     with session_factory() as session:
-        store_idempotent(
+        complete_idempotent(
             session,
             actor=actor,
             endpoint=endpoint,
             key=key,
+            owner_token=key.owner_token,
             status_code=status_code,
-            response_body=json.dumps(body, sort_keys=True),
-            created_at=timestamp(created),
+            response_body=json.dumps(_redact_queries(body), sort_keys=True),
             expires_at=timestamp(created + IDEMPOTENCY_WINDOW),
         )
         session.commit()
