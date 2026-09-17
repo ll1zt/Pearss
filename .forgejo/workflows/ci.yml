@@ -9,20 +9,20 @@ jobs:
     runs-on: nixos-server
     timeout-minutes: 60
     steps:
-      # Forgejo's :3000 is HTTPS (tailscale cert); plaintext HTTP gets a 400.
-      # The job token authenticates even if the repo turns private again, and
-      # sslVerify is off because the runner does not trust the tailscale CA.
+      # The runner does not trust the certificate on Forgejo's HTTPS endpoint.
       - name: Checkout
         env:
           CI_SHA: ${{ github.sha }}
+          CI_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          git clone --depth 1 "https://${{ github.token }}@pearss.example.ts.net:3000/lllzt/Pearss.git" source
-          cd source
-          git remote set-url origin "./source"
-          git -c http.sslVerify=false fetch --depth 1 origin "$CI_SHA"
-          git -c advice.detachedHead=false checkout --detach FETCH_HEAD
-          test "$(git rev-parse HEAD)" = "$CI_SHA"
+          repository="https://pearss.example.ts.net:3000/lllzt/Pearss.git"
+          trap 'if [ -d source/.git ]; then git -C source remote set-url origin "$repository"; fi' EXIT
+          git -c http.sslVerify=false clone --depth 1 \
+            "https://${CI_TOKEN}@pearss.example.ts.net:3000/lllzt/Pearss.git" source
+          git -C source -c http.sslVerify=false fetch --depth 1 origin "$CI_SHA"
+          git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
 
       - name: Run quality gates
         working-directory: source
