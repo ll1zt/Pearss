@@ -23,11 +23,11 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B01 real scheduler maintenance assertions | Fixed | `fd74926` |
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
-| A07 worker recovery and stop | Partial: scheduler loop survives temporary SQLite failures and retries on the next poll; enrichment recovery, maintenance deadline advance on failure and stop cleanup remain open | (this change) |
+| A07 worker recovery and stop | Partial: scheduler retries storage failures; maintenance failures retain their retry window; stopping a failed worker consumes its exception without logging its body | `306534a` (loop recovery); maintenance/stop follow-up in this revision |
 
 **Still open:** A05 transient decoder memory and end-to-end budgets; A07
-remaining boundaries (enrichment recovery, maintenance deadline advance on
-failure, stop cleanup, health wiring);
+remaining boundaries (enrichment recovery, startup failure cleanup,
+independent lifespan resource cleanup, health wiring and live-thread ownership);
 A09 remaining deadline boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
@@ -72,11 +72,33 @@ on migrated rollback-journal SQLite made `collectable_sources` raise
 `sqlalchemy.exc.OperationalError` out of the loop (red, 1 failed in 1.7s);
 after the loop-level catch the same test passes and expired audit rows are
 pruned on the next poll. The fix catches `OperationalError` only, so
-cancellation and programming errors still terminate the task. No claim is
-made for enrichment recovery, maintenance deadline behavior on failure, stop
-cleanup or health endpoints. Full `nix develop --command just ci` passed:
+cancellation and programming errors still terminate the task. That commit
+(`306534a`) did not cover enrichment recovery, maintenance timing, stop cleanup
+or health endpoints. Full `nix develop --command just ci` passed:
 918 unit/fixture, 513 integration, 57 E2E and 3 contract tests (**1,491 total**),
 plus formatting, Ruff, mypy, import boundaries and migration roundtrip.
+
+**A07 maintenance/stop follow-up:** real SQLite `BEGIN IMMEDIATE` locks
+reproduced both lost retry windows: after unlock, the orphan stayed `running`
+and the expired audit remained. Both now retry at the same monotonic instant;
+only successful maintenance advances the deadline from completion time.
+Completed task fault injection reproduced both workers rethrowing `RuntimeError`
+from `stop()`. Stop now returns, clears the task reference and permits restart;
+stderr assertions reject the exception body and traceback. All 11 recovery and
+maintenance cases pass. These lifecycle tests do not prove full application
+cleanup or cancellation of synchronous work already running in a thread.
+Enrichment loop recovery remains unimplemented. Isolated regression injection
+confirmed two expected failures each for early maintenance deadlines, rethrowing
+stop handlers, and traceback logging; restoring the snapshot passed all five
+recovery cases. The subsequent test setup extraction preserves those assertions
+and replaces the yield loop with awaiting the injected failed task. Mypy and all
+11 targeted tests pass after that extraction. Full
+`nix develop --command just ci` then passed **1,495 tests** (918 unit/fixture,
+517 integration, 57 E2E, 3 contract), formatting, Ruff, mypy (200 files),
+import boundaries and migration roundtrip. The first gate attempt failed on
+mypy narrowing in the fault-injection setup; this was corrected before the
+successful run. No real-client manual smoke or fresh coverage measurement
+was performed for this increment.
 
 **Combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,

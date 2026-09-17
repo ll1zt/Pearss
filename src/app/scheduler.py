@@ -19,7 +19,6 @@ Two structural notes:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import secrets
@@ -416,10 +415,13 @@ class Scheduler:
         if self._task is None:
             return
         self._task.cancel()
-        # Awaiting swallows the cancellation we just requested: it is the
-        # expected outcome of stopping, not a condition to report.
-        with contextlib.suppress(asyncio.CancelledError):
+        # A failed task must not prevent shutdown of the remaining resources.
+        try:
             await self._task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            LOGGER.error("scheduler task failed (%s)", type(exc).__name__)
         self._task = None
         LOGGER.info("scheduler stopped")
 
@@ -447,7 +449,6 @@ class Scheduler:
         now = self._monotonic()
         if now < self._next_reap_at:
             return
-        self._next_reap_at = now + self._tick_seconds * 4
 
         def reap() -> int:
             with self._session_factory() as session:
@@ -459,7 +460,12 @@ class Scheduler:
                 session.commit()
             return reaped
 
+        # Only a committed pass spends the window: a storage failure here must
+        # not also consume the retry slot, or one transient lock (backup tool,
+        # overloaded disk) would delay orphan reaping by a whole window even
+        # though nothing was reaped. Retries land on the next poll instead.
         reaped = await asyncio.to_thread(reap)
+        self._next_reap_at = self._monotonic() + self._tick_seconds * 4
         if reaped:
             LOGGER.warning(
                 "timed out %d run(s) left running past the %ds grace window",
@@ -471,7 +477,6 @@ class Scheduler:
         now = self._monotonic()
         if now < self._next_prune_at:
             return
-        self._next_prune_at = now + self._prune_every
         days = audit_retention_days()
         if days <= 0:
             return
@@ -485,7 +490,10 @@ class Scheduler:
                 session.commit()
             return pruned
 
+        # Same rule as reaping: spend the window only on a committed pass, so
+        # a locked database retries on the next poll rather than an hour later.
         pruned = await asyncio.to_thread(prune)
+        self._next_prune_at = self._monotonic() + self._prune_every
         if pruned:
             LOGGER.info("audit retention pruned %d row(s) older than %dd", pruned, days)
 

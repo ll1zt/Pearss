@@ -354,10 +354,13 @@ class EnrichmentWorker:
         if self._task is None:
             return
         self._task.cancel()
-        import contextlib
-
-        with contextlib.suppress(asyncio.CancelledError):
+        # A failed task must not prevent shutdown of the remaining resources.
+        try:
             await self._task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            LOGGER.error("enrichment task failed (%s)", type(exc).__name__)
         self._task = None
         LOGGER.info("enrichment worker stopped")
 
