@@ -226,32 +226,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             sync_plugin_table,
         )
 
-        # Recover approved installations before wiring their egress or starting jobs.
-        restore_installed_plugins(app.state.session_factory)
-
-        # The sandboxed collectors' egress is host-proxied (ADR 0017): the
-        # child's reverse http calls ride back here and run through the same
-        # shared client the scheduler uses - which is where the SSRF
-        # private-address guard (ADR 0016) and the fetch-timeout/size bounds
-        # live. Without this injection every proxied request is refused, so
-        # the wiring is load-bearing, not cosmetic.
-        from app.plugin_runtime import HostClientTransport
-
-        transport = HostClientTransport(client)
-        # Registered, not just applied: an installed plugin's child is built
-        # later (ADR 0023), and `_installed_registration` reads this back to
-        # give it the same egress path. Applying it to the current children is
-        # the other half.
-        for_each_sandboxed_collector(
-            lambda name, child: set_http_transport(name, transport)
-        )
-        sync_plugin_table(app.state.session_factory)
-        if scheduler_enabled():
-            await scheduler.start()
-            await worker.start()
-        else:
-            LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
         try:
+            # Restore approved installations before egress wiring or starting jobs.
+            restore_installed_plugins(app.state.session_factory)
+
+            # The sandboxed collectors' egress is host-proxied (ADR 0017): the
+            # child's reverse http calls ride back here and run through the same
+            # shared client the scheduler uses - which is where the SSRF
+            # private-address guard (ADR 0016) and the fetch-timeout/size bounds
+            # live. Without this injection every proxied request is refused, so
+            # the wiring is load-bearing, not cosmetic.
+            from app.plugin_runtime import HostClientTransport
+
+            transport = HostClientTransport(client)
+            # Registered, not just applied: an installed plugin's child is built
+            # later (ADR 0023), and `_installed_registration` reads this back to
+            # give it the same egress path. Applying it to the current children is
+            # the other half.
+            for_each_sandboxed_collector(
+                lambda name, child: set_http_transport(name, transport)
+            )
+            sync_plugin_table(app.state.session_factory)
+            if scheduler_enabled():
+                await scheduler.start()
+                await worker.start()
+            else:
+                LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
             yield
         finally:
             await scheduler.stop()

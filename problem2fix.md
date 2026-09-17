@@ -23,11 +23,11 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B01 real scheduler maintenance assertions | Fixed | `fd74926` |
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
-| A07 worker recovery and stop | Partial: scheduler and enrichment loops retry temporary storage failures; maintenance failures retain their retry window; stopping a failed worker consumes its exception without logging its body | `306534a`, `36843c0`; enrichment recovery in this revision |
+| A07 worker recovery and stop | Partial: scheduler and enrichment loops retry storage failures; failed maintenance stays due; failed-task stop drains safely; post-MCP-entry startup steps now share shutdown cleanup | `306534a`, `36843c0`, `9c1b3ce`; startup cleanup in this revision |
 
 **Still open:** A05 transient decoder memory and end-to-end budgets; A07
-remaining boundaries (startup failure cleanup, independent lifespan
-resource cleanup, health wiring and live-thread ownership);
+remaining boundaries (constructor/MCP-entry failure cleanup, independent
+lifespan resource cleanup, health wiring and live-thread ownership);
 A09 remaining deadline boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
@@ -131,6 +131,23 @@ passed full `nix develop --command just ci` with exit 0: 918 unit/fixture,
 518 integration, 57 E2E and 3 contract tests (**1,496 total**), plus
 formatting, Ruff, mypy (201 files), import boundaries and the migration
 roundtrip.
+
+**A07 startup cleanup:** SQLite's real authorizer rejects access to
+`job_run` during scheduler startup. The actual ASGI lifespan raises a
+database exception group but originally leaves the shared HTTP client
+open (1 failed, 1 normal-shutdown case passed). Moving the existing cleanup
+boundary before plugin restoration covers post-MCP-entry startup failures
+without changing stop order. Both cases now pass; an isolated pre-fix source
+copy reproduced the client leak with explicit `PYTHONPATH`. This checks
+actual client closure and absence of live named worker tasks, not stop-call
+counts. Constructor/MCP-entry failures, independent cleanup after a cleanup
+error, and synchronous thread ownership remain open. The first full-gate
+attempts failed only on formatting and one over-long comment line; the
+final attempt passed `nix develop --command just ci` with exit 0: 918
+unit/fixture, 520 integration, 57 E2E and 3 contract tests (**1,498
+total**), plus formatting, Ruff, mypy (202 files), import boundaries and
+the migration roundtrip. No real-client manual
+smoke or fresh coverage measurement was performed for this increment.
 
 **Earlier combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,
