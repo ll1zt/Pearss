@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -140,7 +141,7 @@ def sweep_queue(
     }
 
     claimable = _claimable_rows(session, now=now, limit=concurrency * 2)
-    claimed: list[tuple[str, str]] = []
+    claimed: list[tuple[str, str, str]] = []
     for row_id, item_id, plugin_id in claimable:
         if plugin_id not in processors:
             # Defense in depth: chains naming unregistered processors are
@@ -154,21 +155,38 @@ def sweep_queue(
             )
             report["skipped"] += 1
             continue
+        # Eligibility must still hold when the claim is written, not just
+        # when candidates were enumerated.
+        owner = secrets.token_hex(16)
         claim = (
             update(ItemEnrichment)
             .where(
                 ItemEnrichment.id == row_id,
-                ItemEnrichment.status.in_(
-                    [EnrichmentStatus.QUEUED.value, EnrichmentStatus.RUNNING.value]
+                or_(
+                    and_(
+                        ItemEnrichment.status == EnrichmentStatus.QUEUED.value,
+                        or_(
+                            ItemEnrichment.next_attempt_at.is_(None),
+                            ItemEnrichment.next_attempt_at <= timestamp(now),
+                        ),
+                    ),
+                    and_(
+                        ItemEnrichment.status == EnrichmentStatus.RUNNING.value,
+                        ItemEnrichment.updated_at
+                        < timestamp(now - timedelta(seconds=DEFAULT_CALL_TIMEOUT * 2)),
+                    ),
                 ),
             )
-            .values(status=EnrichmentStatus.RUNNING.value, updated_at=timestamp(now))
+            .values(
+                status=EnrichmentStatus.RUNNING.value,
+                owner_token=owner,
+                updated_at=timestamp(now),
+            )
         )
         claimed_flag = cast("CursorResult[Any]", session.execute(claim)).rowcount
         if claimed_flag:
-            claimed.append((row_id, item_id))
+            claimed.append((row_id, item_id, owner))
     session.commit()
-
     if not claimed:
         return report
 
@@ -176,11 +194,12 @@ def sweep_queue(
 
     report_lock = threading.Lock()
 
-    def run_one(row_id: str, item_id: str) -> None:
+    def run_one(row_id: str, item_id: str, owner: str) -> None:
         nonlocal report
         outcome = _execute_row(
             row_id,
             item_id,
+            owner_token=owner,
             processors=processors,
             max_attempts=max_attempts,
         )
@@ -189,7 +208,10 @@ def sweep_queue(
                 report[key] = report.get(key, 0) + value
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(run_one, row_id, item_id) for row_id, item_id in claimed]
+        futures = [
+            pool.submit(run_one, row_id, item_id, owner)
+            for row_id, item_id, owner in claimed
+        ]
         for future in futures:
             future.result()
     return report
@@ -235,13 +257,18 @@ def _execute_row(
     row_id: str,
     item_id: str,
     *,
+    owner_token: str,
     processors: dict[str, Any],
     max_attempts: int,
 ) -> dict[str, int]:
     """Run one claimed row entirely inside its own session.
 
     The row and item are re-fetched here: this session owns them from claim
-    to commit, and no other session touches them meanwhile.
+    to commit. Every result write is fenced by the claim's owner token (A10):
+    a late completion from a former owner - e.g. after stale-claim recovery
+    handed the row to a new sweeper - must not overwrite the current owner's
+    work. The fence is the UPDATE's WHERE clause itself, so the check and the
+    write land in one statement; the Python-side re-read is only a fast path.
     """
     outcome = {"ran": 1, "succeeded": 0, "failed": 0, "retried": 0, "skipped": 0}
     session = _row_session()
@@ -249,6 +276,15 @@ def _execute_row(
         row = session.get(ItemEnrichment, row_id)
         item = session.get(ItemRow, item_id)
         if row is None or item is None:
+            outcome["skipped"] += 1
+            return outcome
+        if row.owner_token != owner_token:
+            # Our lease was reclaimed while the processor was running. The new
+            # owner's attempt is authoritative; ours is discarded unrecorded.
+            LOGGER.warning(
+                "enrichment %s claim lost to a newer owner; discarding result",
+                row.id,
+            )
             outcome["skipped"] += 1
             return outcome
         processor = processors[row.plugin_id]
@@ -270,30 +306,49 @@ def _execute_row(
             transient = error_class.value in TRANSIENT_CLASSES
             if transient and attempts < max_attempts:
                 backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-                row.status = EnrichmentStatus.QUEUED.value
-                row.attempt_count = attempts
-                row.next_attempt_at = timestamp(
-                    datetime.now(UTC) + timedelta(seconds=backoff)
+                fenced = _fenced_update(
+                    session,
+                    row_id=row_id,
+                    owner_token=owner_token,
+                    values={
+                        "status": EnrichmentStatus.QUEUED.value,
+                        "attempt_count": attempts,
+                        "next_attempt_at": timestamp(
+                            datetime.now(UTC) + timedelta(seconds=backoff)
+                        ),
+                        "error_class": error_class.value,
+                        "detail": str(exc)[:500],
+                        "updated_at": timestamp(datetime.now(UTC)),
+                    },
                 )
-                row.error_class = error_class.value
-                row.detail = str(exc)[:500]
-                row.updated_at = timestamp(datetime.now(UTC))
-                outcome["retried"] += 1
-                LOGGER.warning(
-                    "enrichment %s transient failure (%s), requeue attempt %d/%d "
-                    "after %ds: %s",
-                    row.id,
-                    error_class.value,
-                    attempts,
-                    max_attempts,
-                    int(backoff),
-                    str(exc)[:100],
-                )
-            else:
-                row.status = EnrichmentStatus.FAILED.value
-                row.error_class = error_class.value
-                row.detail = str(exc)[:500]
-                row.updated_at = timestamp(datetime.now(UTC))
+                if fenced:
+                    outcome["retried"] += 1
+                    LOGGER.warning(
+                        "enrichment %s transient failure (%s), requeue attempt "
+                        "%d/%d after %ds: %s",
+                        row.id,
+                        error_class.value,
+                        attempts,
+                        max_attempts,
+                        int(backoff),
+                        str(exc)[:100],
+                    )
+                else:
+                    outcome["skipped"] += 1
+                session.commit()
+                return outcome
+            fenced = _fenced_update(
+                session,
+                row_id=row_id,
+                owner_token=owner_token,
+                values={
+                    "status": EnrichmentStatus.FAILED.value,
+                    "error_class": error_class.value,
+                    "detail": str(exc)[:500],
+                    "updated_at": timestamp(datetime.now(UTC)),
+                },
+            )
+            if fenced:
                 LOGGER.warning(
                     "enrichment %s failed (%s)%s: %s",
                     row.id,
@@ -302,19 +357,66 @@ def _execute_row(
                     str(exc)[:120],
                 )
                 outcome["failed"] += 1
+            else:
+                outcome["skipped"] += 1
             session.commit()
             return outcome
 
-        row.status = EnrichmentStatus.SUCCEEDED.value
-        row.payload_ref = result if isinstance(result, str) else None
-        row.updated_at = timestamp(datetime.now(UTC))
-        _open_gate_if_complete(session, item_id=item.id, input_hash=row.input_hash)
-        session.commit()
-        LOGGER.info("enrichment %s succeeded", row.id)
-        outcome["succeeded"] += 1
+        session.execute(
+            update(ItemEnrichment)
+            .where(
+                ItemEnrichment.id == row_id,
+                ItemEnrichment.owner_token == owner_token,
+            )
+            .values(
+                status=EnrichmentStatus.SUCCEEDED.value,
+                payload_ref=result if isinstance(result, str) else None,
+                updated_at=timestamp(datetime.now(UTC)),
+            )
+        )
+        # The gate may only open through a fence that held: if our claim was
+        # reclaimed mid-run, the new owner's row state is authoritative and
+        # promoting the item on our behalf would publish behind its back.
+        if _fence_holds(session, row_id=row_id, owner_token=owner_token):
+            _open_gate_if_complete(session, item_id=item.id, input_hash=row.input_hash)
+            session.commit()
+            LOGGER.info("enrichment %s succeeded", row.id)
+            outcome["succeeded"] += 1
+        else:
+            session.rollback()
+            LOGGER.warning("enrichment %s claim lost before result; discarding", row_id)
+            outcome["skipped"] += 1
         return outcome
     finally:
         session.close()
+
+
+def _fenced_update(
+    session: Session, *, row_id: str, owner_token: str, values: dict[str, Any]
+) -> bool:
+    """One UPDATE that only lands while this owner still holds the row."""
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(ItemEnrichment)
+            .where(
+                ItemEnrichment.id == row_id,
+                ItemEnrichment.owner_token == owner_token,
+            )
+            .values(**values)
+        ),
+    )
+    return bool(result.rowcount)
+
+
+def _fence_holds(session: Session, *, row_id: str, owner_token: str) -> bool:
+    """Whether this owner still owns the row after the success write."""
+    return (
+        session.scalar(
+            select(ItemEnrichment.owner_token).where(ItemEnrichment.id == row_id)
+        )
+        == owner_token
+    )
 
 
 class EnrichmentWorker:

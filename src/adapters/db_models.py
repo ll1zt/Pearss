@@ -548,6 +548,11 @@ class ItemEnrichment(Base):
     model: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(64), nullable=True
     )
+    # Claim fencing (A10): set when a sweeper claims the row, checked before
+    # every result write. NULL means not owned; stale-claim recovery clears it.
+    owner_token: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
     created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
