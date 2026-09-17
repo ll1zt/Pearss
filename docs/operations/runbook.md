@@ -25,10 +25,12 @@ journalctl --user -u pearss.service -f
 
 ## 调度器
 
-运行中的调度循环遇到 SQLAlchemy `OperationalError` 时会记录不含 SQL、参数或异常正文的
-警告，结束当前轮并按原 `PEARSS_TICK_SECONDS` 间隔重试；这不是数据库自动修复，持续失败
+运行中的调度循环和 enrichment sweep 遇到 SQLAlchemy `OperationalError` 时会记录不含 SQL、
+参数或异常正文的警告，结束当前轮并按原轮询间隔重试；这不是数据库自动修复，持续失败
 仍需检查磁盘、权限和锁竞争。其他异常不会被当作临时存储故障无限重试。
-此恢复边界不含启动阶段和 enrichment worker；`/healthz` 也不代表后台任务健康。
+此恢复边界不含启动阶段；`/healthz` 也不代表后台任务健康。
+enrichment 任务的认领状态在执行前提交；若故障留下 `running` 任务，既有的超期回收机制会
+重新认领。正在线程里运行的 provider 调用不会被该恢复取消。
 孤儿运行回收和审计裁剪只在数据库提交成功后推进维护计时；写入失败不会消耗重试窗口，
 下一轮仍可重试。窗口从本次维护完成时起计算。
 

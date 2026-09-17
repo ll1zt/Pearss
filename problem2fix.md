@@ -23,11 +23,11 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B01 real scheduler maintenance assertions | Fixed | `fd74926` |
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
-| A07 worker recovery and stop | Partial: scheduler retries storage failures; maintenance failures retain their retry window; stopping a failed worker consumes its exception without logging its body | `306534a` (loop recovery); maintenance/stop follow-up in this revision |
+| A07 worker recovery and stop | Partial: scheduler and enrichment loops retry temporary storage failures; maintenance failures retain their retry window; stopping a failed worker consumes its exception without logging its body | `306534a`, `36843c0`; enrichment recovery in this revision |
 
 **Still open:** A05 transient decoder memory and end-to-end budgets; A07
-remaining boundaries (enrichment recovery, startup failure cleanup,
-independent lifespan resource cleanup, health wiring and live-thread ownership);
+remaining boundaries (startup failure cleanup, independent lifespan
+resource cleanup, health wiring and live-thread ownership);
 A09 remaining deadline boundaries; A10–A15;
 B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
 not a completed registry/Reader architecture refactor. A10/A11 were inspected
@@ -87,7 +87,7 @@ from `stop()`. Stop now returns, clears the task reference and permits restart;
 stderr assertions reject the exception body and traceback. All 11 recovery and
 maintenance cases pass. These lifecycle tests do not prove full application
 cleanup or cancellation of synchronous work already running in a thread.
-Enrichment loop recovery remains unimplemented. Isolated regression injection
+Enrichment loop recovery was not included in that increment. Isolated regression injection
 confirmed two expected failures each for early maintenance deadlines, rethrowing
 stop handlers, and traceback logging; restoring the snapshot passed all five
 recovery cases. The subsequent test setup extraction preserves those assertions
@@ -100,7 +100,39 @@ mypy narrowing in the fault-injection setup; this was corrected before the
 successful run. No real-client manual smoke or fresh coverage measurement
 was performed for this increment.
 
-**Combined verification:** `nix develop --command just ci` passed with exit 0
+**A07 enrichment recovery:** a real rollback-journal lock on the enrichment
+queue made `_claimable_rows` raise `sqlalchemy.exc.OperationalError` out of
+the sweep loop (red, 1 failed in 2.1s), leaving the pending item blocked
+forever. A loop-level catch of `OperationalError` alone retries on the next
+sweep; the same test then passes with a real filestore artifact and gate
+promotion after recovery. Cancellation and programming errors still
+terminate the enrichment task; claims committed before a failure are
+reclaimed by the existing stale-running budget. The isolated regression
+copy with the loop catch reverted failed with the same `database is
+locked` error only after `PYTHONPATH=<copy>/src` was set explicitly — the
+repo's editable `.venv` otherwise resolved imports back to the main tree
+and falsely passed. This is not a claim about WAL read-lock behavior,
+worker health wiring or cancellation of a provider call already running in
+a thread. See "Enrichment gate attempts" below for the full-gate status;
+the third attempt passed (**1,496 tests**).
+
+**Enrichment gate attempts:** the first attempt passed formatting, Ruff,
+mypy (201 files), import boundaries, 918 unit/fixture and 518 integration
+tests, then failed one plugin-restart E2E case during subprocess startup
+(56 passed). Its log contained `Application startup failed` and a logging
+error but did not expose the underlying exception. The same test module
+passed in isolation (3 passed); this does not establish the failure's cause.
+The second attempt stopped with 916 unit/fixture passes and two temporary
+directory creation errors. Disk inspection then showed only 277 MiB free.
+After temporary-directory cleanup, 6.4 GiB was available. Disk pressure is
+a plausible contributor, not a proven explanation for the first failure;
+its cause remains unknown and it did not reproduce. The third attempt
+passed full `nix develop --command just ci` with exit 0: 918 unit/fixture,
+518 integration, 57 E2E and 3 contract tests (**1,496 total**), plus
+formatting, Ruff, mypy (201 files), import boundaries and the migration
+roundtrip.
+
+**Earlier combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,
 54 E2E and 3 contract tests (**1,477 total**). Formatting, Ruff, mypy (196 files),
 import boundaries and migration upgrade/downgrade/upgrade passed. The initial

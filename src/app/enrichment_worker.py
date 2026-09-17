@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters import filestore
@@ -367,7 +368,15 @@ class EnrichmentWorker:
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._sweep_seconds)
-            await self.sweep_once()
+            # Same recovery boundary as the scheduler: one transient storage
+            # failure must not kill the worker, but a programming error or a
+            # cancellation must.
+            try:
+                await self.sweep_once()
+            except OperationalError:
+                LOGGER.warning(
+                    "enrichment storage operation failed; retrying next sweep"
+                )
 
     async def sweep_once(self) -> dict[str, int]:
         async with self._lock:
