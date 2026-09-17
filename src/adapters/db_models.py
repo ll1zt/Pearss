@@ -550,6 +550,9 @@ class ItemEnrichment(Base):
     )
     # Claim fencing (A10): set when a sweeper claims the row, checked before
     # every result write. NULL means not owned; stale-claim recovery clears it.
+    lease_expires_at: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
     owner_token: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(64), nullable=True
     )

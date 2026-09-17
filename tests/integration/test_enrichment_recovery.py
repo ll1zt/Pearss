@@ -17,7 +17,6 @@ from adapters.repository import create_source, parse_chain
 from app.enrichment_worker import EnrichmentWorker
 from app.pipeline import normalise_and_store
 from core.models import ItemDraft
-from tests.integration.conftest import migrated_database
 
 pytestmark = pytest.mark.integration
 
@@ -42,6 +41,9 @@ async def test_user_pending_item_is_processed_after_storage_unlocks(
     other lifespan resources. The processor, artifact store and DB are real;
     this is not a claim about production WAL read locking or worker readiness.
     """
+    # Child resolution of TitleSummary must not initialize conftest's API app.
+    from tests.integration.conftest import migrated_database
+
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(
         migrated_database(tmp_path, "enrichment-recovery.db"),

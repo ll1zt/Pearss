@@ -808,11 +808,6 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
     ).scalar()
     assert statuses == "pending", "the chain must hold the gate"
 
-    class FakeTranslate:
-        @staticmethod
-        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
-            return str(store(f"<p>Translated: {item_ctx['title']}</p>"))
-
     row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
     report = sweep_queue(
         session,
@@ -853,8 +848,6 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     from adapters.repository import parse_chain
     from app.enrichment_worker import sweep_queue
     from app.pipeline import normalise_and_store
-    from core.enums import ErrorClass
-    from core.plugins.hooks import ProcessorError
 
     raw_chain = jsonlib.dumps(
         [{"plugin_id": "translate", "kind": "translation", "required": True}]
@@ -872,11 +865,6 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     drafts = collect(SOURCE, "valid.xml")
     normalise_and_store(session, drafts, chain=specs)
     session.commit()
-
-    class FailingTranslate:
-        @staticmethod
-        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
-            raise ProcessorError(ErrorClass.AUTH, "provider rejected the key")
 
     row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
     report = sweep_queue(
@@ -955,13 +943,6 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
 
     row_sessions = sessionmaker(session.get_bind(), expire_on_commit=False)
 
-    class NetworkFailure:
-        @staticmethod
-        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
-            import httpx
-
-            raise httpx.ConnectError("provider down")
-
     # Sweeps 1..MAX_ATTEMPTS: attempts 1..2 requeue; the MAX_ATTEMPTS-th
     # failure stops the row as failed. (MAX_ATTEMPTS counts *tries*.)
     from app.enrichment_worker import BACKOFF_BASE_SECONDS, MAX_ATTEMPTS
@@ -1038,14 +1019,6 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     session.commit()
     backfill_chain(session, source_id="src-retry")
     session.commit()
-
-    from core.enums import ErrorClass as _EC
-    from core.plugins.hooks import ProcessorError
-
-    class AuthFailure:
-        @staticmethod
-        def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
-            raise ProcessorError(_EC.AUTH, "bad key")
 
     report = sweep_queue(
         session,
@@ -1255,3 +1228,35 @@ def test_an_entity_encoded_chinese_body_is_not_queued(session: Session) -> None:
     status, enrichments = _publish_state(session, "item-zh-entity")
     assert enrichments == 0, "an entity-encoded Chinese body must not be queued"
     assert status == PublishStatus.READY.value
+
+
+class FakeTranslate:
+    @staticmethod
+    def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+        return str(store(f"<p>Translated: {item_ctx['title']}</p>"))
+
+
+class FailingTranslate:
+    @staticmethod
+    def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+        from core.enums import ErrorClass
+        from core.plugins.hooks import ProcessorError
+
+        raise ProcessorError(ErrorClass.AUTH, "provider rejected the key")
+
+
+class NetworkFailure:
+    @staticmethod
+    def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+        import httpx
+
+        raise httpx.ConnectError("provider down")
+
+
+class AuthFailure:
+    @staticmethod
+    def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+        from core.enums import ErrorClass as _EC
+        from core.plugins.hooks import ProcessorError
+
+        raise ProcessorError(_EC.AUTH, "bad key")

@@ -34,9 +34,11 @@ from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.repository import timestamp
+from app.processor_runtime import LEASE_GRACE_SECONDS, run_processor
 from core.enrichment import EnrichmentStatus
 from core.enums import ErrorClass, ItemEvent, PublishStatus
 from core.item_state import TransitionContext, transition
+from core.plugins.hooks import ProcessorError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,8 +47,8 @@ TENANT: Final = "default"
 # invisible next to the fetch interval that produced them.
 DEFAULT_SWEEP_SECONDS: Final = 60.0
 # Generous: an LLM completion regularly takes minutes through a relayed
-# endpoint (observed 126s for one gemini-flash reply). Matches the
-# processor's read budget; the reclaim window is twice this.
+# endpoint (observed 126s for one gemini-flash reply). The whole attempt,
+# including imports, chunks and fallback, shares this budget; leases add grace.
 DEFAULT_CALL_TIMEOUT: Final = 360.0
 # How many rows one sweep processes in parallel. Each worker runs in its own
 # thread with its own session; SQLite handles short writes from a few threads
@@ -112,15 +114,17 @@ def sweep_queue(
     concurrency: int = DEFAULT_CONCURRENCY,
     max_attempts: int = MAX_ATTEMPTS,
     row_session_factory: Callable[[], Session] | None = None,
+    cancel_event: threading.Event | None = None,
+    call_timeout: float | None = None,
 ) -> dict[str, int]:
     """Process queued enrichments, up to `concurrency` in parallel.
 
     Claiming is a Core-language conditional UPDATE (no ORM instances of the
     row are retained here): the row sessions own every further write, so
     there is no cross-session identity conflict. The claim commits before
-    dispatch - the provider call must not hold the write lock, and a second
-    sweep seeing `running` stands down. A `running` row past twice the call
-    budget is reclaimed (crashed worker).
+    dispatch. Only immediately available slots are claimed. One absolute
+    deadline includes dispatch/startup and execution; a persisted lease adds
+    termination/write grace. Older rows without leases use the legacy cutoff.
     """
     global _row_session_factory
     if row_session_factory is not None:
@@ -132,6 +136,12 @@ def sweep_queue(
         )
 
     now = now or datetime.now(UTC)
+    call_timeout = DEFAULT_CALL_TIMEOUT if call_timeout is None else call_timeout
+    cancel_event = cancel_event if cancel_event is not None else threading.Event()
+    deadline = time.monotonic() + call_timeout
+    lease_expires_at = timestamp(
+        now + timedelta(seconds=call_timeout + LEASE_GRACE_SECONDS)
+    )
     report: dict[str, int] = {
         "ran": 0,
         "succeeded": 0,
@@ -140,7 +150,7 @@ def sweep_queue(
         "skipped": 0,
     }
 
-    claimable = _claimable_rows(session, now=now, limit=concurrency * 2)
+    claimable = _claimable_rows(session, now=now, limit=max(1, concurrency))
     claimed: list[tuple[str, str, str]] = []
     for row_id, item_id, plugin_id in claimable:
         if plugin_id not in processors:
@@ -170,16 +180,13 @@ def sweep_queue(
                             ItemEnrichment.next_attempt_at <= timestamp(now),
                         ),
                     ),
-                    and_(
-                        ItemEnrichment.status == EnrichmentStatus.RUNNING.value,
-                        ItemEnrichment.updated_at
-                        < timestamp(now - timedelta(seconds=DEFAULT_CALL_TIMEOUT * 2)),
-                    ),
+                    _expired_lease(now),
                 ),
             )
             .values(
                 status=EnrichmentStatus.RUNNING.value,
                 owner_token=owner,
+                lease_expires_at=lease_expires_at,
                 updated_at=timestamp(now),
             )
         )
@@ -202,19 +209,39 @@ def sweep_queue(
             owner_token=owner,
             processors=processors,
             max_attempts=max_attempts,
+            cancel_event=cancel_event,
+            deadline=deadline,
         )
         with report_lock:
             for key, value in outcome.items():
                 report[key] = report.get(key, 0) + value
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [
-            pool.submit(run_one, row_id, item_id, owner)
-            for row_id, item_id, owner in claimed
-        ]
-        for future in futures:
-            future.result()
+        try:
+            futures = [
+                pool.submit(run_one, row_id, item_id, owner)
+                for row_id, item_id, owner in claimed
+            ]
+            for future in futures:
+                future.result()
+        finally:
+            cancel_event.set()
     return report
+
+
+def _expired_lease(now: datetime) -> Any:
+    """Legacy NULL leases retain their old crash-recovery cutoff."""
+    return and_(
+        ItemEnrichment.status == EnrichmentStatus.RUNNING.value,
+        or_(
+            ItemEnrichment.lease_expires_at <= timestamp(now),
+            and_(
+                ItemEnrichment.lease_expires_at.is_(None),
+                ItemEnrichment.updated_at
+                < timestamp(now - timedelta(seconds=DEFAULT_CALL_TIMEOUT * 2)),
+            ),
+        ),
+    )
 
 
 def _claimable_rows(
@@ -223,7 +250,6 @@ def _claimable_rows(
     """(id, item_id, plugin_id) of queued rows plus `running` rows past the
     reclaim budget. Core columns only - the outer sweep never holds ORM
     instances of rows that row sessions will write."""
-    stale_before = timestamp(now - timedelta(seconds=DEFAULT_CALL_TIMEOUT * 2))
     rows = session.execute(
         select(
             ItemEnrichment.id,
@@ -241,10 +267,7 @@ def _claimable_rows(
                         ItemEnrichment.next_attempt_at <= timestamp(now),
                     ),
                 ),
-                and_(
-                    ItemEnrichment.status == EnrichmentStatus.RUNNING.value,
-                    ItemEnrichment.updated_at < stale_before,
-                ),
+                _expired_lease(now),
             )
         )
         .order_by(ItemEnrichment.created_at)
@@ -260,6 +283,8 @@ def _execute_row(
     owner_token: str,
     processors: dict[str, Any],
     max_attempts: int,
+    cancel_event: threading.Event,
+    deadline: float,
 ) -> dict[str, int]:
     """Run one claimed row entirely inside its own session.
 
@@ -289,8 +314,10 @@ def _execute_row(
             return outcome
         processor = processors[row.plugin_id]
         try:
-            result = processor.process(
-                {
+            result = run_processor(
+                processor,
+                plugin_id=row.plugin_id,
+                item_ctx={
                     "item_id": item.id,
                     "title": item.title or "",
                     "content": filestore.read_body(item.content_ref),
@@ -298,94 +325,94 @@ def _execute_row(
                     "lang": row.lang,
                 },
                 target_lang=row.lang or "en",
-                store=filestore.store_body,
+                deadline=deadline,
+                cancelled=cancel_event,
             )
+        except ProcessorError as exc:
+            error_class = exc.error_class
+            detail = exc.detail
         except Exception as exc:
-            error_class = getattr(exc, "error_class", None) or ErrorClass.NETWORK
-            attempts = row.attempt_count + 1
-            transient = error_class.value in TRANSIENT_CLASSES
-            if transient and attempts < max_attempts:
-                backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-                fenced = _fenced_update(
-                    session,
-                    row_id=row_id,
-                    owner_token=owner_token,
-                    values={
-                        "status": EnrichmentStatus.QUEUED.value,
-                        "attempt_count": attempts,
-                        "next_attempt_at": timestamp(
-                            datetime.now(UTC) + timedelta(seconds=backoff)
-                        ),
-                        "error_class": error_class.value,
-                        "detail": str(exc)[:500],
-                        "updated_at": timestamp(datetime.now(UTC)),
-                    },
+            error_class = ErrorClass.NETWORK
+            detail = f"{type(exc).__name__}: {exc}"
+        else:
+            _record_success(
+                session,
+                row_id=row_id,
+                owner_token=owner_token,
+                result=filestore.store_body(result),
+            )
+            if _fence_holds(session, row_id=row_id, owner_token=owner_token):
+                _open_gate_if_complete(
+                    session, item_id=item.id, input_hash=row.input_hash
                 )
-                if fenced:
-                    outcome["retried"] += 1
-                    LOGGER.warning(
-                        "enrichment %s transient failure (%s), requeue attempt "
-                        "%d/%d after %ds: %s",
-                        row.id,
-                        error_class.value,
-                        attempts,
-                        max_attempts,
-                        int(backoff),
-                        str(exc)[:100],
-                    )
-                else:
-                    outcome["skipped"] += 1
                 session.commit()
-                return outcome
+                LOGGER.info("enrichment %s succeeded", row.id)
+                outcome["succeeded"] += 1
+            else:
+                session.rollback()
+                LOGGER.warning(
+                    "enrichment %s claim lost before result; discarding", row_id
+                )
+                outcome["skipped"] += 1
+            return outcome
+        attempts = row.attempt_count + 1
+        transient = error_class.value in TRANSIENT_CLASSES
+        if transient and attempts < max_attempts:
+            backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
             fenced = _fenced_update(
                 session,
                 row_id=row_id,
                 owner_token=owner_token,
                 values={
-                    "status": EnrichmentStatus.FAILED.value,
+                    "status": EnrichmentStatus.QUEUED.value,
+                    "attempt_count": attempts,
+                    "next_attempt_at": timestamp(
+                        datetime.now(UTC) + timedelta(seconds=backoff)
+                    ),
                     "error_class": error_class.value,
-                    "detail": str(exc)[:500],
+                    "detail": detail[:500],
                     "updated_at": timestamp(datetime.now(UTC)),
                 },
             )
             if fenced:
+                outcome["retried"] += 1
                 LOGGER.warning(
-                    "enrichment %s failed (%s)%s: %s",
+                    "enrichment %s transient failure (%s), requeue attempt "
+                    "%d/%d after %ds: %s",
                     row.id,
                     error_class.value,
-                    f" attempt {attempts}/{max_attempts}" if transient else "",
-                    str(exc)[:120],
+                    attempts,
+                    max_attempts,
+                    int(backoff),
+                    detail[:100],
                 )
-                outcome["failed"] += 1
             else:
                 outcome["skipped"] += 1
             session.commit()
             return outcome
-
-        session.execute(
-            update(ItemEnrichment)
-            .where(
-                ItemEnrichment.id == row_id,
-                ItemEnrichment.owner_token == owner_token,
-            )
-            .values(
-                status=EnrichmentStatus.SUCCEEDED.value,
-                payload_ref=result if isinstance(result, str) else None,
-                updated_at=timestamp(datetime.now(UTC)),
-            )
+        fenced = _fenced_update(
+            session,
+            row_id=row_id,
+            owner_token=owner_token,
+            values={
+                "status": EnrichmentStatus.FAILED.value,
+                "error_class": error_class.value,
+                "detail": detail[:500],
+                "updated_at": timestamp(datetime.now(UTC)),
+            },
         )
-        # The gate may only open through a fence that held: if our claim was
-        # reclaimed mid-run, the new owner's row state is authoritative and
-        # promoting the item on our behalf would publish behind its back.
-        if _fence_holds(session, row_id=row_id, owner_token=owner_token):
-            _open_gate_if_complete(session, item_id=item.id, input_hash=row.input_hash)
-            session.commit()
-            LOGGER.info("enrichment %s succeeded", row.id)
-            outcome["succeeded"] += 1
+        if fenced:
+            LOGGER.warning(
+                "enrichment %s failed (%s)%s: %s",
+                row.id,
+                error_class.value,
+                f" attempt {attempts}/{max_attempts}" if transient else "",
+                detail[:120],
+            )
+            outcome["failed"] += 1
         else:
-            session.rollback()
-            LOGGER.warning("enrichment %s claim lost before result; discarding", row_id)
             outcome["skipped"] += 1
+        session.commit()
         return outcome
     finally:
         session.close()
@@ -407,6 +434,24 @@ def _fenced_update(
         ),
     )
     return bool(result.rowcount)
+
+
+def _record_success(
+    session: Session, *, row_id: str, owner_token: str, result: str
+) -> None:
+    """The fenced success write; the caller checks the fence before opening."""
+    session.execute(
+        update(ItemEnrichment)
+        .where(
+            ItemEnrichment.id == row_id,
+            ItemEnrichment.owner_token == owner_token,
+        )
+        .values(
+            status=EnrichmentStatus.SUCCEEDED.value,
+            payload_ref=result,
+            updated_at=timestamp(datetime.now(UTC)),
+        )
+    )
 
 
 def _fence_holds(session: Session, *, row_id: str, owner_token: str) -> bool:
@@ -444,6 +489,8 @@ class EnrichmentWorker:
             self._concurrency = concurrency or DEFAULT_CONCURRENCY
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        self._cancel_event = threading.Event()
+        self._inflight: asyncio.Task[dict[str, int]] | None = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -454,7 +501,10 @@ class EnrichmentWorker:
         )
 
     async def stop(self) -> None:
+        self._cancel_event.set()
         if self._task is None:
+            if self._inflight is not None:
+                await asyncio.shield(self._inflight)
             return
         self._task.cancel()
         # A failed task must not prevent shutdown of the remaining resources.
@@ -483,7 +533,23 @@ class EnrichmentWorker:
     async def sweep_once(self) -> dict[str, int]:
         async with self._lock:
             started = time.monotonic()
-            report = await asyncio.to_thread(self._sweep, self._session_factory)
+            self._cancel_event.clear()
+            self._inflight = asyncio.create_task(
+                asyncio.to_thread(self._sweep, self._session_factory)
+            )
+            try:
+                report = await asyncio.shield(self._inflight)
+            except asyncio.CancelledError:
+                self._cancel_event.set()
+                # Keep the sweep lock and join the actual DB-owning thread;
+                # cancelling to_thread alone abandons it, not the processor.
+                try:
+                    await asyncio.shield(self._inflight)
+                except Exception as exc:
+                    LOGGER.error("cancelled sweep failed (%s)", type(exc).__name__)
+                raise
+            finally:
+                self._inflight = None
             if report["ran"]:
                 LOGGER.info(
                     "enrichment sweep: %d ran (%d ok, %d failed, %d skipped) in %.1fs",
@@ -502,6 +568,7 @@ class EnrichmentWorker:
                 processors=self._processors,
                 concurrency=self._concurrency,
                 row_session_factory=session_factory,
+                cancel_event=self._cancel_event,
             )
 
 

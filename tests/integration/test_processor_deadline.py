@@ -1,0 +1,236 @@
+"""Real provider cancellation through the production processor and SQLite queue."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.orm import sessionmaker
+
+from adapters import filestore
+from adapters.db_models import Item, ItemEnrichment
+from adapters.repository import create_source, parse_chain
+from app import enrichment_worker
+from app.pipeline import normalise_and_store
+from core.models import ItemDraft
+
+pytestmark = pytest.mark.integration
+
+
+def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given a never-replying provider, when its budget expires, then its socket
+    closes, failure persists, and the next item publishes without a hung sweep.
+    """
+    from tests.integration.conftest import migrated_database
+
+    entered = threading.Event()
+    disconnected = threading.Event()
+    done = threading.Event()
+    connections: list[socket.socket] = []
+    errors: list[Exception] = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            if b"Stalled article" in body:
+                connections.append(self.connection)
+                entered.set()
+                if self.connection.recv(1) == b"":
+                    disconnected.set()
+                return
+            response = json.dumps(
+                {"choices": [{"message": {"content": "Translated article"}}]}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv(
+        "PEARSS_TRANSLATE_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+    )
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "fixture")
+    monkeypatch.setattr(enrichment_worker, "DEFAULT_CALL_TIMEOUT", 3.0)
+    engine = sa.create_engine(migrated_database(tmp_path, "deadline.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    chain = (
+        '[{"plugin_id":"translate","kind":"translation","lang":"zh","required":true}]'
+    )
+    with factory() as session:
+        source = create_source(
+            session,
+            source_type="rss",
+            url="https://deadline.example/feed",
+            canonical_url="https://deadline.example/feed",
+            tenant_id="default",
+            schedule_policy='{"type":"fixed","interval":"30m"}',
+            pipeline_chain=chain,
+            at="2026-09-17T00:00:00.000000Z",
+        )
+        for name in ("Stalled article", "Later article"):
+            normalise_and_store(
+                session,
+                [
+                    ItemDraft(
+                        source_id=source.id,
+                        external_id=name,
+                        title=name,
+                        canonical_url=f"https://deadline.example/{name.split()[0]}",
+                        published_at=None,
+                        content=f"<p>{name}</p>",
+                    )
+                ],
+                chain=parse_chain(chain, target_lang=None),
+            )
+        session.commit()
+
+    def run() -> None:
+        try:
+            for _ in range(2):
+                with factory() as session:
+                    enrichment_worker.sweep_queue(
+                        session,
+                        processors=enrichment_worker.default_processors(),
+                        concurrency=1,
+                        max_attempts=1,
+                        row_session_factory=factory,
+                    )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert entered.wait(5), "provider was not reached"
+        assert done.wait(5), "stalled processor prevented later work and sweep shutdown"
+        assert errors == []
+        assert disconnected.wait(1), "timed-out processor still owns its HTTP socket"
+        with factory() as session:
+            rows = session.execute(
+                sa.select(
+                    Item.title,
+                    Item.publish_status,
+                    ItemEnrichment.status,
+                    ItemEnrichment.error_class,
+                    ItemEnrichment.payload_ref,
+                )
+                .join(ItemEnrichment, Item.id == ItemEnrichment.item_id)
+                .order_by(Item.title)
+            ).all()
+            assert [tuple(row[:4]) for row in rows] == [
+                ("Later article", "ready", "succeeded", None),
+                ("Stalled article", "pending", "failed", "network"),
+            ]
+            assert (
+                filestore.read_body(rows[0].payload_ref) == "<p>Translated article</p>"
+            )
+            assert rows[1].payload_ref is None
+    finally:
+        for connection in connections:
+            with contextlib.suppress(OSError):
+                connection.shutdown(socket.SHUT_RDWR)
+        thread.join(5)
+        server.shutdown()
+        server.server_close()
+        server_thread.join(5)
+        engine.dispose()
+
+
+class SocketStall:
+    """An importable processor that keeps a real connection open indefinitely."""
+
+    @staticmethod
+    def process(item_ctx: dict[str, str], *, target_lang: str, store: object) -> str:
+        host, port = item_ctx["title"].split(":")
+        with socket.create_connection((host, int(port))) as connection:
+            connection.sendall(b"started")
+            connection.recv(1)
+        raise RuntimeError("provider closed")
+
+
+@pytest.mark.asyncio
+async def test_user_shutdown_terminates_active_processor_before_returning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given active processing, when stopped, then the socket closes and DB settles."""
+    # Keep migration/app initialization in the parent: the child imports this
+    # module only to resolve SocketStall, not to construct an unrelated API app.
+    from tests.integration.conftest import migrated_database
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    engine = sa.create_engine(migrated_database(tmp_path, "shutdown.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    chain = '[{"plugin_id":"stall","kind":"summary","required":true}]'
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(5)
+    with factory() as session:
+        source = create_source(
+            session,
+            source_type="rss",
+            url="https://shutdown.example/feed",
+            canonical_url="https://shutdown.example/feed",
+            tenant_id="default",
+            schedule_policy='{"type":"fixed","interval":"30m"}',
+            pipeline_chain=chain,
+            at="2026-09-17T00:00:00.000000Z",
+        )
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source.id,
+                    external_id="shutdown",
+                    title=f"127.0.0.1:{listener.getsockname()[1]}",
+                    canonical_url="https://shutdown.example/article",
+                    published_at=None,
+                    content="<p>Stalled work</p>",
+                )
+            ],
+            chain=parse_chain(chain, target_lang=None),
+        )
+        session.commit()
+    worker = enrichment_worker.EnrichmentWorker(
+        factory,
+        processors={"stall": SocketStall},
+        sweep_seconds=0.01,
+    )
+    try:
+        await worker.start()
+        connection, _ = await asyncio.to_thread(listener.accept)
+        with connection:
+            connection.settimeout(3)
+            assert await asyncio.to_thread(connection.recv, 7) == b"started"
+            async with asyncio.timeout(3):
+                await worker.stop()
+            assert await asyncio.to_thread(connection.recv, 1) == b""
+        with factory() as session:
+            assert session.scalar(sa.select(ItemEnrichment.status)) == "queued"
+            assert session.scalar(sa.select(ItemEnrichment.error_class)) == "network"
+            assert session.scalar(sa.select(ItemEnrichment.attempt_count)) == 1
+            assert session.scalar(sa.select(ItemEnrichment.payload_ref)) is None
+            assert session.scalar(sa.select(Item.publish_status)) == "pending"
+    finally:
+        await worker.stop()
+        listener.close()
+        engine.dispose()

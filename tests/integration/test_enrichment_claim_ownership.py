@@ -17,7 +17,6 @@ from adapters.repository import create_source, parse_chain, timestamp
 from app.enrichment_worker import sweep_queue
 from app.pipeline import normalise_and_store
 from core.models import ItemDraft
-from tests.integration.conftest import migrated_database
 from tests.integration.test_enrichment_recovery import TitleSummary
 
 pytestmark = pytest.mark.integration
@@ -31,6 +30,8 @@ def test_user_fresh_claim_is_not_stolen_by_a_stale_sweeper(
     The SQL event is an interleaving gate, not a substitute repository: a second
     connection commits a real claim between enumeration and the first UPDATE.
     """
+    from tests.integration.conftest import migrated_database
+
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(migrated_database(tmp_path, "ownership.db"))
     factory = sessionmaker(engine, expire_on_commit=False)
@@ -116,6 +117,8 @@ def test_user_fresh_claim_is_not_stolen_by_a_stale_sweeper(
 def queued_product(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[sessionmaker[Session]]:
+    from tests.integration.conftest import migrated_database
+
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(migrated_database(tmp_path, "product.db"))
     factory = sessionmaker(engine, expire_on_commit=False)
@@ -191,11 +194,25 @@ def test_user_new_owner_result_survives_a_late_completion(
     factory = queued_product
     authoritative_ref = filestore.store_body("<p>New owner result.</p>")
 
-    class LateProcessor:
-        @staticmethod
-        def process(
-            item_ctx: dict[str, str], *, target_lang: str, store: Callable[[str], str]
-        ) -> str:
+    armed = True
+    engine = factory.kw["bind"]
+
+    @sa.event.listens_for(engine, "before_cursor_execute")
+    def replace_before_completion(
+        connection: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        nonlocal armed
+        if (
+            armed
+            and statement.startswith("UPDATE item_enrichment")
+            and "owner_token=" not in statement
+        ):
+            armed = False
             with factory.begin() as competitor:
                 competitor.execute(
                     sa.update(ItemEnrichment).values(
@@ -205,14 +222,11 @@ def test_user_new_owner_result_survives_a_late_completion(
                         updated_at="2026-09-17T01:00:00.000000Z",
                     )
                 )
-            if fails:
-                raise RuntimeError("late processor failure")
-            return store("<p>Obsolete result.</p>")
 
     with factory() as session:
         report = sweep_queue(
             session,
-            processors={"title-summary": LateProcessor},
+            processors={"title-summary": FailedSummary if fails else TitleSummary},
             row_session_factory=factory,
         )
     with factory() as session:
@@ -228,3 +242,49 @@ def test_user_new_owner_result_survives_a_late_completion(
         assert session.scalar(sa.select(ItemEnrichment.error_class)) is None
         assert session.scalar(sa.select(Item.publish_status)) == "pending"
     assert report == {"ran": 1, "succeeded": 0, "failed": 0, "retried": 0, "skipped": 1}
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["expired", "at-expiry", "live"])
+def test_user_stored_lease_controls_recovery_not_current_timeout(
+    queued_product: sessionmaker[Session],
+    offset: int,
+) -> None:
+    """Given an old timestamp, only the stored expiry permits reclaiming work."""
+    factory = queued_product
+    now = datetime(2026, 9, 17, tzinfo=UTC)
+    with factory.begin() as session:
+        session.execute(
+            sa.update(ItemEnrichment).values(
+                status="running",
+                owner_token="lease-owner",
+                updated_at=timestamp(now - timedelta(hours=1)),
+                lease_expires_at=timestamp(now + timedelta(seconds=offset)),
+            )
+        )
+    with factory() as session:
+        report = sweep_queue(
+            session,
+            processors={"title-summary": TitleSummary},
+            now=now,
+            call_timeout=10,
+            row_session_factory=factory,
+        )
+    with factory() as session:
+        assert session.scalar(sa.select(ItemEnrichment.status)) == (
+            "running" if offset > 0 else "succeeded"
+        )
+        assert session.scalar(sa.select(Item.publish_status)) == (
+            "pending" if offset > 0 else "ready"
+        )
+        assert session.scalar(sa.select(ItemEnrichment.lease_expires_at)) == timestamp(
+            now + timedelta(seconds=offset if offset > 0 else 15)
+        )
+    assert report["ran"] == (0 if offset > 0 else 1)
+
+
+class FailedSummary:
+    @staticmethod
+    def process(
+        item_ctx: dict[str, str], *, target_lang: str, store: Callable[[str], str]
+    ) -> str:
+        raise RuntimeError("late processor failure")
