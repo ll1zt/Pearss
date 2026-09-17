@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: nixos-server
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        env:
+          CI_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          git clone --depth 1 http://127.0.0.1:3000/lllzt/Pearss.git source
+          cd source
+          git fetch --depth 1 origin "$CI_SHA"
+          git -c advice.detachedHead=false checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$CI_SHA"
+
+      - name: Run quality gates
+        working-directory: source
+        env:
+          NIX_CONFIG: |
+            max-jobs = 1
+            cores = 2
+        run: nix develop --command just ci
