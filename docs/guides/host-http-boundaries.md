@@ -71,14 +71,31 @@ Known limits, recorded rather than hidden:
 
 ## Not yet enforced host-side (known gaps)
 
-- **No child-wide elapsed deadline.** The child's policy deadline is not
-  propagated across RPC or multiple child requests; reverse-proxied requests
-  receive only the transport's default 60-second per-request cap.
+- **No child-wide elapsed deadline.** Closed (A09): the outer RPC call budget
+  now reaches the reverse-call servicing thread, which answers the child a
+  classified network error on expiry instead of extending the call. What
+  remains unbounded is a single abandoned servicing thread's own lifetime
+  after that answer — it finishes or dies in the background either way.
 - **DNS re-resolution window.** `check_destination` resolves the hostname
   once; the connection re-resolves. Textbook DNS rebinding remains possible;
   the recorded threat model (ADR 0016) is a leaked token probing an internal
   network, not a hostile resolver racing the socket. Same limitation as the
   host-initiated fetch path.
+
+## Tailnet exemption and refusal detail (ADR 0027)
+
+- Tailscale's CGNAT (`100.64.0.0/10`) and ULA (`fd7a:115c:a1e0::/48`) ranges
+  are exempt from the private-address refusal: the instance is
+  tailnet-hosted and its internal services (CookieCloud, translate gateway)
+  are tailnet services. Guarding them broke every self-hosted dependency the
+  moment the guard reached sandboxed egress (issue #1). Other private
+  ranges — RFC1918, loopback, link-local, metadata endpoints, and ULAs
+  outside Tailscale's allocation — keep the refusal.
+- A refusal's detail names its reason and the destination:
+  `private-address fetch refused for <url>` vs
+  `unresolvable-host fetch refused for <url>`. The old single message sent
+  operators debugging DNS when the answer was the guard, and the
+  sandbox-egress variant carried no URL at all.
 
 ## Deliberate deployment exceptions
 

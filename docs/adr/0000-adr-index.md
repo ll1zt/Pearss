@@ -77,3 +77,4 @@ docs/adr/
 | [0024](0024-readyou-subscription-writes.md) | Read You 的订阅管理写端点（quickadd / rename-tag / disable-tag，`it=` 与 `xt=` 下推 SQL） | accepted（**修订 ADR 0004 的端点范围**；**修订 ADR 0010 只澄清 A5 不受影响**） | 2026-09-14 |
 | [0025](0025-restore-approved-plugin-installations.md) | 从持久化审批记录恢复插件安装（启动 checksum 比对，子进程校验） | accepted（**部分 supersede 0023**） | 2026-09-17 |
 | [0026](0026-audit-boundary-and-reader-post-reads.md) | 审计边界（覆盖以中间件位置定义）与 Reader POST 读取认证例外 | accepted | 2026-09-18 |
+| [0027](0027-ssrf-tailnet-exemption.md) | SSRF 守卫的 tailnet 网段豁免与拒绝原因拆分 | accepted（**收窄 0016 的私有地址定义**） | 2026-09-19 |

@@ -301,6 +301,129 @@ def _resolve_answer(answers: dict[str, set[str]]) -> Callable[[str], set[str]]:
     return resolve
 
 
+# The operator's internal services live on the tailnet, and /etc/hosts pins
+# them to both stacks: the CGNAT v4 address and the Tailscale ULA v6 address.
+_TAILNET_SERVICE_ANSWERS = {
+    "svc.tailnet.example": {
+        "100.64.0.10",
+        "fd7a:115c:a1e0::a",
+    }
+}
+
+
+@pytest.mark.unit
+def test_user_tailnet_service_domains_are_not_refused_as_private(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given the guard ON, when an internal service resolves to its tailnet
+    addresses (CGNAT v4 + Tailscale ULA v6, the deployed /etc/hosts shape),
+    then the fetch proceeds — the operator's own network is not a probing
+    target (issue #1: CookieCloud and translate broke after the guard
+    reached sandboxed egress).
+    """
+    from adapters import http as pearss_http
+
+    requests: list[httpx.Request] = []
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", _resolve_answer(_TAILNET_SERVICE_ANSWERS)
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=FEED_BODY)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        payload = fetch("https://svc.tailnet.example:4001/cookies", client=http_client)
+
+    assert payload.ok
+    assert [str(r.url) for r in requests] == [
+        "https://svc.tailnet.example:4001/cookies"
+    ]
+
+
+@pytest.mark.unit
+def test_user_ula_addresses_outside_the_tailnet_stay_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tailnet exemption is scoped to Tailscale's two ranges, not to
+    every ULA: fc00::/7 neighbours keep the guard's protection.
+    """
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", _resolve_answer({"host.example": {"fd00::1"}})
+    )
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        ) as http_client,
+        pytest.raises(FetchError) as exc_info,
+    ):
+        fetch("https://host.example/rss", client=http_client)
+
+    assert exc_info.value.error_class is ErrorClass.BLOCKED
+
+
+@pytest.mark.unit
+def test_user_unresolvable_and_private_refusals_name_different_reasons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A name that resolves to nothing and one that resolves into a private
+    range are different failures: the detail must say which, and name the
+    host, or the operator debugs DNS when the answer is the guard (issue #1
+    observed exactly that misdirection).
+    """
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", lambda host, *, deadline=None: set()
+    )
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        ) as http_client,
+        pytest.raises(FetchError) as unresolvable,
+    ):
+        fetch("https://gone.example.com/rss", client=http_client)
+
+    monkeypatch.setattr(
+        pearss_http,
+        "resolve_host",
+        _resolve_answer({"metadata.internal": {"169.254.169.254"}}),
+    )
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200))
+        ) as http_client,
+        pytest.raises(FetchError) as private,
+    ):
+        fetch("https://metadata.internal/latest", client=http_client)
+
+    assert "unresolvable" in unresolvable.value.detail, unresolvable.value.detail
+    assert "gone.example.com" in unresolvable.value.detail
+    assert "private-address" in private.value.detail, private.value.detail
+    assert "metadata.internal" in private.value.detail
+
+
+@pytest.mark.unit
+def test_user_destination_check_carries_the_refused_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`check_destination` (the sandbox-egress guard) must include the host
+    in its detail: a bare refusal sentence left nothing to grep for.
+    """
+    from adapters import http as pearss_http
+
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", _resolve_answer({"db.internal": {"10.0.0.5"}})
+    )
+    with pytest.raises(FetchError) as refused:
+        pearss_http.check_destination("https://db.internal:5432/admin")
+
+    assert refused.value.error_class is ErrorClass.BLOCKED
+    assert "db.internal" in refused.value.detail, refused.value.detail
+
+
 @pytest.mark.unit
 def test_private_literal_ip_is_refused_without_a_connection(
     monkeypatch: pytest.MonkeyPatch,

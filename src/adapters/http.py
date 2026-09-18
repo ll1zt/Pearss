@@ -161,11 +161,28 @@ def _getaddrinfo(host: str) -> set[str]:
     return {str(info[4][0]) for info in infos}
 
 
+# Tailscale's CGNAT and ULA ranges are this deployment's own network, not a
+# probing target: the instance is tailnet-hosted (ADR 0020) and its internal
+# services (CookieCloud, translate gateway) are tailnet services the
+# collectors must reach. Refusing these ranges broke every such service the
+# moment the guard reached sandboxed egress (issue #1); other tailnet hosts
+# remain reachable by design — the operator's ACL, not this guard, gates
+# that path.
+_TAILSCALE_NETWORKS: Final[
+    tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+] = (
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("fd7a:115c:a1e0::/48"),
+)
+
+
 def _is_private_ip(address_text: str) -> bool:
     try:
         address = ipaddress.ip_address(address_text)
     except ValueError:
         return True  # an unparseable answer is not one we can vouch for
+    if any(address in network for network in _TAILSCALE_NETWORKS):
+        return False
     return (
         address.is_private
         or address.is_loopback
@@ -176,8 +193,16 @@ def _is_private_ip(address_text: str) -> bool:
     )
 
 
-def _resolves_private(url: str, *, deadline: float | None = None) -> bool:
-    """Whether `url`'s host is (or resolves to) a private address.
+# The two ways a destination can fail the guard. They read differently in
+# job_run on purpose: an operator who sees "private-address" checks what the
+# host resolves to, one who sees "unresolvable" checks DNS — the old single
+# message sent both to the same wrong direction (issue #1).
+_PRIVATE_REASON: Final = "private-address"
+_UNRESOLVABLE_REASON: Final = "unresolvable-host"
+
+
+def _refusal_reason(url: str, *, deadline: float | None = None) -> str | None:
+    """Why `url` may not be fetched, or None when the guard allows it.
 
     Fail-closed on resolution errors: a name the server cannot resolve is not
     one it should fetch, and DNS is exactly the layer an SSRF chain plays
@@ -193,11 +218,13 @@ def _resolves_private(url: str, *, deadline: float | None = None) -> bool:
     """
     host = urlsplit(url).hostname
     if not host:
-        return True
+        return _UNRESOLVABLE_REASON
     addresses = resolve_host(host, deadline=deadline)
     if not addresses:
-        return True  # unresolvable → refused, fail-closed
-    return any(_is_private_ip(address) for address in addresses)
+        return _UNRESOLVABLE_REASON  # unresolvable → refused, fail-closed
+    if any(_is_private_ip(address) for address in addresses):
+        return _PRIVATE_REASON
+    return None
 
 
 def _strip_credentials(headers: dict[str, str]) -> dict[str, str]:
@@ -342,10 +369,10 @@ def _request(
     # redirects are followed manually so every hop is classified too — the
     # classic SSRF bypass is a public URL that 302s to the metadata service.
     guard_private = not allow_private_fetch()
-    if guard_private and _resolves_private(url, deadline=deadline):
+    reason = _refusal_reason(url, deadline=deadline) if guard_private else None
+    if reason is not None:
         raise FetchError(
-            ErrorClass.BLOCKED,
-            f"private-address fetch refused for {_redact(url)}",
+            ErrorClass.BLOCKED, f"{reason} fetch refused for {_redact(url)}"
         )
     manual_redirects = guard_private and follow_redirects
     hops = 0
@@ -381,10 +408,11 @@ def _request(
                             f"redirect without location for {_redact(url)}",
                         )
                     next_url = urljoin(url, location)
-                    if _resolves_private(next_url, deadline=deadline):
+                    redirect_reason = _refusal_reason(next_url, deadline=deadline)
+                    if redirect_reason is not None:
                         raise FetchError(
                             ErrorClass.BLOCKED,
-                            "redirect to a private address refused for "
+                            f"redirect to a {redirect_reason} refused for "
                             f"{_redact(next_url)}",
                         )
                     if urlsplit(next_url).hostname != urlsplit(url).hostname:
@@ -444,11 +472,19 @@ def _request(
 
 
 def check_destination(url: str, *, deadline: float | None = None) -> None:
-    """Refuse unsupported/private HTTP destinations before host egress."""
+    """Refuse unsupported/private HTTP destinations before host egress.
+
+    The detail names the reason (private-address vs unresolvable-host) and
+    the refused URL: sandboxed children egress through here, and a bare
+    refusal sentence sent the operator debugging the wrong layer (issue #1).
+    """
     if urlsplit(url).scheme not in {"http", "https"}:
         raise FetchError(ErrorClass.BLOCKED, "non-HTTP destination refused")
-    if not allow_private_fetch() and _resolves_private(url, deadline=deadline):
-        raise FetchError(ErrorClass.BLOCKED, "private-address fetch refused")
+    reason = _refusal_reason(url, deadline=deadline)
+    if not allow_private_fetch() and reason is not None:
+        raise FetchError(
+            ErrorClass.BLOCKED, f"{reason} fetch refused for {_redact(url)}"
+        )
 
 
 def _request_headers(
