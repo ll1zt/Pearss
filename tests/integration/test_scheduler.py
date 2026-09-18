@@ -177,11 +177,18 @@ def test_job_run_walks_its_state_machine(
         session.commit()
         assert status is JobRunStatus.SUCCEEDED
         row = session.execute(
-            sa.text("select status, metrics, finished_at from job_run where id='r1'")
+            sa.text(
+                "select status, metrics, finished_at, started_at"
+                " from job_run where id='r1'"
+            )
         ).one()
         assert row[0] == "succeeded"
         assert '"inserted": 3' in row[1]
-        assert row[2] is not None
+        # Pinned to the injected clock, not merely non-null: a wrong timestamp
+        # (wrong event's time, wrong width) passed the old presence check.
+        # Changing these requires a data migration.
+        assert row[2] == "2026-06-01T12:00:02.000000Z", row[2]
+        assert row[3] == "2026-06-01T12:00:01.000000Z", row[3]
 
 
 @pytest.mark.integration
@@ -836,7 +843,13 @@ def test_orphaned_running_runs_are_reaped_on_start(
         ).one()
     assert row[0] == "timed_out"
     assert row[1] == "network"
-    assert row[2] is not None
+    # The reap decision stamps the wall clock (scheduler.start() takes no
+    # injectable one), so the exact instant cannot be pinned here. The
+    # format contract can: fixed-width UTC with a Z suffix — a naive
+    # timestamp, a wrong column, or isoformat()'s variable width all fail.
+    import re as _re
+
+    assert _re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", row[2]), row[2]
 
 
 @pytest.mark.integration
