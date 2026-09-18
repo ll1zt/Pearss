@@ -118,7 +118,7 @@ just ci-nix           # CI 实际执行的命令，含 nix flake check
 ### Reader API（兼容层）
 
 - Google Reader 的一切形态（stream id、`tag:google.com,2005:reader/item/...`、com.google 状态标签）只出现在 `src/adapters/reader_api.py`，不得渗入 `src/core/`
-- 认证不对称是硬约束：GET 只认 `Authorization: GoogleLogin auth=<token>`，POST 只认表单 `T=<token>`，两者不可互换
+- 认证不对称是硬约束：**写**端点只认表单 `T=<token>`；**读**端点（`reader_read` 注册的路径）header 与表单 `T` 皆可——真实客户端以 POST+header 发读请求（ADR 0026）。查询串永远不作为凭据来源
 - 新增端点以 NNW 实际调用为准，不盲目复刻整个 FreshRSS API
 - 已读/星标写入不得改动 Item 主体内容、`publish_status`、`guid` 或 `content_hash`；`pending` 条目对 Reader API 同样不可见
 - 凭据只从环境变量读取，库内只存 scrypt 哈希；明文密码永不落库
