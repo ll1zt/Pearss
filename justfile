@@ -99,12 +99,25 @@ coverage:
 # The gate that protects new work: a global percentage can be met by testing
 # whatever is cheapest to reach, but "did the lines you just wrote get run?"
 # has a direct answer. Runs the suite with instrumentation, then compares.
-# See scripts/coverage_diff.py and docs/guides/testing.md.
+# E2E is part of the measured run: a behavior exercised only through the real
+# server counts toward the change that introduced it. See
+# scripts/coverage_diff.py and docs/guides/testing.md.
 coverage-diff base="origin/main" threshold="20":
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f .coverage
-    uv run pytest -q -m "unit or fixture or integration" -p no:cacheprovider \
+    uv run pytest -q -m "unit or fixture or integration or e2e" -p no:cacheprovider \
+        --cov --cov-report= >/dev/null
+    uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
+
+# The changed-line gate, as CI runs it: same measurement as coverage-diff,
+# parameterized through the environment so a merge workflow can pin the base
+# and threshold without editing this file (B06).
+coverage-gate base="origin/main" threshold="20":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f .coverage
+    uv run pytest -q -m "unit or fixture or integration or e2e" -p no:cacheprovider \
         --cov --cov-report= >/dev/null
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
@@ -220,7 +233,10 @@ service-restart:
 # ---------------------------------------------------------------------------
 
 # Everything CI runs, in the order architecture section 7.6 prescribes.
-ci: lint test test-integration test-e2e migrate-check contract
+# coverage-gate is the changed-line diagnostic wired into the merge workflow
+# (B06): it re-runs the suite instrumented, so it is the slowest step and
+# therefore last.
+ci: lint test test-integration test-e2e migrate-check contract coverage-gate
 
 # The exact command CI executes, including the Nix environment entry point.
 ci-nix:
