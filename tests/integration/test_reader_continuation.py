@@ -1,0 +1,188 @@
+"""Reader continuation must survive membership changes between pages.
+
+A continuation used to be an offset into the *current* filtered set, so any
+membership change between page requests -- an item read by another client, a
+deletion, a new arrival -- shifted every later page. Read-synchronisation
+walks `stream/items/ids` while the user is actively reading in another
+client, so this is the common case, not a corner: the user marking page one
+read in NNW while Read You walks page two silently dropped an unread item
+from the walk (and Read You then treated never-seen ids as read).
+
+Every scenario follows the real client pattern: fetch page one, let the
+world change, then continue *from page one's cursor* -- the exact shape
+`fetchItemIdsAndContinue` runs. The conftest feed has three items: Second
+(2026-01-07, newest), First (2026-01-05), Third (no date, so it sorts last).
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+
+from app.pipeline import normalise_and_store
+from core.models import ItemDraft
+
+from .conftest import TENANT
+from .test_reader_api import READ_TAG, auth_header, edit, login
+
+pytestmark = pytest.mark.integration
+
+
+@pytest_asyncio.fixture
+async def reader(
+    reader_app: FastAPI,
+) -> AsyncIterator[tuple[FastAPI, httpx.AsyncClient]]:
+    """The shared reader app *and* its client: membership edits need the DB."""
+    transport = httpx.ASGITransport(app=reader_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as opened:
+        yield reader_app, opened
+
+
+async def _get(
+    client: httpx.AsyncClient, token: str, params: dict[str, str]
+) -> dict[str, Any]:
+    response = await client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params=params,
+    )
+    assert response.status_code == 200, response.text
+    result: dict[str, Any] = response.json()
+    return result
+
+
+def _page_params(**extra: str) -> dict[str, str]:
+    base = {"output": "json", "s": "user/-/state/com.google/reading-list", "n": "1"}
+    base.update(extra)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_user_items_read_between_pages_are_still_all_served(
+    reader: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    """Given a paged unread walk, when page one is read before page two is
+    requested, then the continuation still serves the never-served unread
+    items: none is skipped.
+
+    With the offset cursor the unread set shrank by one, so the offset-1
+    second page began past an item that had never been served -- NNW marking
+    page one read while Read You walked page two hid a real article from the
+    sync.
+    """
+    _, client = reader
+    token = await login(client)
+    params = _page_params(xt=READ_TAG)
+
+    first = await _get(client, token, params)
+    served = [ref["id"] for ref in first["itemRefs"]]
+    cursor = first["continuation"]
+    assert len(served) == 1 and cursor, "the scenario needs a page and a cursor"
+
+    marked = await edit(client, token, served, add=[READ_TAG])
+    assert marked.status_code == 200
+
+    resumed: list[str] = []
+    while cursor:
+        page = await _get(client, token, dict(params, c=str(cursor)))
+        resumed.extend(ref["id"] for ref in page["itemRefs"])
+        cursor = page["continuation"]
+    # First and Third were never served and must arrive; Second was the
+    # boundary and is now read, so it must not reappear.
+    assert resumed == ["90191516472070762", "558277528912161179"], (
+        f"resuming after marking page one read served {resumed}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_items_deleted_between_pages_are_not_skipped(
+    reader: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    """Given a paged walk, when the served item is deleted before page two
+    is requested, then the continuation still serves the never-served items.
+
+    Deleting a served item shifted the offset cursor one row deeper, so the
+    next page began past an unserved item. Deletion goes through the same
+    repository the app uses; no public route removes items.
+    """
+    app, client = reader
+    token = await login(client)
+    params = _page_params()
+
+    first = await _get(client, token, params)
+    served = [ref["id"] for ref in first["itemRefs"]]
+    cursor = first["continuation"]
+    assert len(served) == 1 and cursor, "the scenario needs a page and a cursor"
+
+    from adapters.repository import delete_items
+
+    with app.state.session_factory() as session:
+        delete_items(session, served)
+        session.commit()
+
+    resumed: list[str] = []
+    while cursor:
+        page = await _get(client, token, dict(params, c=str(cursor)))
+        resumed.extend(ref["id"] for ref in page["itemRefs"])
+        cursor = page["continuation"]
+    assert resumed == ["90191516472070762", "558277528912161179"], (
+        f"resuming after deleting the served item served {resumed}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_user_items_inserted_between_pages_are_not_duplicated(
+    reader: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    """Given a paged walk, when a newer item arrives before page two is
+    requested, then the continuation continues after the served boundary:
+    the arrival is left to the next sync from the top and nothing is
+    re-served or skipped.
+
+    The offset cursor slid past the served prefix when the arrival pushed
+    rows deeper, re-serving page-one ids -- which Read You folded into its
+    read set.
+    """
+    app, client = reader
+    token = await login(client)
+    params = _page_params()
+
+    first = await _get(client, token, params)
+    served = [ref["id"] for ref in first["itemRefs"]]
+    cursor = first["continuation"]
+    assert len(served) == 1 and cursor, "the scenario needs a page and a cursor"
+
+    with app.state.session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id="src-1",
+                    external_id="urn:uuid:1a2b3c4d-0004-4000-8000-000000000004",
+                    title="Fourth Post Arrived Mid Walk",
+                    canonical_url="https://blog.example.com/2026/01/fourth-post",
+                    published_at=datetime(2026, 1, 10, tzinfo=UTC),
+                    content="<p>Fourth</p>",
+                )
+            ],
+            tenant_id=TENANT,
+        )
+        session.commit()
+
+    resumed: list[str] = []
+    while cursor:
+        page = await _get(client, token, dict(params, c=str(cursor)))
+        resumed.extend(ref["id"] for ref in page["itemRefs"])
+        cursor = page["continuation"]
+    # The walk continues after Second in its original position: First, then
+    # Third, with no repeats; Fourth is newer than the boundary and belongs
+    # to the *next* sync from the top.
+    assert resumed == ["90191516472070762", "558277528912161179"], (
+        f"resuming after a mid-walk arrival served {resumed}"
+    )

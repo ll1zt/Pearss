@@ -30,7 +30,11 @@ def visible_ids_for_stream(
     offset: int = 0,
     include_states: tuple[str, ...] = (),
     exclude_states: tuple[str, ...] = (),
-) -> list[str]:
+    after_published_at: str | None = None,
+    after_item_id: str | None = None,
+    after_published_null: bool = False,
+    with_ordering: bool = False,
+) -> list[str] | list[tuple[str, str | None]]:
     """Item ids for a Reader API stream, newest first.
 
     Pending items are excluded here, in SQL, for the same reason the RSS path
@@ -50,10 +54,17 @@ def visible_ids_for_stream(
     difference as items that do not exist. That is a wrong answer that looks
     like data, and it drifts as items are read, which is exactly the bug the
     unread badge was showing.
+
+    `after_*` carries the keyset boundary from a continuation cursor: the last
+    `(published_at, id)` actually served. Unlike an OFFSET, a stable boundary
+    survives membership changes between pages -- an item read elsewhere
+    shrinks the set, a deletion removes a served row, a new arrival pushes
+    rows deeper, and in all three cases the next page still starts exactly
+    after the last served id rather than at an absolute row number.
     """
     from adapters import reader_api
 
-    query = select(ItemRow.id).where(visible_item_rows())
+    query = select(ItemRow.id, ItemRow.published_at).where(visible_item_rows())
 
     source_id = reader_api.parse_feed_stream_id(stream_id)
     if source_id is not None:
@@ -115,13 +126,43 @@ def visible_ids_for_stream(
         exclude_states=exclude_states,
     )
 
-    return list(
-        session.execute(
-            query.order_by(ItemRow.published_at.desc().nullslast(), ItemRow.id)
-            .limit(limit)
-            .offset(offset)
-        ).scalars()
-    )
+    # Keyset continuation, not OFFSET: a membership change between pages
+    # (an item read elsewhere, a deletion, a new arrival) shifts an offset
+    # past unserved rows, while a stable `(published_at, id)` boundary keeps
+    # every page anchored to the last row actually served.
+    if after_item_id is not None:
+        if after_published_null or after_published_at is None:
+            # The boundary row had no published_at; with nullslast those rows
+            # sort after every dated one, so the page continues inside the
+            # undated tail by id.
+            query = query.where(
+                ItemRow.published_at.is_(None), ItemRow.id < after_item_id
+            )
+        else:
+            # Dated rows strictly after the boundary position, plus the whole
+            # undated tail (nullslast puts it after every dated row).
+            query = query.where(
+                or_(
+                    (ItemRow.published_at.is_not(None))
+                    & (
+                        (ItemRow.published_at < after_published_at)
+                        | (
+                            (ItemRow.published_at == after_published_at)
+                            & (ItemRow.id < after_item_id)
+                        )
+                    ),
+                    ItemRow.published_at.is_(None),
+                )
+            )
+    elif offset:
+        query = query.offset(offset)
+
+    rows = session.execute(
+        query.order_by(ItemRow.published_at.desc().nullslast(), ItemRow.id).limit(limit)
+    ).all()
+    if with_ordering:
+        return [(row_id, published) for row_id, published in rows]
+    return [row_id for row_id, _ in rows]
 
 
 def _apply_state_filters(

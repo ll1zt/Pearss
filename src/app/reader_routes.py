@@ -20,7 +20,7 @@ import logging
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Final, TypeVar
+from typing import Any, Final, NamedTuple, TypeVar, cast
 
 from fastapi import APIRouter, Depends, Form, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -628,80 +628,115 @@ def stream_items_ids(
     if xt and not exclude_states:
         return {"itemRefs": [], "continuation": None}
 
-    offset = _offset(c)
+    offset, boundary = _decode_cursor(c)
     limit = max(1, min(n, 10000))
     with request.app.state.session_factory() as session:
         # One row beyond the page: its presence is how "there is more" is
         # known without a second COUNT over the same filtered set. A count
         # would also have to repeat every filter, and a rule written twice is
-        # a rule that drifts.
-        ids = visible_ids_for_stream(
+        # a rule that drifts. Each row carries its ordering columns so the
+        # next cursor can anchor to the last row actually served: an id alone
+        # is not a boundary.
+        rows = visible_ids_for_stream(
             session,
             stream_id=s,
             tenant_id=TENANT,
             limit=limit + 1,
             offset=offset,
+            after_published_at=boundary.published_at if boundary else None,
+            after_item_id=boundary.item_id if boundary else None,
+            after_published_null=boundary.published_null if boundary else False,
             include_states=include_states,
             exclude_states=exclude_states,
+            with_ordering=True,
         )
+        ordered = cast(list[tuple[str, str | None]], rows)
 
-    has_more = len(ids) > limit and _more_than(c)
-    page = ids[:limit]
-    next_offset = offset + len(page)
+    has_more = len(ordered) > limit
+    page = ordered[:limit]
+    next_cursor = _encode_cursor(offset, page) if has_more and page else None
 
     # Decimal, not hex: NetNewsWire does Int(id)! on these values and drops
     # every entry it cannot parse as an integer.
     return {
-        "itemRefs": [{"id": str(reader_api.reader_id(item_id))} for item_id in page],
+        "itemRefs": [
+            {"id": str(reader_api.reader_id(item_id))} for item_id, _published in page
+        ],
         # A cursor, never null-unless-exhausted. Read You loops
         # `while continuation != null`, so omitting it here would terminate
         # its walk after one page and it would treat what it saw as the whole
         # stream -- the silent-subset failure this endpoint has already
         # produced twice (the ignored `it=`, the post-LIMIT `xt` filter).
-        # miniflux returns the same numeric offset (`len(itemRefs) + offset`).
-        "continuation": str(next_offset) if has_more else None,
+        "continuation": next_cursor,
     }
 
 
-# A continuation cursor deeper than this many items is a client bug or an
-# attacker; either way the walk stops there rather than scanning without
-# bound. The cap must terminate the stream, not clamp to the same value
-# forever: a client looping `while continuation != null` would otherwise
-# re-request the same offset indefinitely.
+# A walk that claims more than this many served items is a client bug or an
+# attacker; either way it stops there rather than paging without bound. The
+# count rides inside the cursor, so the cap terminates the stream: a client
+# looping `while continuation != null` receives an empty page with no
+# further cursor instead of seeing the same cursor forever.
+_MAX_SERVED: Final[int] = 100_000
+# Bare integers (the pre-keyset cursor format) still page by offset so an
+# in-flight walk from the previous release keeps working, with that
+# format's weaker guarantees.
 _MAX_OFFSET: Final[int] = 100_000
 
 
-def _offset(cursor: str | None) -> int:
-    """The starting row for a page, from the client's opaque cursor.
+class _Boundary(NamedTuple):
+    """The keyset boundary a continuation cursor carries.
+
+    `item_id` is the internal id of the last item actually served, and
+    `published_at`/`published_null` place it in the ordering: dated rows by
+    timestamp, undated rows last, by id. Together they are stable under
+    membership changes between pages, which an offset is not.
+    """
+
+    item_id: str
+    published_at: str | None
+    published_null: bool
+
+
+def _decode_cursor(cursor: str | None) -> tuple[int, _Boundary | None]:
+    """Split a cursor into its served counter and keyset boundary.
 
     An unparseable cursor restarts at the beginning rather than erroring:
     the cursor is ours to produce and the client only echoes it, so a
     malformed one means a bug on this side or a hand-written request, and
-    neither is improved by a 500.
+    neither is improved by a 500. A cursor at or past the cap yields an
+    empty, terminating walk.
     """
     if not cursor:
-        return 0
+        return 0, None
+    served, separator, rest = cursor.partition("|")
     try:
-        return min(max(0, int(cursor)), _MAX_OFFSET)
+        count = int(served)
     except ValueError:
-        return 0
+        return 0, None
+    if not separator:
+        # Legacy bare offset from the previous release.
+        return min(max(0, count), _MAX_OFFSET), None
+    if count >= _MAX_SERVED:
+        return 0, None
+    published, separator, external = rest.partition("|")
+    if not separator:
+        return 0, None
+    internal = reader_api.reader_id_hex(int(external))
+    if published == "-":
+        return count, _Boundary(internal, None, True)
+    return count, _Boundary(internal, published, False)
 
 
-def _more_than(cursor: str | None) -> bool:
-    """Whether the walk has reached its depth cap and must report the end.
+def _encode_cursor(served: int, page: list[tuple[str, str | None]]) -> str:
+    """Bundle the served counter and the page's last row into a cursor.
 
-    Called with the cursor the client sent: if it was already at (or past)
-    the cap, `_offset` returned the cap, so the next cursor would be the
-    same value or greater and the client would loop. Answering "no more"
-    here converts that into a terminating walk that is honest about where it
-    stopped.
+    The boundary is the last row actually served, so the next page starts
+    exactly after it no matter how membership moved in between. Timestamps
+    are already fixed-width text in the database, so they embed directly and
+    compare lexicographically in SQL exactly as they order.
     """
-    if not cursor:
-        return True
-    try:
-        return int(cursor) < _MAX_OFFSET
-    except ValueError:
-        return True
+    item_id, published = page[-1]
+    return f"{served + len(page)}|{published or '-'}|{reader_api.reader_id(item_id)}"
 
 
 @router.post("/reader/api/0/stream/items/contents")
