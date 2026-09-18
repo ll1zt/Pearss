@@ -1,8 +1,15 @@
 name: CI
 
+# Feature branches and pull requests gate every push; main is deliberately
+# excluded (merges land exactly at the CI-passed branch tip, so a second run
+# would only burn the shared runner) and stays available on demand through
+# workflow_dispatch.
 on:
   push:
+    branches-ignore:
+      - main
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -16,10 +23,10 @@ jobs:
           CI_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          repository="https://pearss.example.ts.net:3000/lllzt/Pearss.git"
+          repository="https://git.example.com:3000/lllzt/Pearss.git"
           trap 'if [ -d source/.git ]; then git -C source remote set-url origin "$repository"; fi' EXIT
           git -c http.sslVerify=false clone --depth 1 \
-            "https://${CI_TOKEN}@pearss.example.ts.net:3000/lllzt/Pearss.git" source
+            "https://${CI_TOKEN}@git.example.com:3000/lllzt/Pearss.git" source
           git -C source -c http.sslVerify=false fetch --depth 1 origin "$CI_SHA"
           git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
