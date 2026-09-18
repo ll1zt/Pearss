@@ -404,8 +404,12 @@ class PluginChild:
                 raise PluginChildError(f"undecodable child message: {exc}") from exc
             if isinstance(message, protocol.ReverseCall):
                 # A reverse "http" call: the child proxies its egress through
-                # us (network whitelist lives at the host, E4).
-                self._service_reverse_call(message)
+                # us (network whitelist lives at the host, E4). It runs under
+                # the *call's* remaining budget, not the transport's own
+                # per-request cap alone.
+                self._service_reverse_call(
+                    message, remaining=deadline - time.monotonic()
+                )
                 continue
             if not isinstance(message, protocol.Response):
                 raise PluginChildError("unexpected message type from child")
@@ -435,8 +439,19 @@ class PluginChild:
             result: dict[str, Any] = message.result
             return result
 
-    def _service_reverse_call(self, call: protocol.ReverseCall) -> None:
-        """Answer a child's reverse "http" call through the injected transport."""
+    def _service_reverse_call(
+        self, call: protocol.ReverseCall, *, remaining: float | None = None
+    ) -> None:
+        """Answer a child's reverse "http" call through the injected transport.
+
+        `remaining` is the outer RPC call's leftover budget. The proxied
+        handling runs on a worker thread joined against that budget: the
+        shared client's own timeouts bound each phase, but a stalled origin
+        or a hung transport must not extend the *call* past what the host
+        promised the scheduler (A09). On expiry the child receives a
+        classified network error; the abandoned thread dies with the
+        response it can never deliver.
+        """
         import base64
 
         params = call.params
@@ -445,45 +460,71 @@ class PluginChild:
                 "egress_denied", "the child has no host-proxied network"
             )
         else:
-            try:
-                import httpx
+            outcome: dict[str, Any] = {}
+            transport = self._http_transport
 
-                request = httpx.Request(
-                    method=str(params.get("method", "GET")),
-                    url=str(params.get("url", "")),
-                    headers=[
-                        (str(k).encode(), str(v).encode())
-                        for k, v in params.get("headers") or []
-                    ],
-                    content=base64.b64decode(str(params.get("content_b64", ""))),
-                )
-                http_response = self._http_transport.handle_request(request)
-                response_body = {
-                    "status": http_response.status_code,
-                    # Pair lists, not dicts: Set-Cookie repeats, and folding
-                    # it would silently drop every cookie after the first.
-                    "headers": [
-                        [k.decode(), v.decode()] for k, v in http_response.headers.raw
-                    ],
-                    "body_b64": base64.b64encode(http_response.content).decode("ascii"),
-                }
-                error = None
-            except Exception as exc:  # transport-level failure
-                # A policy refusal (the egress transport's SSRF guard raises
-                # FetchError) keeps its classification; anything else is a
-                # plain transport failure. Both are answered as *values* —
-                # the child stays healthy either way.
-                from adapters.http import FetchError
+            def handling() -> None:
+                try:
+                    import httpx
 
-                if isinstance(exc, FetchError):
-                    error = protocol.error_result(exc.error_class.value, exc.detail)
-                else:
-                    error = protocol.error_result(
-                        "network", f"{type(exc).__name__}: {exc}"
+                    request = httpx.Request(
+                        method=str(params.get("method", "GET")),
+                        url=str(params.get("url", "")),
+                        headers=[
+                            (str(k).encode(), str(v).encode())
+                            for k, v in params.get("headers") or []
+                        ],
+                        content=base64.b64decode(str(params.get("content_b64", ""))),
                     )
+                    http_response = transport.handle_request(request)
+                    body = {
+                        "status": http_response.status_code,
+                        # Pair lists, not dicts: Set-Cookie repeats, and folding
+                        # it would silently drop every cookie after the first.
+                        "headers": [
+                            [k.decode(), v.decode()]
+                            for k, v in http_response.headers.raw
+                        ],
+                        "body_b64": base64.b64encode(http_response.content).decode(
+                            "ascii"
+                        ),
+                    }
+                    outcome["result"] = body
+                except Exception as exc:  # transport-level failure
+                    # A policy refusal (the egress transport's SSRF guard raises
+                    # FetchError) keeps its classification; anything else is a
+                    # plain transport failure. Both are answered as *values* —
+                    # the child stays healthy either way.
+                    from adapters.http import FetchError
+
+                    if isinstance(exc, FetchError):
+                        outcome["error"] = protocol.error_result(
+                            exc.error_class.value, exc.detail
+                        )
+                    else:
+                        outcome["error"] = protocol.error_result(
+                            "network", f"{type(exc).__name__}: {exc}"
+                        )
+
+            budget = remaining if remaining is not None and remaining > 0 else None
+            worker = threading.Thread(target=handling, daemon=True)
+            worker.start()
+            worker.join(budget)
+            if worker.is_alive():
+                # Budget exhausted mid-call: answer the child now. The worker
+                # thread finishes or dies in the background either way; its
+                # answer can no longer reach the protocol stream.
+                error = protocol.error_result(
+                    "network",
+                    f"host-proxied egress exceeded the call budget ({budget:.0f}s)",
+                )
+            elif "error" in outcome:
+                error = outcome["error"]
+            else:
+                error = None
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 0}
         payload["result" if error is None else "error"] = (
-            response_body if error is None else error
+            outcome.get("result") if error is None and "result" in outcome else error
         )
         proc = self._proc
         if proc is None or proc.stdin is None:

@@ -65,7 +65,9 @@ def test_user_origin_cannot_redirect_host_into_forbidden_destination(
     monkeypatch.setattr(
         http,
         "resolve_host",
-        lambda host: {"127.0.0.1" if host == "localhost" else "93.184.216.34"},
+        lambda host, *, deadline=None: {
+            "127.0.0.1" if host == "localhost" else "93.184.216.34"
+        },
     )
     url, visited = origin
     with httpx.Client(follow_redirects=True, trust_env=False) as shared:

@@ -295,7 +295,7 @@ def test_correlation_id_is_carried_through() -> None:
 def _resolve_answer(answers: dict[str, set[str]]) -> Callable[[str], set[str]]:
     """A resolver stub keyed by host; unknown hosts answer public."""
 
-    def resolve(host: str) -> set[str]:
+    def resolve(host: str, *, deadline: float | None = None) -> set[str]:
         return answers.get(host, {"93.184.216.34"})
 
     return resolve
@@ -353,7 +353,9 @@ def test_an_unresolvable_host_is_refused_fail_closed(
 ) -> None:
     from adapters import http as pearss_http
 
-    monkeypatch.setattr(pearss_http, "resolve_host", lambda host: set())
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", lambda host, *, deadline=None: set()
+    )
     transport = httpx.MockTransport(lambda request: httpx.Response(200))
 
     with (

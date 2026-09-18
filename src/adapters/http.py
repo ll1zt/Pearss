@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import socket
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import monotonic
@@ -106,12 +107,18 @@ def allow_private_fetch() -> bool:
 TEST_DNS_ENV: Final = "PEARSS_TEST_DNS"
 
 
-def resolve_host(host: str) -> set[str]:
+def resolve_host(host: str, *, deadline: float | None = None) -> set[str]:
     """Every address `host` resolves to; empty means unresolvable.
 
     Module-level so tests can substitute a hermetic answer — the guard must
     not make the test suite depend on real DNS. `PEARSS_TEST_DNS` extends that
     substitution to sandboxed children, which cannot be monkeypatched.
+
+    `deadline` is an absolute `monotonic()` instant bounding the wait.
+    getaddrinfo offers no cancellation, so the OS resolver thread is simply
+    abandoned on expiry — its answer, whenever it arrives, is discarded and
+    the fetch is refused. A daemon thread per abandoned query is bounded by
+    the fetch's own lifetime rules; the caller stops waiting either way.
     """
     override = os.environ.get(TEST_DNS_ENV, "")
     if override:
@@ -128,6 +135,25 @@ def resolve_host(host: str) -> set[str]:
                 addresses = table.get(host, table.get("*"))
                 if isinstance(addresses, list):
                     return {str(address) for address in addresses}
+    if deadline is None:
+        return _getaddrinfo(host)
+    budget = deadline - monotonic()
+    if budget <= 0:
+        return set()
+    answer: set[str] = set()
+
+    def resolving() -> None:
+        answer.update(_getaddrinfo(host))
+
+    worker = threading.Thread(target=resolving, daemon=True)
+    worker.start()
+    worker.join(budget)
+    # Partial or no answer on expiry: the caller refuses, fail-closed.
+    return answer
+
+
+def _getaddrinfo(host: str) -> set[str]:
+    """The real resolver call, isolated for the deadline wrapper."""
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, OSError):
@@ -150,7 +176,7 @@ def _is_private_ip(address_text: str) -> bool:
     )
 
 
-def _resolves_private(url: str) -> bool:
+def _resolves_private(url: str, *, deadline: float | None = None) -> bool:
     """Whether `url`'s host is (or resolves to) a private address.
 
     Fail-closed on resolution errors: a name the server cannot resolve is not
@@ -159,11 +185,16 @@ def _resolves_private(url: str) -> bool:
     the connection re-resolves, so textbook DNS rebinding remains possible;
     the threat here is a leaked write token probing an internal network, not
     a hostile resolver racing the socket.
+
+    `deadline` bounds the resolver wait: getaddrinfo has no timeout of its
+    own, so a hung nameserver would otherwise hold the fetch past its total
+    budget (A09). An unresolved answer inside the budget is treated exactly
+    like a resolution failure — refused, fail-closed.
     """
     host = urlsplit(url).hostname
     if not host:
         return True
-    addresses = resolve_host(host)
+    addresses = resolve_host(host, deadline=deadline)
     if not addresses:
         return True  # unresolvable → refused, fail-closed
     return any(_is_private_ip(address) for address in addresses)
@@ -311,7 +342,7 @@ def _request(
     # redirects are followed manually so every hop is classified too — the
     # classic SSRF bypass is a public URL that 302s to the metadata service.
     guard_private = not allow_private_fetch()
-    if guard_private and _resolves_private(url):
+    if guard_private and _resolves_private(url, deadline=deadline):
         raise FetchError(
             ErrorClass.BLOCKED,
             f"private-address fetch refused for {_redact(url)}",
@@ -350,7 +381,7 @@ def _request(
                             f"redirect without location for {_redact(url)}",
                         )
                     next_url = urljoin(url, location)
-                    if _resolves_private(next_url):
+                    if _resolves_private(next_url, deadline=deadline):
                         raise FetchError(
                             ErrorClass.BLOCKED,
                             "redirect to a private address refused for "
@@ -412,11 +443,11 @@ def _request(
     )
 
 
-def check_destination(url: str) -> None:
+def check_destination(url: str, *, deadline: float | None = None) -> None:
     """Refuse unsupported/private HTTP destinations before host egress."""
     if urlsplit(url).scheme not in {"http", "https"}:
         raise FetchError(ErrorClass.BLOCKED, "non-HTTP destination refused")
-    if not allow_private_fetch() and _resolves_private(url):
+    if not allow_private_fetch() and _resolves_private(url, deadline=deadline):
         raise FetchError(ErrorClass.BLOCKED, "private-address fetch refused")
 
 

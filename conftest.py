@@ -23,7 +23,11 @@ _HERMETIC_ADDRESS = "93.184.216.34"
 def _hermetic_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     from adapters import http as pearss_http
 
-    monkeypatch.setattr(pearss_http, "resolve_host", lambda host: {_HERMETIC_ADDRESS})
+    # The deadline kwarg exists so production can bound the resolver wait
+    # (A09); the hermetic answer ignores it, as resolution is instant here.
+    monkeypatch.setattr(
+        pearss_http, "resolve_host", lambda host, *, deadline=None: {_HERMETIC_ADDRESS}
+    )
 
     # A sandboxed collector runs in a separate interpreter, where the patch
     # above does not reach: it resolves for itself. Without this the child
