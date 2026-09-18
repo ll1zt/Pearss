@@ -1353,18 +1353,14 @@
     },
     "/healthz": {
       "get": {
-        "description": "Liveness probe with no dependency on the database.",
+        "description": "Liveness probe: no dependency on the database.\n\nThe HTTP process being alive says nothing about the background\nloops (A07): a scheduler killed by an escaped error used to leave\nthis returning ok forever. Started workers report their task\nliveness here; a dead loop degrades the answer to 503 with the\noffender named, so monitoring sees the degradation instead of\nquietly stopped collection.",
         "operationId": "healthz_healthz_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Healthz Healthz Get",
-                  "type": "object"
+                  "title": "Response Healthz Healthz Get"
                 }
               }
             },

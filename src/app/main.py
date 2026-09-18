@@ -404,8 +404,32 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         LOGGER.warning("PEARSS_API_TOKEN unset; the Core API will reject every request")
 
     @app.get("/healthz", tags=["ops"])
-    def healthz() -> dict[str, str]:
-        """Liveness probe with no dependency on the database."""
+    def healthz() -> Any:
+        """Liveness probe: no dependency on the database.
+
+        The HTTP process being alive says nothing about the background
+        loops (A07): a scheduler killed by an escaped error used to leave
+        this returning ok forever. Started workers report their task
+        liveness here; a dead loop degrades the answer to 503 with the
+        offender named, so monitoring sees the degradation instead of
+        quietly stopped collection.
+        """
+        degraded: list[str] = []
+        workers = (
+            getattr(app.state, "scheduler", None),
+            getattr(app.state, "enrichment_worker", None),
+        )
+        for worker in workers:
+            if worker is None:
+                continue
+            alive, who = worker.liveness()
+            if not alive:
+                degraded.append(who)
+        if degraded:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "details": degraded},
+            )
         return {"status": "ok"}
 
     # The MCP sub-app. Mounted at the root because the SDK app routes on

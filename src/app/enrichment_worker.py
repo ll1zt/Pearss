@@ -493,8 +493,10 @@ class EnrichmentWorker:
         self._inflight: asyncio.Task[dict[str, int]] | None = None
 
     async def start(self) -> None:
-        if self._task is not None:
+        if self._task is not None and not self._task.done():
             return
+        # A dead task's reference must not block restart (A07 liveness).
+        self._task = None
         self._task = asyncio.create_task(self._loop(), name="pearss-enrichment")
         LOGGER.info(
             "enrichment worker started, sweeping every %.0fs", self._sweep_seconds
@@ -516,6 +518,17 @@ class EnrichmentWorker:
             LOGGER.error("enrichment task failed (%s)", type(exc).__name__)
         self._task = None
         LOGGER.info("enrichment worker stopped")
+
+    def liveness(self) -> tuple[bool, str]:
+        """Whether the background loop is alive, and a name for diagnostics.
+
+        Same contract as Scheduler.liveness: a started task whose coroutine
+        died of an escaped error still exists as an object, so `done()` is
+        the only honest liveness signal the health endpoint can aggregate.
+        """
+        if self._task is None:
+            return True, ""  # not started (or stopped): not a degradation
+        return not self._task.done(), "enrichment"
 
     async def _loop(self) -> None:
         while True:

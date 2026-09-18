@@ -384,8 +384,11 @@ class Scheduler:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._task is not None:
+        if self._task is not None and not self._task.done():
             return
+        # A task that already died of an escaped error must not block restart:
+        # drop the dead reference and start fresh (A07 liveness recovery).
+        self._task = None
 
         # Reap first: a run left `running` by a crashed process is never closed
         # by anyone, so the history would keep showing work in progress that
@@ -424,6 +427,18 @@ class Scheduler:
             LOGGER.error("scheduler task failed (%s)", type(exc).__name__)
         self._task = None
         LOGGER.info("scheduler stopped")
+
+    def liveness(self) -> tuple[bool, str]:
+        """Whether the background loop is alive, and a name for diagnostics.
+
+        A started task whose coroutine has died of an escaped error still
+        exists as an object; `done()` distinguishes the two. This is the
+        signal operational health exposes: a 200 from the HTTP process means
+        nothing if collection quietly stopped.
+        """
+        if self._task is None:
+            return True, ""  # not started (or stopped): not a degradation
+        return not self._task.done(), "scheduler"
 
     async def _loop(self) -> None:
         while True:
