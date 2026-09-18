@@ -15,7 +15,7 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | A04 partial processing configuration | Fixed | `5a6a9c3` |
 | A05 host-proxied HTTP | Partial: redirect checks and streamed 5 MiB body cap; transient decoder memory and child-wide budgets remain open | `69f96c3`, `5a26a87` |
 | A06 installed plugin restart | Fixed for approved manifests; unavailable records remain stored but absent from runtime list | `379ea62` |
-| A09 total fetch deadline | Partial: cancellable direct HTTP I/O; DNS and end-to-end child budgets remain open | `744eefa` |
+| A09 total fetch deadline | Fixed: direct HTTP I/O, DNS resolution, and child-proxied egress are all bounded by the policy budget | `744eefa`, `91d0582` |
 | A08 concurrent body storage | Fixed | `2142c29` |
 | A16 failure backoff floor | Fixed | `6e6b130` |
 | A17 IPv6 canonicalization | Fixed for new normalization; no stored-data migration | `5b9651a` |
@@ -23,19 +23,17 @@ Branch: `fix/deep-review-findings`. The findings below describe the original
 | B01 real scheduler maintenance assertions | Fixed | `fd74926` |
 | B04 attributable audit/redaction assertions | Fixed | `acd6fc3` |
 | B05 effective markers and empty-suite failure | Fixed | `09c4846` |
-| A07 worker recovery and stop | Partial: scheduler and enrichment loops retry storage failures; failed maintenance stays due; failed-task stop drains safely; post-MCP-entry startup steps now share shutdown cleanup | `306534a`, `36843c0`, `9c1b3ce`; startup cleanup in this revision |
+| A07 worker recovery and stop | Fixed: loop recovery, maintenance retries, stop drain, startup cleanup, and health wiring are all in place; dead tasks no longer block restart, and /healthz reports loop liveness | `306534a`, `36843c0`, `9c1b3ce`, `ac29ef0` |
 
-**Still open:** A05 transient decoder memory and end-to-end budgets; A07
-remaining boundaries (constructor/MCP-entry failure cleanup, independent
-lifespan resource cleanup, health wiring and live-thread ownership);
-A09 remaining deadline boundaries; A10–A15;
-B02/B03/B06/B07; C01–C10. Test improvements reduce specific debt but are
-not a completed registry/Reader architecture refactor. A10/A11 were inspected
-again without implementation. Earlier delegation attempts for A06/A09/A12
-failed due to provider authentication/rate limits. A09 was partially repaired
-directly (`744eefa`): direct slow HTTP streams are cancellable with the new
-transport, but DNS and child-side budget propagation remain open. See
-`docs/guides/host-http-boundaries.md` for the precise boundary.
+**Still open (after the 2026-09-18 second repair pass):** A05 transient
+decoder memory (peak-memory bound on HTTPX decoding; per-request and
+per-hop budgets and the child body cap are closed); B02 sandboxed-egress
+acceptance journeys; B07 naming/process polish; C04–C10 architecture debt
+(registry ownership extraction, route splitting, docs alignment). Closed in
+this pass: A07 (health wiring, `ac29ef0`), A09 (DNS and child egress
+budgets, `91d0582`), A10 (`1f758a2`), A11 (`b890439`), A12+A13+B03
+(`7f26cff`), A14 (`99a208c`), A15 (`574b943`), C01+C02 (ADR 0026,
+`54a87dc`), B06 (`8ed6287`), B07 timestamp pins (`5476b45`).
 
 **A09 verification:** full `just ci` passed: 918 unit/fixture, 505 integration,
 54 E2E and 3 contract tests (**1,480 total**), plus formatting, Ruff, mypy
@@ -148,6 +146,38 @@ unit/fixture, 520 integration, 57 E2E and 3 contract tests (**1,498
 total**), plus formatting, Ruff, mypy (202 files), import boundaries and
 the migration roundtrip. No real-client manual
 smoke or fresh coverage measurement was performed for this increment.
+
+**Second repair pass (2026-09-18) verification:** seven commits, each with a
+full `nix develop --command just ci` before its commit (final gate: **1,529
+tests**: 918 unit/fixture, 550 integration, 58 E2E, 3 contract, plus the
+coverage gate at 7.2% uncovered / 20% threshold), formatting, Ruff, mypy,
+import boundaries and migration roundtrip.
+- A10/A11 (`1f758a2`, `b890439`): interleaving-race and real stalled-provider
+  tests, fenced result writes, one-shot killable subprocess processors with a
+  persisted lease; injection checks confirmed the fence and lease semantics.
+- A12/A13/B03 (`7f26cff`): atomic idempotency reservations bound to request
+  fingerprints; overlapping retry, crash recovery, key/body mismatch and
+  lifecycle (uninstall/reload) scenarios red before green; three injected
+  regressions (fingerprint ignored, unfenced completion, re-admission) each
+  failed the new tests before restore.
+- A14 (`99a208c`): continuation is a stable keyset boundary; read/delete/
+  insert-between-pages scenarios failed on the offset cursor and fail again
+  when the keyset predicate is disabled or the boundary comparison flipped.
+- A15 (`574b943`): audit writes moved off the event loop; reproduction showed
+  a refused 400 taking 32s under writer contention and the audit row lost;
+  the responsiveness scenario fails with the synchronous audit re-injected.
+- C01/C02 (ADR 0026, `54a87dc`): audit coverage ruled by middleware position;
+  Reader POST-read exception documented; AGENTS.md aligned.
+- A09 (`91d0582`): a hung resolver left the fetch unbounded (DID NOT RAISE)
+  and a stalled host transport extended a 2s child call to 60.4s; both now
+  bounded, resolver stubs updated to the deadline-aware signature.
+- A07 health (`ac29ef0`): killing the scheduler task under the running app
+  left /healthz at 200; it now degrades to 503 naming the offender and
+  recovers on restart.
+- B06 (`8ed6287`): coverage-gate wired into `just ci`, measuring all four
+  markers including e2e.
+- B07 (`5476b45`): run timestamps pinned to the injected clock (exact values)
+  and to the fixed-width format contract where the wall clock is inherent.
 
 **Earlier combined verification:** `nix develop --command just ci` passed with exit 0
 on the stabilized combined source/test changes: 918 unit/fixture, 502 integration,
