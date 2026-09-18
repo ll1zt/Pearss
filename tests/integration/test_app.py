@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters.raw_payload import RawPayload
 from adapters.repository import store_item
 from app.main import create_app
+from app.middleware import CorrelationAndAuditMiddleware
 from core.normalize import normalize
 from plugins.collectors.rss import collector as rss
 
@@ -469,6 +470,7 @@ async def test_write_is_audited_with_actor_and_correlation(
     assert response.status_code == 201
     correlation_id = response.headers.get("x-request-id")
 
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         rows = session.execute(
             sa.text(
@@ -503,6 +505,7 @@ async def test_reused_request_id_does_not_drop_audit_rows(
         )
         assert response.status_code == 201
 
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         count = session.execute(sa.text("select count(*) from audit_log")).scalar()
     assert count == 2
@@ -514,6 +517,7 @@ async def test_credentials_never_reach_the_audit_log(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
     await ingest(client)
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         args = session.execute(
             sa.text("select args_redacted from audit_log")
@@ -580,6 +584,7 @@ async def test_a_write_echoes_the_audit_id_it_recorded(
     audit_id = response.headers.get("x-audit-id")
     assert audit_id, "a write did not report the audit row it created"
 
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         row = session.execute(
             sa.text("select operation from audit_log where id = :id"),

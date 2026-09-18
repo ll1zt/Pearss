@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import AuditLog
 from app.main import create_app
+from app.middleware import CorrelationAndAuditMiddleware
 
 WRITE_TOKEN = "pearss-live-token-9f3a2b7c"
 FEED_URL = "https://planetpython.org/rss20.xml"
@@ -44,7 +45,10 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 def _audit_for(
     session_factory: sessionmaker[Session], response: httpx.Response
 ) -> AuditLog:
-    # scalar_one fails for absent evidence, not merely leaked credentials.
+    # The audit write is asynchronous (A15): wait for the worker queue to
+    # drain before demanding the row. scalar_one still fails for absent
+    # evidence, not merely leaked credentials.
+    CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as session:
         return session.scalars(
             sa.select(AuditLog).where(AuditLog.id == response.headers["x-audit-id"])

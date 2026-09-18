@@ -36,6 +36,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
+from app.middleware import CorrelationAndAuditMiddleware
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -211,6 +212,8 @@ def _plugin_rows(
 def _audit_outcomes(
     session_factory: sessionmaker[Session], operation: str
 ) -> list[str]:
+    # Audit writes are asynchronous (A15); wait for the worker to drain.
+    CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as session:
         return [
             str(row[0])

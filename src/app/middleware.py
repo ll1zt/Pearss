@@ -10,6 +10,13 @@ Written as pure ASGI rather than BaseHTTPMiddleware: the latter runs the
 downstream app in a separate task, and a contextvar set by the middleware is
 then not reliably visible to the endpoint that reads it. Correlation ids are
 the whole point of this middleware, so the propagation guarantee matters.
+
+Audit writes run on a dedicated worker thread, never on the event loop: the
+audit table lives in the same SQLite database as everything else, so under
+writer contention a synchronous audit commit would block the *shared* loop
+for up to the full busy timeout, stalling unrelated requests and worker
+scheduling behind one bookkeeping row. The session is created and closed
+inside the thread that uses it.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import MutableMapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Request
@@ -77,6 +85,12 @@ def _operation(scope: ScopeState) -> str:
 class CorrelationAndAuditMiddleware:
     """Assign a correlation id, echo it, and audit meaningful operations."""
 
+    # One thread is the bound: audit rows are bookkeeping, and a burst of
+    # requests queues behind each other instead of multiplying database
+    # contention. An overload therefore delays audit records (visible in
+    # the journal on failure) rather than the responses callers wait for.
+    _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pearss-audit")
+
     def __init__(self, app: Any, *, session_factory: SessionFactory) -> None:
         self.app = app
         self.session_factory = session_factory
@@ -132,11 +146,52 @@ class CorrelationAndAuditMiddleware:
         if not sent:
             return
         if _should_audit(scope, status):
-            self._record(scope, status, correlation_id, audit_id)
+            self._submit(scope, status, correlation_id, audit_id)
+
+    def _submit(
+        self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
+    ) -> None:
+        """Hand the audit write to the worker thread and return immediately.
+
+        Fire-and-forget is the deliberate contract: the caller's response is
+        already on the wire, so waiting here would only couple its completion
+        to database contention the request did not cause. Completion is
+        observable through the audit table itself; failure through the
+        error-level journal entry the worker emits.
+        """
+        self._EXECUTOR.submit(self._record, scope, status, correlation_id, audit_id)
+
+    @classmethod
+    def drain_audit(cls, timeout: float = 10.0) -> bool:
+        """Wait until every submitted audit write has finished.
+
+        Test support for the fire-and-forget contract: the middleware itself
+        never waits (that is the point of A15), so a test that asserts on the
+        audit table awaits this instead of sleeping a fixed interval. The
+        single worker means an empty queue plus one scheduling beat guarantees
+        every submitted row has committed or been logged. Returns False on
+        timeout, so a test can fail on evidence rather than hang.
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            if cls._EXECUTOR._work_queue.qsize() == 0:
+                _time.sleep(0.05)
+                return True
+            _time.sleep(0.02)
+        return False
 
     def _record(
         self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
     ) -> None:
+        """Write one audit row, on the worker thread, in its own session.
+
+        Runs outside the event loop, so a contended database wait costs this
+        thread nothing but time -- the responses callers wait for are already
+        gone. Failure is visible, never fatal: the row is lost, the journal
+        says so.
+        """
         try:
             with self.session_factory() as session:
                 record(

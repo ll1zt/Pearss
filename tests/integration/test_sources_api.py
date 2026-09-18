@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
+from app.middleware import CorrelationAndAuditMiddleware
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -1295,6 +1296,7 @@ async def test_backfill_chain_endpoint_queues_and_audits(
     assert again.status_code == 200
     assert again.json()["queued"] == 0
 
+    CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as session:
         audited = session.execute(
             sa.text("select count(*) from audit_log where operation like :pattern"),
