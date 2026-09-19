@@ -227,7 +227,10 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
     Raises CollectorError with a classified reason rather than returning an
     empty list when the shape moved: "the API changed" and "the user has no
     content" are different situations, and collapsing them is how a broken
-    parser goes unnoticed. An empty `data` array is legitimate.
+    parser goes unnoticed. An empty `data` array is legitimate — and so is a
+    window whose every entry is follow-noise (an account in a quiet stretch):
+    treating that as a shape change made the source fail for days with a
+    misleading class and a backoff stretched toward 24h (issue #2).
     """
     kind = _kind_of(raw.url)
     try:
@@ -243,14 +246,21 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
     if not data:
         return []
 
+    noise_dropped = 0
     if kind == "activities":
-        drafts = _activities(data, raw.source_id)
+        drafts, noise_dropped = _activities(data, raw.source_id)
     elif kind == "answers":
         drafts = _entries(data, raw.source_id, _answer_draft)
     else:
         drafts = _entries(data, raw.source_id, _article_draft)
 
     if not drafts:
+        if kind == "activities" and noise_dropped == len(data):
+            # Every entry was recognized and deliberately dropped as noise:
+            # nothing readable happened this window, which is an empty
+            # result, not a moved shape. A single unrecognized entry (or an
+            # unrenderable target) keeps the raise.
+            return []
         raise CollectorError(
             ErrorClass.STRUCTURE_CHANGED,
             f"all {len(data)} entries lacked a usable shape",
@@ -331,8 +341,15 @@ def _article_draft(item: Any, source_id: str) -> ItemDraft | None:
 # --------------------------------------------------------------------------
 
 
-def _activities(data: list[Any], source_id: str) -> list[ItemDraft]:
+def _activities(data: list[Any], source_id: str) -> tuple[list[ItemDraft], int]:
+    """Map activities to drafts; also count entries dropped as noise.
+
+    The count is what lets `parse` tell a quiet account (every entry was
+    follow-noise) from a moved shape (something was not recognized) — the
+    distinction an all-empty window loses without it.
+    """
     drafts: list[ItemDraft] = []
+    noise_dropped = 0
     for item in data:
         if not isinstance(item, dict):
             continue
@@ -341,6 +358,7 @@ def _activities(data: list[Any], source_id: str) -> list[ItemDraft]:
             continue
         classifier = _classify(item)
         if classifier is None:
+            noise_dropped += 1
             continue  # follow/question-created noise, per the reference adapter
 
         mapped = _map_target(target)
@@ -387,7 +405,7 @@ def _activities(data: list[Any], source_id: str) -> list[ItemDraft]:
                 },
             )
         )
-    return drafts
+    return drafts, noise_dropped
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

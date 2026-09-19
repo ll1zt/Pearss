@@ -992,7 +992,13 @@ def test_an_escaped_exception_closes_the_run_and_does_not_wedge_the_source(
         now=NOW,
     )
     assert status is JobRunStatus.FAILED
-    assert result is None
+    # A failed result, not None: callers read None as "stood down / another
+    # run in progress", and trigger turned the finished run into a
+    # misleading 409 already_running (issue #2).
+    assert result is not None and result.error_class == "parse"
+    assert result.detail == (
+        "collection raised: RuntimeError: the collection path exploded"
+    )
 
     # The source must be collectable again immediately: no open run holding
     # the only active-run slot. (Not monkeypatch.undo(): that would also tear
@@ -1014,3 +1020,50 @@ def test_an_escaped_exception_closes_the_run_and_does_not_wedge_the_source(
         ).fetchall()
     assert ("failed", "parse") in [tuple(row) for row in rows]
     assert rows[-1][0] == "succeeded"
+
+
+@pytest.mark.integration
+def test_user_an_escaped_collection_error_reaches_the_run_with_its_type(
+    session_factory: sessionmaker[Session],
+    fake_feed: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last-resort handler must return a failed result, not a bare
+    status: trigger reads a None result as "already running" (409) even
+    though the run is finished, and the old detail was a 200-character
+    traceback head whose cut hid which exception fired.
+
+    Controlled fault injection at the collect seam: after the classification
+    fixes no reachable production path escapes collection as an exception,
+    so the handler can only be driven by injecting one.
+    """
+    from app import scheduler as scheduler_module
+
+    with session_factory() as session:
+        add_source(
+            session, source_id="esc", policy={"type": "fixed", "interval": "30m"}
+        )
+        session.commit()
+
+    def explode(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("boom: the pipeline itself broke")
+
+    monkeypatch.setattr(scheduler_module, "collect_source", explode)
+    with session_factory() as session:
+        status, result = scheduler_module.collect_now(
+            session,
+            source_id="esc",
+            policy_json='{"type": "fixed", "interval": "30m"}',
+            client=fake_feed,
+        )
+
+    assert status is JobRunStatus.FAILED
+    assert result is not None, "a finished run must not read as already_running"
+    assert result.error_class == "parse"
+    assert result.detail == (
+        "collection raised: RuntimeError: boom: the pipeline itself broke"
+    )
+    with session_factory() as session:
+        row = session.execute(sa.text("select error_class, metrics from job_run")).one()
+    assert row[0] == "parse"
+    assert "RuntimeError: boom" in str(row[1]), str(row[1])[:200]

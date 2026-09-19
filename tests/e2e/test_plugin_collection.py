@@ -23,6 +23,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from core.enums import ErrorClass
 from tests.e2e.conftest import API_TOKEN, _FixtureOrigin
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
@@ -287,3 +288,99 @@ async def test_a_plugin_that_crashes_leaves_the_host_serving(
             ).fetchall()
         ]
     assert statuses and statuses[-1] != "succeeded", statuses
+
+
+# --------------------------------------------------------------------------
+# Classified parse failures (issue #2): the class the child reported is the
+# class the run records, for every ErrorClass member, and the detail that
+# travelled here is not amputated at 200 characters.
+# --------------------------------------------------------------------------
+
+
+def _raise_in_parse(error_class: str, detail: str) -> str:
+    """A collector revision whose parse raises the given classified error."""
+    return _FETCHING_COLLECTOR.replace(
+        "    return [",
+        "    from core.enums import ErrorClass\n"
+        "    from core.plugins.hooks import CollectorError\n"
+        f'    raise CollectorError(ErrorClass("{error_class}"), "{detail}")\n'
+        "    return [",
+    )
+
+
+@pytest.mark.parametrize(
+    "error_class", [member.value for member in ErrorClass], ids=str
+)
+async def test_user_a_classified_plugin_parse_keeps_its_class(
+    served: str,
+    plugin_dir: Path,
+    origin: _FixtureOrigin,
+    session_factory: sessionmaker[Session],
+    error_class: str,
+) -> None:
+    """Given a plugin whose parse raises a classified CollectorError, when
+    its source is collected, then the run records THAT class — not a
+    blanket parse.
+
+    The child's error whitelist carries every ErrorClass member and the
+    fetch hook preserved it, but the parse path let ClassifiedChildError
+    escape into the scheduler's last-resort handler, which labels
+    everything parse. structure_changed never appeared in job_run, so an
+    operator debugging a quiet account was pointed at the parser.
+    """
+
+    _install_plugin(
+        plugin_dir,
+        "classified",
+        _raise_in_parse(error_class, "origin refused this shape"),
+        label="classified",
+    )
+
+    async with _client(served) as client:
+        assert (
+            await client.post("/v1/plugins/classified:import", headers=_key())
+        ).status_code == 200
+
+        source_id = await _add_source(client, origin.url)
+        triggered = await client.post(
+            f"/v1/sources/{source_id}:trigger", headers=_key()
+        )
+        assert triggered.status_code == 502, triggered.text
+        assert triggered.json()["error_class"] == error_class, triggered.text
+
+        with session_factory() as session:
+            recorded = session.execute(
+                sa.text("select error_class from job_run")
+            ).scalar_one()
+        assert recorded == error_class, recorded
+
+
+async def test_user_the_classified_detail_is_not_amputated(
+    served: str,
+    plugin_dir: Path,
+    origin: _FixtureOrigin,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The detail a plugin reported reaches the run past the old 200-character
+    cap: the tail is where "which call, what did the origin say" lived.
+    """
+    tail = "d" * 300 + "-END-OF-ORIGIN-DETAIL"
+    _install_plugin(
+        plugin_dir,
+        "chatty",
+        _raise_in_parse("structure_changed", tail),
+        label="chatty",
+    )
+
+    async with _client(served) as client:
+        assert (
+            await client.post("/v1/plugins/chatty:import", headers=_key())
+        ).status_code == 200
+        source_id = await _add_source(client, origin.url)
+        await client.post(f"/v1/sources/{source_id}:trigger", headers=_key())
+
+        with session_factory() as session:
+            metrics = session.execute(
+                sa.text("select metrics from job_run")
+            ).scalar_one()
+        assert tail in metrics, metrics[-120:]

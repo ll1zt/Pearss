@@ -572,3 +572,50 @@ def test_the_unknown_target_log_does_not_echo_the_payload() -> None:
     assert 'target.get("id")' in call, call
     # Guard against a later edit widening it to the whole object.
     assert "target," not in call, call
+
+
+def test_user_an_all_noise_window_is_a_quiet_account_not_a_broken_shape() -> None:
+    """issue #2 Bug A: a window whose every entry is 关注了… is the account
+    being quiet, not the API having moved. `parse` returns [] so the source
+    does not spend the quiet period failing with a misleading
+    structure_changed and a backoff stretched toward 24h; the window heals
+    by itself when the account posts again.
+    """
+    drafts = _parse(
+        [{"type": "question", "id": 7009, "title": "示例问题"}],
+        action="关注了问题",
+    )
+    assert drafts == []
+
+
+def test_user_noise_mixed_with_unusable_shapes_still_reports_structure_changed() -> (
+    None
+):
+    """The quiet-window return only covers windows whose every entry was
+    recognized and dropped as noise. An unrecognized shape beside noise is
+    exactly what structure_changed exists for — collapsing the two is the
+    conflation `parse` refuses to make.
+    """
+    body = {
+        "paging": {"is_end": True},
+        "data": [
+            {
+                "id": 9002,
+                "action_text": "关注了问题",
+                "verb": "",
+                "actor": _ACTOR,
+                "target": {"type": "question", "id": 7010, "title": "示例问题"},
+            },
+            "garbage-not-a-dict",
+        ],
+    }
+    with pytest.raises(CollectorError) as excinfo:
+        collector.parse(
+            RawPayload(
+                url=ACTIVITIES_URL,
+                status_code=200,
+                body=json.dumps(body).encode("utf-8"),
+                source_id=SOURCE_ID,
+            )
+        )
+    assert excinfo.value.error_class is ErrorClass.STRUCTURE_CHANGED

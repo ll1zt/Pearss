@@ -23,7 +23,6 @@ import logging
 import os
 import secrets
 import time
-import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -185,26 +184,33 @@ def collect_now(
 
     try:
         result = collect_source(session, source=source, client=client, tenant_id=TENANT)
-    except Exception:
+    except Exception as exc:
         # Failures are normally values, but an exception can still escape the
         # collection path (a plugin child answering unintelligibly, a bug in
         # the pipeline itself). The run must not survive it open: the schema's
         # unique partial index over active runs would then block every future
         # collection of this source until a reaper noticed. An escaped
         # exception is not any one origin's fault, so it classifies as parse
-        # and carries the traceback for the operator.
+        # and carries the exception type and message for the operator — the
+        # traceback itself is in the journal via the logger.
         LOGGER.exception("collection raised for source %s", source_id)
+        # A failed result, not a bare status: callers read None as "stood
+        # down / another run in progress", which a finished run is not —
+        # trigger turned it into a misleading 409 (issue #2).
+        detail = f"collection raised: {type(exc).__name__}: {exc}"[:500]
         status = finish_job_run(
             session,
             run_id=run_id,
             event=JobRunEvent.FAIL,
             correlation_id=correlation_id,
             error_class=ErrorClass.PARSE,
-            metrics={"detail": f"collection raised: {traceback.format_exc()[:200]}"},
+            metrics={"detail": detail},
             at=_iso(datetime.now(UTC)),
         )
         session.commit()
-        return status, None
+        return status, CollectionResult(
+            succeeded=False, error_class="parse", detail=detail
+        )
 
     # The caller's clock throughout. Stamping the run with the wall clock while
     # deciding with an injected one makes the two disagree, and a source whose
@@ -233,7 +239,10 @@ def collect_now(
             event=JobRunEvent.FAIL,
             correlation_id=correlation_id,
             error_class=ErrorClass(result.error_class or "network"),
-            metrics={"detail": (result.detail or "")[:200]},
+            # Bounded at 500, not 200: the tail of an origin-side detail is
+            # where "which call, what did it say" lived, and the old cap cut
+            # exactly there (issue #2).
+            metrics={"detail": (result.detail or "")[:500]},
             at=finished,
         )
     session.commit()

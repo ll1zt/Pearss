@@ -735,6 +735,13 @@ class SandboxedCollector:
         self._ensure_running()
         try:
             result = self._child.call("parse", {"raw": raw.as_rpc_dict()})
+        except ClassifiedChildError as exc:
+            # A classified origin failure keeps its class, exactly as the
+            # fetch hook above preserves it: the child told us which of the
+            # five classes fired, and letting it escape into the scheduler's
+            # last-resort handler relabelled everything parse —
+            # structure_changed was invisible in job_run (issue #2).
+            raise SpecCollectorError(ErrorClass(exc.code), exc.detail) from exc
         except PluginChildError as exc:
             # An installed plugin may raise anything, where a shipped
             # collector's parse is limited to CollectorError (ADR 0017). An
