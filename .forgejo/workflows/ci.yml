@@ -17,6 +17,9 @@ jobs:
     timeout-minutes: 60
     steps:
       # The runner does not trust the certificate on Forgejo's HTTPS endpoint.
+      # A full clone, not --depth 1: the coverage gate diffs the pushed commit
+      # against origin/main, which a single-branch shallow checkout does not
+      # have (that is exactly how the first gated runs failed).
       - name: Checkout
         env:
           CI_SHA: ${{ github.sha }}
@@ -25,9 +28,9 @@ jobs:
           set -eu
           repository="https://git.example.com:3000/lllzt/Pearss.git"
           trap 'if [ -d source/.git ]; then git -C source remote set-url origin "$repository"; fi' EXIT
-          git -c http.sslVerify=false clone --depth 1 \
+          git -c http.sslVerify=false clone \
             "https://${CI_TOKEN}@git.example.com:3000/lllzt/Pearss.git" source
-          git -C source -c http.sslVerify=false fetch --depth 1 origin "$CI_SHA"
+          git -C source fetch origin "$CI_SHA"
           git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
 
