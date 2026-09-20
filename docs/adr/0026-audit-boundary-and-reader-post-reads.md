@@ -3,8 +3,9 @@
 - 状态：accepted
 - 日期：2026-09-18
 - 实现：`src/app/middleware.py`（`UNAUDITED_PATHS`、`AUTH_FAILURE_STATUSES`、
-  审计 worker 线程）、`src/app/main.py`（中间件顺序）、
-  `src/app/reader_routes.py`（`authenticate_any`）、
+  审计 worker 线程、`CREDENTIALLESS_AUTH_FAILURE`、`AUDIT_QUEUE_BOUND`）、
+  `src/app/main.py`（中间件顺序）、
+  `src/app/reader_routes.py`（`authenticate_any`、认证层无凭据标记）、
   `tests/integration/test_audit_responsiveness.py`、
   `tests/e2e/test_failure_paths.py`（认证拒绝不落审计行的钉死断言）、
   `tests/integration/test_app.py::test_a_refused_write_is_not_audited_because_it_never_reaches_the_endpoint`
@@ -23,7 +24,15 @@
    留下一条 actor、operation、correlation_id、脱敏参数齐全的审计行，
    outcome 为 `succeeded` 或 `rejected`。
 2. **认证失败的读与写**（401/403）在到达审计中间件时也会被记录
-   （`AUTH_FAILURE_STATUSES`）：一阵 401 是撞库在数据里的样子。
+   （`AUTH_FAILURE_STATUSES`）——但仅当**出示过凭据**（issue #18，
+   2026-09-21 修订）：一阵 401 是撞库在数据里的样子，值得保留；而
+   **未出示任何凭据**的拒绝（无 Authorization header、无表单 `T`、
+   ClientLogin 双空）是探测不是猜测，不入审计。区分只能由认证层
+   自己做——Reader 写探测是表单 POST，线路上与带错误 `T` 的请求
+   无从分辨——因此认证层在拒绝无凭据请求时打 scope 标记
+   （`CREDENTIALLESS_AUTH_FAILURE`），审计中间件按标记跳过。
+   `x-audit-id` 只在行确实会写入时盖章：指向不存在行的 id
+   比没有 id 更糟。
 3. **EarlyAuth 之外的拒绝**（限流 429、体积 413、未认证即被 EarlyAuth
    拒绝的 401）**不审计**：这些中间件在 CorrelationAndAudit 外侧，
    被拒请求从未成为「API 调用方」。这是有意的泛洪防线——攻击者打满
@@ -47,6 +56,11 @@ writer 争用时（采集运行、enrichment worker 持锁是常态）会把**�
   绝不影响调用方已得到的响应。
 - 容量上限即单 worker：审计洪峰会排队延迟审计行（日志可见），
   不会放大数据库争用。
+- **队列有界**（issue #18，2026-09-21 修订）：队列达
+  `AUDIT_QUEUE_BOUND`（1000）后新行被丢弃并记 error 级日志
+  （含 correlation id）。每个排队条目持有整个请求的头快照，
+  无界队列即无界内存；丢弃是过载语义而非静默丢失——被丢弃的行
+  在 journal 里以 correlation id 可追。
 
 ## 裁定 3：Reader POST 读取接受 header 认证是文档化的硬例外（C02）
 
