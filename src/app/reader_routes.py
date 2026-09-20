@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters import filestore, reader_api
 from adapters.db_models import Item as ItemRow
 from adapters.timestamps import fixed_width_utc as timestamp
+from app.middleware import CREDENTIALLESS_AUTH_FAILURE
 from core.reader_state import (
     TagChange,
     derive_auth_token,
@@ -140,6 +141,12 @@ def _auth_from_form(
     request: Request, token: str | None = Form(default=None, alias="T")
 ) -> str:
     """Authenticate a write POST: token comes from the form field T only."""
+    if not token or not token.strip():
+        # Issue #18: nothing was offered. The auth layer is the only place
+        # that can tell this from a wrong token (the wire shape is
+        # identical), so it marks the scope; the audit middleware uses the
+        # mark to keep probes out of the fact-source table.
+        request.scope[CREDENTIALLESS_AUTH_FAILURE] = True
     auth: ReaderAuth = request.app.state.reader_auth
     with auth._session_factory() as session:
         if not auth.valid(session, token):
@@ -170,6 +177,11 @@ async def authenticate_any(request: Request) -> str:
         supplied = form.get("T")
         if isinstance(supplied, str) and supplied.strip():
             token = supplied.strip()
+    if not token:
+        # Issue #18: neither the header nor the form carried a token -- a
+        # probe, not a guess. Marked for the audit middleware, which cannot
+        # distinguish this from a wrong token by shape.
+        request.scope[CREDENTIALLESS_AUTH_FAILURE] = True
     with auth._session_factory() as session:
         if not auth.valid(session, token):
             raise _unauthorized()
@@ -235,6 +247,12 @@ def client_login(
         )
         if not ok:
             LOGGER.info("reader login failed for user %r", email)
+            if not email and not passwd:
+                # Issue #18: an empty form probes the endpoint without
+                # offering anything to check -- mark it for the audit
+                # middleware (a filled-in wrong username/password stays a
+                # guess and keeps its audit row).
+                request.scope[CREDENTIALLESS_AUTH_FAILURE] = True
             if output == "json":
                 raise HTTPException(
                     status_code=401, detail={"error_message": "access unauthorized"}

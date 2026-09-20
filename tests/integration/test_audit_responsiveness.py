@@ -24,6 +24,7 @@ import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.integration.conftest import REPO_ROOT
 
 pytestmark = pytest.mark.integration
@@ -183,3 +184,74 @@ async def test_user_audited_request_completes_when_the_writer_releases(
             break
         await asyncio.sleep(0.05)
     assert app_harness.audit_rows() >= 1, "the completed write was never audited"
+
+
+@pytest.mark.asyncio
+async def test_the_audit_queue_is_bounded_under_a_writer_held_forever(
+    harness: tuple[_AuditHarness, httpx.AsyncClient],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A flood of audited writes must grow the audit backlog only to its bound.
+
+    Given a real writer transaction holds the SQLite lock (the audit worker
+    cannot commit anything for the whole scenario)
+    When more authenticated writes arrive than the audit queue's bound
+    Then every caller still gets its HTTP answer promptly, the queue's
+    population never exceeds the bound, and each dropped row is visible in
+    the journal at error level with its correlation id -- overload is a
+    policy, not a silent loss (issue #18).
+    """
+    from app.middleware import AUDIT_QUEUE_BOUND
+
+    app_harness, client = harness
+    from sqlalchemy.orm import Session
+
+    holder = Session(app_harness.engine)
+    try:
+        holder.execute(sa.text("CREATE TABLE IF NOT EXISTS a18_probe (v INTEGER)"))
+        holder.execute(sa.text("INSERT INTO a18_probe VALUES (1)"))
+        holder.commit()
+        holder.execute(sa.text("INSERT INTO a18_probe VALUES (2)"))
+        # No commit: the audit worker blocks on the lock for the scenario.
+
+        total = AUDIT_QUEUE_BOUND + 40
+        for i in range(total):
+            response = await asyncio.wait_for(
+                client.post(
+                    "/v1/sources",
+                    json={
+                        "url": f"https://a18-{i}.example/feed",
+                        "schedule_policy": {"type": "fixed", "interval": "30m"},
+                    },
+                    headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+                ),
+                RESPONSIVE_BUDGET_SECONDS,
+            )
+            # A keyless write is refused 400 before any business row or
+            # idempotency reservation (the A15 isolation trick): the request
+            # itself never contends on the held lock, so the ONLY database
+            # work in flight is the audit record. With a key the request's
+            # own reservation would block on the busy timeout and the
+            # responsiveness budget would measure the wrong thing.
+            assert response.status_code == 400, response.status_code
+
+        queued = CorrelationAndAuditMiddleware._EXECUTOR._work_queue.qsize()
+        assert queued <= AUDIT_QUEUE_BOUND, (
+            f"the audit queue grew to {queued}, past its bound"
+        )
+        dropped = [
+            r
+            for r in caplog.records
+            if r.levelname == "ERROR" and "audit queue full" in r.getMessage()
+        ]
+        assert dropped, "a dropped audit row must be visible in the journal"
+    finally:
+        holder.rollback()
+        holder.close()
+
+    # After the lock is released the worker drains; the table must hold no
+    # more rows than were accepted (total minus dropped) -- bounded loss,
+    # bounded memory, no unbounded growth anywhere.
+    CorrelationAndAuditMiddleware.drain_audit(30.0)
+    rows = app_harness.audit_rows()
+    assert rows <= total
