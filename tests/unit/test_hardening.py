@@ -421,3 +421,60 @@ async def test_security_headers_are_stamped_on_every_response() -> None:
 
     headers = dict((name, value) for name, value in sent[0]["headers"])
     assert headers[b"x-content-type-options"] == b"nosniff"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_malformed_content_length_gets_a_defined_answer() -> None:
+    """User sends a POST whose Content-Length is not a number.
+
+    Given the hardening layer is the outermost middleware
+    And the request declares `content-length: abc`
+    When the request arrives
+    Then the client receives a defined response (not a middleware
+    crash), and the app behind the limit decides what it means.
+    """
+    reached: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        reached.append(scope)
+
+    middleware = BodySizeLimitMiddleware(app, max_bytes=1024)
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "client": ("1.2.3.4", 5),
+        "headers": [(b"content-length", b"abc")],
+    }
+    await middleware(scope, _receive_stub(), _send_stub())
+    assert reached == [scope], (
+        "an unpriceable body must not crash the outermost middleware"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_empty_content_length_gets_a_defined_answer() -> None:
+    """User sends a POST with an empty Content-Length header value.
+
+    Given the request declares `content-length:` with no value
+    When the request arrives
+    Then the middleware neither crashes nor prices the body; the
+    request passes through to the app's own handling.
+    """
+    reached: list[Scope] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        reached.append(scope)
+
+    middleware = BodySizeLimitMiddleware(app, max_bytes=1024)
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "client": ("1.2.3.4", 5),
+        "headers": [(b"content-length", b"")],
+    }
+    await middleware(scope, _receive_stub(), _send_stub())
+    assert reached == [scope], (
+        "an empty content-length must not crash the outermost middleware"
+    )
