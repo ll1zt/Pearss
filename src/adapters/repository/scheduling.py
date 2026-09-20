@@ -275,6 +275,41 @@ def consecutive_failures(session: Session, *, job_id: str, limit: int = 20) -> i
     return count
 
 
+def last_failure_error_class(
+    session: Session, *, job_id: str, limit: int = 20
+) -> ErrorClass | None:
+    """The classification of the most recent failure in the current streak.
+
+    Walks the same window `consecutive_failures` walks and stops at the same
+    boundaries, so the class and the count always describe the same streak
+    (issue #5): the retry table keys on the class, and a stale class from a
+    recovered streak must not suppress a current one's backoff. None when the
+    streak has no classification -- legacy rows or a parse that never
+    classified -- which the scheduler treats conservatively (backoff stays).
+    """
+    rows = session.execute(
+        select(JobRunRow.status, JobRunRow.error_class)
+        .where(JobRunRow.job_id == job_id)
+        .order_by(JobRunRow.started_at.desc().nullslast())
+        .limit(limit)
+    ).all()
+    for status, error_class in rows:
+        if status == JobRunStatus.SUCCEEDED.value:
+            break
+        if status in (
+            JobRunStatus.FAILED.value,
+            JobRunStatus.TIMED_OUT.value,
+        ):
+            try:
+                return ErrorClass(error_class)
+            except ValueError:  # unreachable: the schema CHECK-constrains
+                # error_class to the five enum values; a corrupt DB row must
+                # not crash the tick, hence the guard.
+                return None
+        # Queued/running: skip, same convention as consecutive_failures.
+    return None
+
+
 def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, str]]:
     """(source_id, schedule_policy_json) for sources we should consider.
 

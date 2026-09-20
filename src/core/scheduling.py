@@ -12,7 +12,9 @@ import itertools
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
+from core.enums import ErrorClass
 from core.models import SchedulePolicy
 
 # Ceiling for fixed-interval backoff, unless the configured interval is longer:
@@ -33,6 +35,8 @@ def adaptive_interval(
     policy: SchedulePolicy,
     *,
     consecutive_failures: int = 0,
+    error_class: ErrorClass | None = None,
+    rng: Any = None,
 ) -> float:
     """Compute the next fetch interval in seconds.
 
@@ -41,8 +45,17 @@ def adaptive_interval(
     policy's min/max bounds, so a single outlier gap cannot schedule a fetch
     absurdly far out or spin an aggressive source.
 
-    The result is deterministic: identical inputs always produce an identical
-    interval, including in the presence of ties.
+    `error_class` wires the retry table in docs/domain/error-taxonomy.md into
+    the interval (issue #5): a class with `allows_automatic_retry == False`
+    (blocked / auth / structure_changed) does not back off -- the service
+    already refused us or the parser is broken, and stretching the wait only
+    delays the probe that would notice a fix. Retryable classes (network /
+    parse) and an unknown class keep the exponential backoff.
+
+    `rng` carries bounded jitter (±20%) on the backoff so same-tick failures
+    retry spread out instead of spiking the upstream that just refused us.
+    None keeps the computation deterministic (tests); production passes a
+    `random.Random`.
     """
     if policy.type != "adaptive":
         raise ValueError(
@@ -55,8 +68,28 @@ def adaptive_interval(
         raise ValueError("adaptive policy requires min_seconds and max_seconds")
 
     base = _base_interval(observed_gaps)
-    backoff = _backoff_multiplier(consecutive_failures)
-    return _clamp(base * backoff, policy.min_seconds, policy.max_seconds)
+    multiplier = _failure_multiplier(consecutive_failures, error_class, rng)
+    return _clamp(base * multiplier, policy.min_seconds, policy.max_seconds)
+
+
+def _failure_multiplier(
+    consecutive_failures: int, error_class: ErrorClass | None, rng: Any
+) -> float:
+    """Backoff multiplier for a failure streak, per the retry table.
+
+    A non-retryable class never grows the wait; a retryable (or unknown)
+    one multiplies exponentially and, when an rng is supplied, by a factor
+    in [0.8, 1.2]. Without an rng the exact exponential value is returned
+    (deterministic; the historical behaviour).
+    """
+    if consecutive_failures <= 0:
+        return 1.0
+    if error_class is not None and not error_class.allows_automatic_retry:
+        return 1.0
+    multiplier = _backoff_multiplier(consecutive_failures)
+    if rng is not None:
+        multiplier *= rng.uniform(0.8, 1.2)
+    return multiplier
 
 
 def next_interval(
@@ -64,6 +97,8 @@ def next_interval(
     observed_gaps: list[float] | None = None,
     *,
     consecutive_failures: int = 0,
+    error_class: ErrorClass | None = None,
+    rng: Any = None,
 ) -> float:
     """Next interval for a policy, dispatching on its type.
 
@@ -71,6 +106,10 @@ def next_interval(
     the policy: a policy parsed from JSON cannot carry a live counter, so a
     failure count stored there would always read as zero and the backoff would
     never engage for adaptive sources.
+
+    `error_class` is the most recent failure's classification (issue #5): it
+    routes the retry table -- non-retryable classes probe at the normal pace.
+    `rng` adds bounded jitter to the backoff; None stays deterministic.
     """
     if policy.type == "fixed":
         if policy.interval_seconds is None:
@@ -83,7 +122,8 @@ def next_interval(
             interval = max(
                 interval,
                 min(
-                    interval * _backoff_multiplier(consecutive_failures),
+                    interval
+                    * _failure_multiplier(consecutive_failures, error_class, rng),
                     float(MAX_BACKOFF_SECONDS),
                 ),
             )
@@ -92,6 +132,8 @@ def next_interval(
         observed_gaps or [],
         policy,
         consecutive_failures=consecutive_failures,
+        error_class=error_class,
+        rng=rng,
     )
 
 
@@ -113,9 +155,11 @@ def _base_interval(observed_gaps: list[float]) -> float:
 
 
 def _backoff_multiplier(consecutive_failures: int) -> float:
-    """Exponential backoff factor for a run of consecutive failures."""
-    if consecutive_failures <= 0:
-        return 1.0
+    """Exponential backoff factor for a failure streak of n >= 1.
+
+    The zero/negative case never reaches here: `_failure_multiplier` returns
+    1.0 for it (a clean source has no backoff to compute).
+    """
     return min(BACKOFF_BASE**consecutive_failures, float(MAX_BACKOFF_SECONDS))
 
 
@@ -156,6 +200,8 @@ def decide_schedule(
     last_fetch_at: datetime | None,
     observed_update_gaps: list[float] | None = None,
     consecutive_failures: int = 0,
+    error_class: ErrorClass | None = None,
+    rng: Any = None,
     now: datetime,
 ) -> ScheduleDecision:
     """Whether a source should be collected now, and if not, when.
@@ -169,12 +215,21 @@ def decide_schedule(
     `last_fetch_at` is None for a source that has never been fetched, which is
     treated as due: a newly added source should be collected without waiting
     out a full interval first.
+
+    `error_class` and `rng` pass through to `next_interval` (issue #5): the
+    retry table decides whether a failure streak backs off, and jitter
+    spreads same-tick retries. Production supplies both; tests may omit
+    them for the deterministic legacy behaviour.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
 
     interval = next_interval(
-        policy, observed_update_gaps, consecutive_failures=consecutive_failures
+        policy,
+        observed_update_gaps,
+        consecutive_failures=consecutive_failures,
+        error_class=error_class,
+        rng=rng,
     )
 
     if last_fetch_at is None:

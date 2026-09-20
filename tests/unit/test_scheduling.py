@@ -7,10 +7,12 @@ resistance to a single outlier gap, and backoff on consecutive failures.
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from core.enums import ErrorClass
 from core.models import SchedulePolicy
 from core.scheduling import (
     MAX_BACKOFF_SECONDS,
@@ -89,6 +91,128 @@ def test_backoff_is_capped() -> None:
     policy = adaptive(min_h=1, max_h=24)
     result = adaptive_interval([2 * HOUR], policy, consecutive_failures=99)
     assert result == pytest.approx(24 * HOUR)
+
+
+# --------------------------------------------------------------------------
+# Error-class wiring and jitter (issue #5)
+#
+# The taxonomy promised that blocked/auth would not be auto-retried and that
+# network backoff carries jitter; the scheduler only ever looked at the
+# failure COUNT, so both promises were dead letters -- allows_automatic_retry
+# had no caller, and a batch of same-tick failures retried in lockstep.
+# The class now reaches the interval computation: non-retryable classes
+# (blocked / auth / structure_changed) probe at their normal pace instead of
+# backing off, retryable ones (network / parse) keep exponential backoff,
+# and backoff is multiplied by a bounded jitter factor (±20%) so same-tick
+# failures spread out instead of spiking the upstream that just refused us.
+# --------------------------------------------------------------------------
+
+
+class _NoJitter:
+    """An rng stub whose uniform() always returns the midpoint (factor 1.0).
+
+    Existing exact-multiple assertions stay exact: the jitter hook exists but
+    contributes nothing under this stub.
+    """
+
+    def uniform(self, a: float, b: float) -> float:
+        return (a + b) / 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "error_class", [ErrorClass.BLOCKED, ErrorClass.AUTH, ErrorClass.STRUCTURE_CHANGED]
+)
+def test_a_non_retryable_class_does_not_back_off(error_class: ErrorClass) -> None:
+    """Blocked/auth/structure_changed probe at the normal pace.
+
+    The service already refused us or the parser is broken: multiplying the
+    wait would only delay the probe that notices recovery, and no automatic
+    retry is allowed anyway (allows_automatic_retry is False for all three).
+    """
+    policy = adaptive(min_h=1, max_h=1000)
+    gaps = [2 * HOUR]
+    clean = adaptive_interval(gaps, policy, consecutive_failures=0)
+    backed = adaptive_interval(
+        gaps,
+        policy,
+        consecutive_failures=5,
+        error_class=error_class,
+        rng=_NoJitter(),
+    )
+    assert backed == pytest.approx(clean), (
+        f"{error_class} must not grow the wait: it is not retryable, and a "
+        "longer interval only delays noticing a fix"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error_class", [ErrorClass.NETWORK, ErrorClass.PARSE])
+def test_a_retryable_class_still_backs_off(error_class: ErrorClass) -> None:
+    """Network/parse keep exponential backoff (pinned, already correct)."""
+    policy = adaptive(min_h=1, max_h=1000)
+    gaps = [2 * HOUR]
+    clean = adaptive_interval(gaps, policy, consecutive_failures=0)
+    backed = adaptive_interval(
+        gaps,
+        policy,
+        consecutive_failures=2,
+        error_class=error_class,
+        rng=_NoJitter(),
+    )
+    assert backed == pytest.approx(clean * 4)
+
+
+@pytest.mark.unit
+def test_an_unclassified_failure_keeps_the_old_backoff() -> None:
+    """No class recorded (legacy rows, timeouts pre-classification) = back off.
+
+    The wiring only *removes* backoff when the classification says the class
+    is not retryable; absent knowledge stays conservative.
+    """
+    policy = adaptive(min_h=1, max_h=1000)
+    clean = adaptive_interval([2 * HOUR], policy, consecutive_failures=0)
+    backed = adaptive_interval(
+        [2 * HOUR], policy, consecutive_failures=2, rng=_NoJitter()
+    )
+    assert backed == pytest.approx(clean * 4)
+
+
+@pytest.mark.unit
+def test_backoff_carries_bounded_jitter() -> None:
+    """Same-tick failures must not retry in lockstep.
+
+    With a real rng the backoff interval varies within ±20% of the exact
+    exponential value: 56 sources failing together spread their retries
+    instead of spiking the upstream at one instant.
+    """
+    policy = adaptive(min_h=1, max_h=1000)
+    gaps = [2 * HOUR]
+    clean = adaptive_interval(gaps, policy, consecutive_failures=0)
+    exact = clean * 4  # two failures back off by 4x
+    seen: set[float] = set()
+    for seed in range(20):
+        value = adaptive_interval(
+            gaps,
+            policy,
+            consecutive_failures=2,
+            error_class=ErrorClass.NETWORK,
+            # Seeded draws must differ to prove jitter varies; S311 is for
+            # crypto contexts, schedule jitter is not a secret.
+            rng=random.Random(seed),  # noqa: S311 - jitter, not cryptography
+        )
+        seen.add(value)
+        assert exact * 0.8 <= value <= exact * 1.2, value
+    assert len(seen) > 1, "jitter must actually vary the interval across draws"
+
+
+@pytest.mark.unit
+def test_a_clean_source_gets_no_jitter() -> None:
+    """Jitter rides the backoff only: a healthy source stays deterministic."""
+    policy = adaptive(min_h=1, max_h=24)
+    a = adaptive_interval([2 * HOUR], policy, consecutive_failures=0)
+    b = adaptive_interval([2 * HOUR], policy, consecutive_failures=0)
+    assert a == b
 
 
 @pytest.mark.unit
