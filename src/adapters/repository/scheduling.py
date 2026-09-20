@@ -226,26 +226,37 @@ def reap_orphaned_runs(session: Session, *, older_than: datetime) -> int:
 
 
 def last_collect_at(session: Session, *, job_id: str) -> datetime | None:
-    """When this source's collection job last finished, any outcome.
+    """When this source's collection was last attempted, any outcome.
+
+    The start of the most recent *resolved* run: the interval counts from
+    when the last attempt began, stamped with the caller's decision clock
+    so it is always comparable to the next tick's clock. Reading the
+    finish stamp instead made the anchor the wall-clock completion moment
+    (issue #17), which sits outside an injected decision timeline and
+    read as clock skew -- due immediately, defeating backoff.
+
+    Unfinished runs are not evidence yet: a claimed-but-open run may still
+    fail, and the reaper has not ruled on it.
 
     Failures count: backing off requires knowing the last attempt happened,
     and ignoring failed runs would retry a blocked source on its normal
     cadence.
     """
-    finished = (
+    started = (
         session.execute(
-            select(JobRunRow.finished_at)
+            select(JobRunRow.started_at)
             .where(
                 JobRunRow.job_id == job_id,
+                JobRunRow.started_at.is_not(None),
                 JobRunRow.finished_at.is_not(None),
             )
-            .order_by(JobRunRow.finished_at.desc())
+            .order_by(JobRunRow.started_at.desc())
             .limit(1)
         )
         .scalars()
         .first()
     )
-    return _parse(finished) if finished else None
+    return _parse(started) if started else None
 
 
 def consecutive_failures(session: Session, *, job_id: str, limit: int = 20) -> int:

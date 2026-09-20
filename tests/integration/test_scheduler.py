@@ -1067,3 +1067,78 @@ def test_user_an_escaped_collection_error_reaches_the_run_with_its_type(
         row = session.execute(sa.text("select error_class, metrics from job_run")).one()
     assert row[0] == "parse"
     assert "RuntimeError: boom" in str(row[1]), str(row[1])[:200]
+
+
+@pytest.mark.integration
+def test_a_run_records_its_real_duration(
+    session_factory: sessionmaker[Session],
+    fake_feed: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run's stored timestamps must measure the work, not the tick.
+
+    Given a source whose collection takes measurable time (the origin
+    handler advances the injected clock mid-collection, as a slow origin
+    would elapse wall time)
+    When the run completes successfully
+    Then `finished_at` reflects when the work ended -- not the moment the
+    tick started, which currently leaves every scheduler-produced run with
+    `finished_at == started_at` and a stored duration of zero (issue #17).
+    """
+    import app.scheduler as scheduler_module
+
+    clock = {"now": NOW}
+
+    def advancing_handler(request: httpx.Request) -> httpx.Response:
+        # The collection itself consumes time: the fetch happens between
+        # claim and finish, so the clock moves while the run is open.
+        clock["now"] = clock["now"] + timedelta(seconds=90)
+        return httpx.Response(
+            200,
+            content=(
+                b'<?xml version="1.0"?><rss version="2.0"><channel><title>F</title>'
+                b"<item><title>Live post</title>"
+                b"<link>https://live.example.com/post-1</link>"
+                b"<guid>live-1</guid>"
+                b"<pubDate>Mon, 01 Jun 2026 11:00:00 +0000</pubDate>"
+                b"<description>Body.</description></item></channel></rss>"
+            ),
+        )
+
+    advancing_feed = httpx.Client(transport=httpx.MockTransport(advancing_handler))
+
+    # The completion clock is a module-level seam so the test stays
+    # deterministic (no sleeps). Patched with raising=False: before the
+    # fix the seam does not exist and collect_now never reads a completion
+    # clock at all -- which is the defect, so the final assertion fails on
+    # the recorded timestamp, not on test setup.
+    def fake_utcnow() -> datetime:
+        return clock["now"]
+
+    monkeypatch.setattr(scheduler_module, "_utcnow", fake_utcnow, raising=False)
+
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+        session.commit()
+
+    with session_factory() as session:
+        status, _ = collect_now(
+            session,
+            source_id="s1",
+            policy_json='{"type": "fixed", "interval": "30m"}',
+            client=advancing_feed,
+            now=NOW,
+        )
+        session.commit()
+
+    assert status is JobRunStatus.SUCCEEDED
+    with session_factory() as session:
+        row = session.execute(
+            sa.text("select started_at, finished_at from job_run")
+        ).one()
+    assert row[0] == "2026-06-01T12:00:00.000000Z", row[0]
+    # The collection took 90s of injected time: the finish stamp must say
+    # 12:01:30, not the claim moment 12:00:00.
+    assert row[1] == "2026-06-01T12:01:30.000000Z", (
+        f"finished_at must record when the work ended, got {row[1]}"
+    )
