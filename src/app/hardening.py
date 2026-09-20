@@ -53,6 +53,24 @@ _AUTH_FAILURES = frozenset({401, 403})
 DEFAULT_EXEMPT_PATHS: Final = frozenset({"/healthz"})
 
 
+def _declared_body_length(value: bytes) -> int | None:
+    """The body size a Content-Length header declares, when priceable.
+
+    Returns None for anything that is not a plain non-negative integer —
+    a malformed or empty header cannot be priced, and this middleware is
+    the outermost layer, so an exception here would escape before any
+    error handling exists and kill the request at the connection level
+    (issue #16). An unpriceable declaration is passed through untouched:
+    the server that owns the protocol (uvicorn/h11) decides what a
+    malformed header means, which is not a decision for a size guard.
+    """
+    try:
+        declared = int(value)
+    except ValueError:
+        return None
+    return declared if declared >= 0 else None
+
+
 def env_int(name: str, default: int) -> int:
     """Read an integer knob from the environment, falling back on garbage."""
     raw = os.environ.get(name, "").strip()
@@ -80,10 +98,13 @@ class BodySizeLimitMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and self.max_bytes > 0:
             for name, value in scope.get("headers", []):
-                if name == b"content-length" and int(value) > self.max_bytes:
+                declared = (
+                    _declared_body_length(value) if name == b"content-length" else None
+                )
+                if declared is not None and declared > self.max_bytes:
                     LOGGER.warning(
                         "rejected %d byte body from %s (limit %d)",
-                        int(value),
+                        declared,
                         scope.get("client"),
                         self.max_bytes,
                     )
