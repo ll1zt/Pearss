@@ -377,11 +377,37 @@ class AuthFailureRateLimitMiddleware:
         while failures and failures[0] <= cutoff:
             failures.popleft()
 
+    def _evict_aged_out(self, ip: str, failures: deque[float]) -> None:
+        """Drop the address entirely once its window is empty.
+
+        A deque only shrinks to empty; without this, every probed address
+        kept a map entry for the life of the process (issue #19) — one
+        empty-deque entry per rotating bot address, forever. Eviction does
+        not weaken the budget: an empty window means no live failures, so
+        the next failure starts a fresh streak with the full budget, and
+        the block map is untouched (a blocked address stays blocked).
+        """
+        if not failures:
+            self._failures.pop(ip, None)
+
+    def tracked_clients(self) -> int:
+        """How many addresses currently hold failure history.
+
+        An operational observation port, not a guarantee: bounded growth
+        of this map is the behavior issue #19 asks for, and observing it
+        beats probing private fields in tests.
+        """
+        with self._lock:
+            return len(self._failures)
+
     def _record_failure(self, ip: str, now: float) -> bool:
         """Count one failure; return True when this failure trips the block."""
         with self._lock:
             failures = self._failures[ip]
             self._prune_window(failures, now)
+            self._evict_aged_out(ip, failures)
+            if ip not in self._failures:
+                failures = self._failures[ip]
             failures.append(now)
             if len(failures) >= self.max_failures:
                 self._blocked_until[ip] = now + self.block_seconds
@@ -397,6 +423,20 @@ class AuthFailureRateLimitMiddleware:
                 return 0.0
             return remaining
 
+    def _sweep_aged_out(self, now: float) -> None:
+        """Evict every address whose window has fully aged out.
+
+        Runs before the block check on each request: without it, addresses
+        that simply never came back would keep their empty-deque entries
+        until their next visit (issue #19). Cheap — the map only holds
+        addresses that were counted — and bounded work per request.
+        """
+        cutoff = now - self.window_seconds
+        with self._lock:
+            aged = [ip for ip, f in self._failures.items() if not f or f[-1] <= cutoff]
+            for ip in aged:
+                del self._failures[ip]
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or self.max_failures <= 0:
             await self.app(scope, receive, send)
@@ -411,6 +451,7 @@ class AuthFailureRateLimitMiddleware:
 
         ip = self._client_ip(scope)
         now = self._monotonic()
+        self._sweep_aged_out(now)
         remaining = self._block_remaining(ip, now)
         if remaining > 0:
             body = json.dumps(

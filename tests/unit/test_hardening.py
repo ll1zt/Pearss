@@ -478,3 +478,72 @@ async def test_an_empty_content_length_gets_a_defined_answer() -> None:
     assert reached == [scope], (
         "an empty content-length must not crash the outermost middleware"
     )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_aged_out_addresses_do_not_accumulate_forever() -> None:
+    """Rotating probe addresses leave no permanent trace in the limiter.
+
+    Given the limiter recorded failures from 50 distinct addresses, each
+    inside the budget (none blocked)
+    When every failure ages out of the window and the next request passes
+    through
+    Then the failure map holds no address anymore -- one empty-deque entry
+    per address for the life of the process is the defect (issue #19).
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits, max_failures=3)
+
+    for i in range(50):
+        ip = f"10.0.0.{i}"
+        for _ in range(2):  # 2 < budget 3: counted, never blocked
+            clock.advance(1.0)
+            messages = await _responses(limiter, _scope(ip))
+            assert _status(messages) == 401  # the fake app's deliberate refusal
+    assert limiter.tracked_clients() == 50
+
+    clock.advance(301.0)  # past the 300s window
+    # The aging probe carries no credential: a credential-bearing 401 would
+    # itself be a fresh failure and keep its own address alive. The
+    # credentialless shape is exactly what the limiter refuses to count
+    # (issue #8), so it observes eviction without disturbing it.
+    stale = {
+        "type": "http",
+        "method": "GET",
+        "client": ("10.0.0.0", 5),
+        "headers": [],
+    }
+    messages = await _responses(limiter, stale)
+    assert _status(messages) == 401
+
+    assert limiter.tracked_clients() == 0, (
+        "aged-out address history must be evicted, not kept forever"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_eviction_does_not_weaken_the_budget() -> None:
+    """Evicting aged-out history must not reset a live failure streak.
+
+    Given an address aged out and was evicted
+    When it accumulates a fresh full budget of failures
+    Then it is blocked exactly as a first-time offender would be.
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits, max_failures=3)
+
+    await _responses(limiter, _scope("10.9.0.1"))
+    clock.advance(301.0)
+    await _responses(limiter, _scope("10.9.0.1"))  # sweep runs here
+
+    for _ in range(2):
+        clock.advance(1.0)
+        messages = await _responses(limiter, _scope("10.9.0.1"))
+        assert _status(messages) == 401  # the fake app's deliberate refusal
+    clock.advance(1.0)
+    messages = await _responses(limiter, _scope("10.9.0.1"))
+    assert _status(messages) == 429, "a fresh streak must still trip the block"
