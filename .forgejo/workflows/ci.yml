@@ -40,4 +40,12 @@ jobs:
           NIX_CONFIG: |
             max-jobs = 1
             cores = 2
+          # The host's route to pypi.org is slow and unstable (a HEAD took
+          # 4.8s and one run's downloads burned ~40 of the 60 budget minutes,
+          # getting the job killed -- host-config#12 has the measurements).
+          # TUNA answers in ~0.3s from the same host. Declared here rather
+          # than trusted from the runner environment so the repo's CI needs
+          # no particular runner-side setup; the runner-level default
+          # (host-config#12) still covers repos that don't declare it.
+          UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
         run: nix develop --command just ci
