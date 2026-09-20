@@ -676,8 +676,12 @@ async def test_auth_failures_are_rate_limited(
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test"
     ) as aclient:
-        for _ in range(3):
-            wrong = await aclient.get("/v1/sources")
+        for i in range(3):
+            # The canonical guess: a presented (wrong) token. A headerless
+            # request offers nothing to check and does not count (issue #8).
+            wrong = await aclient.get(
+                "/v1/sources", headers={"Authorization": f"Bearer wrong-{i}"}
+            )
             assert wrong.status_code == 401
 
         blocked = await aclient.get("/v1/sources")
