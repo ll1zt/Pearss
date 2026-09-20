@@ -425,7 +425,12 @@ async def _reject(
     elif status == 503:
         suggestion = f"Set {MCP_TOKEN_ENV} to enable the MCP endpoint."
     else:
-        suggestion = "Check the path; this server serves /mcp."
+        # Issue #7: never name an endpoint here. This branch answers every
+        # unrouted path -- including exact paths inside the funnel's proxied
+        # prefix, reachable unauthenticated from the public internet. Naming
+        # /mcp would advertise the endpoint on every mistyped URL, the exact
+        # disclosure the guard's 404 contract forbids. Keep it generic.
+        suggestion = "Check the path; this endpoint is not served."
     error: dict[str, object] = {
         "code": code,
         "message": message,
