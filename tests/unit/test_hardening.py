@@ -218,6 +218,73 @@ async def test_a_zero_budget_disables_the_limiter() -> None:
 
 
 # --------------------------------------------------------------------------
+# Path exemption: liveness must not be hostage to the limiter
+#
+# Issue #6: the limiter is outermost, so a blocked address got 429 for every
+# path -- including /healthz, whose liveness semantics a 429 silently
+# replaces. For the length of the block (15 min default) the monitor cannot
+# distinguish "app down" from "my source address is banned", and an
+# automated MCP client was locked out alongside the actual abuser. Paths
+# that consume no credentials (/healthz) are meaningless to brute force, so
+# they are exempt from both counting and blocking.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_healthz_stays_reachable_while_the_address_is_blocked() -> None:
+    """A blocked address still gets a real answer on /healthz.
+
+    The block must not turn /healthz into a second 429 surface: the probe's
+    answer (200 alive / 503 degraded) is the only machine-readable liveness
+    signal a monitor has, and it must survive a neighbour's brute-force
+    campaign from the same source address.
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    for _ in range(3):
+        await _responses(limiter, _scope())
+    assert _status(await _responses(limiter, _scope())) == 429
+
+    health = _scope()
+    health["path"] = "/healthz"
+    messages = await _responses(limiter, health)
+    # 3 failures reached the app pre-block; the blocked request did not; the
+    # exempt healthz request did -- that is the fourth and decisive hit.
+    assert len(hits) == 4, "the exempt path must reach the app even while blocked"
+    assert _status(messages) == 401, (
+        "the app's own answer passes through untouched -- the real handler"
+        " decides, not the limiter"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_an_exempt_path_never_consumes_the_failure_budget() -> None:
+    """Requests to exempt paths are not counted as auth failures.
+
+    A 401 from /healthz (auth eventually wired there or a probe misfire) must
+    not push the source address toward a block: the exemption covers the
+    whole limiter for that path, not just the block check.
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    for _ in range(2):
+        health = _scope()
+        health["path"] = "/healthz"
+        await _responses(limiter, health)
+    # Exactly one more failure fits the budget (max_failures=3); the two
+    # healthz 401s must not have counted, so this third real failure alone
+    # does not trip the block yet.
+    assert _status(await _responses(limiter, _scope())) == 401
+    assert _status(await _responses(limiter, _scope())) == 401
+
+
+# --------------------------------------------------------------------------
 # ASGI behaviour
 # --------------------------------------------------------------------------
 
