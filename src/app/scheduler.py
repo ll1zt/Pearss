@@ -59,6 +59,20 @@ from core.scheduling import ScheduleDecision, decide_schedule
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _utcnow() -> datetime:
+    """The completion clock for run bookkeeping.
+
+    A module-level seam rather than a bare datetime.now(UTC) call so tests
+    can drive run durations deterministically (issue #17): the tick's
+    decision clock is injected per call, but the moment a run *ends* is
+    whatever the wall says when the work actually finishes -- and that is
+    what finished_at must record, or every stored run duration reads as
+    zero and a 20-minute fetch looks instantaneous.
+    """
+    return datetime.now(UTC)
+
+
 TENANT = "default"
 DEFAULT_TICK_SECONDS = 60.0
 # How many due sources one tick collects in parallel. Each source runs
@@ -214,18 +228,21 @@ def collect_now(
             correlation_id=correlation_id,
             error_class=ErrorClass.PARSE,
             metrics={"detail": detail},
-            at=_iso(datetime.now(UTC)),
+            at=_iso(_utcnow()),
         )
         session.commit()
         return status, CollectionResult(
             succeeded=False, error_class="parse", detail=detail
         )
 
-    # The caller's clock throughout. Stamping the run with the wall clock while
-    # deciding with an injected one makes the two disagree, and a source whose
-    # run is stamped "later than now" reads as clock skew and is then treated
-    # as due forever.
-    finished = _iso(moment)
+    # The completion moment, not the tick moment: started_at carries the
+    # caller's clock (the tick's, so a run is never stamped later than the
+    # decision that produced it), but finished_at is when the work actually
+    # ended. Stamping both with the tick moment made every stored run
+    # duration zero and reaping-grace reasoning unobservable (issue #17).
+    # The escaped-exception path above reads the same seam, so all three
+    # endings agree.
+    finished = _iso(_utcnow())
     if result.succeeded:
         status = finish_job_run(
             session,
