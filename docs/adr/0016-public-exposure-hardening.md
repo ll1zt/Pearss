@@ -32,7 +32,7 @@ GET 带冻结内容的副作用。
 | 暴露边界 | 默认仅 Reader API 公网；`/v1` 与 `/mcp` 是否暴露由隧道路由规则决定（操作者自选） | 控制面有 token + elicitation + 限速，但默认不暴露；cloudflared 按路径路由 |
 | Swagger 兜底 | `PEARSS_DOCS_ENABLED`（默认开）；公网部署置 0 后 `/docs` `/redoc` `/openapi.json` 一律 404 | 兜底 UI 需求保留在可信网内；公网不送 schema |
 | 审计保留 | **30 天滚动**（`PEARSS_AUDIT_RETENTION_DAYS`，0 = 永久），调度器每小时清理 | 这是对「AuditLog 永久事实源」的原则修订：公网 401 洪水让无界保留变成资源耗尽面。30 天内仍可取证 |
-| 暴力破解 | 应用内按客户端地址限速：401/403 计入滑动窗口（默认 50 次 / 5 分钟），超限 429 + Retry-After 15 分钟；`PEARSS_AUTH_RATELIMIT_MAX=0` 关闭 | 内存计数、单进程，重启即清零——目标是让在线爆破变慢，不是入侵检测 |
+| 暴力破解 | 应用内按客户端地址限速：**携带凭据的** 401/403 计入滑动窗口（默认 50 次 / 5 分钟），超限 429 + Retry-After 15 分钟；`PEARSS_AUTH_RATELIMIT_MAX=0` 关闭 | 内存计数、单进程，重启即清零——目标是让在线爆破变慢，不是入侵检测。「携带凭据的」限定（2026-09-20，issue #8）：无 `Authorization` 头的 401（CORS 预检等）不是「失败尝试」——没有猜就没有失败，不计入预算。`/healthz` 整体豁免限速与阻断（issue #6），liveness 语义不被 429 顶替。全站无 CORS 中间件是有意设计：MCP 面（tailnet-only）不在浏览器场景内，跨源预检本就拿不到 `Access-Control-Allow-Origin` |
 | 请求体 | `PEARSS_MAX_BODY_BYTES`（默认 1MB）超限 413，在应用运行前拒绝 | 基于 Content-Length；无长度的分块体由隧道缓冲兜底 |
 | SSRF | 默认拒绝解析到私网/环回/链路本地地址的抓取目标，重定向逐跳复查且跨宿主剥离凭据头；`PEARSS_ALLOW_PRIVATE_FETCH=1` 关闭（订阅内网源的场景） | 已知局限：先解析后连接存在 DNS rebinding 的 TOCTOU 窗口；威胁模型是写 token 泄露后的内网探测，不是与攻击者竞速解析器 |
 | Reader token 有效期 | **维持永不过期**（风险已知并接受），改密即全端轮换（ADR 0005） | 泄露处置写入 runbook |
