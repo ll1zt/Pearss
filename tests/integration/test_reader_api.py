@@ -16,6 +16,8 @@ import pytest_asyncio
 import sqlalchemy as sa
 from fastapi import FastAPI
 
+from app.middleware import CorrelationAndAuditMiddleware
+
 from .conftest import (
     READER_PASSWORD as TEST_PASSWORD,
 )
@@ -1173,3 +1175,88 @@ async def test_a_non_label_add_is_refused(client: httpx.AsyncClient) -> None:
         data={"T": token, "ac": "edit", "s": feed, "a": "https://example.com/feed"},
     )
     assert response.status_code == 400
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_credentialless_write_probe_is_not_audited(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """Rotating probes of a public write endpoint must not fill the audit table.
+
+    Given the tunnel exposes the Reader API to the public internet
+    And a request POSTs a write endpoint (edit-tag) with no credential at all
+    When the endpoint refuses it with 401
+    Then no audit row is written for it and no audit id is promised -- every
+    credential-free probe is bookkeeping, not evidence (issue #18). The
+    rate limiter deliberately does not count these (issue #8), so without
+    this bound nothing throttles the table's growth.
+    """
+    response = await client.post(
+        "/api/greader.php/reader/api/0/edit-tag",
+        data={"i": "tag:example.com,2026:item-1", "a": READ_TAG},
+    )
+    assert response.status_code == 401
+    assert "x-audit-id" not in response.headers
+
+    CorrelationAndAuditMiddleware.drain_audit()
+    with app.state.session_factory() as session:
+        count = session.execute(sa.text("select count(*) from audit_log")).scalar()
+    assert count == 0, "a credential-free probe must not reach the audit table"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_credentialed_reader_failure_is_still_audited(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """A refused guess still looks like a guess in the data.
+
+    Given the probe presents a form credential that fails validation
+    When the endpoint refuses it with 401
+    Then the audit row exists -- a burst of bad T tokens is the brute-force
+    signature, and that visibility is worth keeping (ADR 0026, narrowing
+    only the credential-free case).
+    """
+    response = await client.post(
+        "/api/greader.php/reader/api/0/edit-tag",
+        data={"T": "wrong-token", "i": "tag:example.com,2026:item-1", "a": READ_TAG},
+    )
+    assert response.status_code == 401
+    audit_id = response.headers.get("x-audit-id")
+    assert audit_id, "a credentialed failure must promise its audit row"
+
+    CorrelationAndAuditMiddleware.drain_audit()
+    with app.state.session_factory() as session:
+        row = session.execute(
+            sa.text("select outcome, actor from audit_log where id = :id"),
+            {"id": audit_id},
+        ).first()
+    assert row is not None, "the promised audit row must exist"
+    assert row[0] == "rejected"
+    assert row[1] == "anonymous"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_empty_clientlogin_probe_is_not_audited(
+    app: FastAPI, client: httpx.AsyncClient
+) -> None:
+    """The public login endpoint probed with an empty form stays unaudited.
+
+    Given the tunnel exposes ClientLogin to the public internet
+    And a request POSTs it with no Email and no Passwd
+    When it refuses the request with 401
+    Then no audit row is written and no audit id is promised -- the empty
+    form offered nothing to check. A filled-in wrong password keeps its
+    row: that is a guess, and a burst of guesses is the brute-force
+    signature worth keeping (issue #18).
+    """
+    response = await client.post("/api/greader.php/accounts/ClientLogin", data={})
+    assert response.status_code == 401
+    assert "x-audit-id" not in response.headers
+
+    CorrelationAndAuditMiddleware.drain_audit()
+    with app.state.session_factory() as session:
+        count = session.execute(sa.text("select count(*) from audit_log")).scalar()
+    assert count == 0, "an empty ClientLogin probe must not reach the audit table"

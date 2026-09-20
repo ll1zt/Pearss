@@ -48,8 +48,31 @@ UNAUDITED_PATHS = frozenset({"/healthz", "/docs", "/openapi.json", "/redoc"})
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Auth failures are audited even though they are reads: a burst of 401s is how
-# a guessed token looks in the data, and that is worth keeping.
+# a guessed token looks in the data, and that is worth keeping. But only when
+# there was a guess: the auth layers mark requests that offered no credential
+# at all (CREDENTIALLESS_AUTH_FAILURE below) -- a probe, not a guess (issue
+# #18). That traffic is exactly what the rate limiter refuses to count (issue
+# #8), and the tunnel's only public surface (the Reader API) receives it in
+# bulk. Auditing every probe filled the fact-source table unboundedly from an
+# unthrottled path. Only the auth layer itself can tell "no credential" from
+# "a wrong credential": a form POST without T is wire-identical to one with a
+# bad T as far as headers go.
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
+
+# Scope key the auth layers set when they refused a request that presented no
+# credential whatsoever. Shape-level detection (header/form sniffing) cannot
+# do this: Reader write probes are form POSTs, so the content-type matches a
+# real ClientLogin either way. Marking at the point of refusal keeps the
+# definition next to the check that has the evidence.
+CREDENTIALLESS_AUTH_FAILURE = "pearss.credentialless-auth-failure"
+
+# The audit queue's bound. One worker commits rows at database speed; a flood
+# of audited requests must not grow the queue without limit (each entry holds
+# the whole request's header snapshot). When the bound is hit the row is
+# dropped with an error-level journal entry -- overload semantics, not
+# silent loss: an x-audit-id whose row was dropped still names the gap in
+# the journal by correlation id.
+AUDIT_QUEUE_BOUND = 1000
 
 ScopeState = MutableMapping[str, Any]
 
@@ -58,10 +81,14 @@ def _should_audit(scope: Scope, status: int) -> bool:
     path = scope.get("path", "")
     if path in UNAUDITED_PATHS or path.startswith("/docs"):
         return False
+    # Auth failures are decided by the auth layer's own evidence first,
+    # whatever the method: a 401 means the operation never ran, so the only
+    # question is whether a guess was attempted. A request that offered no
+    # credential at all is a probe, not a refused write (issue #18).
+    if status in AUTH_FAILURE_STATUSES:
+        return not scope.get(CREDENTIALLESS_AUTH_FAILURE)
     method = scope.get("method", "")
-    if method in WRITE_METHODS:
-        return True
-    return status in AUTH_FAILURE_STATUSES
+    return method in WRITE_METHODS
 
 
 def _actor(scope: ScopeState) -> str:
@@ -95,6 +122,34 @@ class CorrelationAndAuditMiddleware:
         self.app = app
         self.session_factory = session_factory
 
+    def _submit(
+        self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
+    ) -> None:
+        """Hand the audit write to the worker thread and return immediately.
+
+        Fire-and-forget is the deliberate contract: the caller's response is
+        already on the wire, so waiting here would only couple its completion
+        to database contention the request did not cause. Completion is
+        observable through the audit table itself; failure through the
+        error-level journal entry the worker emits.
+
+        The queue is bounded (issue #18): under a flood of audited requests
+        the single worker cannot keep up and an unbounded queue grows the
+        process without limit -- each entry holds the request's header
+        snapshot. At capacity the row is dropped and the gap is logged at
+        error level with the correlation id, so the overload is observable
+        rather than silent. Drops prefer the newest request (the flood's
+        latest probe), never a reordering of already-queued rows.
+        """
+        if self._EXECUTOR._work_queue.qsize() >= AUDIT_QUEUE_BOUND:
+            LOGGER.error(
+                "audit queue full (%d); dropping the audit row for %s",
+                AUDIT_QUEUE_BOUND,
+                correlation_id,
+            )
+            return
+        self._EXECUTOR.submit(self._record, scope, status, correlation_id, audit_id)
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -111,7 +166,6 @@ class CorrelationAndAuditMiddleware:
         # correlation id: that id may echo a client-supplied X-Request-ID, and a
         # client that reused one would collide on this primary key.
         audit_id = f"audit-{secrets.token_hex(8)}"
-        will_audit = _should_audit(scope, 200)
 
         status = 500
         sent = False
@@ -124,12 +178,13 @@ class CorrelationAndAuditMiddleware:
                 message["headers"] = _with_header(
                     message["headers"], b"x-request-id", correlation_id
                 )
-                # A write's audit id, so an agent can name the record it caused.
-                # On the wire it is only meaningful for the rows we actually
-                # write; the header is set when the method is auditable rather
-                # than when the status lands, because the status is not known
-                # until here and a refused write (4xx) is still audited.
-                if will_audit or status >= 400:
+                # The audit id is promised exactly when the row will exist:
+                # the status is known here (response.start), so the header
+                # and the audit decision cannot disagree. A credential-free
+                # probe gets no x-audit-id, because no row is coming (issue
+                # #18) -- a promised id for a dropped row would send an
+                # operator looking for evidence that was never written.
+                if _should_audit(scope, status):
                     message["headers"] = _with_header(
                         message["headers"], b"x-audit-id", audit_id
                     )
@@ -147,19 +202,6 @@ class CorrelationAndAuditMiddleware:
             return
         if _should_audit(scope, status):
             self._submit(scope, status, correlation_id, audit_id)
-
-    def _submit(
-        self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
-    ) -> None:
-        """Hand the audit write to the worker thread and return immediately.
-
-        Fire-and-forget is the deliberate contract: the caller's response is
-        already on the wire, so waiting here would only couple its completion
-        to database contention the request did not cause. Completion is
-        observable through the audit table itself; failure through the
-        error-level journal entry the worker emits.
-        """
-        self._EXECUTOR.submit(self._record, scope, status, correlation_id, audit_id)
 
     @classmethod
     def drain_audit(cls, timeout: float = 10.0) -> bool:
