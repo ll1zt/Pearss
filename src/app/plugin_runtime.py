@@ -502,8 +502,27 @@ class PluginChild:
                             exc.error_class.value, exc.detail
                         )
                     else:
+                        # Issue #3: name the step and the target host. httpx
+                        # exceptions built without a message render as an
+                        # empty str() (the 15h outage showed as bare
+                        # "ConnectTimeout: "), and the URL was in hand the
+                        # whole time -- without it, three hosts share one
+                        # detail and the operator cannot tell which egress
+                        # died. Host:port only: the path/query can carry
+                        # credentials (CookieCloud's uuid), same red line
+                        # _redact() holds.
+                        from urllib.parse import urlsplit
+
+                        host = urlsplit(str(request.url)).netloc
+                        message = str(exc)
+                        type_name = type(exc).__name__
+                        # An empty str() must not leave a dangling colon (it
+                        # reads as "truncated" when nothing was ever there):
+                        # the bare type name is the honest fallback.
+                        detail = f"{type_name}: {message}" if message else type_name
                         outcome["error"] = protocol.error_result(
-                            "network", f"{type(exc).__name__}: {exc}"
+                            "network",
+                            f"{detail} (egress to {host})",
                         )
 
             budget = remaining if remaining is not None and remaining > 0 else None
