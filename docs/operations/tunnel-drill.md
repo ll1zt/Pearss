@@ -91,6 +91,12 @@ done
 curl -s https://pearss.example.ts.net:10000/v1/sources | head -3
 # 期望：nginx 的 404 页，无 JSON、无版本号、无 "pearss"
 
+# 前缀内的精确路径（issue #7 的空隙）：nginx 按前缀转发 /api/greader.php，
+# 所以精确路径 /api/greader.php 本身也会落到应用，由 MCPPathGuard 兜底 404。
+curl -s https://pearss.example.ts.net:10000/api/greader.php | head -3
+# 期望：应用 404 JSON 可以接受，但响应体（整包，含 suggestion）不得包含
+#       "mcp" 或任何端点名/环境变量名——否则等于向公网广播 MCP 端点存在。
+
 # 确认响应头不泄露
 curl -sI https://pearss.example.ts.net:10000/api/greader.php/reader/api/0/token | head -8
 # 期望：无 Server 版本细节，有 nosniff

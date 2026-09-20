@@ -316,12 +316,22 @@ def test_a_404_does_not_advertise_the_mcp_endpoint(base_url: str) -> None:
     auth challenge or a token suggestion: neither is why the path is missing,
     and both would let any mistyped URL discover that an MCP endpoint exists
     and name the variable that unlocks it.
+
+    The reply must also not name the endpoint itself. Issue #7: the fallback
+    suggestion read "this server serves /mcp", so every unrouted path inside
+    the proxied prefix (e.g. the exact /api/greader.php on the funnel) told
+    the public internet that an MCP endpoint exists -- the opposite of the
+    "404 must not disclose" contract the guard's own docstring states.
     """
     response = httpx.get(f"{base_url}/nope")
     assert response.status_code == 404
     assert "www-authenticate" not in {k.lower() for k in response.headers}
     suggestion = response.json()["error"]["suggestion"]
     assert MCP_TOKEN_ENV not in suggestion
+    # No endpoint name, no env-variable name, in the whole body (AC-1):
+    body = response.text.lower()
+    assert "mcp" not in body
+    assert "pearss_" not in body
 
 
 @pytest.mark.integration
