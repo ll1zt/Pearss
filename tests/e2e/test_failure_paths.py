@@ -532,7 +532,12 @@ async def test_the_same_key_with_a_different_body_does_not_create_a_second_sourc
     with session_factory() as db:
         stored = db.execute(sa.text("select id from source")).scalar_one()
     assert stored == source_id
-    assert second.status_code in (200, 201, 409, 422), second.text
+    # The mismatch policy is pinned (matching the integration contract in
+    # test_sources_api): a key bound to a different request is a 409, not a
+    # silent replay or a validation error -- a caller can distinguish a
+    # deliberate refusal from either.
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["error"]["code"] == "idempotency_key_conflict"
 
 
 async def test_a_write_without_a_key_is_refused_rather_than_executed(

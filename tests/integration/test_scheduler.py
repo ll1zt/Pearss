@@ -33,7 +33,7 @@ from adapters.repository import (
 )
 from adapters.timestamps import fixed_width_utc
 from app.main import create_engine_for
-from app.scheduler import TickReport, collect_now, run_tick
+from app.scheduler import TickReport, collect_now, evaluate_source, run_tick
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
 from core.models import schedule_policy_from_json, schedule_policy_to_json
@@ -1141,4 +1141,110 @@ def test_a_run_records_its_real_duration(
     # 12:01:30, not the claim moment 12:00:00.
     assert row[1] == "2026-06-01T12:01:30.000000Z", (
         f"finished_at must record when the work ended, got {row[1]}"
+    )
+
+
+def _seed_failure_streak(
+    session: Session,
+    *,
+    source_id: str,
+    error_class: ErrorClass,
+    count: int = 3,
+) -> None:
+    """Seed `count` resolved failed runs carrying the given classification.
+
+    Started an hour before NOW so the source is due on cadence whatever the
+    interval math concludes; the streak is what the retry table keys on.
+    """
+    job_id = ensure_collect_job(
+        session,
+        source_id=source_id,
+        tenant_id="default",
+        at="2026-06-01T11:00:00.000000Z",
+    )
+    for i in range(count):
+        run_id = f"r-{error_class.value}-{i}"
+        create_job_run(
+            session, run_id=run_id, job_id=job_id, correlation_id=f"c-{i}", at="x"
+        )
+        claim_job_run(session, run_id=run_id, at="2026-06-01T11:00:00.000000Z")
+        finish_job_run(
+            session,
+            run_id=run_id,
+            event=JobRunEvent.FAIL,
+            correlation_id=f"c-{i}",
+            error_class=error_class,
+            at="2026-06-01T11:00:05.000000Z",
+        )
+    session.commit()
+
+
+@pytest.mark.integration
+def test_a_blocked_streak_probes_at_the_normal_pace(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The retry table must reach the interval through the real session.
+
+    Given a source with three resolved failures classified `blocked` -- a
+    non-retryable class per the error taxonomy
+    When the scheduler evaluates the source (evaluate_source, the real
+    composition of the streak query and the policy math)
+    Then the next interval is exactly the configured one: the service
+    already refused us, and backoff would only delay the probe that
+    notices the fix (issue #5's wiring, pinned end to end). The multiplier
+    is 1.0 here with no jitter, so the assertion is exact.
+    """
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+        _seed_failure_streak(session, source_id="s1", error_class=ErrorClass.BLOCKED)
+
+        decision = evaluate_source(
+            session,
+            source_id="s1",
+            policy_json='{"type": "fixed", "interval": "30m"}',
+            now=NOW,
+        )
+        session.commit()
+
+    assert decision.due is True  # elapsed (1h) exceeds the 30m cadence
+    assert decision.interval_seconds == 1800.0, (
+        "a blocked streak must not back off -- the wiring must reach the "
+        "interval, not die in a unit test"
+    )
+
+
+@pytest.mark.integration
+def test_a_network_streak_backs_off_within_the_jitter_band(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Retryable failures keep exponential backoff even with real jitter.
+
+    Given three resolved failures classified `network` (retryable)
+    When the scheduler evaluates the source with its production rng
+    Then the interval exceeds the configured one by at least the
+    deterministic backoff floor (2^3 x 0.8) and stays inside the jitter
+    ceiling (2^3 x 1.2): same-tick failures spread out instead of
+    spiking the upstream that just failed.
+    """
+    with session_factory() as session:
+        add_source(session, source_id="s2", policy={"type": "fixed", "interval": "30m"})
+        _seed_failure_streak(session, source_id="s2", error_class=ErrorClass.NETWORK)
+
+        decision = evaluate_source(
+            session,
+            source_id="s2",
+            policy_json='{"type": "fixed", "interval": "30m"}',
+            now=NOW,
+        )
+        session.commit()
+
+    assert decision.due is False, "backoff means the source is not due yet"
+    assert 1800.0 * 8 * 0.8 <= decision.interval_seconds <= 1800.0 * 8 * 1.2, (
+        decision.interval_seconds
+    )
+    # The next attempt is anchored on the last attempt's start (the seeded
+    # streak began at 11:00:00) plus the backed-off interval, not on the
+    # wall clock (issue #17's anchor rule).
+    assert decision.next_due_at == NOW.replace(hour=11) + timedelta(
+        seconds=decision.interval_seconds
     )
