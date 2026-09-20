@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import secrets
 import time
 from collections.abc import Callable
@@ -41,6 +42,7 @@ from adapters.repository import (
     ensure_collect_job,
     finish_job_run,
     last_collect_at,
+    last_failure_error_class,
     prune_audit_log,
     reap_orphaned_runs,
     update_gaps_for_source,
@@ -114,6 +116,13 @@ def evaluate_source(
         last_fetch_at=last_collect_at(session, job_id=job_id),
         observed_update_gaps=update_gaps_for_source(session, source_id=source_id),
         consecutive_failures=consecutive_failures(session, job_id=job_id),
+        # Issue #5: the retry table keys on the latest failure's class --
+        # non-retryable ones (blocked/auth/structure_changed) probe at the
+        # normal pace instead of backing off. Jitter spreads same-tick
+        # retries; per-decision rng, no persistence needed. S311 is for
+        # crypto contexts; schedule jitter is the opposite of a secret.
+        error_class=last_failure_error_class(session, job_id=job_id),
+        rng=random.Random(),  # noqa: S311 - jitter, not cryptography
         now=now,
     )
 
