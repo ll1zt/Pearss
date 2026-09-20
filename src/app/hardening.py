@@ -45,6 +45,13 @@ _TOO_LARGE = 413
 _TOO_MANY = 429
 _AUTH_FAILURES = frozenset({401, 403})
 
+# Paths exempt from the failure limiter (issue #6). A liveness probe carries
+# no credentials, so there is nothing to brute force on it -- but the limiter
+# is the outermost middleware, so without an exemption a blocked address got
+# 429 here too, replacing /healthz's liveness answer with the limiter's and
+# blinding the monitor for the length of the block (15 min by default).
+DEFAULT_EXEMPT_PATHS: Final = frozenset({"/healthz"})
+
 
 def env_int(name: str, default: int) -> int:
     """Read an integer knob from the environment, falling back on garbage."""
@@ -290,11 +297,18 @@ class AuthFailureRateLimitMiddleware:
         window_seconds: float = DEFAULT_FAILURE_WINDOW_SECONDS,
         block_seconds: float = DEFAULT_FAILURE_BLOCK_SECONDS,
         monotonic: Callable[[], float] | None = None,
+        exempt_paths: frozenset[str] | None = None,
     ) -> None:
         self.app = app
         self.max_failures = max_failures
         self.window_seconds = window_seconds
         self.block_seconds = block_seconds
+        # Credential-free paths pass through untouched: never counted, never
+        # blocked. Only liveness belongs here -- exempting an authenticated
+        # path would hand brute force a budget-free route.
+        self._exempt_paths = (
+            DEFAULT_EXEMPT_PATHS if exempt_paths is None else exempt_paths
+        )
         # Injected so the window arithmetic can be driven deterministically in
         # tests: what is under test is "N failures within the window block the
         # address", and observing that by sleeping out a real window is not a
@@ -335,6 +349,13 @@ class AuthFailureRateLimitMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or self.max_failures <= 0:
+            await self.app(scope, receive, send)
+            return
+
+        # Exempt paths bypass the limiter entirely -- before the block check,
+        # so a liveness probe answers while its source address is blocked,
+        # and before the accounting, so it never spends the budget either.
+        if str(scope.get("path", "")) in self._exempt_paths:
             await self.app(scope, receive, send)
             return
 
