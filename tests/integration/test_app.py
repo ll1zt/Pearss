@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 from collections.abc import AsyncIterator, Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from uuid import uuid4
 
@@ -24,10 +26,13 @@ from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.http import FetchError
 from adapters.raw_payload import RawPayload
 from adapters.repository import store_item
 from app.main import create_app
 from app.middleware import CorrelationAndAuditMiddleware
+from app.plugin_runtime import HostClientTransport
+from core.enums import ErrorClass
 from core.normalize import normalize
 from plugins.collectors.rss import collector as rss
 
@@ -741,19 +746,69 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
     collector_registry._registry()  # build children (they spawn lazily)
     # Run the lifespan by hand: ASGITransport does not enter it, and this
     # test needs the wiring that happens inside, not the routes.
-    from app.plugin_runtime import HostClientTransport
 
-    async with app.router.lifespan_context(app):
-        for name in ("telegram", "twitter", "zhihu", "zsxq"):
-            child = collector_registry._SANDBOX_CHILDREN[name]
-            transport = child._http_transport
-            assert isinstance(transport, HostClientTransport), (
-                f"sandboxed collector {name!r} must egress through a "
-                "HostClientTransport"
+    # A real loopback origin: the assertions below observe bytes arriving
+    # and guards firing, not object identity between private fields.
+    seen: list[str] = []
+
+    class Origin(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.path)
+            body = b"sandboxed egress reached the origin"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Origin)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        origin_url = f"http://127.0.0.1:{server.server_port}/feed"
+        monkeypatch.setenv("PEARSS_ALLOW_PRIVATE_FETCH", "1")
+        async with app.router.lifespan_context(app):
+            for name in ("telegram", "twitter", "zhihu", "zsxq"):
+                child = collector_registry._SANDBOX_CHILDREN[name]
+                transport = child._http_transport
+                assert isinstance(transport, HostClientTransport), (
+                    f"sandboxed collector {name!r} must egress through a "
+                    "HostClientTransport"
+                )
+                # The wiring must actually carry traffic: a reverse call
+                # through the injected transport reaches the real origin
+                # and its body comes back (old B02 identity assertion).
+                response = transport.handle_request(httpx.Request("GET", origin_url))
+                assert response.status_code == 200, (
+                    f"{name!r}'s egress must reach the wired transport"
+                )
+                assert b"sandboxed egress reached the origin" in response.content
+            assert seen == ["/feed"] * 4
+
+            # The SSRF guard covers sandboxed egress: without the
+            # private-fetch exemption the same destination is refused
+            # before the host sends anything (ADR 0016 via the transport).
+            # The hermetic-DNS fixture answers every name with a public
+            # address, and the guard's classification is exactly what this
+            # half observes -- so resolve the loopback host for real (the
+            # pattern the SSRF-specific suites use).
+            from adapters import http as pearss_http
+
+            monkeypatch.setattr(
+                pearss_http,
+                "resolve_host",
+                lambda host, *, deadline=None: {"127.0.0.1"},
             )
-            assert transport._client is app.state.http_client, (
-                f"sandboxed collector {name!r} must wrap the host's shared client"
-            )
+            monkeypatch.delenv("PEARSS_ALLOW_PRIVATE_FETCH", raising=False)
+            with pytest.raises(FetchError) as refused:
+                transport.handle_request(httpx.Request("GET", origin_url))
+            assert refused.value.error_class == ErrorClass.BLOCKED
+            assert len(seen) == 4, "a refused destination must not be contacted"
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.integration
