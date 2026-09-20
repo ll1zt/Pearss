@@ -1,5 +1,208 @@
 # Pearss deep review — problems to fix
 
+## Review 2026-09-20 · Baseline `c25d301` (post issue-#5 merge)
+
+Fresh deep review of current main: correctness, behavior-first test audit,
+maintainability. All findings below were verified against `c25d301`; the
+reproduction commands/locations are cited per finding. The 2026-09-17 report
+and its repair ledger are preserved below this section — most A-series items
+from that pass are confirmed fixed on this baseline (TODO.md gone, audit off
+the event loop, coverage gate wired into `just ci` incl. e2e, idempotency 409
+contract pinned). This section lists only what is still true now.
+
+**Filed as issues (2026-09-21):** R1→#16, R2→#17, R3→#18, R4→#19, R5→#20,
+R6→#21.
+
+### R1 · P1 · A malformed Content-Length crashes the outermost middleware
+
+**Evidence: reproduced** (`content-length: abc` → `ValueError: invalid
+literal for int() with base 10: b'abc'` escapes `BodySizeLimitMiddleware`).
+
+`src/app/hardening.py` `BodySizeLimitMiddleware.__call__` does
+`int(value)` on the raw header with no guard. The middleware is the
+outermost layer (`main.py`), so the exception is not a route 500 — it
+escapes before any error handling exists. An unauthenticated request with
+one junk header kills the request with a connection-level failure instead
+of a 4xx. Empty value and non-numeric values both reproduce; a huge but
+numeric value correctly yields 413.
+
+**Repair:** parse defensively — non-integer, empty, or overflow values
+must not be priced (pass through and let the framework/uvicorn answer, or
+reject 413/400 deliberately). Add the malformed-header case to the
+middleware tests (they currently cover only numeric values).
+
+**Acceptance:** Given a POST with `content-length: abc` (and separately an
+empty value), when it hits the running app, the client receives a defined
+4xx (or the framework's own defined rejection) and the journal shows no
+traceback from the hardening layer.
+
+### R2 · P2 · `collect_now` stamps `finished_at` with the tick moment
+
+**Evidence: source-inspected + test-audit; no test pins the production
+timestamp choice.**
+
+`src/app/scheduler.py` `collect_now`: `moment = now or datetime.now(UTC)`
+is taken once, `claim_job_run(..., at=_iso(moment))` stamps `started_at`,
+and after collection `finished = _iso(moment)` — the *same instant* —
+stamps `finish_job_run`. Every scheduler-produced run therefore has
+`finished_at == started_at`: stored duration is always zero and
+`finished_at` lies about when the run actually ended (a 20-minute fetch
+reads as instant). The escaped-exception path in the same function
+correctly uses `datetime.now(UTC)`, so the two paths disagree by design,
+not by choice.
+
+The suite cannot see this: `tests/integration/test_scheduler.py` pins
+`finished_at` only on *direct* `finish_job_run` calls with explicit `at=`
+arguments (12:00:01 → 12:00:02, a good pin of the state machine but not of
+the caller's clock choice). No test drives `collect_now` to completion and
+asserts the recorded finish time reflects elapsed time.
+
+Consequences: run-duration metrics and any future "how long did collections
+take" query are garbage; reaping grace reasoning ("routine collection is one
+page… finishes far inside an hour") is unobservable in data.
+
+**Repair:** stamp `finished_at` at completion time (`datetime.now(UTC)` —
+or a now injected per call site for tests) on both success and failure
+paths; keep `started_at` at claim time. Pin the behavior with a
+collect_now-level test using an injected/injectable clock where the finish
+time differs from the claim time and is asserted exactly.
+
+**Acceptance:** Given a collection whose work takes measurable time (real
+or gated), when the run finishes, `finished_at > started_at` by the
+observed work duration, on success, classified failure, and escaped-raise
+paths alike.
+
+### R3 · P2 · Unauthenticated write attempts are audited without bound, onto an unbounded queue
+
+**Evidence: source-inspected; two compounding halves.**
+
+1. `src/app/middleware.py` `_should_audit`: any POST/PUT/PATCH/DELETE is
+   audited regardless of outcome — including 401s produced by
+   `EarlyAuthMiddleware` for requests that never presented a credential.
+   On the public deployment (tunnel routes the Reader API; Reader writes
+   are form POSTs), every unauthenticated probe of a write endpoint
+   generates an audit row. ADR 0016 names audit flooding as the reason
+   retention exists; ADR 0026 pins coverage to middleware position but no
+   bounded-denial policy exists for the no-credential case (the rate
+   limiter deliberately does not count credential-free requests, issue
+   #8 — so nothing throttles this path).
+2. The audit write is fire-and-forget onto
+   `ThreadPoolExecutor(max_workers=1)` with an **unbounded** queue.
+   Sustained write-probe traffic enqueues rows faster than the single
+   worker can commit them under SQLite writer contention; memory grows
+   without bound and everything still in the queue is lost on process
+   death (rows the response already promised via `x-audit-id`).
+
+**Repair:** decide the bounded perimeter policy explicitly (ADR-level):
+either stop auditing credential-free refusals (align with the rate
+limiter's credential predicate) or sample/aggregate them; and bound the
+audit queue (maxsize + defined overload semantics — drop with a warning
+counter, or block briefly). Document what `x-audit-id` guarantees under
+overload.
+
+**Acceptance:** Given a flood of unauthenticated POSTs from one address,
+memory stays bounded (queue cap or non-audit decision), the API stays
+responsive, and the audit table's growth rate is bounded by policy; the
+journal records the overload decision.
+
+### R4 · P2 · Rate limiter never evicts per-IP failure history
+
+**Evidence: source-inspected.** `src/app/hardening.py`
+`AuthFailureRateLimitMiddleware`: `_blocked_until` entries are popped on
+expiry, but `_failures` (a `defaultdict(deque)` keyed by client IP) has no
+eviction path for the dict itself — a deque only shrinks to empty, the key
+stays forever. A public deployment probed from rotating addresses (bots,
+CGNAT pools) accumulates one empty-deque entry per address for the life of
+the process. Unbounded in the same direction as R3, smaller magnitude.
+
+**Repair:** evict empty deques when the window prunes them (in
+`_record_failure`/`_prune_window` after pruning, delete the key when
+capacity or a periodic sweep dictates).
+
+**Acceptance:** a long-running deterministic test driving N distinct
+addresses through failures and window expiry observes the failure map
+to return to (near) empty.
+
+### R5 · P2 · Issue-#5 retry wiring has no behavioral integration test; two stale test-debt items remain
+
+**Evidence: grep + file inspection.**
+
+- The pure functions (`core/scheduling.py`, 31 unit tests) and the repo
+  query `last_failure_error_class` are each tested in isolation, but the
+  **composition** is untested: no test exercises
+  `evaluate_source`/`decide_schedule` through a real session where a
+  stored failure streak with `error_class='blocked'` yields a normal-pace
+  next run (and `network` yields backoff+jitter). A regression that drops
+  the `error_class=`/`rng=` arguments from `evaluate_source` (silently
+  re-disabling issue #5's fix) leaves the suite green.
+- Old B02 residue: `tests/integration/test_app.py:754` still asserts
+  `transport._client is app.state.http_client` — object identity on
+  private fields; it proves wiring, not safe egress.
+- Old B03 residue: `tests/e2e/test_failure_paths.py:535` still accepts
+  `second.status_code in (200, 201, 409, 422)` while the same file now
+  pins a 409 contract at line 180 — the sequential-replay contract stays
+  formally undefined.
+
+**Repair:** add one integration scenario per wiring promise (blocked
+streak → normal pace; network streak → backoff within jitter bounds,
+seeded rng) driven through `evaluate_source` on a migrated DB; replace the
+B02 identity assertion with a proxied-fetch behavior test (old A05
+boundary scenarios already exist — point the assertion at outcomes);
+pin the sequential-replay status to the documented contract.
+
+**Acceptance:** removing `error_class=` from `evaluate_source` fails the
+new integration test with a reason naming the wiring; the B02 test passes
+after deleting the private-field assertion; B03 asserts one exact status.
+
+### R6 · P3 · Import-time application construction and heavyweight deploy unit
+
+**Evidence: source-inspected.**
+
+- `src/app/main.py` ends with module-level `app = create_app()`: importing
+  the module builds an engine, creates the database directory, and wires
+  the full middleware stack as an import side effect. Harmless today
+  (SQLite connect is lazy) but it makes `import app.main` non-free for
+  tools, tests, and future workers; any move to per-tenant or
+  multi-process deployment multiplies the surprise.
+- `deploy/pearss.service` starts the app via `nix develop --command just
+  serve` — every (re)start re-evaluates the flake and rebuilds the dev
+  shell. Documented tradeoff in the unit, but it couples production
+  availability to the network and the store at restart time (the same
+  restart path that R2's data would diagnose).
+
+**Repair:** keep `app` only under a `if __name__`/uvicorn-factory entry
+(`uvicorn app.main:create_app --factory`), or gate the module-level
+instance behind an explicit flag; for the unit, prefer the packaged
+`nix/module.nix` path (package/bin/pearss, no nix develop) once validated.
+
+### Test audit summary (behavior-first)
+
+Still strong: zero mock-call assertions (enforced by structure guards),
+real migrated SQLite, real-socket E2E journeys, red-before-green culture
+with injection checks, coverage-diff gate incl. e2e, deterministic clocks
+injected rather than slept. The gaps are concentration, not prevalence:
+R2 (caller clock choice invisible), R5 (composition layer untested;
+two residue assertions), plus `drain_audit` reaching into
+`_EXECUTOR._work_queue` privates (test-coupling smell — replace with an
+executor-side completion signal or a bounded wait on a public hook).
+
+### Maintainability outlook
+
+Not rotting. Gates are real and layered (ruff/mypy strict/lint-imports/
+coverage-diff/migration roundtrip/structure guards), docs are synced at
+the point of change (error-taxonomy, ADRs), commits are atomic with
+evidence. Remaining debt is the same concentrated application-layer shape
+the 2026-09-17 report named and is still open: plugin lifecycle in module
+globals (C04 — tests still read `collector_registry._SANDBOX_CHILDREN`),
+fat route modules (C05 — reader_routes 1269 / sources_routes 908 lines),
+and now the R3/R4 memory-bound pair, which matters more the longer the
+tunnel exposure runs. Fix R1 before the next public-exposure change; do
+R3/R4 together; R5 can ride along with the next scheduling change.
+
+---
+
+## Historical: 2026-09-17 review (baseline `8502cc5`)
+
 Reviewed: 2026-09-17 · Baseline: `8502cc5` · Scope: correctness, behavior-first testing, and long-term maintainability.
 
 ## Repair ledger — 2026-09-17
