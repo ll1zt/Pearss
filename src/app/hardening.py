@@ -322,6 +322,35 @@ class AuthFailureRateLimitMiddleware:
         client = scope.get("client")
         return str(client[0]) if client else ""
 
+    @staticmethod
+    def _presented_credential(scope: Scope) -> bool:
+        """Whether the request plausibly submitted a credential for checking.
+
+        Issue #8: a 401 answer to a request that never offered anything to
+        check is not a failed guess -- there was no guess. CORS preflights
+        (OPTIONS, no Authorization) get 401 from the MCP auth layer and used
+        to burn the brute-force budget, banning a source that never tried a
+        credential.
+
+        Two shapes carry a credential: an Authorization header (Core API,
+        /mcp, Reader bearer paths) and a form POST -- Reader's ClientLogin
+        presents Email/Passwd in the body, not a header, so a header-only
+        check would silently disarm the public face's main brute-force
+        defense. A JSON POST with no header (an unauthenticated MCP call)
+        offers nothing to check and stays uncounted.
+        """
+        headers = scope.get("headers") or []
+        content_type = b""
+        for name, value in headers:
+            lower = name.lower()
+            if lower == b"authorization" and value.strip():
+                return True
+            if lower == b"content-type":
+                content_type = value
+        if str(scope.get("method", "")).upper() == "POST":
+            return b"application/x-www-form-urlencoded" in content_type.lower()
+        return False
+
     def _prune_window(self, failures: deque[float], now: float) -> None:
         cutoff = now - self.window_seconds
         while failures and failures[0] <= cutoff:
@@ -399,7 +428,11 @@ class AuthFailureRateLimitMiddleware:
 
         await self.app(scope, receive, send_with_status)
 
-        if status_holder["status"] in _AUTH_FAILURES and self._record_failure(ip, now):
+        if (
+            status_holder["status"] in _AUTH_FAILURES
+            and self._presented_credential(scope)
+            and self._record_failure(ip, now)
+        ):
             LOGGER.warning(
                 "auth failures from %s exceeded %d in %ds; blocking for %ds",
                 ip,

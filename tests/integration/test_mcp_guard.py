@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -57,8 +58,10 @@ MCP_HEADERS = {
 }
 
 
-@pytest.fixture
-def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+@contextmanager
+def _built_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str
+) -> Iterator[Any]:
     url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "guard.db")))
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
@@ -70,14 +73,33 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv(MCP_TOKEN_ENV, MCP_TOKEN)
     monkeypatch.delenv(MCP_ALLOWED_HOSTS_ENV, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     application = create_app(sessionmaker(engine, expire_on_commit=False))
     yield application
     engine.dispose()
 
 
 @pytest.fixture
-def base_url(app: Any) -> Iterator[str]:
-    server = Server(UvicornConfig(app, host="127.0.0.1", port=0, log_level="critical"))
+def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    with _built_app(tmp_path, monkeypatch) as application:
+        yield application
+
+
+@pytest.fixture
+def tight_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """The same app with a 3-failure brute-force budget (issue #8 scenarios)."""
+    with _built_app(
+        tmp_path, monkeypatch, **{"PEARSS_AUTH_RATELIMIT_MAX": "3"}
+    ) as application:
+        yield application
+
+
+@contextmanager
+def _served(application: Any) -> Iterator[str]:
+    server = Server(
+        UvicornConfig(application, host="127.0.0.1", port=0, log_level="critical")
+    )
 
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -93,6 +115,18 @@ def base_url(app: Any) -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+@pytest.fixture
+def base_url(app: Any) -> Iterator[str]:
+    with _served(app) as url:
+        yield url
+
+
+@pytest.fixture
+def tight_url(tight_app: Any) -> Iterator[str]:
+    with _served(tight_app) as url:
+        yield url
 
 
 def post_mcp(base: str, token: str | None = None) -> httpx.Response:
@@ -409,3 +443,58 @@ def test_the_real_endpoint_still_answers_without_a_token(base_url: str) -> None:
     )
     assert response.status_code == 401, response.text
     assert "www-authenticate" in {k.lower() for k in response.headers}
+
+
+# --------------------------------------------------------------------------
+# The rate-limit budget counts credential-bearing attempts only (issue #8)
+#
+# The MCP auth layer answers 401 for every unauthenticated request, and the
+# limiter sits outermost counting those 401s. A CORS preflight (OPTIONS, no
+# Authorization) never submits a credential, yet each such request used to
+# spend one of the 50 failures per 5 minutes -- banning a source that never
+# guessed anything. Driven here through the real server with a tight
+# (3-failure) budget so the difference between counted and not-counted is
+# observable in a couple of requests.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_credentialless_requests_never_trip_the_budget(tight_url: str) -> None:
+    """N token-less OPTIONS/POST requests must all pass through, never 429.
+
+    Nothing was guessed, so nothing counts: 10 requests against a budget of
+    3 would have blocked the source four times over under the old accounting.
+    """
+    for i in range(10):
+        preflight = httpx.options(f"{tight_url}/mcp", timeout=10)
+        assert preflight.status_code == 401, (i, preflight.status_code)
+        bare = httpx.post(
+            f"{tight_url}/mcp", json=INITIALIZE, headers=MCP_HEADERS, timeout=10
+        )
+        assert bare.status_code == 401, (i, bare.status_code)
+
+
+@pytest.mark.integration
+def test_wrong_token_still_exhausts_the_budget_and_blocks(tight_url: str) -> None:
+    """Presented-but-wrong tokens keep counting; the block arrives on schedule.
+
+    The credentialless carve-out must not become an amnesty: the fourth
+    request with a real (wrong) token is refused by the limiter with 429
+    before the auth layer ever sees it.
+    """
+    for i in range(3):
+        response = httpx.post(
+            f"{tight_url}/mcp",
+            json=INITIALIZE,
+            headers={**MCP_HEADERS, "authorization": f"Bearer wrong-{i}"},
+            timeout=10,
+        )
+        assert response.status_code == 401, (i, response.status_code)
+    blocked = httpx.post(
+        f"{tight_url}/mcp",
+        json=INITIALIZE,
+        headers={**MCP_HEADERS, "authorization": "Bearer wrong-3"},
+        timeout=10,
+    )
+    assert blocked.status_code == 429, blocked.text
+    assert "retry-after" in {k.lower() for k in blocked.headers}

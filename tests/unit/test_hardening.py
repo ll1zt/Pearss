@@ -97,11 +97,15 @@ def _failing_limiter(
 
 
 def _scope(ip: str = "1.2.3.4") -> Scope:
+    # Default to a credential-bearing request: the budget's whole purpose is
+    # counting refused guesses, so the canonical scope in these tests is a
+    # real attempt. The credentialless shape is its own scenario (issue #8)
+    # and strips the header explicitly.
     return {
         "type": "http",
         "method": "GET",
         "client": (ip, 5),
-        "headers": [],
+        "headers": [(b"authorization", b"Bearer some-token")],
     }
 
 
@@ -282,6 +286,66 @@ async def test_an_exempt_path_never_consumes_the_failure_budget() -> None:
     # does not trip the block yet.
     assert _status(await _responses(limiter, _scope())) == 401
     assert _status(await _responses(limiter, _scope())) == 401
+
+
+# --------------------------------------------------------------------------
+# Credential-free 401s are not failures (issue #8)
+#
+# A 401 answer to a request that never presented a token is not a failed
+# guess -- there was no guess. CORS preflights (OPTIONS, no Authorization)
+# get 401 from the MCP auth layer, and every one of them was burning the
+# 50-per-5-minutes budget, banning a source that never tried a credential.
+# The budget counts credential-bearing failures only.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_401_without_a_presented_token_is_not_a_failure() -> None:
+    """Credentialless 401s never push the address toward a block.
+
+    N token-less requests must all pass through to the app: nothing was
+    guessed, so nothing counts. This is the CORS-preflight shape (OPTIONS
+    without Authorization), which must not consume the brute-force budget.
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    # Far beyond the budget of 3: none of these may trip a block. The scope
+    # constructor defaults to a credential-bearing request (the canonical
+    # guess), so the credentialless shape strips the header explicitly.
+    for _ in range(8):
+        scope = _scope()
+        scope["headers"] = []
+        messages = await _responses(limiter, scope)
+        assert _status(messages) == 401, (
+            "a credentialless 401 is not a guess -- the limiter must not "
+            "answer for the app"
+        )
+    assert len(hits) == 8, "every request reached the app; none were refused"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a_401_with_a_presented_token_still_counts() -> None:
+    """Wrong-token requests keep exhausting the budget (exemption not too broad).
+
+    The credentialless carve-out must not become a general amnesty: a request
+    that presented a token and was refused IS a guess, and the budget blocks
+    on the third one exactly as before.
+    """
+    clock = _FakeClock()
+    hits: list[Scope] = []
+    limiter = _failing_limiter(clock, hits)
+
+    for _ in range(3):
+        scope = _scope()
+        scope["headers"] = [(b"authorization", b"Bearer wrong-token")]
+        await _responses(limiter, scope)
+    messages = await _responses(limiter, _scope())
+    assert len(hits) == 3, "the three real guesses each reached the app"
+    assert _status(messages) == 429, "the fourth request is blocked as before"
 
 
 # --------------------------------------------------------------------------
