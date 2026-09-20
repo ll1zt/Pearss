@@ -457,4 +457,24 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+_APPLICATION_KEY = "app"
+
+
+def __getattr__(name: str) -> Any:
+    """Build the ASGI application on first attribute access (PEP 562).
+
+    The module used to end with `app = create_app()`, so *importing* it
+    built the engine, created the database directory, and wired the full
+    middleware stack (issue #21) -- a cost every importer paid, and one
+    that multiplies with multi-process or per-tenant deployment. Uvicorn's
+    `app.main:app` string form only needs the attribute to exist when it
+    is looked up, so the build moves to that lookup: `import app.main` is
+    now free, and `app.main.app` builds exactly once per process and is
+    cached in the module namespace (subsequent reads hit the attribute,
+    not this hook).
+    """
+    if name == _APPLICATION_KEY:
+        application = create_app()
+        globals()[_APPLICATION_KEY] = application
+        return application
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
