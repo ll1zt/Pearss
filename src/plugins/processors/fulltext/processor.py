@@ -43,7 +43,7 @@ proxy and the host's SSRF guard (ADR 0016, 0027).
 from __future__ import annotations
 
 import logging
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import httpx
 from lxml import html as lxml_html
@@ -235,13 +235,15 @@ def _extract_article_text(html_text: str) -> str:
 
     for element in document.iter():
         if element.tag in _NON_CONTENT:
-            element.drop_tree()
+            # The HTML parser yields HtmlElement instances here at runtime;
+            # the stubs type iter() as _Element, which lacks drop_tree.
+            cast("lxml_html.HtmlElement", element).drop_tree()
 
     candidates = [
         element
         for element in document.iter()
-        if isinstance(element.tag, str)
-        and element.tag in ("article", "main", "div", "section", "td", "body")
+        # Comment/PI nodes carry a non-string tag and fall out naturally.
+        if element.tag in ("article", "main", "div", "section", "td", "body")
     ]
     if not candidates:
         candidates = [document]
