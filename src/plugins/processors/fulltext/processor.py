@@ -112,8 +112,21 @@ _NON_CONTENT: Final[frozenset[str]] = frozenset(
 # Tags whose text becomes a paragraph in the product; everything else in the
 # winning subtree is unwrapped to inline text.
 _PARAGRAPH_TAGS: Final[frozenset[str]] = frozenset(
-    {"p", "li", "blockquote", "pre", "h1", "h2", "h3", "h4", "h5", "h6",
-     "figcaption", "dd", "dt"}
+    {
+        "p",
+        "li",
+        "blockquote",
+        "pre",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "figcaption",
+        "dd",
+        "dt",
+    }
 )
 
 
@@ -148,7 +161,7 @@ def process(
             f"no extractable article at the item URL ({_plain_length(text)} chars)",
         )
     fragments = _fragment(text)
-    product = "".join(fragments)
+    product = sanitize_html("".join(fragments))
     return str(store(product))
 
 
@@ -294,4 +307,8 @@ def _fragment(text: str) -> list[str]:
     """Escape and wrap each paragraph; the product shape readers render."""
     from html import escape
 
-    return [f"<p>{escape(paragraph)}</p>" for paragraph in text.split("\n\n") if paragraph.strip()]
+    return [
+        f"<p>{escape(paragraph)}</p>"
+        for paragraph in text.split("\n\n")
+        if paragraph.strip()
+    ]

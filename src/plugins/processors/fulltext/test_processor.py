@@ -40,7 +40,7 @@ class _Origin:
         outer = self
 
         class _Handler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 outer.requests.append(self.path)
                 status, body = outer.routes.get(self.path, (404, b"no such page"))
                 self.send_response(status)
@@ -83,15 +83,19 @@ def _hermetic_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PEARSS_ALLOW_PRIVATE_FETCH", "1")
 
 
-ARTICLE = """<html><head><title>t</title></head><body>
+ARTICLE = (
+    """<html><head><title>t</title></head><body>
 <nav>menu menu</nav>
 <article>
 <h1>The real headline</h1>
-<p>""" + ("Paragraph of prose. " * 40) + """</p>
+<p>"""
+    + ("Paragraph of prose. " * 40)
+    + """</p>
 <p>Second paragraph of the article body.</p>
 </article>
 <footer>copyright</footer>
 </body></html>"""
+)
 
 
 def _store_sink() -> tuple[Callable[[str], str], list[str]]:
@@ -142,7 +146,8 @@ def test_user_extracted_full_text_passes_the_store_time_sanitiser(
 ) -> None:
     """AC-1: the product is ADR-0007-safe: scripts and handlers gone."""
     dangerous = (
-        "<html><body><article><p>" + ("Safe prose. " * 40)
+        "<html><body><article><p>"
+        + ("Safe prose. " * 40)
         + '</p><script>alert(1)</script><p onclick="x()">More prose.</p>'
         + "</article></body></html>"
     )
@@ -298,7 +303,9 @@ def test_the_extractor_prefers_the_largest_text_block() -> None:
     """Article detection: the dense text container wins over site chrome."""
     html_text = (
         "<html><body><nav>menu menu</nav>"
-        + "<article><p>" + ("Long main article text. " * 30) + "</p></article>"
+        + "<article><p>"
+        + ("Long main article text. " * 30)
+        + "</p></article>"
         + "<aside>sidebar note</aside></body></html>"
     )
     text = processor._extract_article_text(html_text)
@@ -454,9 +461,7 @@ def test_user_chain_gated_item_publishes_after_fulltext_completes(
             )
             assert gate == "ready", "the gate must open when the chain completes"
             payload_ref = session.scalar(
-                sa.text(
-                    "select payload_ref from item_enrichment where item_id = :i"
-                ),
+                sa.text("select payload_ref from item_enrichment where item_id = :i"),
                 {"i": item_id},
             )
             assert filestore.read_body(payload_ref) == probe_product
