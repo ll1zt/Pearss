@@ -1,23 +1,19 @@
-"""The fulltext processor: summary feeds get full article bodies.
+"""The fulltext processor: extraction, fetch bounds, and error taxonomy.
 
-Scenario register: src/plugins/processors/fulltext/SCENARIOS.md (AC-1..AC-8).
-Every origin in this suite is a local ThreadingHTTPServer or a pure function;
-no test touches a real blog. The processor contract is exercised end to end
-through the enrichment worker's real SQLite sweep and the child boundary,
-mirroring production.
+Scenario register: src/plugins/processors/fulltext/SCENARIOS.md (AC-1..AC-6);
+AC-7/AC-8 live in tests/integration/test_fulltext_chain.py, where the
+app-level wiring belongs. Every origin in this suite is a local
+ThreadingHTTPServer or a pure function; no test touches a real blog.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
-import sqlalchemy as sa
-from sqlalchemy.orm import Session, sessionmaker
 
 from core.enums import ErrorClass
 from plugins.processors.fulltext import processor
@@ -332,141 +328,3 @@ def test_the_extractor_drops_nav_aside_script_and_style() -> None:
 def test_the_processor_id_is_stable() -> None:
     assert processor.processor_id() == "fulltext"
     assert processor.processor_version() == "0.1.0"
-
-
-# --------------------------------------------------------------------------
-# AC-8: end to end - real migrated SQLite, real sweep, gate and artifact
-# --------------------------------------------------------------------------
-
-
-class FulltextProbe:
-    """A processor hooking the SAME hooks as fulltext, serving a canned page.
-
-    It exercises the worker/gate wiring with a deterministic product. The
-    network fetch and the extractor are pinned by the unit tests above; here
-    the row lifecycle and the publish gate are what is under test.
-    """
-
-    @staticmethod
-    def process(
-        item_ctx: dict[str, str], *, target_lang: str, store: Callable[[str], str]
-    ) -> str:
-        # Derived from the item_ctx the worker passes through the child
-        # boundary: the assertion pins that the boundary carried the item in.
-        return store("PROBE:" + item_ctx.get("content", ""))
-
-
-def _seed_fulltext_world(
-    factory: sessionmaker[Session],
-    *,
-    chain: str,
-    content: str,
-) -> str:
-    """A source with the fulltext chain and one stored item, via the pipeline."""
-    from adapters.repository import create_source, parse_chain, timestamp
-    from app.pipeline import normalise_and_store
-    from core.models import ItemDraft
-
-    with factory() as session:
-        source = create_source(
-            session,
-            source_type="rss",
-            url="https://fulltext.example/feed",
-            canonical_url="https://fulltext.example/feed",
-            schedule_policy="{}",
-            tenant_id="default",
-            pipeline_chain=chain,
-            at=timestamp(datetime.now(UTC)),
-        )
-        normalise_and_store(
-            session,
-            [
-                ItemDraft(
-                    source_id=source.id,
-                    external_id="post-1",
-                    title="A summary post",
-                    canonical_url="https://fulltext.example/post-1",
-                    published_at=None,
-                    content=content,
-                )
-            ],
-            chain=parse_chain(chain, target_lang=None),
-        )
-        session.commit()
-        item_id = session.scalar(
-            sa.text("select id from item where source_id = :sid"), {"sid": source.id}
-        )
-    assert item_id is not None
-    return str(item_id)
-
-
-def test_user_chain_gated_item_publishes_after_fulltext_completes(
-    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """AC-8: collection -> queued row -> sweep -> gate opens, artifact stored,
-    item body untouched (products never rewrite items)."""
-    from tests.integration.conftest import migrated_database
-
-    from adapters import filestore
-    from adapters.db_models import Item
-    from app.enrichment_worker import sweep_queue
-
-    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
-    # The sandboxed child resolves plugin modules through PYTHONPATH; without
-    # pinning it to THIS checkout the shared venv's .pth wins and the child
-    # imports the main checkout's (fulltext-less) tree.
-    from pathlib import Path
-
-    repo_src = Path(__file__).resolve().parents[3]  # .../Pearss/src
-    monkeypatch.setenv("PYTHONPATH", str(repo_src))
-    engine = sa.create_engine(migrated_database(tmp_path, "fulltext-e2e.db"))
-    factory = sessionmaker(engine, expire_on_commit=False)
-    try:
-        chain = '[{"plugin_id":"fulltext","kind":"fulltext","required":true}]'
-        summary = "<p>Short summary of the post.</p>"
-        item_id = _seed_fulltext_world(factory, chain=chain, content=summary)
-
-        # Stored behind the gate: pending, one queued fulltext row.
-        with factory() as session:
-            row = session.execute(
-                sa.text(
-                    "select status, plugin_id, kind from item_enrichment"
-                    " where item_id = :i"
-                ),
-                {"i": item_id},
-            ).first()
-            assert row is not None
-            assert (row[0], row[1], row[2]) == ("queued", "fulltext", "fulltext")
-            assert (
-                session.scalar(
-                    sa.text("select publish_status from item where id = :i"),
-                    {"i": item_id},
-                )
-                == "pending"
-            )
-
-        probe_product = "PROBE:" + summary
-        with factory() as session:
-            report = sweep_queue(
-                session,
-                processors={"fulltext": FulltextProbe},
-                row_session_factory=factory,
-            )
-            assert report["succeeded"] == 1
-
-        with factory() as session:
-            gate = session.scalar(
-                sa.text("select publish_status from item where id = :i"),
-                {"i": item_id},
-            )
-            assert gate == "ready", "the gate must open when the chain completes"
-            payload_ref = session.scalar(
-                sa.text("select payload_ref from item_enrichment where item_id = :i"),
-                {"i": item_id},
-            )
-            assert filestore.read_body(payload_ref) == probe_product
-            stored_item = session.get(Item, item_id)
-            assert stored_item is not None
-            assert filestore.read_body(stored_item.content_ref) == summary
-    finally:
-        engine.dispose()
