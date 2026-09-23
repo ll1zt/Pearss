@@ -29,6 +29,10 @@ class EnrichmentKind(StrEnum):
     TRANSLATION = "translation"
     SUMMARY = "summary"
     TTS_AUDIO = "tts_audio"
+    # The article body of a summary-only feed item, fetched from the item
+    # URL by the fulltext processor (issue #28). A product like any other:
+    # pinned to input_hash, never rewriting the item.
+    FULLTEXT = "fulltext"
 
 
 class EnrichmentStatus(StrEnum):
