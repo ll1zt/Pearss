@@ -380,7 +380,7 @@ def add_source(
                 suggestion=(
                     "Use a list of {plugin_id, kind, lang?, required?} naming "
                     "registered processors; kinds: translation, summary, "
-                    "tts_audio."
+                    "fulltext, tts_audio."
                 ),
             ) from exc
 
@@ -512,7 +512,7 @@ def update_source(
                     message=str(exc),
                     suggestion=(
                         "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
-                        "translation, summary, tts_audio."
+                        "translation, summary, fulltext, tts_audio."
                     ),
                 ) from exc
         for column, value in changes.items():
@@ -571,7 +571,7 @@ def backfill_source_chain(
                 message=str(exc),
                 suggestion=(
                     "Use a list of {plugin_id, kind, lang?, required?}; kinds: "
-                    "translation, summary, tts_audio."
+                    "translation, summary, fulltext, tts_audio."
                 ),
             ) from exc
         session.commit()

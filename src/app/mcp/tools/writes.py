@@ -63,7 +63,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "'web'. Pass type explicitly when auto would guess wrong. "
             "pipeline_chain (a list of {plugin_id, kind, lang?, required?}) "
             "plus target_lang gates items until the chain completes: e.g. "
-            "one translate/translation spec with target_lang 'en'."
+            "one translate/translation spec with target_lang 'en', or "
+            "one fulltext/fulltext spec to fetch missing article bodies."
         ),
     )
     async def add_source(

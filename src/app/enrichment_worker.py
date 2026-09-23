@@ -590,9 +590,13 @@ def default_processors() -> dict[str, Any]:
 
     import sys
 
+    from plugins.processors.fulltext import processor as fulltext
     from plugins.processors.translate import processor as translate
 
-    return {"translate": sys.modules[translate.__name__]}
+    return {
+        "translate": sys.modules[translate.__name__],
+        "fulltext": sys.modules[fulltext.__name__],
+    }
 
 
 def registered_processor_ids() -> frozenset[str]:
