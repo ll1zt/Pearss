@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,8 +31,6 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, TextResourceContents
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
-from uvicorn.config import Config as UvicornConfig
-from uvicorn.server import Server
 
 from adapters.repository import (
     claim_job_run,
@@ -45,6 +41,7 @@ from adapters.repository import (
 from app.main import create_app, create_engine_for
 from core.enums import ErrorClass
 from core.job_state import JobRunEvent
+from tests.integration.conftest import ServerInThread, free_port
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "conformance-edge-token"
@@ -97,42 +94,21 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     }
 
 
-class _ServerInThread:
-    def __init__(self, app: Any, port: int) -> None:
-        self._server = Server(
-            UvicornConfig(app, host="127.0.0.1", port=port, log_level="critical")
-        )
-        self._port = port
-
-    def __enter__(self) -> _ServerInThread:
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-        self._thread.start()
-        for _ in range(120):
-            if self._listening():
-                break
-            time.sleep(0.05)
-        return self
-
-    def _listening(self) -> bool:
-        import socket
-
-        with socket.socket() as probe:
-            probe.settimeout(0.2)
-            return probe.connect_ex(("127.0.0.1", self._port)) == 0
-
-    def __exit__(self, *exc: object) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=15)
-
-
 @pytest.fixture(scope="module")
 def base_url(mcp_env: dict[str, str]) -> Iterator[str]:
+    """Serve the app for the module; the port comes from the OS (#37).
+
+    Never a constant: the same SHA can have two CI runs in flight (`push` and
+    `pull_request` are separate events), and a fixed port made the second run
+    fail to bind — its server thread died and the client waited on an
+    endpoint that would never answer, hanging the job to the 60-minute cap.
+    """
     previous = {key: os.environ.get(key) for key in mcp_env}
     os.environ.update(mcp_env)
     try:
         app = create_app()
-        with _ServerInThread(app, 8093):
-            yield "http://127.0.0.1:8093"
+        with ServerInThread(app, free_port()) as server:
+            yield server.base_url("")
     finally:
         for key, value in previous.items():
             if value is None:

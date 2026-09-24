@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
-import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,11 +26,10 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from sqlalchemy import text
-from uvicorn.config import Config as UvicornConfig
-from uvicorn.server import Server
 
 from adapters.filestore import store_body
 from app.main import create_app, create_engine_for
+from tests.integration.conftest import ServerInThread, free_port
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "synthetic-mcp-edge-token"
@@ -114,51 +111,22 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     }
 
 
-class _ServerInThread:
-    """The app served on its own thread and event loop.
-
-    Keeping uvicorn off the test loop means the server's anyio cancel scopes
-    are created and destroyed on one thread.
-    """
-
-    def __init__(self, app: Any, port: int) -> None:
-        self._server = Server(
-            UvicornConfig(app, host="127.0.0.1", port=port, log_level="critical")
-        )
-        self._port = port
-
-    def __enter__(self) -> _ServerInThread:
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
-        self._thread.start()
-        # The lifespan must finish before the MCP session manager accepts
-        # connections; polling the port is more reliable than a fixed sleep.
-        for _ in range(120):
-            if self._listening():
-                break
-            time.sleep(0.05)
-        return self
-
-    def _listening(self) -> bool:
-        import socket
-
-        with socket.socket() as probe:
-            probe.settimeout(0.2)
-            return probe.connect_ex(("127.0.0.1", self._port)) == 0
-
-    def __exit__(self, *exc: object) -> None:
-        self._server.should_exit = True
-        self._thread.join(timeout=15)
-
-
 @pytest.fixture(scope="module")
 def mcp_url(mcp_env: dict[str, str]) -> Iterator[str]:
-    """Serve the app for the module and yield its MCP endpoint."""
+    """Serve the app for the module and yield its MCP endpoint.
+
+    The port comes from the OS (`free_port`), never a constant: the same SHA
+    can have two CI runs in flight (`push` and `pull_request` are separate
+    events), and a fixed port made the second run fail to bind — its server
+    thread died and the client waited on an endpoint that would never answer,
+    hanging the job until the 60-minute cap (#37).
+    """
     previous = {key: os.environ.get(key) for key in mcp_env}
     os.environ.update(mcp_env)
     try:
         app = create_app()
-        with _ServerInThread(app, 8091):
-            yield "http://127.0.0.1:8091/mcp"
+        with ServerInThread(app, free_port()) as server:
+            yield server.base_url("/mcp")
     finally:
         for key, value in previous.items():
             if value is None:
