@@ -1568,3 +1568,92 @@ async def test_a_busy_source_says_when_to_retry(
     assert retry_after is not None, "409 must say when to come back"
     # A positive number of seconds: the client sleeps, then retries.
     assert int(retry_after) > 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_user_backfill_queues_a_watchable_batch_not_the_whole_backlog(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chain backfill queues a bounded batch, and repeating it continues.
+
+    Given a source with 25 stored items and a freshly enabled chain
+    When :backfill-chain is called with no limit
+    Then only the configured batch (3 here) is queued — one call is not a
+    burst at the third-party sites those products will fetch
+    And a second call queues the next batch rather than repeating the first
+    And an explicit limit overrides the default.
+
+    The bug this pins: unbounded queuing turned one call into 122 fetches of
+    a single blog, and capping the *scan* instead of the queue made repeat
+    calls no-ops (the first `limit` items were already queued, so the count
+    stayed 0 and the tail of the backlog was unreachable).
+    """
+    monkeypatch.setenv("PEARSS_BACKFILL_DEFAULT_LIMIT", "3")
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "batch-create-1"},
+        json={"url": "https://batch.example/feed", "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+    await writer.patch(
+        f"/v1/sources/{source_id}",
+        headers={"Idempotency-Key": "batch-patch-1"},
+        json={
+            "pipeline_chain": [{"plugin_id": "fulltext", "kind": "fulltext"}],
+        },
+    )
+
+    with session_factory() as session:
+        for index in range(25):
+            session.execute(
+                sa.text(
+                    "insert into item (id, source_id, guid, content_hash, title,"
+                    " url, publish_status, tenant_id, created_at, updated_at)"
+                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " :ts, :ts)"
+                ),
+                {
+                    "id": f"batch-item-{index:02d}",
+                    "s": source_id,
+                    "g": f"batch-guid-{index}",
+                    "h": f"batch-hash-{index}",
+                    "t": f"Backlog {index}",
+                    "u": f"https://batch.example/post/{index}",
+                    "ts": f"2026-01-{index + 1:02d}T00:00:00.000000Z",
+                },
+            )
+        session.commit()
+
+    first = await writer.post(
+        f"/v1/sources/{source_id}:backfill-chain",
+        headers={"Idempotency-Key": "batch-run-1"},
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["queued"] == 3, first.json()
+    assert first.json()["limit"] == 3, "the response names the batch it used"
+
+    second = await writer.post(
+        f"/v1/sources/{source_id}:backfill-chain",
+        headers={"Idempotency-Key": "batch-run-2"},
+    )
+    assert second.json()["queued"] == 3, (
+        "repeating the call must reach the next batch, not re-queue the first"
+    )
+
+    explicit = await writer.post(
+        f"/v1/sources/{source_id}:backfill-chain",
+        headers={"Idempotency-Key": "batch-run-3"},
+        json={"limit": 5},
+    )
+    assert explicit.json()["queued"] == 5, "an explicit limit wins"
+    assert explicit.json()["limit"] == 5
+
+    with session_factory() as session:
+        total = session.execute(
+            sa.text("select count(*) from item_enrichment")
+        ).scalar()
+    assert total == 11, "3 + 3 + 5 rows queued, never more than asked for"

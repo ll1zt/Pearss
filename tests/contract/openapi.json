@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "BackfillChainRequest": {
+        "description": "Narrowing for a chain backfill.\n\n`limit` caps how many items join the queue in one call. It exists because\nthis verb is the one that queues fetches of third-party pages (issue\n#35): the default is a conservative batch, and an operator who wants a\nlonger run asks for it explicitly rather than discovering it as a burst\nat someone's blog. Repeat the call to continue — queuing is idempotent.",
+        "properties": {
+          "limit": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          }
+        },
+        "title": "BackfillChainRequest",
+        "type": "object"
+      },
       "Body_client_login_api_greader_php_accounts_ClientLogin_post": {
         "properties": {
           "Email": {
@@ -2796,7 +2815,7 @@
     },
     "/v1/sources/{source_id}:backfill-chain": {
       "post": {
-        "description": "Queue processor products for items stored before the chain was enabled.\n\nA write (it mutates item_enrichment and spends provider budget), so it is\nauthenticated, idempotent and audited like every other write.",
+        "description": "Queue processor products for items stored before the chain was enabled.\n\nA write (it mutates item_enrichment and spends provider budget), so it is\nauthenticated, idempotent and audited like every other write.\n\nThe batch size defaults to a conservative limit; see\n`BackfillChainRequest`. Unbounded was how one call turned into 122 fetches\nof a single blog, so the default is now something an operator can watch.",
         "operationId": "backfillChain",
         "parameters": [
           {
@@ -2825,6 +2844,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BackfillChainRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

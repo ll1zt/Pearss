@@ -197,15 +197,21 @@ def backfill_chain(
         .where(ItemRow.source_id == source_id)
         .order_by(ItemRow.published_at.desc())
     )
-    if limit is not None:
-        query = query.limit(limit)
     items = session.execute(query).scalars().all()
 
+    # `limit` caps the rows this call *queues*, not the items it looks at.
+    # Capping the item scan instead made a repeated call a no-op: the newest
+    # `limit` items were already queued, so the count stayed 0 while the rest
+    # of the backlog was never reached. Batch, repeat, finish.
     queued = 0
     now = datetime.now(UTC)
     stamp = timestamp(now)
     for item in items:
+        if limit is not None and queued >= limit:
+            break
         for spec in chain:
+            if limit is not None and queued >= limit:
+                break
             exists = session.execute(
                 select(ItemEnrichment).where(
                     ItemEnrichment.item_id == item.id,
