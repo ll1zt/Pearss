@@ -1260,3 +1260,143 @@ async def test_an_empty_clientlogin_probe_is_not_audited(
     with app.state.session_factory() as session:
         count = session.execute(sa.text("select count(*) from audit_log")).scalar()
     assert count == 0, "an empty ClientLogin probe must not reach the audit table"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_fulltext_product_replaces_the_summary_in_contents(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """NNW receives the full article body, not the summary stub.
+
+    Given an item whose feed body is a summary (the reason fulltext exists)
+    And a successful fulltext product for it
+    When the reader fetches contents
+    Then the served body is the full text — a summary reader cannot use is
+    exactly what the chain exists to replace. The merge appends the original
+    below a marker rule (the translation shape), so the stub stays available
+    for reference and products still never rewrite items.
+    """
+    from datetime import UTC, datetime
+
+    from adapters import filestore
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    assert ids
+
+    with app.state.session_factory() as session:
+        from adapters.repository import resolve_reader_ids
+
+        internal = list(resolve_reader_ids(session, [int(x) for x in ids]).values())
+        target_internal = internal[0] if internal else None
+        full_text = "<p>" + ("The complete article body. " * 30) + "</p>"
+        ref = filestore.store_body(full_text)
+        session.add(
+            ItemEnrichment(
+                id="enr-fulltext-1",
+                item_id=target_internal,
+                plugin_id="fulltext",
+                plugin_version="0.1.0",
+                kind="fulltext",
+                lang=None,
+                payload_ref=ref,
+                input_hash="any-version",
+                status="succeeded",
+                tenant_id="default",
+                created_at=timestamp(datetime.now(UTC)),
+                updated_at=timestamp(datetime.now(UTC)),
+            )
+        )
+        session.commit()
+
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids[:1]},
+    )
+    body = response.json()["items"][0]["summary"]["content"]
+    assert body.startswith("<p>The complete article body."), body[:120]
+    # The summary stays below the rule, never replaced.
+    assert 'data-pearss="fulltext-separator"' in body
+    assert len(body) > len(full_text), "the original summary must survive below"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fulltext_and_translation_stack_in_contents(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+) -> None:
+    """A kxxt-shaped source (fulltext + translate) shows translation first.
+
+    The reader subscribed for a translated reading experience; the chain
+    order is fulltext then translate, so the product stack must read:
+    translation, then fulltext, then the original summary.
+    """
+    from datetime import UTC, datetime
+
+    from adapters import filestore
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    token = await login(client)
+    ids = await fetch_ids(client, token)
+    assert ids
+
+    with app.state.session_factory() as session:
+        from adapters.repository import resolve_reader_ids
+
+        internal = list(resolve_reader_ids(session, [int(x) for x in ids]).values())
+        target_internal = internal[0] if internal else None
+        now = timestamp(datetime.now(UTC))
+        session.add_all(
+            [
+                ItemEnrichment(
+                    id="enr-stack-ft",
+                    item_id=target_internal,
+                    plugin_id="fulltext",
+                    plugin_version="0.1.0",
+                    kind="fulltext",
+                    lang=None,
+                    payload_ref=filestore.store_body(
+                        "<p>" + ("Full English article. " * 20) + "</p>"
+                    ),
+                    input_hash="any-version",
+                    status="succeeded",
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=now,
+                ),
+                ItemEnrichment(
+                    id="enr-stack-tr",
+                    item_id=target_internal,
+                    plugin_id="translate",
+                    plugin_version="0.1.0",
+                    kind="translation",
+                    lang="zh",
+                    payload_ref=filestore.store_body("<p>中文译文。</p>"),
+                    input_hash="any-version",
+                    status="succeeded",
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    response = await client.post(
+        "/api/greader.php/reader/api/0/stream/items/contents",
+        headers=auth_header(token),
+        data={"i": ids[:1]},
+    )
+    body = response.json()["items"][0]["summary"]["content"]
+    translation_at = body.index("中文译文。")
+    fulltext_at = body.index("Full English article.")
+    assert translation_at < fulltext_at, "translation leads the stack"
+    assert 'data-pearss="fulltext-separator"' in body
+    assert 'data-pearss="translation-separator"' in body

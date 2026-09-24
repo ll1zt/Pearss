@@ -30,9 +30,12 @@ kind 枚举扩展（core.enrichment）。产物（artifact）是消毒后的 `<p
 产物 pin 在 `input_hash` 上，内容变更加新行，永不回写 Item（ADR 0018 的
 「产物不改写条目」不变量原样适用）。
 
-Reader API 暂不做合并视图：摘要 feed 的原文页正文就是读者想要的全部，
-item body（摘要）继续作为原始内容保留在库内。若日后需要「全文+摘要」
-双栏，沿用 ADR 0018 的 merge 模式另立 ADR，不在本篇范围。
+Reader API 不展示 fulltext 产物的初始决定已修订（2026-09-24，issue #29
+灰度第一天）：产物入库但对唯一消费路径不可见，等于读者永远拿不到全文，
+验收判据「NNW 显示全文」不可能达成。现在 Reader API contents 沿 ADR 0018
+的 merge 模式输出产物栈：fulltext 包住摘要（全文在上、原摘要留分隔线下），
+译文再叠于其上——链序 fulltext → translate 对应阅读栈 译文 → 全文 → 摘要。
+产物照旧不回写 Item。原文合并视图的其余部分维持本篇其余决策不变。
 
 ### 3. 阈值与回退语义
 
