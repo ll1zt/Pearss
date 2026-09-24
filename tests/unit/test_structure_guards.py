@@ -793,3 +793,62 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
         "`pull_request` (it gates the PR head, and pushing fires "
         "`synchronize`) and use `workflow_dispatch` for anything else."
     )
+
+
+def test_the_ci_aggregate_runs_the_suites_once() -> None:
+    """`just ci` must not run the full suite bare *and* instrumented.
+
+    It did, so the same tests ran twice. That was waste rather than the cause
+    of the 60-minute failure: the double-run form passed in 10m15s (run #94)
+    and 48m5s (#452), and the run that broke was single-run (#459). What
+    actually grew is integration's per-test cost, 0.26s -> 1.18s (issue #44).
+    The gate reads the measurement instead, because one instrumented run
+    answers every question the bare runs did.
+
+    Checked by counting the recipes `ci` depends on, which is narrower than the
+    property deserves: `coverage-diff` runs the whole instrumented suite too,
+    and the pytest command can be written into a recipe body rather than named
+    as a dependency. Both of those pass this guard. Issue #46 tracks replacing
+    it with one that expands `just ci` and counts the suites it really runs.
+    """
+    justfile = Path("justfile").read_text(encoding="utf-8")
+
+    # The full-suite marker expression appears in recipes; `ci` must reach it
+    # exactly once (through `ci-covered`).
+    full_suite = "unit or fixture or integration or e2e"
+    in_ci = _recipe_body(justfile, "ci")
+    dependencies = [
+        token.strip() for token in in_ci.replace("ci:", "", 1).split() if token.strip()
+    ]
+
+    # `ci` is a dependency list, so its own body names recipes, not commands.
+    assert "ci-covered" in dependencies, (
+        f"`just ci` must run the suites once via ci-covered; got {dependencies}"
+    )
+    for bare in ("test", "test-integration", "test-e2e"):
+        assert bare not in dependencies, (
+            f"`just ci` also runs `{bare}`, so the suite runs twice (issue #42). "
+            "Use `ci-covered` (one instrumented run) and let `coverage-gate` "
+            "read its .coverage."
+        )
+
+    # And the instrumented recipe is the one that selects the full marker set.
+    assert full_suite in justfile, "the full-suite marker expression moved"
+
+
+def _recipe_body(justfile: str, name: str) -> str:
+    """The recipe header line plus its body, or "" when the recipe is absent."""
+    lines = justfile.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith(f"{name}:")), None
+    )
+    if start is None:
+        return ""
+    body = [lines[start]]
+    for line in lines[start + 1 :]:
+        if line and not line.startswith((" ", "\t")):
+            break
+        if line.startswith("#"):
+            break
+        body.append(line)
+    return "\n".join(body)
