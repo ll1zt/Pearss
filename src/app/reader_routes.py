@@ -800,10 +800,14 @@ def stream_items_contents(
         rows = [row for row in rows if row.publish_status != "pending"]
         states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
         bodies = bodies_for(session, [row_to_item(row) for row in rows])
-        # P3 processor chain: a successful translation merges above the
-        # original — the reader subscribed with a target language; the
-        # original stays for reference (ADR 0018).
-        translations = _translation_refs(session, [row.id for row in rows])
+        # P3 processor chain: successful products merge above the original —
+        # fulltext replaces the unreadable summary stub (ADR 0028), and a
+        # translation rides on top of that (ADR 0018): the reader subscribed
+        # for a translated reading experience, so the stack reads
+        # translation → fulltext → original. Products never rewrite items.
+        products = _product_refs(
+            session, [row.id for row in rows], kinds=("fulltext", "translation")
+        )
         # One query for the whole page rather than one per item: a contents
         # request can carry a hundred ids, and a client that cannot show a
         # source name is the bug this is here to fix.
@@ -824,9 +828,14 @@ def stream_items_contents(
     for row in rows:
         state = states.get(row.id)
         body = bodies.get(row.id, "")
-        tref = translations.get(row.id)
+        # Innermost first: fulltext wraps the summary, translation wraps the
+        # result — each merge only ever prepends and keeps what came before.
+        fref = products.get((row.id, "fulltext"))
+        if fref:
+            body = _merge_over(filestore.read_body(fref), body, "fulltext")
+        tref = products.get((row.id, "translation"))
         if tref:
-            body = _merge_translation(filestore.read_body(tref), body)
+            body = _merge_over(filestore.read_body(tref), body, "translation")
         items.append(
             _render_item(
                 row,
@@ -839,11 +848,15 @@ def stream_items_contents(
     return _contents_payload(items)
 
 
-def _translation_refs(session: Any, item_ids: list[str]) -> dict[str, str]:
-    """Successful translation products for `item_ids`, keyed by item id.
+def _product_refs(
+    session: Any, item_ids: list[str], *, kinds: tuple[str, ...]
+) -> dict[tuple[str, str], str]:
+    """Successful processor products for `item_ids`, keyed by (item, kind).
 
-    When several exist (a content change re-processed the item), the newest
-    row wins — the same rule the conditional-state lookup uses.
+    When several rows exist per (item, kind) — a content change re-processed
+    the item — the newest wins, the same rule the conditional-state lookup
+    uses. One query serves every kind the reader merges, so a hundred-id
+    contents page stays one round trip.
     """
     from adapters.db_models import ItemEnrichment
 
@@ -854,7 +867,7 @@ def _translation_refs(session: Any, item_ids: list[str]) -> dict[str, str]:
             select(ItemEnrichment)
             .where(
                 ItemEnrichment.item_id.in_(item_ids),
-                ItemEnrichment.kind == "translation",
+                ItemEnrichment.kind.in_(kinds),
                 ItemEnrichment.status == "succeeded",
             )
             .order_by(ItemEnrichment.updated_at.desc())
@@ -862,22 +875,26 @@ def _translation_refs(session: Any, item_ids: list[str]) -> dict[str, str]:
         .scalars()
         .all()
     )
-    refs: dict[str, str] = {}
+    refs: dict[tuple[str, str], str] = {}
     for row in rows:
-        refs.setdefault(row.item_id, row.payload_ref or "")
-    return {item_id: ref for item_id, ref in refs.items() if ref}
+        if not row.payload_ref:
+            continue
+        refs.setdefault((row.item_id, row.kind), row.payload_ref)
+    return refs
 
 
-def _merge_translation(translation: str, original: str) -> str:
-    """Translation on top, original below, one rule between.
+def _merge_over(product: str, original: str, kind: str) -> str:
+    """The product on top, the original below, one rule between.
 
-    The original is never dropped: the translation is a derived artifact and
-    the reader may want to check it against the source. The merge happens at
-    the boundary where bodies are already assembled, so every output path
-    through here shows the same shape.
+    The original is never dropped: a derived artifact is not a replacement,
+    and the reader may want to check it against the source. The merge
+    happens at the boundary where bodies are already assembled, so every
+    output path through here shows the same shape. Products never rewrite
+    items: the product leads, the original follows under the rule, and the
+    rule names the kind that produced it.
     """
-    rule = '<hr data-pearss="translation-separator">'
-    return f"{translation}{rule}{original}"
+    rule = f'<hr data-pearss="{kind}-separator">'
+    return f"{product}{rule}{original}"
 
 
 def _render_item(
