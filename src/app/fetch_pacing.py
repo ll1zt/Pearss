@@ -1,0 +1,255 @@
+"""Host-level pacing for processor fetches (issue #35).
+
+A processor that fetches the *item's own URL* talks to a third-party server the
+operator does not control. Nothing in the chain model bounds that: subscribing a
+blog with 122 stored posts queued 122 fetches, and the worker fired them as fast
+as its concurrency slots allowed — three in flight at once, no spacing, no cap.
+That is a burst at someone's blog, which is what this module prevents.
+
+Why the pacing lives here and not in the processor: processors run in a
+sandboxed child process spawned per row (`app/processor_runtime`), so a counter
+inside one cannot pace anything — every execution starts from zero. The host
+worker is the only process that sees the whole queue, so the state belongs to
+it. The state is in memory on purpose: a restart forgetting the pacing
+bookkeeping is a far smaller problem than an un-paced burst, and it costs no
+schema.
+
+Three bounds, all per host:
+
+- **interval** — minimum wall-clock gap between two dispatches to the same
+  host. Enforced by waiting, not by dropping: the work still happens, just
+  spaced out.
+- **per-sweep cap** — at most N dispatches to one host in one sweep. Rows
+  beyond the cap stay queued for the next sweep, so a 122-post backlog drains
+  at N per sweep instead of all at once.
+- **cooldown** — after a host answers with a `blocked` classification (403/429:
+  "stop, you are asking too much"), that host is skipped entirely for the
+  cooldown window. A rate-limited origin is a request to slow down; trying the
+  next item on it is the opposite of listening.
+
+robots.txt is deliberately **not** consulted (decision recorded in ADR 0029):
+the sites this feature serves publish permissive robots files, fetching robots
+per host adds an uncached third-party request that the pacing itself would have
+to police, and the harm actually observed was request rate, not path permission.
+An operator who needs path-level permission can filter at the source level.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections.abc import Callable
+from typing import Final
+from urllib.parse import urlsplit
+
+LOGGER = logging.getLogger(__name__)
+
+# Conservative defaults, deliberately slow: a blog is not an API. Two fetches
+# per sweep with 2s between them drains a 100-post backlog over ~50 minutes,
+# which is invisible to the reader next to a 1h feed interval.
+DEFAULT_MIN_INTERVAL_SECONDS: Final = 2.0
+DEFAULT_MAX_PER_HOST_PER_SWEEP: Final = 2
+DEFAULT_COOLDOWN_SECONDS: Final = 900.0
+DEFAULT_BACKFILL_LIMIT: Final = 10
+
+MIN_INTERVAL_ENV: Final = "PEARSS_FETCH_MIN_INTERVAL"
+MAX_PER_SWEEP_ENV: Final = "PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP"
+COOLDOWN_ENV: Final = "PEARSS_FETCH_COOLDOWN_SECONDS"
+BACKFILL_LIMIT_ENV: Final = "PEARSS_BACKFILL_DEFAULT_LIMIT"
+
+# Processors whose work is a fetch of the item's own URL on a third-party host.
+# A translation calls a provider the operator chose and pays for; pacing it by
+# the *item's* host would throttle the provider for no reason, which is why
+# this is a set of ids rather than "every processor".
+PACED_PROCESSORS: Final[frozenset[str]] = frozenset({"fulltext"})
+
+
+def host_of(url: str | None) -> str:
+    """The pacing key for a URL: its host, lowercased; "" when unparseable."""
+    if not url:
+        return ""
+    try:
+        return (urlsplit(url).netloc or "").lower()
+    except ValueError:
+        return ""
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        LOGGER.warning("%s is not a number (%r); using %s", name, raw, default)
+        return default
+    return value if value >= 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        LOGGER.warning("%s is not an integer (%r); using %s", name, raw, default)
+        return default
+    return value if value >= 1 else default
+
+
+def backfill_default_limit() -> int:
+    """How many items a backfill queues when the caller names no limit.
+
+    Unbounded by default was the accident in #35: one call queued 122 fetches
+    of a third-party site. The default is a batch the operator can watch,
+    repeated until the backlog is done.
+    """
+    return _env_int(BACKFILL_LIMIT_ENV, DEFAULT_BACKFILL_LIMIT)
+
+
+class HostPacer:
+    """Per-host dispatch pacing, safe to call from the worker's threads.
+
+    One entry point, `take_turn`, because the three bounds interact: it waits
+    out the interval, then re-checks the cooldown and the per-sweep cap before
+    admitting. Waiting anywhere else is wrong — claiming in the sweep loop and
+    sleeping there would let the (already admitted) rows dispatch together in
+    the thread pool, which is the burst this exists to prevent.
+    """
+
+    def __init__(
+        self,
+        *,
+        min_interval: float = DEFAULT_MIN_INTERVAL_SECONDS,
+        max_per_sweep: int = DEFAULT_MAX_PER_HOST_PER_SWEEP,
+        cooldown_seconds: float = DEFAULT_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._min_interval = min_interval
+        self._max_per_sweep = max_per_sweep
+        self._cooldown_seconds = cooldown_seconds
+        self._clock = clock
+        self._sleep = sleep
+        # A sweep must not block indefinitely on one host: past this budget
+        # the row stays queued for the next sweep instead.
+        self._max_wait = max(min_interval * 4.0, 5.0)
+        self._lock = threading.Lock()
+        self._last_dispatch: dict[str, float] = {}
+        self._dispatched_this_sweep: dict[str, int] = {}
+        self._cooldown_until: dict[str, float] = {}
+
+    @classmethod
+    def from_env(cls) -> HostPacer:
+        return cls(
+            min_interval=_env_float(MIN_INTERVAL_ENV, DEFAULT_MIN_INTERVAL_SECONDS),
+            max_per_sweep=_env_int(MAX_PER_SWEEP_ENV, DEFAULT_MAX_PER_HOST_PER_SWEEP),
+            cooldown_seconds=_env_float(COOLDOWN_ENV, DEFAULT_COOLDOWN_SECONDS),
+        )
+
+    @property
+    def min_interval(self) -> float:
+        """The configured spacing between two fetches to one host."""
+        return self._min_interval
+
+    @property
+    def max_per_sweep(self) -> int:
+        """The configured per-host budget for one sweep."""
+        return self._max_per_sweep
+
+    def begin_sweep(self) -> None:
+        """Start a new sweep: the per-sweep caps refill, cooldowns persist."""
+        with self._lock:
+            self._dispatched_this_sweep = {}
+
+    def reserve(self, host: str) -> bool:
+        """Claim this sweep's slot for `host` — cap and cooldown, no waiting.
+
+        Called at claim time, which is single-threaded: a host that is
+        cooling down down after a refusal, or whose sweep budget is spent,
+        simply is not claimed and waits for the next sweep.
+        """
+        if not host:
+            return True
+        with self._lock:
+            if self._cooldown_until.get(host, 0.0) > self._clock():
+                return False
+            if self._dispatched_this_sweep.get(host, 0) >= self._max_per_sweep:
+                return False
+            self._dispatched_this_sweep[host] = (
+                self._dispatched_this_sweep.get(host, 0) + 1
+            )
+            return True
+
+    def pace(self, host: str) -> bool:
+        """Wait out the interval before fetching `host`; False = don't fetch.
+
+        This is the call that makes the spacing real: it runs immediately
+        before the fetch, in the worker thread that is about to make it, so
+        concurrent rows for one host are serialised here rather than racing
+        out of a thread pool together. Returned False means the host went on
+        cooldown while we waited (a sibling row was refused) or the wait hit
+        its budget — the caller leaves its row queued.
+        """
+        if not host:
+            return True
+        deadline = self._clock() + self._max_wait
+        while True:
+            with self._lock:
+                now = self._clock()
+                if self._cooldown_until.get(host, 0.0) > now:
+                    return False
+                last = self._last_dispatch.get(host)
+                if last is None or (now - last) >= self._min_interval:
+                    self._last_dispatch[host] = now
+                    return True
+                wait = self._min_interval - (now - last)
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            self._sleep(max(0.0, min(wait, remaining)))
+
+    def record_blocked(self, host: str) -> None:
+        """A host refused us (403/429): stop asking for the cooldown window."""
+        if not host:
+            return
+        with self._lock:
+            self._cooldown_until[host] = self._clock() + self._cooldown_seconds
+        LOGGER.warning(
+            "host %s returned blocked; pausing fetches to it for %.0fs",
+            host,
+            self._cooldown_seconds,
+        )
+
+
+_PACER: HostPacer | None = None
+_PACER_LOCK = threading.Lock()
+
+
+def pacer() -> HostPacer:
+    """The process-wide pacer, built from the environment on first use."""
+    global _PACER
+    with _PACER_LOCK:
+        if _PACER is None:
+            _PACER = HostPacer.from_env()
+        return _PACER
+
+
+def reset_pacer() -> None:
+    """Forget the process-wide pacer (tests; the environment never changes)."""
+    global _PACER
+    with _PACER_LOCK:
+        _PACER = None
+
+
+__all__ = [
+    "PACED_PROCESSORS",
+    "HostPacer",
+    "backfill_default_limit",
+    "host_of",
+    "pacer",
+    "reset_pacer",
+]

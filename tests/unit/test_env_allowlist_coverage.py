@@ -49,6 +49,14 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_BACKFILL_LIMIT",
         "PEARSS_ENRICHMENT_CONCURRENCY",  # worker sweep concurrency
         "PEARSS_TICK_CONCURRENCY",  # scheduler tick concurrency
+        # Fetch politeness (issue #35). Host-side by design: the sandboxed
+        # child is spawned per row, so a counter or a clock inside it could
+        # not pace anything across rows — the whole point of these knobs is
+        # that the *worker* enforces them.
+        "PEARSS_FETCH_MIN_INTERVAL",
+        "PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP",
+        "PEARSS_FETCH_COOLDOWN_SECONDS",
+        "PEARSS_BACKFILL_DEFAULT_LIMIT",
         "PEARSS_BACKUP_DIR",  # backup destination (CLI, host-side)
         "PEARSS_RESTORE_ARCHIVE",  # restore CLI plumbing
         "PEARSS_RESTORE_TARGET",

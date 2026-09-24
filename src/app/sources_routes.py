@@ -200,6 +200,19 @@ class DeleteSourceItemsRequest(BaseModel):
     include_published: bool = True
 
 
+class BackfillChainRequest(BaseModel):
+    """Narrowing for a chain backfill.
+
+    `limit` caps how many items join the queue in one call. It exists because
+    this verb is the one that queues fetches of third-party pages (issue
+    #35): the default is a conservative batch, and an operator who wants a
+    longer run asks for it explicitly rather than discovering it as a burst
+    at someone's blog. Repeat the call to continue — queuing is idempotent.
+    """
+
+    limit: int | None = Field(default=None, ge=1)
+
+
 def _shared_client(request: Request) -> httpx.Client:
     """The process-wide HTTP client, or a clear failure if startup did not run.
 
@@ -539,11 +552,16 @@ def backfill_source_chain(
     source_id: str,
     principal: Principal = Depends(write_required),
     key: str = Depends(idempotency_key),
+    payload: BackfillChainRequest | None = None,
 ) -> JSONResponse:
     """Queue processor products for items stored before the chain was enabled.
 
     A write (it mutates item_enrichment and spends provider budget), so it is
     authenticated, idempotent and audited like every other write.
+
+    The batch size defaults to a conservative limit; see
+    `BackfillChainRequest`. Unbounded was how one call turned into 122 fetches
+    of a single blog, so the default is now something an operator can watch.
     """
     endpoint = f"POST /v1/sources/{source_id}:backfill-chain"
     factory = request.app.state.session_factory
@@ -552,6 +570,10 @@ def backfill_source_chain(
         return replayed
 
     from adapters.repository import backfill_chain
+    from app.fetch_pacing import backfill_default_limit
+
+    body = payload or BackfillChainRequest()
+    limit = body.limit if body.limit is not None else backfill_default_limit()
 
     with factory() as session:
         row = _require_source(session, source_id)
@@ -563,7 +585,7 @@ def backfill_source_chain(
                 suggestion="Set pipeline_chain via PATCH first.",
             )
         try:
-            queued = backfill_chain(session, source_id=source_id)
+            queued = backfill_chain(session, source_id=source_id, limit=limit)
         except ValueError as exc:
             raise api_error(
                 status_code=422,
@@ -576,9 +598,10 @@ def backfill_source_chain(
             ) from exc
         session.commit()
 
-    payload: dict[str, Any] = {
+    result: dict[str, Any] = {
         "source_id": source_id,
         "queued": queued,
+        "limit": limit,
         "audit": "recorded by the Core API",
         "correlation_id": current_correlation_id(),
     }
@@ -588,9 +611,9 @@ def backfill_source_chain(
         endpoint=endpoint,
         key=key,
         status_code=200,
-        body=payload,
+        body=result,
     )
-    return JSONResponse(status_code=200, content=payload)
+    return JSONResponse(status_code=200, content=result)
 
 
 @router.get("/sources/{source_id}/enrichments", operation_id="listEnrichments")

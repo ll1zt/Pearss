@@ -34,6 +34,7 @@ from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.repository import timestamp
+from app.fetch_pacing import PACED_PROCESSORS, host_of, pacer
 from app.processor_runtime import LEASE_GRACE_SECONDS, run_processor
 from core.enrichment import EnrichmentStatus
 from core.enums import ErrorClass, ItemEvent, PublishStatus
@@ -150,9 +151,19 @@ def sweep_queue(
         "skipped": 0,
     }
 
+    # Per-host fetch pacing (issue #35), in two stages. The cap is applied
+    # here, at claim time, which is single-threaded and race-free: a host
+    # whose sweep budget is spent (or that is cooling down) is simply not
+    # claimed, so its rows wait for the next sweep. The *interval* cannot be
+    # enforced here — it has to hold between the actual fetches, which happen
+    # in the pool's threads and then in child processes; it is enforced by
+    # `pace()` immediately before each fetch.
+    fetch_pacer = pacer()
+    fetch_pacer.begin_sweep()
+
     claimable = _claimable_rows(session, now=now, limit=max(1, concurrency))
-    claimed: list[tuple[str, str, str]] = []
-    for row_id, item_id, plugin_id in claimable:
+    claimed: list[tuple[str, str, str, str]] = []
+    for row_id, item_id, plugin_id, item_url in claimable:
         if plugin_id not in processors:
             # Defense in depth: chains naming unregistered processors are
             # refused at config time now, but a processor removed after a
@@ -162,6 +173,20 @@ def sweep_queue(
                 "cannot be processed until the chain is reconfigured",
                 row_id,
                 plugin_id,
+            )
+            report["skipped"] += 1
+            continue
+        host = host_of(item_url) if plugin_id in PACED_PROCESSORS else ""
+        if not fetch_pacer.reserve(host):
+            # Deferred, not dropped: the row stays queued and a later sweep
+            # picks it up once the cooldown has passed.
+            LOGGER.info(
+                "deferring enrichment %s: host %s is paced (%d per sweep, "
+                "%.0fs interval)",
+                row_id,
+                host or "-",
+                fetch_pacer.max_per_sweep,
+                fetch_pacer.min_interval,
             )
             report["skipped"] += 1
             continue
@@ -192,7 +217,7 @@ def sweep_queue(
         )
         claimed_flag = cast("CursorResult[Any]", session.execute(claim)).rowcount
         if claimed_flag:
-            claimed.append((row_id, item_id, owner))
+            claimed.append((row_id, item_id, owner, host))
     session.commit()
     if not claimed:
         return report
@@ -201,7 +226,7 @@ def sweep_queue(
 
     report_lock = threading.Lock()
 
-    def run_one(row_id: str, item_id: str, owner: str) -> None:
+    def run_one(row_id: str, item_id: str, owner: str, host: str) -> None:
         nonlocal report
         outcome = _execute_row(
             row_id,
@@ -211,6 +236,7 @@ def sweep_queue(
             max_attempts=max_attempts,
             cancel_event=cancel_event,
             deadline=deadline,
+            host=host,
         )
         with report_lock:
             for key, value in outcome.items():
@@ -219,8 +245,8 @@ def sweep_queue(
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         try:
             futures = [
-                pool.submit(run_one, row_id, item_id, owner)
-                for row_id, item_id, owner in claimed
+                pool.submit(run_one, row_id, item_id, owner, host)
+                for row_id, item_id, owner, host in claimed
             ]
             for future in futures:
                 future.result()
@@ -246,16 +272,19 @@ def _expired_lease(now: datetime) -> Any:
 
 def _claimable_rows(
     session: Session, *, now: datetime, limit: int
-) -> list[tuple[str, str, str]]:
-    """(id, item_id, plugin_id) of queued rows plus `running` rows past the
-    reclaim budget. Core columns only - the outer sweep never holds ORM
-    instances of rows that row sessions will write."""
+) -> list[tuple[str, str, str, str | None]]:
+    """(id, item_id, plugin_id, item_url) of queued rows plus `running` rows
+    past the reclaim budget. Core columns only - the outer sweep never holds
+    ORM instances of rows that row sessions will write. The item URL rides
+    along because fetch pacing is per host, and the host is the item's."""
     rows = session.execute(
         select(
             ItemEnrichment.id,
             ItemEnrichment.item_id,
             ItemEnrichment.plugin_id,
+            ItemRow.url,
         )
+        .join(ItemRow, ItemRow.id == ItemEnrichment.item_id)
         .where(
             or_(
                 and_(
@@ -273,7 +302,7 @@ def _claimable_rows(
         .order_by(ItemEnrichment.created_at)
         .limit(limit)
     ).all()
-    return [(row[0], row[1], row[2]) for row in rows]
+    return [(row[0], row[1], row[2], row[3]) for row in rows]
 
 
 def _execute_row(
@@ -285,6 +314,7 @@ def _execute_row(
     max_attempts: int,
     cancel_event: threading.Event,
     deadline: float,
+    host: str = "",
 ) -> dict[str, int]:
     """Run one claimed row entirely inside its own session.
 
@@ -313,6 +343,31 @@ def _execute_row(
             outcome["skipped"] += 1
             return outcome
         processor = processors[row.plugin_id]
+        if row.plugin_id in PACED_PROCESSORS and not pacer().pace(host):
+            # Nothing was attempted: this row lost its turn because a sibling
+            # row on the same host was refused (cooldown) or the wait budget
+            # ran out. Hand it back to the queue rather than burning an
+            # attempt, so the next sweep retries it for free.
+            fenced = _fenced_update(
+                session,
+                row_id=row_id,
+                owner_token=owner_token,
+                values={
+                    "status": EnrichmentStatus.QUEUED.value,
+                    "owner_token": None,
+                    "lease_expires_at": None,
+                    "updated_at": timestamp(datetime.now(UTC)),
+                },
+            )
+            outcome["skipped"] += 1
+            if fenced:
+                LOGGER.info(
+                    "enrichment %s deferred: host %s is cooling down or paced",
+                    row_id,
+                    host or "-",
+                )
+            session.commit()
+            return outcome
         try:
             result = run_processor(
                 processor,
@@ -356,6 +411,12 @@ def _execute_row(
                 outcome["skipped"] += 1
             return outcome
         attempts = row.attempt_count + 1
+        # A refusal is the origin asking us to stop (403/429): honour it for
+        # every row on that host, not just this one. The classification is the
+        # taxonomy's own blocked class, so the pacer cannot disagree with what
+        # the operator sees in the run history.
+        if error_class is ErrorClass.BLOCKED:
+            pacer().record_blocked(host)
         transient = error_class.value in TRANSIENT_CLASSES
         if transient and attempts < max_attempts:
             backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
