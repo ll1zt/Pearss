@@ -746,3 +746,50 @@ def test_the_gate_helper_is_what_the_visibility_reads_use() -> None:
         - used
     )
     assert not missing, f"these visibility reads ignore the shared gate: {missing}"
+
+
+def test_the_ci_workflow_has_one_trigger_source() -> None:
+    """The CI workflow must not listen to both `push` and `pull_request`.
+
+    It used to, and every push to a branch with an open PR produced two
+    identical full runs — lint, unit, integration, e2e, contract, coverage,
+    ~45 minutes each, on a shared runner (issue #40). They also raced: the
+    concurrent pair was what made the MCP suites' hardcoded ports collide and
+    hang a job for 51 minutes (issue #37).
+
+    The invariant is mechanical, so it is checked mechanically: whoever adds
+    `push:` back gets a red test with the reason attached, instead of a
+    doubled runner bill nobody notices.
+    """
+    workflow = Path(".forgejo/workflows/ci.yml")
+    lines = workflow.read_text(encoding="utf-8").splitlines()
+
+    triggers: list[str] = []
+    in_on_block = False
+    for line in lines:
+        if line.startswith("on:"):
+            in_on_block = True
+            continue
+        if in_on_block:
+            # A top-level key (no indentation) ends the block.
+            if line and not line[0].isspace():
+                break
+            # Direct children only: a trigger key sits at one indent level
+            # (`  pull_request:`), while the parameters of a trigger sit
+            # deeper (`    branches-ignore:`, `      - main`).
+            indent = len(line) - len(line.lstrip())
+            if indent != 2:
+                continue
+            key = line.strip().split(":", 1)[0].strip()
+            if key:
+                triggers.append(key)
+
+    assert "pull_request" in triggers, (
+        f"CI must gate pull requests; found triggers: {triggers}"
+    )
+    assert "push" not in triggers, (
+        "CI listens to both push and pull_request, so every push to a branch "
+        "with an open PR burns two identical full runs (issue #40). Keep "
+        "`pull_request` (it gates the PR head, and pushing fires "
+        "`synchronize`) and use `workflow_dispatch` for anything else."
+    )

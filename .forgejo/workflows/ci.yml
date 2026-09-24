@@ -1,13 +1,23 @@
 name: CI
 
-# Feature branches and pull requests gate every push; main is deliberately
-# excluded (merges land exactly at the CI-passed branch tip, so a second run
-# would only burn the shared runner) and stays available on demand through
-# workflow_dispatch.
+# One trigger source, on purpose. This workflow used to listen to `push`
+# (branches-ignore: main) *and* `pull_request`, which meant every push to a
+# branch with an open PR produced TWO identical full runs — lint, unit,
+# integration, e2e, contract, coverage, ~45 minutes each — on a shared
+# runner (issue #40). They also raced each other: two concurrent runs were
+# what made the MCP suites' hardcoded ports collide and hang a job for 51
+# minutes (issue #37).
+#
+# `pull_request` is the trigger that matters: it gates the PR's head commit,
+# and pushing to that branch fires `synchronize`, so "one run per revision"
+# holds. Forgejo's default concurrency behaviour then cancels the superseded
+# run instead of queueing behind it. Branches without a PR — and deliberate
+# re-runs — use workflow_dispatch, because that is exactly the "only spend
+# the shared runner when a test is actually needed" case.
+#
+# main stays excluded: merges land exactly at the CI-passed branch tip, so a
+# run there would only burn the runner a second time.
 on:
-  push:
-    branches-ignore:
-      - main
   pull_request:
   workflow_dispatch:
 
