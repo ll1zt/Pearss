@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Final, cast
+from urllib.parse import urljoin
 
 import httpx
 from lxml import html as lxml_html
@@ -109,26 +110,6 @@ _NON_CONTENT: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Tags whose text becomes a paragraph in the product; everything else in the
-# winning subtree is unwrapped to inline text.
-_PARAGRAPH_TAGS: Final[frozenset[str]] = frozenset(
-    {
-        "p",
-        "li",
-        "blockquote",
-        "pre",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "figcaption",
-        "dd",
-        "dt",
-    }
-)
-
 
 def process(
     item_ctx: Any,
@@ -138,8 +119,9 @@ def process(
 ) -> str:
     """Fill in the item's body from its article page; return the storage ref.
 
-    The artifact is a bare sequence of block-level fragments ("<p>…", the
-    translate processor's product shape). Sanitised here, before `store`.
+    The artifact is the article's own markup (headings, images, code, lists,
+    quotes, tables, links), sanitised here before `store` — the reader gets
+    the article as the author laid it out, not a flattened transcript.
     """
     url = (item_ctx.get("url") or "").strip()
     current = _plain_length(item_ctx.get("content", ""))
@@ -154,15 +136,13 @@ def process(
         return str(store(""))
 
     html_text = _fetch_article(url, item_id=str(item_ctx.get("item_id", "?")))
-    text = _extract_article_text(html_text)
-    if _plain_length(text) < MIN_ARTICLE_CHARS:
+    markup = _extract_article_markup(html_text, base_url=url)
+    if _plain_length(markup) < MIN_ARTICLE_CHARS:
         raise ProcessorError(
             ErrorClass.PARSE,
-            f"no extractable article at the item URL ({_plain_length(text)} chars)",
+            f"no extractable article at the item URL ({_plain_length(markup)} chars)",
         )
-    fragments = _fragment(text)
-    product = sanitize_html("".join(fragments))
-    return str(store(product))
+    return str(store(sanitize_html(markup)))
 
 
 # --------------------------------------------------------------------------
@@ -205,33 +185,22 @@ def _fetch_article(url: str, *, item_id: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _extract_article_text(html_text: str) -> str:
-    """The readable text of an HTML page: chrome dropped, article kept.
+def _extract_article_markup(html_text: str, base_url: str) -> str:
+    """The readable article as MARKUP: chrome dropped, structure kept.
 
-    Structural, in three steps: parse; remove every non-content subtree;
-    among the remaining container-level blocks keep the one with the most
-    visible text (the article is always the densest block on a blog page).
-    Returns plain text with paragraphs separated by newlines.
+    Three steps: parse; remove every non-content subtree; among the remaining
+    container-level blocks keep the one with the most visible text (the
+    article is always the densest block on a blog page). The winner's
+    children are returned as HTML — headings, images, code, lists, quotes,
+    tables and links intact — with relative URLs resolved against `base_url`,
+    because the product is rendered somewhere else entirely.
+
+    Returning plain text was the original mistake: it flattened every block
+    into a `<p>`, so a fetched article lost its headings, images, code
+    formatting, lists, quotes, tables and links, and nested blocks printed
+    twice (#32).
     """
-    try:
-        document = lxml_html.fromstring(html_text)
-    except ValueError:
-        # lxml refuses an XML declaration with a stray encoding hint; the
-        # content is the same document without it.
-        head, _, tail = html_text.partition("?>")
-        if not tail:
-            head, _, tail = html_text.partition(">")
-            head = head + ">" if head.startswith("<") else head
-        try:
-            document = lxml_html.fromstring(tail if tail.strip() else head)
-        except Exception as exc:
-            raise ProcessorError(
-                ErrorClass.PARSE, f"article page is not parseable HTML: {exc}"
-            ) from exc
-    except Exception as exc:
-        raise ProcessorError(
-            ErrorClass.PARSE, f"article page is not parseable HTML: {exc}"
-        ) from exc
+    document = _parse_document(html_text)
 
     for element in document.iter():
         if element.tag in _NON_CONTENT:
@@ -257,7 +226,7 @@ def _extract_article_text(html_text: str) -> str:
     # over wrappers that add nothing, while still preferring a container
     # that genuinely holds more text.
     scored = [
-        (element, _plain_length(_text_of(element)), _depth(element))
+        (element, _plain_length(_serialize(element)), _depth(element))
         for element in candidates
     ]
     top = max(score for _, score, _ in scored)
@@ -267,7 +236,21 @@ def _extract_article_text(html_text: str) -> str:
         (entry for entry in scored if entry[1] >= int(top * 0.9)),
         key=lambda entry: entry[2],
     )
-    return _text_of(best[0])
+    article = best[0]
+    # The article is rendered elsewhere (a reader, a phone), so a relative
+    # href/src is a broken link there.
+    for element in article.iter():
+        if element.tag == "a" and element.get("href"):
+            element.set("href", urljoin(base_url, element.get("href")))
+        elif element.tag == "img" and element.get("src"):
+            element.set("src", urljoin(base_url, element.get("src")))
+    # Children only: the container's own tag (article/main/section) is
+    # packaging, and the sanitiser's allowlist is about content.
+    return "".join(
+        lxml_html.tostring(child, encoding="unicode")
+        for child in article.iterchildren()
+        if isinstance(child.tag, str)
+    )
 
 
 def _depth(element: lxml_html.HtmlElement) -> int:
@@ -275,42 +258,51 @@ def _depth(element: lxml_html.HtmlElement) -> int:
     return sum(1 for _ in element.iterancestors())
 
 
-def _text_of(element: lxml_html.HtmlElement) -> str:
-    """Visible text of a subtree, one paragraph per block-level child."""
-    parts: list[str] = []
-    if isinstance(element.tag, str) and element.tag in _PARAGRAPH_TAGS:
-        parts.append(_inline_text(element))
-    else:
-        for child in element.iterdescendants():
-            if not isinstance(child.tag, str):
-                continue
-            if child.tag in _PARAGRAPH_TAGS:
-                parts.append(_inline_text(child))
-    return "\n\n".join(part for part in parts if part.strip())
+def _parse_document(html_text: str) -> lxml_html.HtmlElement:
+    """Parse a page into a tree, or fail with the processor's taxonomy."""
+    try:
+        return lxml_html.fromstring(html_text)
+    except ValueError:
+        # lxml refuses an XML declaration with a stray encoding hint; the
+        # content is the same document without it.
+        head, _, tail = html_text.partition("?>")
+        if not tail:
+            head, _, tail = html_text.partition(">")
+            head = head + ">" if head.startswith("<") else head
+        try:
+            return lxml_html.fromstring(tail if tail.strip() else head)
+        except Exception as exc:
+            raise ProcessorError(
+                ErrorClass.PARSE, f"article page is not parseable HTML: {exc}"
+            ) from exc
+    except Exception as exc:
+        raise ProcessorError(
+            ErrorClass.PARSE, f"article page is not parseable HTML: {exc}"
+        ) from exc
 
 
-def _inline_text(element: lxml_html.HtmlElement) -> str:
-    """The element's text with tags unwrapped and whitespace collapsed."""
-    return " ".join((element.text_content() or "").split())
+def _serialize(element: lxml_html.HtmlElement) -> str:
+    """The element's subtree as HTML (used for measuring and for the product)."""
+    return cast("str", lxml_html.tostring(element, encoding="unicode"))
+
+
+def _visible_text(markup: str) -> str:
+    """The text a reader sees in a markup fragment, whitespace collapsed.
+
+    Tag-wise on purpose: this is the density/threshold measurement, and
+    markup weight must not make a short description look like an article.
+    """
+    try:
+        tree = lxml_html.fromstring(markup)
+    except Exception:
+        return " ".join(markup.split())
+    # The stubs type fromstring() as _Element, which lacks text_content.
+    content = cast("lxml_html.HtmlElement", tree).text_content() or ""
+    return " ".join(content.split())
 
 
 def _plain_length(content: str | None) -> int:
-    """The visible-text length of an HTML fragment (or plain string)."""
+    """The visible-text length of a markup fragment (or plain string)."""
     if not content:
         return 0
-    try:
-        tree = lxml_html.fromstring(content)
-    except Exception:
-        return len(content.split())
-    return len(_inline_text(tree))
-
-
-def _fragment(text: str) -> list[str]:
-    """Escape and wrap each paragraph; the product shape readers render."""
-    from html import escape
-
-    return [
-        f"<p>{escape(paragraph)}</p>"
-        for paragraph in text.split("\n\n")
-        if paragraph.strip()
-    ]
+    return len(_visible_text(content))

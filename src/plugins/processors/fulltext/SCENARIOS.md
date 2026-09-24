@@ -40,3 +40,30 @@
   Given 源启用 fulltext 链之前的已发布条目
   When 调用 backfill
   Then 为存量条目排队 fulltext 产物（复用现有机制，本插件不新增 API）
+
+## AC-8 用户拿到的全文保留原文排版（issue #32）
+  Given 摘要源的文章页含 h1/h2、img、pre/code、ul/li、blockquote、table、a
+  When fulltext 处理链运行
+  Then 产物保留这些标签（不是一串裸 <p>）
+  And 站点 chrome（nav/aside/header/footer/script/style）仍被剔除
+
+## AC-9 全文里的图片与链接指向绝对地址
+  Given 文章页用相对路径写 `<img src="/img/a.png">` 与 `<a href="/post/b">`
+  When 抽取
+  Then 产物中的地址以条目 URL 为基解析为绝对 URL
+  And 图片的 alt 文本保留
+
+## AC-10 嵌套块级元素不重复输出
+  Given 文章里的引用块为 `<blockquote><p>句子</p></blockquote>`
+  When 抽取
+  Then 该句子在产物中只出现一次
+
+## AC-11 代码块保留缩进与换行
+  Given 文章页含 `<pre><code>` 且代码带缩进与换行
+  When 抽取
+  Then 产物的 `pre` 内保留那些空白（代码语义的一部分，不做空白折叠）
+
+## AC-12 恶意标记仍被消毒边界拦住
+  Given 文章页含 script/onclick/javascript: 链接
+  When 抽取
+  Then 产物经 sanitize_html 后无残留（注入式验证：放行标签时测试必须变红）
