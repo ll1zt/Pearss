@@ -40,23 +40,39 @@ def _is_production(path: str) -> bool:
     return "/test_" not in path and not Path(path).name.startswith("test_")
 
 
+class UnknownBaseRef(RuntimeError):
+    """The ref the gate was asked to diff against is not in this repository.
+
+    Raised rather than letting `git`'s non-zero status escape as a
+    `CalledProcessError`: the status is the same either way, but a traceback
+    naming `['git', 'diff', ...]` does not tell a reader what to do about it.
+    This is a real CI failure mode, not a hypothetical one -- a single-branch
+    shallow clone has no `origin/main` to diff against.
+    """
+
+
 def changed_lines(base: str) -> list[tuple[str, int]]:
     """The added/modified (path, lineno) pairs introduced since `base`.
 
     Parsed from a zero-context unified diff so that only lines this branch
     actually wrote are considered -- not the whole file, which would let a
     change to one line inherit responsibility for an untested module.
+
+    Raises `UnknownBaseRef` when `base` cannot be resolved here.
     """
     # Both noqa codes here are about executing an untrusted program. The
     # program is `git`, fixed, and the only variable is a ref name the operator
     # typed on their own command line -- there is no input path to this
     # function that its caller does not already control.
-    diff = subprocess.run(  # noqa: S603
+    result = subprocess.run(  # noqa: S603
         ["git", "diff", "--unified=0", f"{base}...HEAD", "--", "src/"],  # noqa: S607
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout
+        check=False,
+    )
+    if result.returncode != 0:
+        raise UnknownBaseRef(base)
+    diff = result.stdout
 
     pairs: list[tuple[str, int]] = []
     path = ""
@@ -105,7 +121,22 @@ def main(argv: list[str]) -> int:
 
     checked = missed = 0
     missed_lines: list[str] = []
-    for path, lineno in changed_lines(base):
+    try:
+        added = changed_lines(base)
+    except UnknownBaseRef:
+        # Exit 1 for the same reason as an absent measurement: the question was
+        # not answered. The difference is that this one has a cure, so say it.
+        print(
+            f"coverage-diff: cannot diff against {base!r}: this repository has "
+            "no such ref.\n"
+            f"Fetch it first -- for example `git fetch origin "
+            f"{base.split('/')[-1]}` -- and run the gate again.\n"
+            "A shallow or single-branch checkout hits this: the gate needs the "
+            "base\ncommit, not only the pushed one."
+        )
+        return 1
+
+    for path, lineno in added:
         entry = files.get(path)
         if entry is None:
             continue
