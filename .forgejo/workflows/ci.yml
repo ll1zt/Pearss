@@ -10,16 +10,34 @@ name: CI
 #
 # `pull_request` is the trigger that matters: it gates the PR's head commit,
 # and pushing to that branch fires `synchronize`, so "one run per revision"
-# holds. Forgejo's default concurrency behaviour then cancels the superseded
-# run instead of queueing behind it. Branches without a PR — and deliberate
-# re-runs — use workflow_dispatch, because that is exactly the "only spend
-# the shared runner when a test is actually needed" case.
+# holds. Branches without a PR — and deliberate re-runs — use
+# workflow_dispatch, because that is exactly the "only spend the shared runner
+# when a test is actually needed" case.
 #
 # main stays excluded: merges land exactly at the CI-passed branch tip, so a
 # run there would only burn the runner a second time.
 on:
   pull_request:
   workflow_dispatch:
+
+# Superseded runs are cancelled explicitly instead of relying on the default.
+#
+# Forgejo does cancel same-workflow runs on `push` and `pull_request`
+# synchronize by default, and that default is what the old comment here took on
+# faith. It is also the behaviour that regressed once already: forgejo#9797
+# exists because cancellation "only worked on an `on: push` workflow"
+# (pull_request was broken), and forgejo#10863 because the group only matched
+# runs still *pending*, so a run whose job had already failed was never
+# cancelled. Stating the group makes the intent ours rather than a version's.
+#
+# Two runs of this workflow are not a curiosity here: at capacity 5 on a shared
+# runner they compete for the same 14 cores, and #458/#459 were killed at the
+# 60-minute cap while a *different* run of the same suite was executing on the
+# host (issue #44). One run per revision is the property; concurrency is what
+# enforces it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:

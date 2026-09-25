@@ -793,3 +793,57 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
         "`pull_request` (it gates the PR head, and pushing fires "
         "`synchronize`) and use `workflow_dispatch` for anything else."
     )
+
+
+def test_the_ci_workflow_cancels_superseded_runs_explicitly() -> None:
+    """CI must state its concurrency group, not inherit one.
+
+    The trigger guard above keeps `push` out so a revision gets one run. That
+    was half the property: the other half is what happens when a *second*
+    revision arrives while the first is still running. The workflow used to say
+    Forgejo's default "cancels the superseded run instead of queueing behind
+    it", which is true of recent versions -- and was false twice: cancellation
+    did not apply to `pull_request` workflows at all (forgejo#9797), and the
+    group only matched runs still pending, so a run whose job had already failed
+    kept running (forgejo#10863). Both are the kind of default that changes
+    under you.
+
+    It matters here because the runner is shared and `capacity` is 5: two runs
+    of this suite compete for the same 14 cores. #458 and #459 were both killed
+    at the 60-minute cap while a different run of the same suite was executing
+    on the host (issue #44, #47).
+
+    Read from the workflow rather than from memory, and keyed on the behaviour
+    (`cancel-in-progress: true` inside a `concurrency:` block) rather than on a
+    particular spelling of the group expression.
+    """
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith("concurrency:")), None
+    )
+    assert start is not None, (
+        "the CI workflow has no `concurrency:` block, so a superseded run is "
+        "cancelled only if the server's default still does that -- and it has "
+        "regressed twice (forgejo#9797, forgejo#10863). State the group "
+        "(issues #40, #47)."
+    )
+
+    block: list[str] = []
+    for line in lines[start + 1 :]:
+        if line and not line[0].isspace():
+            break  # the next top-level key ends the block
+        block.append(line.strip())
+
+    # `cancel-in-progress` is what actually cancels; `group` without it only
+    # serialises, which on a shared runner is worse than the default.
+    assert any(
+        entry.replace(" ", "").startswith("cancel-in-progress:true") for entry in block
+    ), (
+        "the CI `concurrency:` block does not set `cancel-in-progress: true`, so "
+        f"a superseded run waits for the previous one instead of replacing it: {block}"
+    )
+    assert any(entry.startswith("group:") for entry in block), (
+        f"the CI `concurrency:` block has no `group:`, so it groups nothing: {block}"
+    )
