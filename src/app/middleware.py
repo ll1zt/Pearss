@@ -209,20 +209,27 @@ class CorrelationAndAuditMiddleware:
 
         Test support for the fire-and-forget contract: the middleware itself
         never waits (that is the point of A15), so a test that asserts on the
-        audit table awaits this instead of sleeping a fixed interval. The
-        single worker means an empty queue plus one scheduling beat guarantees
-        every submitted row has committed or been logged. Returns False on
-        timeout, so a test can fail on evidence rather than hang.
-        """
-        import time as _time
+        audit table awaits this instead of sleeping a fixed interval. Returns
+        False on timeout, so a test can fail on evidence rather than hang.
 
-        deadline = _time.monotonic() + timeout
-        while _time.monotonic() < deadline:
-            if cls._EXECUTOR._work_queue.qsize() == 0:
-                _time.sleep(0.05)
-                return True
-            _time.sleep(0.02)
-        return False
+        A sentinel task, not an empty-queue check. The executor's queue holds
+        only *pending* work -- the worker removes an item before it runs it -- so
+        `qsize() == 0` is true while a write is still executing. Polling for
+        that returned early, and because the executor is FIFO with one worker,
+        waiting on a sentinel submitted now is exactly "everything submitted
+        before this point has finished".
+
+        That distinction cost a CI run: `test_backfill_chain_endpoint_queues_
+        and_audits` failed with `assert 1 == 2` -- one audit row short, the
+        second write still in flight -- while passing in isolation, where the
+        write happens to win the race. Every `drain_audit(); assert count` in
+        the suite carried the same latent flake.
+        """
+        try:
+            cls._EXECUTOR.submit(lambda: None).result(timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
 
     def _record(
         self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
