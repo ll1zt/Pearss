@@ -282,6 +282,23 @@ nix flake check
 nix develop --command just ci
 ```
 
+### CI 与本地测试共用同一台主机
+
+runner 跑在 `ci-runner` 上，`.forgejo/workflows/ci.yml` 用 `runs-on: nixos-server`，
+job 以 **host 模式**执行——不是容器，与开发者的 shell、`nix.buildMachines` 构建、
+同机其他仓库的 CI 竞争同一批 CPU 与内存。
+
+因此：
+
+- **CI 期间不要跑全量套件。** 并发跑测会把 CI 的时长拉长数倍，而不改变测试结论：
+  `#452` 的 integration 阶段基线 948s，在另一轮测试同机运行时涨到 1794s（#458），
+  叠加当时的作业上限被直接杀掉。这是**环境问题**，不是代码问题——排查前先看
+  `journalctl -u forgejo-runner-dev_runner`，短于 job 超时上限的失败尤其可疑。
+- workflow 声明了 `concurrency`（`cancel-in-progress: true`），同一分支的新一轮会取消
+  被取代的那轮，不依赖服务器默认行为（该默认曾两次回归：forgejo#9797、#10863）。
+- runner 的内存边界（`MemoryHigh`/`MemoryMax`）与 `capacity` 在 **host-config** 的
+  `hosts/<host>/forgejo-runner.nix`，不在本仓库。
+
 禁止测试依赖开发者机器上的公网、时钟、随机数、已有 SQLite 数据库、真实 token 或真实 LLM provider。
 
 ## 失败处理
