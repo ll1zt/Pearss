@@ -171,7 +171,7 @@ def test_user_backlog_is_fetched_spaced_and_capped_per_sweep(
     worker fired them as fast as its slots allowed — a burst at a third
     party's server, with three of them in flight at once.
     """
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_FETCH_MIN_INTERVAL", "1")
     monkeypatch.setenv("PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP", "2")
@@ -226,7 +226,7 @@ def test_user_rate_limited_host_is_left_alone(
     Then it stops fetching that host for a cooldown — a rate-limited origin
     is a request to slow down, not an invitation to try the next item on it.
     """
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_FETCH_MIN_INTERVAL", "1")
     monkeypatch.setenv("PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP", "2")

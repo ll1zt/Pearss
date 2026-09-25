@@ -15,11 +15,15 @@ tested here rather than being taken on faith:
 
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
-from scripts.coverage_diff import changed_lines
+from coverage import CoverageData
+from scripts.coverage_diff import changed_lines, main
 
 pytestmark = pytest.mark.unit
 
@@ -158,3 +162,173 @@ def _added_lines(root: Path) -> list[tuple[str, int]]:
         return changed_lines("HEAD~1")
     finally:
         os.chdir(previous)
+
+
+# --------------------------------------------------------------------------
+# The verdict: the threshold comparison and the exit status
+#
+# The parsing tests above pin which lines the gate *considers*. These pin what
+# it *decides*, which is the half a commit hook reads: the exit status. A gate
+# that parses perfectly and then exits 0 on a violation protects nothing, and
+# one that exits non-zero when there is nothing to check blocks every commit.
+#
+# The measurement is written directly into a `.coverage` database rather than
+# produced by instrumenting a live run: the gate reads the database, so the
+# database is the honest input, and a fixture built by the instrumenter would
+# test the instrumenter as much as the gate.
+# --------------------------------------------------------------------------
+
+
+def _write_measurement(root: Path, relative: str, executed: list[int]) -> None:
+    """Record that `relative` ran exactly these line numbers, nothing else."""
+    data = CoverageData(basename=str(root / ".coverage"))
+    data.add_lines({str(root / relative): set(executed)})
+    data.write()
+
+
+def _verdict(root: Path, base: str, threshold: str = "20") -> tuple[int, str]:
+    """Run the gate with `root` as the working directory.
+
+    Both halves of the gate are CWD-relative -- `git diff` runs here and the
+    default `.coverage` is read from here -- so the only honest way to exercise
+    the real entry point is to be here.
+    """
+    previous = os.getcwd()
+    os.chdir(root)
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            status = main(["coverage_diff.py", base, threshold])
+    finally:
+        os.chdir(previous)
+    return status, captured.getvalue()
+
+
+def _change_one_statement(root: Path) -> None:
+    """A repo whose change adds one statement, ready for a measurement.
+
+    Two executable lines are added (a condition and its body) so a measurement
+    can be crafted to miss exactly one of them -- that is the 50% case the
+    threshold boundary needs, which a single added line cannot express.
+    """
+    _commit_file(root, "src/mod.py", "FLAG = False\n")
+    _commit_file(root, "src/mod.py", "FLAG = False\nif FLAG:\n    NEVER = 1\n")
+
+
+def test_uncovered_added_lines_fail_and_are_named() -> None:
+    """The violation must be named, not just counted.
+
+    "38 added statements, 12 uncovered" tells a reader that something is
+    wrong; `src/mod.py:2` tells them where to look. The gate's own message
+    says to add a test, so it has to say which one.
+    """
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+        # Only the first line ran: the condition and its body are missed.
+        _write_measurement(repo, "src/mod.py", [1])
+
+        status, output = _verdict(repo, "HEAD~1", "20")
+
+    assert status == 1, output
+    assert "src/mod.py:2" in output, output
+
+
+def test_coverage_exactly_at_the_threshold_passes() -> None:
+    """`more than threshold` is the rule, so the threshold itself is allowed.
+
+    The boundary is the part of a comparison that gets written wrong, and the
+    difference is not cosmetic: at 20% a violation would fail a change that
+    meets the documented bar, and at 19.9% it would let one through.
+    """
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+        # Line 2 ran, line 3 did not: exactly 50% of the added statements.
+        _write_measurement(repo, "src/mod.py", [1, 2])
+
+        status, output = _verdict(repo, "HEAD~1", "50")
+
+    assert status == 0, output
+    assert "1 uncovered" in output, output
+
+
+def test_coverage_just_above_the_threshold_fails() -> None:
+    """The same measurement one point over must fail -- the other side."""
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+        _write_measurement(repo, "src/mod.py", [1, 2])
+
+        status, output = _verdict(repo, "HEAD~1", "49")
+
+    assert status == 1, output
+
+
+def test_a_change_with_no_executable_lines_passes() -> None:
+    """A comment-only or blank change has nothing to cover and must not fail.
+
+    `checked == 0` is not a violation; it is a question that did not apply.
+    Failing here would make every documentation-only commit red.
+    """
+    with _scratch_repo() as repo:
+        _commit_file(repo, "src/mod.py", "FLAG = False\n")
+        _commit_file(repo, "src/mod.py", "FLAG = False\n# only a comment\n")
+        _write_measurement(repo, "src/mod.py", [1])
+
+        status, output = _verdict(repo, "HEAD~1", "20")
+
+    assert status == 0, output
+    assert "no executable added lines" in output, output
+
+
+def test_an_absent_measurement_fails_rather_than_passing_vacuously() -> None:
+    """No `.coverage` means the question was not answered, not answered well.
+
+    `just ci` runs the gate after the instrumented suite, so an absent file
+    means the step that produces it did not run. Exiting 0 there would report
+    a green gate for a check that never happened.
+    """
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+
+        status, output = _verdict(repo, "HEAD~1", "20")
+
+    assert status == 1, output
+    assert "no measured production files" in output, output
+
+
+def test_a_measurement_that_recorded_nothing_fails_too() -> None:
+    """An empty database is absent evidence, not evidence of no gaps.
+
+    The file exists, so a check that only tested `Path.exists()` would pass
+    here -- and this is exactly what a run that imported but never executed
+    production code leaves behind.
+    """
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+        CoverageData(basename=str(repo / ".coverage")).write()
+
+        status, output = _verdict(repo, "HEAD~1", "20")
+
+    assert status == 1, output
+    assert "no measured production files" in output, output
+
+
+def test_an_unavailable_base_ref_fails_with_the_remedy(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A base the repository does not have must name the base and the cure.
+
+    This is not hypothetical: the gate first failed in CI because a
+    single-branch shallow clone has no `origin/main` to diff against, and the
+    failure was a `CalledProcessError` traceback that said nothing about
+    fetching. The status is the same either way -- what changes is whether a
+    reader can act on it.
+    """
+    with _scratch_repo() as repo:
+        _change_one_statement(repo)
+        _write_measurement(repo, "src/mod.py", [1])
+
+        status, output = _verdict(repo, "origin/main", "20")
+
+    assert status == 1, output
+    assert "origin/main" in output, output
+    assert "fetch" in output.lower(), output

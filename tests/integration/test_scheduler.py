@@ -15,8 +15,6 @@ from pathlib import Path
 import httpx
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import AuditLog
@@ -37,6 +35,7 @@ from app.scheduler import TickReport, collect_now, evaluate_source, run_tick
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
 from core.models import schedule_policy_from_json, schedule_policy_to_json
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -86,11 +85,7 @@ def add_items(
 
 @pytest.fixture
 def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "sched.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "sched.db")
     engine = create_engine_for(url)
     try:
         yield sessionmaker(engine, expire_on_commit=False)

@@ -200,7 +200,7 @@ HTTP 状态码：`400` 请求无效、`401` 未认证、`403` 无权限、`404` 
 - 每个 operation 必须有 `operationId`、summary、说明、请求 schema、成功和失败响应
 - 所有 enum 在共享 schema 中定义，尤其 `ErrorClass`、`PublishStatus`、`JobRunStatus`
 - 为每个写操作提供含 `Idempotency-Key` 的示例
-- schema 变更先修改规范，再改代码；CI 使用 oasdiff 阻断破坏性变更
+- schema 变更先修改规范，再改代码；CI 用 snapshot 比对阻断破坏性变更（`just contract`，见 `docs/guides/testing.md`）
 - 新字段应可选且有安全默认值；删除/重命名字段必须先 deprecate
 
 ## 兼容与弃用

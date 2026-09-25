@@ -26,8 +26,6 @@ import httpx
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 from uvicorn.config import Config as UvicornConfig
@@ -37,6 +35,7 @@ from adapters.raw_payload import RawPayload
 from app.main import create_app, create_engine_for
 from app.pipeline import normalise_and_store
 from plugins.collectors.rss import collector as rss
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RSS_FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -48,22 +47,6 @@ READER_PASSWORD = "fixture-password-not-a-secret"
 
 # The tenant every integration suite drives.
 TENANT = "default"
-
-
-def migrated_database(tmp_path: Path, filename: str) -> str:
-    """Run the real migrations against `tmp_path/filename` and return its URL.
-
-    Using alembic rather than `Base.metadata.create_all` is the point: the
-    schema under test is then the one production runs, including the CHECK
-    constraints and CASCADE rules that `create_all` would also produce only if
-    someone remembered to keep the two in sync.
-    """
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / filename)))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
-    return url
 
 
 @pytest.fixture
@@ -101,7 +84,7 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
     every item body-less, so the Reader API could never serve one and no test
     noticed.
     """
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "reader.db")))
+    url = migrated_database(tmp_path, "reader.db")
 
     monkeypatch.setenv("PEARSS_DATABASE_URL", url)
     monkeypatch.setenv("PEARSS_READER_USERNAME", READER_USERNAME)
@@ -109,11 +92,6 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
     # Without this the file store falls back to ./data/storage, which is where
     # a developer's real collected bodies live.
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
-
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
 
     engine = create_engine_for(url)
     with engine.begin() as conn:

@@ -10,10 +10,9 @@ name: CI
 #
 # `pull_request` is the trigger that matters: it gates the PR's head commit,
 # and pushing to that branch fires `synchronize`, so "one run per revision"
-# holds. Forgejo's default concurrency behaviour then cancels the superseded
-# run instead of queueing behind it. Branches without a PR — and deliberate
-# re-runs — use workflow_dispatch, because that is exactly the "only spend
-# the shared runner when a test is actually needed" case.
+# holds. Branches without a PR — and deliberate re-runs — use
+# workflow_dispatch, because that is exactly the "only spend the shared runner
+# when a test is actually needed" case.
 #
 # main stays excluded: merges land exactly at the CI-passed branch tip, so a
 # run there would only burn the runner a second time.
@@ -21,29 +20,99 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Superseded runs are cancelled explicitly instead of relying on the default.
+#
+# Forgejo does cancel same-workflow runs on `push` and `pull_request`
+# synchronize by default, and that default is what the old comment here took on
+# faith. It is also the behaviour that regressed once already: forgejo#9797
+# exists because cancellation "only worked on an `on: push` workflow"
+# (pull_request was broken), and forgejo#10863 because the group only matched
+# runs still *pending*, so a run whose job had already failed was never
+# cancelled. Stating the group makes the intent ours rather than a version's.
+#
+# Two runs of this workflow are not a curiosity here: at capacity 5 on a shared
+# runner they compete for the same 14 cores, and #458/#459 were killed at the
+# 60-minute cap while a *different* run of the same suite was executing on the
+# host (issue #44). One run per revision is the property; concurrency is what
+# enforces it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: nixos-server
     timeout-minutes: 60
+    env:
+      # The instance, named once. It used to be written into two clone URLs,
+      # which is how a host rename took CI down (bf8e3ba).
+      CI_REPOSITORY: https://git.example.com:3000/lllzt/Pearss.git
     steps:
-      # The runner does not trust the certificate on Forgejo's HTTPS endpoint.
       # A full clone, not --depth 1: the coverage gate diffs the pushed commit
       # against origin/main, which a single-branch shallow checkout does not
       # have (that is exactly how the first gated runs failed).
+      #
+      # The job token goes through the askpass helper rather than into the
+      # clone URL. A credential in the URL is exposed twice over: it lands in
+      # the `git clone` argv, world-readable in /proc on this host (and the
+      # runner executes jobs on the host, not in a container), and git writes
+      # it into `.git/config`. The previous version cleaned that up with an
+      # EXIT trap, which a job killed at its timeout never runs -- and being
+      # killed at the timeout is the failure mode this very workflow has
+      # (issues #49, #51). With askpass there is nothing to clean up: the token
+      # exists only in this step's environment, which /proc exposes to its owner
+      # alone.
+      #
+      # Certificate verification is on. It used to be disabled with a comment
+      # about the runner's CA store; the store this host ships trusts the
+      # endpoint, measured with the runner's own git on its own PATH. If a
+      # future runner cannot, fix its CA configuration rather than turning
+      # verification off here -- a silent MITM is worse than a red build.
       - name: Checkout
         env:
           CI_SHA: ${{ github.sha }}
           CI_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          repository="https://git.example.com:3000/lllzt/Pearss.git"
-          trap 'if [ -d source/.git ]; then git -C source remote set-url origin "$repository"; fi' EXIT
-          git -c http.sslVerify=false clone \
-            "https://${CI_TOKEN}@git.example.com:3000/lllzt/Pearss.git" source
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          # `CI_TOKEN` is read at ask time, so the helper file holds no secret.
+          # Gitea/Forgejo accept the token as the username.
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s' "${CI_TOKEN:-}" ;;
+            Password*) printf '' ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
+          git clone "$CI_REPOSITORY" source
           git -C source fetch origin "$CI_SHA"
           git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
+          # The hygiene this step claims, checked rather than asserted in prose:
+          # the credential was never in the URL, so it cannot be in .git/config.
+          test -n "$CI_TOKEN"
+          ! grep -qF "$CI_TOKEN" source/.git/config
 
+      # The first gate, and by far the cheapest (~2s): it evaluates the flake
+      # and builds the dev shells' derivations, so a flake that cannot evaluate
+      # fails here instead of forty minutes into the suite. §7.6 of the
+      # architecture spec and three other documents already described this as
+      # CI's first step; it was not running, which meant `just ci-nix` -- whose
+      # comment calls it "the exact command CI executes" -- had no caller.
+      # `test_the_documented_ci_entry_point_is_what_the_workflow_runs` now keeps
+      # the documented entry point and this file from drifting apart again.
+      - name: Check the flake
+        working-directory: source
+        run: nix flake check
+
+      # `--verbose` is deliberate: `just` does not echo shebang recipes'
+      # bodies, and `ci-covered`/`migrate-check` are shebang recipes, so
+      # without it the log jumps from the last lint line to pytest's progress
+      # dots and a killed job never says which phase it was in (issue #49).
+      # With it each phase announces itself as `===> running recipe ...`.
       - name: Run quality gates
         working-directory: source
         env:
@@ -58,4 +127,4 @@ jobs:
           # no particular runner-side setup; the runner-level default
           # (host-config#12) still covers repos that don't declare it.
           UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
-        run: nix develop --command just ci
+        run: nix develop --command just --verbose ci

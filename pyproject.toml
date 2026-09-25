@@ -39,6 +39,7 @@ dev = [
   "pytest>=8.3",
   "pytest-asyncio>=1.4.0",
   "pytest-cov>=6.0",
+  "pytest-timeout>=2.3",
   "ruff>=0.8",
 ]
 
@@ -185,6 +186,28 @@ asyncio_default_fixture_loop_scope = "function"
 # its fixtures is a parser that stops being verified.
 testpaths = ["tests", "src"]
 addopts = "-ra --strict-markers --strict-config"
+# A hung test must fail as a test, not as a 60-minute job kill.
+#
+# The failure this addresses (issue #49): CI was killed at its cap with nothing
+# in the log but progress dots and `context deadline exceeded`, which is the
+# same output a merely slow suite produces. Neither a deadlock nor its location
+# could be told from that.
+#
+# `timeout` bounds one test. The slowest legitimate test measured here is
+# ~114s under coverage, so 300s is a deadlock detector rather than a
+# performance assertion.
+# `faulthandler_timeout` dumps every thread's stack *while the test is still
+# running*, which matters because a killed job never reaches pytest's end-of-run
+# summary -- the stack dump is the only evidence that survives the kill. It sits
+# between the two: above the slowest legitimate test (so a slow machine gets no
+# spurious dump) and below `timeout` (so a real hang is reported with a stack
+# rather than only as a timeout).
+#
+# `signal` rather than `thread`: the thread method cannot interrupt a blocking
+# C call, and this suite has tests that block on sockets and subprocess pipes.
+timeout = 300
+timeout_method = "signal"
+faulthandler_timeout = 240
 # Every warning is an error, with one deliberate exception.
 #
 # `unclosed database in <sqlite3.Connection ...>` is CPython's sqlite3 emitting
@@ -266,4 +289,12 @@ also_copy = [
   # it the mutation runner dies during stats collection -- the same failure
   # mode as a missing file above, and the same cure.
   "scripts",
+  # Third time this list was the thing that broke, and the third distinct
+  # path: the CI trigger guard reads `.forgejo/workflows/ci.yml`, so without
+  # this entry stats collection died on a FileNotFoundError naming a file the
+  # gate had never heard of. `tests/integration/test_mutmut_copy_tree.py` now
+  # asserts the property instead of the list: it builds the tree from this
+  # config and runs the unit suite in it, so the next path a test reads from
+  # the repository root fails there rather than silently disabling the gate.
+  ".forgejo",
 ]

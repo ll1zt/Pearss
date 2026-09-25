@@ -93,6 +93,33 @@ coverage:
     rm -f .coverage
     uv run pytest -q -m "unit or fixture or integration" -p no:cacheprovider --cov --cov-report=term-missing
 
+# One instrumented run of every suite: the shared measurement CI's gates read.
+#
+# `ci` used to run the suites bare *and* again under --cov, so the same tests ran
+# twice. That is waste, but it is not what broke CI: the double-run form ran in
+# 10m15s (run #94) and 48m5s (#452) without hitting the cap. The cost that did
+# break it is integration growing from 0.26s to 1.18s per test — see issue #44.
+#
+# This is still the right shape for a different reason: one instrumented run
+# answers every question the bare runs did, so the gates below read its
+# .coverage instead of repeating anything.
+ci-covered:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f .coverage
+    # `--cov-report=` on purpose, not a terminal report: on the unit suite the
+    # per-file formatting costs 21s -> 60s for `term` and 66s for `term-missing`
+    # (measured on 957 tests). The gate reads `.coverage` directly and prints
+    # its own summary, so the report has no reader. A 40s saving on a
+    # 60-minute budget is worth taking, but it is not why CI failed.
+    #
+    # `--durations` costs nothing measurable (20.70s vs 20.77s on unit+fixture)
+    # and leaves the slowest 50 tests in every log, so "which test got slower?"
+    # is answerable by diffing two runs instead of by re-running with a
+    # different flag (issue #49).
+    uv run pytest -q -m "unit or fixture or integration or e2e" -p no:cacheprovider \
+        --cov --cov-report= --durations=50 --durations-min=2
+
 # Coverage of the lines this branch added or changed, against a base ref.
 # Usage: just coverage-diff [base] [threshold]   (default: origin/main 20)
 #
@@ -110,15 +137,19 @@ coverage-diff base="origin/main" threshold="20":
         --cov --cov-report= >/dev/null
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
-# The changed-line gate, as CI runs it: same measurement as coverage-diff,
-# parameterized through the environment so a merge workflow can pin the base
-# and threshold without editing this file (B06).
-coverage-gate base="origin/main" threshold="20":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rm -f .coverage
-    uv run pytest -q -m "unit or fixture or integration or e2e" -p no:cacheprovider \
-        --cov --cov-report= >/dev/null
+# The changed-line gate, as CI runs it: it reads the coverage that
+# `ci-covered` recorded rather than re-running the suite.
+#
+# `COVERAGE_BASE` and `COVERAGE_THRESHOLD` override the defaults (B06), so a
+# merge workflow can pin them without editing this file; a positional argument
+# still wins, so `just coverage-gate HEAD~3 5` works from a shell.
+#
+# Deliberately does NOT run pytest. Not because running the suite twice was the
+# 60-minute failure — it was not, see issue #44 — but because a second identical
+# run is a second of the same answer at the price of the slowest step in CI.
+# A missing `.coverage` makes coverage_diff.py exit non-zero, so forgetting
+# `ci-covered` fails the gate instead of passing it vacuously.
+coverage-gate base=env_var_or_default("COVERAGE_BASE", "origin/main") threshold=env_var_or_default("COVERAGE_THRESHOLD", "20"):
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
 # ---------------------------------------------------------------------------
@@ -233,15 +264,25 @@ service-restart:
 # ---------------------------------------------------------------------------
 
 # Everything CI runs, in the order architecture section 7.6 prescribes.
-# coverage-gate is the changed-line diagnostic wired into the merge workflow
-# (B06): it re-runs the suite instrumented, so it is the slowest step and
-# therefore last.
-ci: lint test test-integration test-e2e migrate-check contract coverage-gate
+#
+# The suites run ONCE, instrumented (`ci-covered`); the changed-line gate then
+# reads that measurement instead of repeating the run (issue #42). `lint` first
+# because a style failure should stop the build before anything slow starts.
+ci: lint ci-covered migrate-check contract coverage-gate
 
 # The exact command CI executes, including the Nix environment entry point.
+#
+# `--verbose` is load-bearing for diagnosis, not decoration: `just` does not
+# echo a shebang recipe's body, and `ci-covered` and `migrate-check` are
+# shebang recipes. Without this flag the CI log goes straight from the last lint
+# line to pytest's progress dots, so a job killed mid-suite says nothing about
+# which phase it was in -- which is exactly what made #458/#459 unreadable
+# (issue #49). With it, each phase announces itself:
+#
+#     ===> running recipe `ci-covered`...
 ci-nix:
     nix flake check
-    nix develop --command just ci
+    nix develop --command just --verbose ci
 
 
 # Backfill processor products for items stored before a chain was enabled.

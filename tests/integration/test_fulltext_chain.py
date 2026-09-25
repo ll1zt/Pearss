@@ -89,7 +89,7 @@ def test_user_chain_gated_item_publishes_after_fulltext_completes(
     from adapters import filestore
     from adapters.db_models import Item
     from app.enrichment_worker import sweep_queue
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     # The sandboxed child resolves plugin modules through PYTHONPATH; without

@@ -22,6 +22,7 @@ from app import collector_registry
 from app.main import create_engine_for
 from app.pipeline import CollectionResult, collect_paged
 from core.enums import ErrorClass
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ID = "src-x"
@@ -87,15 +88,8 @@ def timeline(ids: list[str], next_cursor: str | None) -> bytes:
 
 @pytest.fixture
 def session(tmp_path: Path) -> Iterator[Session]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "paging.db")))
+    url = migrated_database(tmp_path, "paging.db")
     engine = create_engine_for(url)
-    from alembic import command
-    from alembic.config import Config
-
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
 
     with Session(engine) as made:
         made.add(

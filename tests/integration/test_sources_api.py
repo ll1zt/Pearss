@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
 from app.middleware import CorrelationAndAuditMiddleware
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -39,11 +40,7 @@ def policy(**overrides: object) -> dict[str, object]:
 
 @pytest.fixture
 def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "v1.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "v1.db")
 
     engine = create_engine_for(url)
     try:

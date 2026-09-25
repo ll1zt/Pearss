@@ -18,15 +18,15 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shlex
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 
 from core.enrichment import EnrichmentStatus
 from core.enums import (
@@ -37,10 +37,16 @@ from core.enums import (
     SourceStatus,
     TrustLevel,
 )
+from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The suites `just ci` runs in full. `contract` is not one of them: it is a
+# single, different marker level, and it runs once by construction. These are
+# the levels that were being run twice -- once bare, once instrumented.
+_RUN_SUITE_LEVELS = ("unit", "fixture", "integration", "e2e")
 
 
 # --------------------------------------------------------------------------
@@ -65,12 +71,14 @@ def _table_ddl(url: str) -> dict[str, str]:
 
 
 def _migrated_url(tmp_path: Path) -> str:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "ddl.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
-    return url
+    """A migrated database, from the per-session template.
+
+    Through the shared helper rather than `alembic` directly: an in-process
+    `command.upgrade` reaches `migrations/env.py`'s `fileConfig`, which rebinds
+    the root logger to the current `sys.stderr` for the rest of the session.
+    See `tests/migrated_schema.py`.
+    """
+    return migrated_database(tmp_path, "ddl.db")
 
 
 # column -> the enum whose members the CHECK must allow and nothing else.
@@ -760,29 +768,16 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
     The invariant is mechanical, so it is checked mechanically: whoever adds
     `push:` back gets a red test with the reason attached, instead of a
     doubled runner bill nobody notices.
-    """
-    workflow = Path(".forgejo/workflows/ci.yml")
-    lines = workflow.read_text(encoding="utf-8").splitlines()
 
-    triggers: list[str] = []
-    in_on_block = False
-    for line in lines:
-        if line.startswith("on:"):
-            in_on_block = True
-            continue
-        if in_on_block:
-            # A top-level key (no indentation) ends the block.
-            if line and not line[0].isspace():
-                break
-            # Direct children only: a trigger key sits at one indent level
-            # (`  pull_request:`), while the parameters of a trigger sit
-            # deeper (`    branches-ignore:`, `      - main`).
-            indent = len(line) - len(line.lstrip())
-            if indent != 2:
-                continue
-            key = line.strip().split(":", 1)[0].strip()
-            if key:
-                triggers.append(key)
+    Read through `_workflow_triggers`, not by scanning indentation: the first
+    version of this guard only understood the block form, so a legitimate
+    `on: [pull_request]` failed it with "found triggers: []" while
+    `on: [push, pull_request]` -- the shape this guard exists to reject -- was
+    read as no triggers at all. Both directions were wrong.
+    """
+    triggers = _workflow_triggers(
+        (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    )
 
     assert "pull_request" in triggers, (
         f"CI must gate pull requests; found triggers: {triggers}"
@@ -792,4 +787,480 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
         "with an open PR burns two identical full runs (issue #40). Keep "
         "`pull_request` (it gates the PR head, and pushing fires "
         "`synchronize`) and use `workflow_dispatch` for anything else."
+    )
+
+
+def _workflow_triggers(workflow: str) -> list[str]:
+    """The trigger keys of a workflow's top-level `on:` value.
+
+    `on:` has four shapes and a text scan gets three of them wrong:
+    a block mapping (the usual form), a flow sequence (`on: [push]`), a flow
+    mapping (`on: {push: null}`), and a bare scalar (`on: push`). Parsing is
+    cheap here -- the value is a key list, not a nested document -- so the
+    guard reads whichever shape the file uses rather than the one it expects.
+    """
+    key = re.compile(r'^("?on"?)\s*:\s*(.*)$')
+    lines = workflow.splitlines()
+
+    for index, line in enumerate(lines):
+        if line[:1].isspace() or line.lstrip().startswith("#"):
+            continue
+        match = key.match(line)
+        if match is None:
+            continue
+
+        inline = match.group(2).strip()
+        if inline.startswith("["):  # flow sequence
+            return [part.strip().strip("\"'") for part in _split_flow(inline)]
+        if inline.startswith("{"):  # flow mapping: keys, not values
+            return [
+                part.split(":", 1)[0].strip().strip("\"'")
+                for part in _split_flow(inline)
+            ]
+        if inline:  # bare scalar
+            return [inline.strip("\"'")]
+
+        # Block mapping. Direct children share one indent; a child's own
+        # parameters sit deeper (`    branches-ignore:` / `      - main`).
+        children: list[str] = []
+        child_indent: int | None = None
+        for following in lines[index + 1 :]:
+            if not following.strip() or following.lstrip().startswith("#"):
+                continue
+            if not following[:1].isspace():
+                break  # the next top-level key ends the value
+            depth = len(following) - len(following.lstrip())
+            child_indent = depth if child_indent is None else child_indent
+            if depth != child_indent:
+                continue
+            children.append(following.strip().split(":", 1)[0].strip().strip("\"'"))
+        return children
+
+    return []
+
+
+def _split_flow(flow: str) -> list[str]:
+    """Top-level comma-separated items of a flow collection, brackets removed."""
+    return [part for part in flow.strip().strip("[]{} ").split(",") if part.strip()]
+
+
+@pytest.mark.parametrize(
+    ("workflow", "expected"),
+    [
+        # Block mapping: the form the tree uses.
+        (
+            "on:\n  pull_request:\n  workflow_dispatch:\n",
+            ["pull_request", "workflow_dispatch"],
+        ),
+        # Block mapping with a trigger's own parameters nested below.
+        ("on:\n  push:\n    branches-ignore:\n      - main\n", ["push"]),
+        # Flow sequence, which the indentation scan read as no triggers at all.
+        (
+            "on: [pull_request, workflow_dispatch]\n",
+            ["pull_request", "workflow_dispatch"],
+        ),
+        ("on: [push, pull_request]\n", ["push", "pull_request"]),
+        # Flow mapping: the keys, not the values.
+        ("on: {push: null, pull_request: null}\n", ["push", "pull_request"]),
+        # Bare scalar.
+        ("on: push\n", ["push"]),
+        # Quoted key and values.
+        ('"on": ["push", "pull_request"]\n', ["push", "pull_request"]),
+    ],
+)
+def test_workflow_trigger_shapes_are_all_read(
+    workflow: str, expected: list[str]
+) -> None:
+    """Each shape `on:` can take is read, so the guard is not shape-blind.
+
+    A guard that only understands the author's favourite YAML spelling does not
+    protect the invariant: it fails on a legitimate file, or -- worse -- reads a
+    forbidden trigger as nothing and passes.
+    """
+    assert _workflow_triggers(workflow) == expected
+
+
+def test_the_ci_aggregate_runs_the_suites_once() -> None:
+    """`just ci` must not run the full suite bare *and* instrumented.
+
+    It did, so the same tests ran twice. That was waste rather than the cause
+    of the 60-minute failure -- the double-run form passed in 10m15s (run #94)
+    and 48m5s (#452), and what actually grew is integration's per-test cost
+    (issue #44). The gate reads the measurement instead, because one
+    instrumented run answers every question the bare runs did.
+
+    Checked by counting the full-suite selections `just ci` would actually
+    execute, not by reading the `ci:` line's text. `coverage-diff` also runs
+    the whole instrumented suite, and the pytest command can be written into a
+    recipe body rather than named as a dependency; an earlier version of this
+    guard called both of those fine.
+    """
+    selections = _marker_selections("ci")
+
+    # Count how many pytest invocations select each suite. The suite is "run
+    # twice" precisely when every marker is selected twice, which is what both
+    # of the redundant forms look like from outside -- whether the second run
+    # arrives as `coverage-gate` re-invoking pytest or as the same command
+    # written into a recipe body.
+    counts: Counter[str] = Counter()
+    for _command, selection in selections:
+        for level in _RUN_SUITE_LEVELS:
+            if re.search(rf"\b{level}\b", selection):
+                counts[level] += 1
+
+    redundant = {level: n for level, n in counts.items() if n > 1}
+    assert not redundant, (
+        f"`just ci` selects these suites more than once: {redundant}.\n"
+        f"Every pytest invocation it runs: {selections}\n"
+        "Run the suites once (`ci-covered`, instrumented) and let "
+        "`coverage-gate` read that .coverage instead of repeating it "
+        "(issues #42, #46)."
+    )
+    assert counts, "`just ci` runs no suites at all; the guard lost its subject"
+
+
+def _marker_selections(recipe: str) -> list[tuple[str, str]]:
+    """(command, `-m` selection) for every pytest call `just <recipe>` runs.
+
+    Includes the `contract` call; the caller counts only the levels in
+    `_RUN_SUITE_LEVELS`, so a contract run is reported but never counted as a
+    duplicate of the full suites.
+    """
+    found: list[tuple[str, str]] = []
+    for line in _expand_recipe(recipe):
+        try:
+            tokens = shlex.split(line)
+        except ValueError:  # unbalanced quoting: not a command we can read
+            continue
+        if "pytest" not in tokens:
+            continue
+        selection = tokens[tokens.index("-m") + 1] if "-m" in tokens else ""
+        found.append((line, selection))
+    return found
+
+
+def _expand_recipe(recipe: str) -> list[str]:
+    """Every leaf command `just <recipe>` would run, with indirection resolved.
+
+    Two things make a textual reading of the justfile wrong here. `just` prints
+    a nested recipe invocation as `just <recipe> ...` rather than inlining it
+    (that is what `_test` is), so the commands actually executed are one hop
+    away. And a recipe body is as valid a place for a pytest call as a
+    dependency list is -- the first version of this guard only looked at the
+    `ci:` line's tokens and missed both.
+    """
+
+    def walk(args: list[str], depth: int) -> list[str]:
+        if depth > 6:  # a cycle; `just` would have failed long before this
+            return []
+        result = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+            ["just", "--justfile", str(REPO_ROOT / "justfile"), "--dry-run", *args],  # noqa: S607
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={**os.environ, "PYTEST_ADDOPTS": ""},
+        )
+        assert result.returncode == 0, result.stderr
+
+        commands: list[str] = []
+        # Join backslash continuations first: one command may span several
+        # lines, and a `-m` argument can sit on the continuation.
+        for raw in result.stderr.replace("\\\n", " ").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            tokens = shlex.split(line)
+            if tokens and tokens[0] == "just":
+                commands.extend(walk(tokens[1:], depth + 1))
+            else:
+                commands.append(line)
+        return commands
+
+    return walk([recipe], 0)
+
+
+def test_the_ci_workflow_cancels_superseded_runs_explicitly() -> None:
+    """CI must state its concurrency group, not inherit one.
+
+    The trigger guard above keeps `push` out so a revision gets one run. That
+    was half the property: the other half is what happens when a *second*
+    revision arrives while the first is still running. The workflow used to say
+    Forgejo's default "cancels the superseded run instead of queueing behind
+    it", which is true of recent versions -- and was false twice: cancellation
+    did not apply to `pull_request` workflows at all (forgejo#9797), and the
+    group only matched runs still pending, so a run whose job had already failed
+    kept running (forgejo#10863). Both are the kind of default that changes
+    under you.
+
+    It matters here because the runner is shared and `capacity` is 5: two runs
+    of this suite compete for the same 14 cores. #458 and #459 were both killed
+    at the 60-minute cap while a different run of the same suite was executing
+    on the host (issue #44, #47).
+
+    Read from the workflow rather than from memory, and keyed on the behaviour
+    (`cancel-in-progress: true` inside a `concurrency:` block) rather than on a
+    particular spelling of the group expression.
+    """
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    lines = workflow.splitlines()
+
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith("concurrency:")), None
+    )
+    assert start is not None, (
+        "the CI workflow has no `concurrency:` block, so a superseded run is "
+        "cancelled only if the server's default still does that -- and it has "
+        "regressed twice (forgejo#9797, forgejo#10863). State the group "
+        "(issues #40, #47)."
+    )
+
+    block: list[str] = []
+    for line in lines[start + 1 :]:
+        if line and not line[0].isspace():
+            break  # the next top-level key ends the block
+        block.append(line.strip())
+
+    # `cancel-in-progress` is what actually cancels; `group` without it only
+    # serialises, which on a shared runner is worse than the default.
+    assert any(
+        entry.replace(" ", "").startswith("cancel-in-progress:true") for entry in block
+    ), (
+        "the CI `concurrency:` block does not set `cancel-in-progress: true`, so "
+        f"a superseded run waits for the previous one instead of replacing it: {block}"
+    )
+    assert any(entry.startswith("group:") for entry in block), (
+        f"the CI `concurrency:` block has no `group:`, so it groups nothing: {block}"
+    )
+
+
+def test_the_documented_ci_entry_point_is_what_the_workflow_runs() -> None:
+    """`just ci-nix` calls itself "the exact command CI executes". Check it.
+
+    Three documents and the architecture spec's §7.6 describe CI as
+    `nix flake check` then `nix develop --command just ci`. The workflow ran
+    only the second, so the flake gate never ran in CI at all, and `ci-nix`
+    -- the recipe that exists to reproduce CI locally -- had no caller. A
+    documented gate that is not wired up is worse than an undocumented one:
+    readers trust it.
+
+    The comparison is mechanical, so it is made mechanically: expand the
+    documented entry point with `just --dry-run` and require each command it
+    would run to appear in the workflow. Adding a step to one side and not the
+    other now fails here, which is the drift this pins.
+    """
+    expanded = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+        ["just", "--justfile", str(REPO_ROOT / "justfile"), "--dry-run", "ci-nix"],  # noqa: S607
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
+    )
+    assert expanded.returncode == 0, expanded.stderr
+    # `just --dry-run` prints the commands it would run to stderr, and the
+    # recipes it would invoke to stdout. The commands are the subject here.
+    documented = [
+        line.strip()
+        for line in expanded.stderr.splitlines()
+        if line.strip() and not line.startswith("just ")
+    ]
+
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    missing = [command for command in documented if command not in workflow]
+
+    assert documented, "`just ci-nix` expands to nothing; the guard lost its subject"
+    assert not missing, (
+        "`just ci-nix` claims to be the exact command CI executes, but the "
+        f"workflow does not run: {missing}\n"
+        "Either add the step to .forgejo/workflows/ci.yml or stop describing "
+        "`ci-nix` as what CI executes -- a documented gate nobody runs is a "
+        "gate readers trust and do not get."
+    )
+
+
+def test_coverage_gate_reads_its_base_and_threshold_from_the_environment() -> None:
+    """The recipe claims a merge workflow can pin these without editing it.
+
+    It claimed that while taking plain positional defaults, so
+    `COVERAGE_BASE=... just coverage-gate` quietly used `origin/main` -- a gate
+    described as configurable that ignored its configuration. B06 asks for the
+    ability explicitly, so it is pinned by behaviour: expand the recipe with
+    the variables set and read what it would actually run.
+    """
+
+    def expanded(**env: str) -> str:
+        # Strip any COVERAGE_* the caller's shell exported, so the default case
+        # measures the recipe rather than the environment running the suite.
+        base = {k: v for k, v in os.environ.items() if not k.startswith("COVERAGE_")}
+        command = ["just", "--justfile", str(REPO_ROOT / "justfile")]
+        command += ["--dry-run", "coverage-gate"]
+        result = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={**base, **env, "PYTEST_ADDOPTS": ""},
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stderr
+
+    assert 'coverage_diff.py "origin/main" "20"' in expanded(), (
+        "the coverage gate's defaults changed; the pinned default is origin/main "
+        "at 20% and several documents quote it"
+    )
+    assert 'coverage_diff.py "HEAD~5" "99"' in expanded(
+        COVERAGE_BASE="HEAD~5", COVERAGE_THRESHOLD="99"
+    ), (
+        "COVERAGE_BASE and COVERAGE_THRESHOLD are not wired into the recipe, so "
+        "a merge workflow cannot pin them without editing the justfile (B06)"
+    )
+
+
+def test_a_hung_test_fails_as_a_test_rather_than_as_a_killed_job(
+    pytestconfig: pytest.Config,
+) -> None:
+    """The suite must bound a single test, and dump stacks while it runs.
+
+    CI's failure mode in #458/#459 was a 60-minute kill whose log contained
+    progress dots and `context deadline exceeded` -- the same shape a merely
+    slow suite produces. Nothing distinguished a deadlock from slowness, and
+    nothing named the test.
+
+    Two mechanisms close that, and both are config this guard has to protect
+    because `--strict-config` does not: it validates *key names against the
+    plugins that registered them*, so deleting `timeout` outright is silently
+    accepted -- verified by removing all three keys and watching collection
+    still exit 0. A configuration that quietly stops applying is exactly the
+    failure this file exists to catch.
+
+      - `timeout` makes a hang fail as a test, with the test's name in the
+        failure, instead of as a job-level kill.
+      - `faulthandler_timeout` dumps every thread's stack *mid-run*. This is
+        the one that survives the kill: pytest's end-of-run summary is never
+        reached by a job that is killed.
+    """
+    timeout = pytestconfig.getini("timeout")
+    assert timeout not in ("", "0"), (
+        "the suite has no per-test timeout, so a hung test consumes the whole "
+        "job budget and the failure names nothing (issue #49)"
+    )
+    # A deadlock detector, not a performance assertion: the slowest legitimate
+    # test measured here is ~114s under coverage, so a bound near it would turn
+    # a slow machine into a red build.
+    assert int(timeout) >= 120, (
+        f"per-test timeout {timeout}s is low enough to fail a slow machine "
+        "rather than a hang; the slowest legitimate test measures ~114s"
+    )
+
+    stacks = pytestconfig.getini("faulthandler_timeout")
+    assert stacks not in ("", "0"), (
+        "faulthandler_timeout is unset, so a job killed mid-suite leaves no "
+        "stack dump -- the only evidence that survives the kill (issue #49)"
+    )
+    assert int(stacks) < int(timeout), (
+        f"faulthandler_timeout ({stacks}s) must fire before the test timeout "
+        f"({timeout}s); otherwise the dump never happens and a hang is reported "
+        "with no stack"
+    )
+
+
+def test_the_checkout_step_keeps_the_job_token_out_of_the_working_tree() -> None:
+    """The clone must not put the credential where a kill strands it.
+
+    Two exposures, both real on this runner:
+
+      - a token in the clone URL lands in the `git clone` argv, which
+        /proc/<pid>/cmdline publishes world-readable. The runner executes jobs
+        on the host (`nixos-server:host`), so any local process can read it.
+      - git writes that URL into `.git/config`. The step used to scrub it with
+        an EXIT trap, and a job killed at its timeout never runs traps -- which
+        is precisely how this workflow's own failures end (#458, #459).
+
+    The fix is for the secret never to be in the URL: `GIT_ASKPASS` reads the
+    token from the environment at ask time, and /proc/<pid>/environ is readable
+    by the process's owner only.
+
+    Mechanical, so it is checked mechanically. Read from the workflow rather
+    than from memory, and asserted on the two forms that leak rather than on one
+    spelling of the fix -- `GIT_ASKPASS`, `credential.helper`, or an
+    `http.extraheader` are all acceptable, a credential in the URL is not.
+    """
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+
+    # A userinfo component in a URL: `scheme://<user>:<secret>@host` or
+    # `scheme://${ANYTHING}@host`. Either way the credential is in argv.
+    userinfo = re.findall(r"https?://[^\s\"']*@[^\s\"']*", workflow)
+    assert not userinfo, (
+        "a URL in the CI workflow carries a userinfo component, so the "
+        f"credential is in the git argv (and /proc is world-readable): {userinfo}"
+    )
+
+    # And the fix must be present, not merely the leak absent: without one of
+    # these, git would prompt and the step would hang until the job timeout.
+    supplying = ("GIT_ASKPASS", "credential.helper", "http.extraheader")
+    assert any(name in workflow for name in supplying), (
+        "the checkout step supplies no credential through a mechanism that "
+        f"keeps it out of the URL; expected one of {supplying}"
+    )
+
+    # If the step still verifies its own hygiene, it must not reference the
+    # token in a way that echoes it into the log on failure.
+    assert "set -x" not in workflow, (
+        "the CI workflow enables shell tracing, which would print the token to "
+        "the job log"
+    )
+
+
+def test_no_recipe_body_repeats_a_command() -> None:
+    """A recipe must not run the same command twice in a row.
+
+    This is a merge-artifact detector, and it earns its place by having caught
+    one: resolving the #48 conflict in the `coverage-gate` recipe kept both
+    sides' copy of the same line, so the gate ran twice per CI run -- visible in
+    run #465 as two identical `coverage_diff.py` invocations. It cost two
+    seconds and no correctness, which is exactly why nobody would have noticed
+    it by reading the diff; the failure mode it belongs to (a duplicated step)
+    can just as easily be an expensive one.
+
+    Adjacent only, deliberately. `migrate-check` runs
+    `alembic upgrade head` / `downgrade base` / `upgrade head`, where the
+    repeated command is the whole point of the round trip, and a guard that
+    flagged that would be turned off rather than fixed.
+
+    Comments and blank lines are skipped: consecutive comment lines are normal,
+    and prose repeating a word is not a duplicated command.
+    """
+    offenders: list[str] = []
+    recipe = False
+    previous: str | None = None
+
+    for number, line in enumerate(
+        (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines(), 1
+    ):
+        # A recipe header is unindented and ends with `:`; any other unindented
+        # line either opens the next recipe or is a top-level comment.
+        if line and not line[0].isspace():
+            recipe = line.rstrip().endswith(":")
+            previous = None
+            continue
+        if not recipe:
+            previous = None
+            continue
+
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == previous:
+            offenders.append(f"justfile:{number}: {stripped}")
+        previous = stripped
+
+    assert not offenders, (
+        "these recipe bodies run the same command twice in a row, which is what "
+        "a resolved merge conflict looks like when both sides' copy is kept:\n"
+        + "\n".join(offenders)
     )

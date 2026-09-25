@@ -55,7 +55,7 @@ nix develop --command just ci
 
 ```text
 just sync             # 安装/同步 Python 依赖
-just run              # 本地启动（尚未接线）
+just run              # 本地启动（默认 127.0.0.1:8000，可传 host/port）
 just test             # unit + fixture
 just test-integration # SQLite / 临时服务集成测试
 just lint             # ruff + mypy + import-linter
@@ -66,8 +66,8 @@ just migrate-check    # upgrade / downgrade / upgrade 往返
 just revision "msg"   # 生成新 migration
 just test-e2e         # 单进程全链路（真服务 + MCP 客户端 + fixture origin）
 just mutate           # core 变异测试（mutmut，非每提交门禁）
-just ci               # 完整门禁
-just ci-nix           # CI 实际执行的命令，含 nix flake check
+just ci               # 完整门禁（含覆盖率门禁）
+just ci-nix           # CI 实际执行的命令：nix flake check + just ci
 ```
 
 不要自行执行 `pip install`、`apt install`；Nix 提供系统环境，uv 解析 Python 依赖。

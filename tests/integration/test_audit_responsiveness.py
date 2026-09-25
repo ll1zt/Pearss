@@ -13,6 +13,7 @@ completes, and the audit outcome must remain observable either way.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -21,11 +22,9 @@ import httpx
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 
 from app.middleware import CorrelationAndAuditMiddleware
-from tests.integration.conftest import REPO_ROOT
+from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.integration
 
@@ -38,11 +37,7 @@ class _AuditHarness:
     """A real app whose audit database a test can lock at the SQLite level."""
 
     def __init__(self, tmp_path: Path) -> None:
-        url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "a15.db")))
-        config = Config(str(REPO_ROOT / "alembic.ini"))
-        config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-        config.set_main_option("sqlalchemy.url", url)
-        command.upgrade(config, "head")
+        url = migrated_database(tmp_path, "a15.db")
         import os
 
         os.environ["PEARSS_DATABASE_URL"] = url
@@ -255,3 +250,51 @@ async def test_the_audit_queue_is_bounded_under_a_writer_held_forever(
     CorrelationAndAuditMiddleware.drain_audit(30.0)
     rows = app_harness.audit_rows()
     assert rows <= total
+
+
+def test_drain_audit_waits_for_a_write_the_worker_has_already_started() -> None:
+    """`drain_audit` must mean "the row is written", not "the queue is empty".
+
+    A single-worker executor removes a task from its queue *before* running it,
+    so `_work_queue.qsize() == 0` is true while that task is executing. Polling
+    it therefore returned early, which made every `drain_audit(); assert
+    count == N` in this suite racy.
+
+    That race is not theoretical: CI failed on
+    `test_sources_api.py::test_backfill_chain_endpoint_queues_and_audits` with
+    `assert 1 == 2` -- one audit row short, exactly the shape of a drain that
+    returned while the second write was still in flight -- while the same test
+    passes in isolation on a quiet machine, where the write happens to win the
+    race.
+
+    Synchronisation is a `threading.Event`, not a sleep: the worker signals that
+    it has *started* and the drain is called from that state, and a second event
+    records completion. A sleep would make the window load-dependent, which is
+    the property under test rather than a tool for testing it.
+    """
+    started = threading.Event()
+    finished = threading.Event()
+
+    def slow_audit_write() -> None:
+        started.set()
+        finished.wait(timeout=5.0)
+
+    CorrelationAndAuditMiddleware._EXECUTOR.submit(slow_audit_write)
+    # The worker has taken the task and is inside it. From here the queue is
+    # empty and the write is still running -- the window the empty-queue
+    # predicate mistook for done.
+    assert started.wait(timeout=5.0), "the executor never started the write"
+
+    drained = CorrelationAndAuditMiddleware.drain_audit(0.5)
+
+    # `drain_audit` cannot have observed completion, so it must time out and say
+    # so. Reporting success here is what let a caller read a partial table.
+    assert drained is False, (
+        "drain_audit claimed success while a submitted write was still running, "
+        "so a test asserting on the audit table right after it can read a "
+        "partial result"
+    )
+    finished.set()
+    assert CorrelationAndAuditMiddleware.drain_audit(5.0) is True, (
+        "drain_audit must report success once the worker is actually free"
+    )

@@ -154,8 +154,10 @@ comm -23 /tmp/all.txt /tmp/ran.txt
 
 ```bash
 just coverage              # 全量测量（生产代码，排除测试模块）
+just ci-covered            # 全量套件 + 覆盖率（CI 的测量来源）
 just coverage-diff         # 相对 origin/main 只检查新增行
 just coverage-diff HEAD~3  # 或指定 base
+just coverage-gate         # 只读已有 .coverage（CI 用；无数据即失败）
 ```
 
 未覆盖且**确实到不了**的行，在 commit message 里说明理由，而不是写成凑数的测试——`// unreachable: <为什么>` 是允许的，垃圾测试不允许。
@@ -209,7 +211,10 @@ just coverage-diff HEAD~3  # 或指定 base
 ### OpenAPI
 
 - 规范文件保存在版本控制中
-- CI 使用 oasdiff 比较基线和当前 spec，破坏式变化须失败
+- CI 用 **snapshot 比对**阻断破坏式变更：`app.openapi()` 的全文档与
+  `tests/contract/openapi.json` 对比，不一致即失败（`oasdiff` 在 nixpkgs 不可用，
+  故用与 MCP 工具面相同的 snapshot 手法，见上文「契约层」）。
+  更新：`OPENAPI_SNAPSHOT_UPDATE=1 just contract`
 - endpoint 的示例、enum、错误响应必须可由测试解析/验证
 - 对外操作至少有成功、422、403、409/幂等和外部任务失败路径测试
 
@@ -263,17 +268,40 @@ just test            # unit + fixture
 just test-integration
 just test-e2e
 just contract        # OpenAPI + MCP snapshot
-just ci              # 以上全部 + lint + migration checks
+just ci              # 以上全部 + lint + migration checks + 覆盖率门禁
+just ci-covered      # 全套件跑一次（带覆盖率），供 ci 的覆盖率门禁读取
 just coverage        # 全量覆盖率（生产代码）
 just coverage-diff   # 只检查本次新增行的覆盖（默认相对 origin/main）
 ```
 
-CI 唯一入口：
+`just ci` 只跑**一次**测试套件（`ci-covered`，带覆盖率）：`coverage-gate` 读同一份
+`.coverage` 而不重跑。这是去重复，不是 60 分钟失败的根因——双跑形态本身在
+10m15s（run #94）与 48m5s（#452）都跑通过，真正变重的是 integration（见 #44）。
+
+CI 唯一入口（`just ci-nix` 就是这两行；`.forgejo/workflows/ci.yml` 必须与它同步，
+由 `test_the_documented_ci_entry_point_is_what_the_workflow_runs` 机械对账）：
 
 ```bash
 nix flake check
 nix develop --command just ci
 ```
+
+### CI 与本地测试共用同一台主机
+
+runner 跑在 `ci-runner` 上，`.forgejo/workflows/ci.yml` 用 `runs-on: nixos-server`，
+job 以 **host 模式**执行——不是容器，与开发者的 shell、`nix.buildMachines` 构建、
+同机其他仓库的 CI 竞争同一批 CPU 与内存。
+
+因此：
+
+- **CI 期间不要跑全量套件。** 并发跑测会把 CI 的时长拉长数倍，而不改变测试结论：
+  `#452` 的 integration 阶段基线 948s，在另一轮测试同机运行时涨到 1794s（#458），
+  叠加当时的作业上限被直接杀掉。这是**环境问题**，不是代码问题——排查前先看
+  `journalctl -u forgejo-runner-dev_runner`，短于 job 超时上限的失败尤其可疑。
+- workflow 声明了 `concurrency`（`cancel-in-progress: true`），同一分支的新一轮会取消
+  被取代的那轮，不依赖服务器默认行为（该默认曾两次回归：forgejo#9797、#10863）。
+- runner 的内存边界（`MemoryHigh`/`MemoryMax`）与 `capacity` 在 **host-config** 的
+  `hosts/<host>/forgejo-runner.nix`，不在本仓库。
 
 禁止测试依赖开发者机器上的公网、时钟、随机数、已有 SQLite 数据库、真实 token 或真实 LLM provider。
 

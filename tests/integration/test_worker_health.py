@@ -20,24 +20,17 @@ from pathlib import Path
 import httpx
 import pytest
 import pytest_asyncio
-import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy.orm import sessionmaker
 
 from app.main import create_app, create_engine_for
-from tests.integration.conftest import REPO_ROOT
+from tests.migrated_schema import migrated_database
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "a07.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "a07.db")
     monkeypatch.setenv("PEARSS_DATABASE_URL", url)
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("PEARSS_SCHEDULER_ENABLED", "1")
