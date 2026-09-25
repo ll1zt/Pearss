@@ -116,7 +116,15 @@ def main(argv: list[str]) -> int:
 
     files = analysed()
     if not files:
-        print("coverage-diff: no measured production files; run `just coverage` first")
+        # Fail, never pass vacuously: a missing measurement means the question
+        # was not answered, not that it was answered well. The message names
+        # both entry points because the two callers differ -- CI reads the
+        # coverage `just ci-covered` recorded, a developer may have run the
+        # narrower `just coverage`.
+        print(
+            "coverage-diff: no measured production files; run `just ci-covered` "
+            "(CI's measurement) or `just coverage` first"
+        )
         return 1
 
     checked = missed = 0

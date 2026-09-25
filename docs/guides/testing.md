@@ -154,8 +154,10 @@ comm -23 /tmp/all.txt /tmp/ran.txt
 
 ```bash
 just coverage              # 全量测量（生产代码，排除测试模块）
+just ci-covered            # 全量套件 + 覆盖率（CI 的测量来源）
 just coverage-diff         # 相对 origin/main 只检查新增行
 just coverage-diff HEAD~3  # 或指定 base
+just coverage-gate         # 只读已有 .coverage（CI 用；无数据即失败）
 ```
 
 未覆盖且**确实到不了**的行，在 commit message 里说明理由，而不是写成凑数的测试——`// unreachable: <为什么>` 是允许的，垃圾测试不允许。
@@ -264,9 +266,14 @@ just test-integration
 just test-e2e
 just contract        # OpenAPI + MCP snapshot
 just ci              # 以上全部 + lint + migration checks
+just ci-covered      # 全套件跑一次（带覆盖率），供 ci 的覆盖率门禁读取
 just coverage        # 全量覆盖率（生产代码）
 just coverage-diff   # 只检查本次新增行的覆盖（默认相对 origin/main）
 ```
+
+`just ci` 只跑**一次**测试套件（`ci-covered`，带覆盖率）：`coverage-gate` 读同一份
+`.coverage` 而不重跑。这是去重复，不是 60 分钟失败的根因——双跑形态本身在
+10m15s（run #94）与 48m5s（#452）都跑通过，真正变重的是 integration（见 #44）。
 
 CI 唯一入口：
 
