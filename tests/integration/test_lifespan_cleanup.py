@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import sessionmaker
 
 from app.main import create_app
-from tests.integration.conftest import migrated_database
+from tests.migrated_schema import migrated_database
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 

@@ -12,11 +12,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, text
 
 from app.backup import backup, database_path, restore
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,12 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.integration
 def test_backup_and_restore_round_trip(tmp_path: Path) -> None:
     """A snapshot of a live database restores with its rows intact."""
-    db_path = tmp_path / "live.db"
-    url = f"sqlite+pysqlite:///{db_path}"
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "live.db")
 
     engine = create_engine(url)
     with engine.begin() as conn:
@@ -73,12 +67,7 @@ def test_backup_and_restore_round_trip(tmp_path: Path) -> None:
 def test_restore_refuses_to_overwrite_a_live_database(tmp_path: Path) -> None:
     """Restoring over an existing database is the accident the drill exists
     to prevent; it must fail loudly, not clobber."""
-    db_path = tmp_path / "live.db"
-    url = f"sqlite+pysqlite:///{db_path}"
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "live.db")
 
     archive = backup(tmp_path / "backups", url=url)
     with pytest.raises(FileExistsError):

@@ -30,7 +30,7 @@ def test_user_fresh_claim_is_not_stolen_by_a_stale_sweeper(
     The SQL event is an interleaving gate, not a substitute repository: a second
     connection commits a real claim between enumeration and the first UPDATE.
     """
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(migrated_database(tmp_path, "ownership.db"))
@@ -117,7 +117,7 @@ def test_user_fresh_claim_is_not_stolen_by_a_stale_sweeper(
 def queued_product(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[sessionmaker[Session]]:
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(migrated_database(tmp_path, "product.db"))

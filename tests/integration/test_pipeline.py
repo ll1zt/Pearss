@@ -19,8 +19,6 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from lxml import etree
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,6 +38,7 @@ from core.enums import PublishStatus
 from core.models import Item, ItemDraft
 from core.normalize import content_hash, normalize
 from plugins.collectors.rss import collector as rss
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -51,10 +50,7 @@ SOURCE = "src-1"
 def session(tmp_path: Path) -> Iterator[Session]:
     """A migrated database containing one source row."""
     db_path = tmp_path / "pipeline.db"
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
-    command.upgrade(config, "head")
+    migrated_database(tmp_path, "pipeline.db")
 
     engine = create_engine(f"sqlite+pysqlite:///{db_path}")
     try:

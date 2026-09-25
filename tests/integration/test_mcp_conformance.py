@@ -21,9 +21,6 @@ from typing import Any, cast
 
 import httpx
 import pytest
-import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from mcp.client._transport import Transport
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -42,6 +39,7 @@ from app.main import create_app, create_engine_for
 from core.enums import ErrorClass
 from core.job_state import JobRunEvent
 from tests.integration.conftest import ServerInThread, free_port
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "conformance-edge-token"
@@ -56,12 +54,14 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture(scope="module")
 def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
+    """A migrated database and the environment the server runs with.
+
+    Migrated through the shared helper: an in-process `command.upgrade` reaches
+    `migrations/env.py`'s `fileConfig` and rebinds this session's root logger
+    to the `sys.stderr` of whichever test ran first (issue #44).
+    """
     root = tmp_path_factory.mktemp("conformance")
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(root / "conf.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(root, "conf.db")
 
     engine = create_engine_for(url)
     with engine.begin() as conn:

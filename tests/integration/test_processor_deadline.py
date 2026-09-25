@@ -30,7 +30,7 @@ def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
     """Given a never-replying provider, when its budget expires, then its socket
     closes, failure persists, and the next item publishes without a hung sweep.
     """
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     entered = threading.Event()
     disconnected = threading.Event()
@@ -174,7 +174,7 @@ async def test_user_shutdown_terminates_active_processor_before_returning(
     """Given active processing, when stopped, then the socket closes and DB settles."""
     # Keep migration/app initialization in the parent: the child imports this
     # module only to resolve SocketStall, not to construct an unrelated API app.
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(migrated_database(tmp_path, "shutdown.db"))

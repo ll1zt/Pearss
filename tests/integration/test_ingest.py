@@ -18,13 +18,12 @@ import httpx
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -39,10 +38,7 @@ RSS_SOURCE_ID = "src-1"
 @pytest.fixture
 def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     db_path = tmp_path / "ingest.db"
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
-    command.upgrade(config, "head")
+    migrated_database(tmp_path, "ingest.db")
 
     engine = create_engine(f"sqlite+pysqlite:///{db_path}")
     with engine.begin() as connection:

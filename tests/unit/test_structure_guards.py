@@ -27,8 +27,6 @@ from typing import Any
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 
 from core.enrichment import EnrichmentStatus
 from core.enums import (
@@ -39,6 +37,7 @@ from core.enums import (
     SourceStatus,
     TrustLevel,
 )
+from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.unit
 
@@ -72,12 +71,14 @@ def _table_ddl(url: str) -> dict[str, str]:
 
 
 def _migrated_url(tmp_path: Path) -> str:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "ddl.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
-    return url
+    """A migrated database, from the per-session template.
+
+    Through the shared helper rather than `alembic` directly: an in-process
+    `command.upgrade` reaches `migrations/env.py`'s `fileConfig`, which rebinds
+    the root logger to the current `sys.stderr` for the rest of the session.
+    See `tests/migrated_schema.py`.
+    """
+    return migrated_database(tmp_path, "ddl.db")
 
 
 # column -> the enum whose members the CHECK must allow and nothing else.

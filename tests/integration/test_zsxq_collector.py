@@ -16,8 +16,6 @@ from pathlib import Path
 import httpx
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -25,6 +23,7 @@ from adapters.db_models import Source
 from app import collector_registry
 from app.pipeline import collect_source
 from core.enums import SourceStatus, TrustLevel
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/zsxq/fixtures"
@@ -37,11 +36,7 @@ GROUP_URL = "https://wx.zsxq.com/dweb2/index/group/88855458825252"
 def session_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[sessionmaker[Session]]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "zsxq.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "zsxq.db")
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("PEARSS_ZSXQ_ACCESS_TOKEN", "test-token")
