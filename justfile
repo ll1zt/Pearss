@@ -151,7 +151,6 @@ coverage-diff base="origin/main" threshold="20":
 # `ci-covered` fails the gate instead of passing it vacuously.
 coverage-gate base=env_var_or_default("COVERAGE_BASE", "origin/main") threshold=env_var_or_default("COVERAGE_THRESHOLD", "20"):
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
-    uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
 # ---------------------------------------------------------------------------
 # Database

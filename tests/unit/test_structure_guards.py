@@ -1214,3 +1214,53 @@ def test_the_checkout_step_keeps_the_job_token_out_of_the_working_tree() -> None
         "the CI workflow enables shell tracing, which would print the token to "
         "the job log"
     )
+
+
+def test_no_recipe_body_repeats_a_command() -> None:
+    """A recipe must not run the same command twice in a row.
+
+    This is a merge-artifact detector, and it earns its place by having caught
+    one: resolving the #48 conflict in the `coverage-gate` recipe kept both
+    sides' copy of the same line, so the gate ran twice per CI run -- visible in
+    run #465 as two identical `coverage_diff.py` invocations. It cost two
+    seconds and no correctness, which is exactly why nobody would have noticed
+    it by reading the diff; the failure mode it belongs to (a duplicated step)
+    can just as easily be an expensive one.
+
+    Adjacent only, deliberately. `migrate-check` runs
+    `alembic upgrade head` / `downgrade base` / `upgrade head`, where the
+    repeated command is the whole point of the round trip, and a guard that
+    flagged that would be turned off rather than fixed.
+
+    Comments and blank lines are skipped: consecutive comment lines are normal,
+    and prose repeating a word is not a duplicated command.
+    """
+    offenders: list[str] = []
+    recipe = False
+    previous: str | None = None
+
+    for number, line in enumerate(
+        (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines(), 1
+    ):
+        # A recipe header is unindented and ends with `:`; any other unindented
+        # line either opens the next recipe or is a top-level comment.
+        if line and not line[0].isspace():
+            recipe = line.rstrip().endswith(":")
+            previous = None
+            continue
+        if not recipe:
+            previous = None
+            continue
+
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == previous:
+            offenders.append(f"justfile:{number}: {stripped}")
+        previous = stripped
+
+    assert not offenders, (
+        "these recipe bodies run the same command twice in a row, which is what "
+        "a resolved merge conflict looks like when both sides' copy is kept:\n"
+        + "\n".join(offenders)
+    )
