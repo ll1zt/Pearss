@@ -135,12 +135,17 @@ coverage-diff base="origin/main" threshold="20":
 # The changed-line gate, as CI runs it: it reads the coverage that
 # `ci-covered` recorded rather than re-running the suite.
 #
+# `COVERAGE_BASE` and `COVERAGE_THRESHOLD` override the defaults (B06), so a
+# merge workflow can pin them without editing this file; a positional argument
+# still wins, so `just coverage-gate HEAD~3 5` works from a shell.
+#
 # Deliberately does NOT run pytest. Not because running the suite twice was the
 # 60-minute failure — it was not, see issue #44 — but because a second identical
 # run is a second of the same answer at the price of the slowest step in CI.
 # A missing `.coverage` makes coverage_diff.py exit non-zero, so forgetting
 # `ci-covered` fails the gate instead of passing it vacuously.
-coverage-gate base="origin/main" threshold="20":
+coverage-gate base=env_var_or_default("COVERAGE_BASE", "origin/main") threshold=env_var_or_default("COVERAGE_THRESHOLD", "20"):
+    uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
 # ---------------------------------------------------------------------------
