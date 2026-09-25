@@ -74,6 +74,11 @@ jobs:
         working-directory: source
         run: nix flake check
 
+      # `--verbose` is deliberate: `just` does not echo shebang recipes'
+      # bodies, and `ci-covered`/`migrate-check` are shebang recipes, so
+      # without it the log jumps from the last lint line to pytest's progress
+      # dots and a killed job never says which phase it was in (issue #49).
+      # With it each phase announces itself as `===> running recipe ...`.
       - name: Run quality gates
         working-directory: source
         env:
@@ -88,4 +93,4 @@ jobs:
           # no particular runner-side setup; the runner-level default
           # (host-config#12) still covers repos that don't declare it.
           UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
-        run: nix develop --command just ci
+        run: nix develop --command just --verbose ci

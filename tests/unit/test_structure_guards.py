@@ -1119,3 +1119,51 @@ def test_coverage_gate_reads_its_base_and_threshold_from_the_environment() -> No
         "COVERAGE_BASE and COVERAGE_THRESHOLD are not wired into the recipe, so "
         "a merge workflow cannot pin them without editing the justfile (B06)"
     )
+
+
+def test_a_hung_test_fails_as_a_test_rather_than_as_a_killed_job(
+    pytestconfig: pytest.Config,
+) -> None:
+    """The suite must bound a single test, and dump stacks while it runs.
+
+    CI's failure mode in #458/#459 was a 60-minute kill whose log contained
+    progress dots and `context deadline exceeded` -- the same shape a merely
+    slow suite produces. Nothing distinguished a deadlock from slowness, and
+    nothing named the test.
+
+    Two mechanisms close that, and both are config this guard has to protect
+    because `--strict-config` does not: it validates *key names against the
+    plugins that registered them*, so deleting `timeout` outright is silently
+    accepted -- verified by removing all three keys and watching collection
+    still exit 0. A configuration that quietly stops applying is exactly the
+    failure this file exists to catch.
+
+      - `timeout` makes a hang fail as a test, with the test's name in the
+        failure, instead of as a job-level kill.
+      - `faulthandler_timeout` dumps every thread's stack *mid-run*. This is
+        the one that survives the kill: pytest's end-of-run summary is never
+        reached by a job that is killed.
+    """
+    timeout = pytestconfig.getini("timeout")
+    assert timeout not in ("", "0"), (
+        "the suite has no per-test timeout, so a hung test consumes the whole "
+        "job budget and the failure names nothing (issue #49)"
+    )
+    # A deadlock detector, not a performance assertion: the slowest legitimate
+    # test measured here is ~114s under coverage, so a bound near it would turn
+    # a slow machine into a red build.
+    assert int(timeout) >= 120, (
+        f"per-test timeout {timeout}s is low enough to fail a slow machine "
+        "rather than a hang; the slowest legitimate test measures ~114s"
+    )
+
+    stacks = pytestconfig.getini("faulthandler_timeout")
+    assert stacks not in ("", "0"), (
+        "faulthandler_timeout is unset, so a job killed mid-suite leaves no "
+        "stack dump -- the only evidence that survives the kill (issue #49)"
+    )
+    assert int(stacks) < int(timeout), (
+        f"faulthandler_timeout ({stacks}s) must fire before the test timeout "
+        f"({timeout}s); otherwise the dump never happens and a hang is reported "
+        "with no stack"
+    )

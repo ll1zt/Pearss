@@ -112,8 +112,13 @@ ci-covered:
     # (measured on 957 tests). The gate reads `.coverage` directly and prints
     # its own summary, so the report has no reader. A 40s saving on a
     # 60-minute budget is worth taking, but it is not why CI failed.
+    #
+    # `--durations` costs nothing measurable (20.70s vs 20.77s on unit+fixture)
+    # and leaves the slowest 50 tests in every log, so "which test got slower?"
+    # is answerable by diffing two runs instead of by re-running with a
+    # different flag (issue #49).
     uv run pytest -q -m "unit or fixture or integration or e2e" -p no:cacheprovider \
-        --cov --cov-report=
+        --cov --cov-report= --durations=50 --durations-min=2
 
 # Coverage of the lines this branch added or changed, against a base ref.
 # Usage: just coverage-diff [base] [threshold]   (default: origin/main 20)
@@ -267,9 +272,18 @@ service-restart:
 ci: lint ci-covered migrate-check contract coverage-gate
 
 # The exact command CI executes, including the Nix environment entry point.
+#
+# `--verbose` is load-bearing for diagnosis, not decoration: `just` does not
+# echo a shebang recipe's body, and `ci-covered` and `migrate-check` are
+# shebang recipes. Without this flag the CI log goes straight from the last lint
+# line to pytest's progress dots, so a job killed mid-suite says nothing about
+# which phase it was in -- which is exactly what made #458/#459 unreadable
+# (issue #49). With it, each phase announces itself:
+#
+#     ===> running recipe `ci-covered`...
 ci-nix:
     nix flake check
-    nix develop --command just ci
+    nix develop --command just --verbose ci
 
 
 # Backfill processor products for items stored before a chain was enabled.
