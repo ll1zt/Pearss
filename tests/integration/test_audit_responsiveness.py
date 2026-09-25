@@ -21,11 +21,9 @@ import httpx
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 
 from app.middleware import CorrelationAndAuditMiddleware
-from tests.integration.conftest import REPO_ROOT
+from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.integration
 
@@ -38,11 +36,7 @@ class _AuditHarness:
     """A real app whose audit database a test can lock at the SQLite level."""
 
     def __init__(self, tmp_path: Path) -> None:
-        url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "a15.db")))
-        config = Config(str(REPO_ROOT / "alembic.ini"))
-        config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-        config.set_main_option("sqlalchemy.url", url)
-        command.upgrade(config, "head")
+        url = migrated_database(tmp_path, "a15.db")
         import os
 
         os.environ["PEARSS_DATABASE_URL"] = url

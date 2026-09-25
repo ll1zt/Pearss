@@ -19,9 +19,6 @@ from typing import Any
 
 import httpx
 import pytest
-import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy.orm import sessionmaker
 from uvicorn import Config as UvicornConfig
 from uvicorn.server import Server
@@ -33,6 +30,7 @@ from app.mcp_guard import (
     allowed_hosts,
     mcp_auth_configured,
 )
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # The SDK app routes on `/mcp` and is mounted at the root, so the endpoint is
@@ -62,11 +60,7 @@ MCP_HEADERS = {
 def _built_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env: str
 ) -> Iterator[Any]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "guard.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "guard.db")
 
     engine = create_engine_for(url)
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
@@ -190,11 +184,7 @@ def test_unconfigured_token_disables_the_endpoint(
     monkeypatch.delenv(MCP_TOKEN_ENV, raising=False)
     assert not mcp_auth_configured()
 
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "off.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "off.db")
     monkeypatch.setenv("PEARSS_API_TOKEN", API_TOKEN)
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = create_engine_for(url)

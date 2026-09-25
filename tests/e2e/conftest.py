@@ -28,9 +28,6 @@ from typing import Any, cast
 import httpx
 import pytest
 import pytest_asyncio
-import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from mcp import types
 from mcp.client._transport import Transport
@@ -41,6 +38,7 @@ from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
 from app.main import create_app, create_engine_for
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VALID_FEED = REPO_ROOT / "src/plugins/collectors/rss/fixtures/valid.xml"
@@ -123,12 +121,13 @@ def failing_origin_url() -> Iterator[str]:
 
 
 def _migrated_database(tmp_path: Path) -> str:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "e2e.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
-    return url
+    """A migrated database in `tmp_path`, copied from the per-session template.
+
+    The schema is still the production one: the template it copies was built
+    by the real migrations. See `tests/migrated_schema.py` for why this is a
+    copy rather than another `alembic upgrade head` per test.
+    """
+    return migrated_database(tmp_path, "e2e.db")
 
 
 @pytest.fixture

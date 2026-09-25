@@ -15,14 +15,13 @@ from pathlib import Path
 import httpx
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source
 from app.pipeline import collect_source
 from core.enums import SourceStatus, TrustLevel
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -33,11 +32,7 @@ FEED_URL = "https://bear.example.com/blog/feed"
 
 @pytest.fixture
 def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "wp.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
+    url = migrated_database(tmp_path, "wp.db")
 
     engine = create_engine(url)
     try:

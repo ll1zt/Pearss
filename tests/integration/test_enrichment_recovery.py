@@ -42,7 +42,7 @@ async def test_user_pending_item_is_processed_after_storage_unlocks(
     this is not a claim about production WAL read locking or worker readiness.
     """
     # Child resolution of TitleSummary must not initialize conftest's API app.
-    from tests.integration.conftest import migrated_database
+    from tests.migrated_schema import migrated_database
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     engine = sa.create_engine(

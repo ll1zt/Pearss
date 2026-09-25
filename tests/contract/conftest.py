@@ -21,9 +21,6 @@ from typing import Any, cast
 import httpx
 import pytest
 import pytest_asyncio
-import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from fastapi import FastAPI
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -32,6 +29,7 @@ from uvicorn.config import Config as UvicornConfig
 from uvicorn.server import Server
 
 from app.main import create_app, create_engine_for
+from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,13 +40,13 @@ API_HEADERS = {"Authorization": f"Bearer {API_TOKEN}"}
 
 
 def _migrated_database(tmp_path: Path) -> str:
-    """A real migrated schema: the app under test is the production one."""
-    url = str(sa.URL.create("sqlite+pysqlite", database=str(tmp_path / "contract.db")))
-    config = Config(str(REPO_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
-    config.set_main_option("sqlalchemy.url", url)
-    command.upgrade(config, "head")
-    return url
+    """A migrated database in `tmp_path` -- the production schema, per session.
+
+    The template it copies was built by the real migrations, so the app under
+    test still runs against the schema production runs. See
+    `tests/migrated_schema.py`.
+    """
+    return migrated_database(tmp_path, "contract.db")
 
 
 @pytest.fixture
