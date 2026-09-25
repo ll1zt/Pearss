@@ -266,4 +266,12 @@ also_copy = [
   # it the mutation runner dies during stats collection -- the same failure
   # mode as a missing file above, and the same cure.
   "scripts",
+  # Third time this list was the thing that broke, and the third distinct
+  # path: the CI trigger guard reads `.forgejo/workflows/ci.yml`, so without
+  # this entry stats collection died on a FileNotFoundError naming a file the
+  # gate had never heard of. `tests/integration/test_mutmut_copy_tree.py` now
+  # asserts the property instead of the list: it builds the tree from this
+  # config and runs the unit suite in it, so the next path a test reads from
+  # the repository root fails there rather than silently disabling the gate.
+  ".forgejo",
 ]
