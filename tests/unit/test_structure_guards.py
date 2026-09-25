@@ -18,8 +18,10 @@ from __future__ import annotations
 import ast
 import os
 import re
+import shlex
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,11 @@ from core.enums import (
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The suites `just ci` runs in full. `contract` is not one of them: it is a
+# single, different marker level, and it runs once by construction. These are
+# the levels that were being run twice -- once bare, once instrumented.
+_RUN_SUITE_LEVELS = ("unit", "fixture", "integration", "e2e")
 
 
 # --------------------------------------------------------------------------
@@ -760,29 +767,16 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
     The invariant is mechanical, so it is checked mechanically: whoever adds
     `push:` back gets a red test with the reason attached, instead of a
     doubled runner bill nobody notices.
-    """
-    workflow = Path(".forgejo/workflows/ci.yml")
-    lines = workflow.read_text(encoding="utf-8").splitlines()
 
-    triggers: list[str] = []
-    in_on_block = False
-    for line in lines:
-        if line.startswith("on:"):
-            in_on_block = True
-            continue
-        if in_on_block:
-            # A top-level key (no indentation) ends the block.
-            if line and not line[0].isspace():
-                break
-            # Direct children only: a trigger key sits at one indent level
-            # (`  pull_request:`), while the parameters of a trigger sit
-            # deeper (`    branches-ignore:`, `      - main`).
-            indent = len(line) - len(line.lstrip())
-            if indent != 2:
-                continue
-            key = line.strip().split(":", 1)[0].strip()
-            if key:
-                triggers.append(key)
+    Read through `_workflow_triggers`, not by scanning indentation: the first
+    version of this guard only understood the block form, so a legitimate
+    `on: [pull_request]` failed it with "found triggers: []" while
+    `on: [push, pull_request]` -- the shape this guard exists to reject -- was
+    read as no triggers at all. Both directions were wrong.
+    """
+    triggers = _workflow_triggers(
+        (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    )
 
     assert "pull_request" in triggers, (
         f"CI must gate pull requests; found triggers: {triggers}"
@@ -795,60 +789,192 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
     )
 
 
+def _workflow_triggers(workflow: str) -> list[str]:
+    """The trigger keys of a workflow's top-level `on:` value.
+
+    `on:` has four shapes and a text scan gets three of them wrong:
+    a block mapping (the usual form), a flow sequence (`on: [push]`), a flow
+    mapping (`on: {push: null}`), and a bare scalar (`on: push`). Parsing is
+    cheap here -- the value is a key list, not a nested document -- so the
+    guard reads whichever shape the file uses rather than the one it expects.
+    """
+    key = re.compile(r'^("?on"?)\s*:\s*(.*)$')
+    lines = workflow.splitlines()
+
+    for index, line in enumerate(lines):
+        if line[:1].isspace() or line.lstrip().startswith("#"):
+            continue
+        match = key.match(line)
+        if match is None:
+            continue
+
+        inline = match.group(2).strip()
+        if inline.startswith("["):  # flow sequence
+            return [part.strip().strip("\"'") for part in _split_flow(inline)]
+        if inline.startswith("{"):  # flow mapping: keys, not values
+            return [
+                part.split(":", 1)[0].strip().strip("\"'")
+                for part in _split_flow(inline)
+            ]
+        if inline:  # bare scalar
+            return [inline.strip("\"'")]
+
+        # Block mapping. Direct children share one indent; a child's own
+        # parameters sit deeper (`    branches-ignore:` / `      - main`).
+        children: list[str] = []
+        child_indent: int | None = None
+        for following in lines[index + 1 :]:
+            if not following.strip() or following.lstrip().startswith("#"):
+                continue
+            if not following[:1].isspace():
+                break  # the next top-level key ends the value
+            depth = len(following) - len(following.lstrip())
+            child_indent = depth if child_indent is None else child_indent
+            if depth != child_indent:
+                continue
+            children.append(following.strip().split(":", 1)[0].strip().strip("\"'"))
+        return children
+
+    return []
+
+
+def _split_flow(flow: str) -> list[str]:
+    """Top-level comma-separated items of a flow collection, brackets removed."""
+    return [part for part in flow.strip().strip("[]{} ").split(",") if part.strip()]
+
+
+@pytest.mark.parametrize(
+    ("workflow", "expected"),
+    [
+        # Block mapping: the form the tree uses.
+        (
+            "on:\n  pull_request:\n  workflow_dispatch:\n",
+            ["pull_request", "workflow_dispatch"],
+        ),
+        # Block mapping with a trigger's own parameters nested below.
+        ("on:\n  push:\n    branches-ignore:\n      - main\n", ["push"]),
+        # Flow sequence, which the indentation scan read as no triggers at all.
+        (
+            "on: [pull_request, workflow_dispatch]\n",
+            ["pull_request", "workflow_dispatch"],
+        ),
+        ("on: [push, pull_request]\n", ["push", "pull_request"]),
+        # Flow mapping: the keys, not the values.
+        ("on: {push: null, pull_request: null}\n", ["push", "pull_request"]),
+        # Bare scalar.
+        ("on: push\n", ["push"]),
+        # Quoted key and values.
+        ('"on": ["push", "pull_request"]\n', ["push", "pull_request"]),
+    ],
+)
+def test_workflow_trigger_shapes_are_all_read(
+    workflow: str, expected: list[str]
+) -> None:
+    """Each shape `on:` can take is read, so the guard is not shape-blind.
+
+    A guard that only understands the author's favourite YAML spelling does not
+    protect the invariant: it fails on a legitimate file, or -- worse -- reads a
+    forbidden trigger as nothing and passes.
+    """
+    assert _workflow_triggers(workflow) == expected
+
+
 def test_the_ci_aggregate_runs_the_suites_once() -> None:
     """`just ci` must not run the full suite bare *and* instrumented.
 
     It did, so the same tests ran twice. That was waste rather than the cause
-    of the 60-minute failure: the double-run form passed in 10m15s (run #94)
-    and 48m5s (#452), and the run that broke was single-run (#459). What
-    actually grew is integration's per-test cost, 0.26s -> 1.18s (issue #44).
-    The gate reads the measurement instead, because one instrumented run
-    answers every question the bare runs did.
+    of the 60-minute failure -- the double-run form passed in 10m15s (run #94)
+    and 48m5s (#452), and what actually grew is integration's per-test cost
+    (issue #44). The gate reads the measurement instead, because one
+    instrumented run answers every question the bare runs did.
 
-    Checked by counting the recipes `ci` depends on, which is narrower than the
-    property deserves: `coverage-diff` runs the whole instrumented suite too,
-    and the pytest command can be written into a recipe body rather than named
-    as a dependency. Both of those pass this guard. Issue #46 tracks replacing
-    it with one that expands `just ci` and counts the suites it really runs.
+    Checked by counting the full-suite selections `just ci` would actually
+    execute, not by reading the `ci:` line's text. `coverage-diff` also runs
+    the whole instrumented suite, and the pytest command can be written into a
+    recipe body rather than named as a dependency; an earlier version of this
+    guard called both of those fine.
     """
-    justfile = Path("justfile").read_text(encoding="utf-8")
+    selections = _marker_selections("ci")
 
-    # The full-suite marker expression appears in recipes; `ci` must reach it
-    # exactly once (through `ci-covered`).
-    full_suite = "unit or fixture or integration or e2e"
-    in_ci = _recipe_body(justfile, "ci")
-    dependencies = [
-        token.strip() for token in in_ci.replace("ci:", "", 1).split() if token.strip()
-    ]
+    # Count how many pytest invocations select each suite. The suite is "run
+    # twice" precisely when every marker is selected twice, which is what both
+    # of the redundant forms look like from outside -- whether the second run
+    # arrives as `coverage-gate` re-invoking pytest or as the same command
+    # written into a recipe body.
+    counts: Counter[str] = Counter()
+    for _command, selection in selections:
+        for level in _RUN_SUITE_LEVELS:
+            if re.search(rf"\b{level}\b", selection):
+                counts[level] += 1
 
-    # `ci` is a dependency list, so its own body names recipes, not commands.
-    assert "ci-covered" in dependencies, (
-        f"`just ci` must run the suites once via ci-covered; got {dependencies}"
+    redundant = {level: n for level, n in counts.items() if n > 1}
+    assert not redundant, (
+        f"`just ci` selects these suites more than once: {redundant}.\n"
+        f"Every pytest invocation it runs: {selections}\n"
+        "Run the suites once (`ci-covered`, instrumented) and let "
+        "`coverage-gate` read that .coverage instead of repeating it "
+        "(issues #42, #46)."
     )
-    for bare in ("test", "test-integration", "test-e2e"):
-        assert bare not in dependencies, (
-            f"`just ci` also runs `{bare}`, so the suite runs twice (issue #42). "
-            "Use `ci-covered` (one instrumented run) and let `coverage-gate` "
-            "read its .coverage."
+    assert counts, "`just ci` runs no suites at all; the guard lost its subject"
+
+
+def _marker_selections(recipe: str) -> list[tuple[str, str]]:
+    """(command, `-m` selection) for every pytest call `just <recipe>` runs.
+
+    Includes the `contract` call; the caller counts only the levels in
+    `_RUN_SUITE_LEVELS`, so a contract run is reported but never counted as a
+    duplicate of the full suites.
+    """
+    found: list[tuple[str, str]] = []
+    for line in _expand_recipe(recipe):
+        try:
+            tokens = shlex.split(line)
+        except ValueError:  # unbalanced quoting: not a command we can read
+            continue
+        if "pytest" not in tokens:
+            continue
+        selection = tokens[tokens.index("-m") + 1] if "-m" in tokens else ""
+        found.append((line, selection))
+    return found
+
+
+def _expand_recipe(recipe: str) -> list[str]:
+    """Every leaf command `just <recipe>` would run, with indirection resolved.
+
+    Two things make a textual reading of the justfile wrong here. `just` prints
+    a nested recipe invocation as `just <recipe> ...` rather than inlining it
+    (that is what `_test` is), so the commands actually executed are one hop
+    away. And a recipe body is as valid a place for a pytest call as a
+    dependency list is -- the first version of this guard only looked at the
+    `ci:` line's tokens and missed both.
+    """
+
+    def walk(args: list[str], depth: int) -> list[str]:
+        if depth > 6:  # a cycle; `just` would have failed long before this
+            return []
+        result = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+            ["just", "--justfile", str(REPO_ROOT / "justfile"), "--dry-run", *args],  # noqa: S607
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={**os.environ, "PYTEST_ADDOPTS": ""},
         )
+        assert result.returncode == 0, result.stderr
 
-    # And the instrumented recipe is the one that selects the full marker set.
-    assert full_suite in justfile, "the full-suite marker expression moved"
+        commands: list[str] = []
+        # Join backslash continuations first: one command may span several
+        # lines, and a `-m` argument can sit on the continuation.
+        for raw in result.stderr.replace("\\\n", " ").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            tokens = shlex.split(line)
+            if tokens and tokens[0] == "just":
+                commands.extend(walk(tokens[1:], depth + 1))
+            else:
+                commands.append(line)
+        return commands
 
-
-def _recipe_body(justfile: str, name: str) -> str:
-    """The recipe header line plus its body, or "" when the recipe is absent."""
-    lines = justfile.splitlines()
-    start = next(
-        (i for i, line in enumerate(lines) if line.startswith(f"{name}:")), None
-    )
-    if start is None:
-        return ""
-    body = [lines[start]]
-    for line in lines[start + 1 :]:
-        if line and not line.startswith((" ", "\t")):
-            break
-        if line.startswith("#"):
-            break
-        body.append(line)
-    return "\n".join(body)
+    return walk([recipe], 0)
