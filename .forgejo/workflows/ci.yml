@@ -43,24 +43,58 @@ jobs:
   test:
     runs-on: nixos-server
     timeout-minutes: 60
+    env:
+      # The instance, named once. It used to be written into two clone URLs,
+      # which is how a host rename took CI down (bf8e3ba).
+      CI_REPOSITORY: https://git.example.com:3000/lllzt/Pearss.git
     steps:
-      # The runner does not trust the certificate on Forgejo's HTTPS endpoint.
       # A full clone, not --depth 1: the coverage gate diffs the pushed commit
       # against origin/main, which a single-branch shallow checkout does not
       # have (that is exactly how the first gated runs failed).
+      #
+      # The job token goes through the askpass helper rather than into the
+      # clone URL. A credential in the URL is exposed twice over: it lands in
+      # the `git clone` argv, world-readable in /proc on this host (and the
+      # runner executes jobs on the host, not in a container), and git writes
+      # it into `.git/config`. The previous version cleaned that up with an
+      # EXIT trap, which a job killed at its timeout never runs -- and being
+      # killed at the timeout is the failure mode this very workflow has
+      # (issues #49, #51). With askpass there is nothing to clean up: the token
+      # exists only in this step's environment, which /proc exposes to its owner
+      # alone.
+      #
+      # Certificate verification is on. It used to be disabled with a comment
+      # about the runner's CA store; the store this host ships trusts the
+      # endpoint, measured with the runner's own git on its own PATH. If a
+      # future runner cannot, fix its CA configuration rather than turning
+      # verification off here -- a silent MITM is worse than a red build.
       - name: Checkout
         env:
           CI_SHA: ${{ github.sha }}
           CI_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          repository="https://git.example.com:3000/lllzt/Pearss.git"
-          trap 'if [ -d source/.git ]; then git -C source remote set-url origin "$repository"; fi' EXIT
-          git -c http.sslVerify=false clone \
-            "https://${CI_TOKEN}@git.example.com:3000/lllzt/Pearss.git" source
+          askpass="$(mktemp)"
+          trap 'rm -f "$askpass"' EXIT
+          # `CI_TOKEN` is read at ask time, so the helper file holds no secret.
+          # Gitea/Forgejo accept the token as the username.
+          cat > "$askpass" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            Username*) printf '%s' "${CI_TOKEN:-}" ;;
+            Password*) printf '' ;;
+          esac
+          ASKPASS
+          chmod 700 "$askpass"
+          export GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0
+          git clone "$CI_REPOSITORY" source
           git -C source fetch origin "$CI_SHA"
           git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
+          # The hygiene this step claims, checked rather than asserted in prose:
+          # the credential was never in the URL, so it cannot be in .git/config.
+          test -n "$CI_TOKEN"
+          ! grep -qF "$CI_TOKEN" source/.git/config
 
       # The first gate, and by far the cheapest (~2s): it evaluates the flake
       # and builds the dev shells' derivations, so a flake that cannot evaluate

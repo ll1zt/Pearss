@@ -1167,3 +1167,50 @@ def test_a_hung_test_fails_as_a_test_rather_than_as_a_killed_job(
         f"({timeout}s); otherwise the dump never happens and a hang is reported "
         "with no stack"
     )
+
+
+def test_the_checkout_step_keeps_the_job_token_out_of_the_working_tree() -> None:
+    """The clone must not put the credential where a kill strands it.
+
+    Two exposures, both real on this runner:
+
+      - a token in the clone URL lands in the `git clone` argv, which
+        /proc/<pid>/cmdline publishes world-readable. The runner executes jobs
+        on the host (`nixos-server:host`), so any local process can read it.
+      - git writes that URL into `.git/config`. The step used to scrub it with
+        an EXIT trap, and a job killed at its timeout never runs traps -- which
+        is precisely how this workflow's own failures end (#458, #459).
+
+    The fix is for the secret never to be in the URL: `GIT_ASKPASS` reads the
+    token from the environment at ask time, and /proc/<pid>/environ is readable
+    by the process's owner only.
+
+    Mechanical, so it is checked mechanically. Read from the workflow rather
+    than from memory, and asserted on the two forms that leak rather than on one
+    spelling of the fix -- `GIT_ASKPASS`, `credential.helper`, or an
+    `http.extraheader` are all acceptable, a credential in the URL is not.
+    """
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+
+    # A userinfo component in a URL: `scheme://<user>:<secret>@host` or
+    # `scheme://${ANYTHING}@host`. Either way the credential is in argv.
+    userinfo = re.findall(r"https?://[^\s\"']*@[^\s\"']*", workflow)
+    assert not userinfo, (
+        "a URL in the CI workflow carries a userinfo component, so the "
+        f"credential is in the git argv (and /proc is world-readable): {userinfo}"
+    )
+
+    # And the fix must be present, not merely the leak absent: without one of
+    # these, git would prompt and the step would hang until the job timeout.
+    supplying = ("GIT_ASKPASS", "credential.helper", "http.extraheader")
+    assert any(name in workflow for name in supplying), (
+        "the checkout step supplies no credential through a mechanism that "
+        f"keeps it out of the URL; expected one of {supplying}"
+    )
+
+    # If the step still verifies its own hygiene, it must not reference the
+    # token in a way that echoes it into the log on failure.
+    assert "set -x" not in workflow, (
+        "the CI workflow enables shell tracing, which would print the token to "
+        "the job log"
+    )
