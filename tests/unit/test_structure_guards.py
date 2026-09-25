@@ -793,3 +793,89 @@ def test_the_ci_workflow_has_one_trigger_source() -> None:
         "`pull_request` (it gates the PR head, and pushing fires "
         "`synchronize`) and use `workflow_dispatch` for anything else."
     )
+
+
+def test_the_documented_ci_entry_point_is_what_the_workflow_runs() -> None:
+    """`just ci-nix` calls itself "the exact command CI executes". Check it.
+
+    Three documents and the architecture spec's §7.6 describe CI as
+    `nix flake check` then `nix develop --command just ci`. The workflow ran
+    only the second, so the flake gate never ran in CI at all, and `ci-nix`
+    -- the recipe that exists to reproduce CI locally -- had no caller. A
+    documented gate that is not wired up is worse than an undocumented one:
+    readers trust it.
+
+    The comparison is mechanical, so it is made mechanically: expand the
+    documented entry point with `just --dry-run` and require each command it
+    would run to appear in the workflow. Adding a step to one side and not the
+    other now fails here, which is the drift this pins.
+    """
+    expanded = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+        ["just", "--justfile", str(REPO_ROOT / "justfile"), "--dry-run", "ci-nix"],  # noqa: S607
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**os.environ, "PYTEST_ADDOPTS": ""},
+    )
+    assert expanded.returncode == 0, expanded.stderr
+    # `just --dry-run` prints the commands it would run to stderr, and the
+    # recipes it would invoke to stdout. The commands are the subject here.
+    documented = [
+        line.strip()
+        for line in expanded.stderr.splitlines()
+        if line.strip() and not line.startswith("just ")
+    ]
+
+    workflow = (REPO_ROOT / ".forgejo/workflows/ci.yml").read_text(encoding="utf-8")
+    missing = [command for command in documented if command not in workflow]
+
+    assert documented, "`just ci-nix` expands to nothing; the guard lost its subject"
+    assert not missing, (
+        "`just ci-nix` claims to be the exact command CI executes, but the "
+        f"workflow does not run: {missing}\n"
+        "Either add the step to .forgejo/workflows/ci.yml or stop describing "
+        "`ci-nix` as what CI executes -- a documented gate nobody runs is a "
+        "gate readers trust and do not get."
+    )
+
+
+def test_coverage_gate_reads_its_base_and_threshold_from_the_environment() -> None:
+    """The recipe claims a merge workflow can pin these without editing it.
+
+    It claimed that while taking plain positional defaults, so
+    `COVERAGE_BASE=... just coverage-gate` quietly used `origin/main` -- a gate
+    described as configurable that ignored its configuration. B06 asks for the
+    ability explicitly, so it is pinned by behaviour: expand the recipe with
+    the variables set and read what it would actually run.
+    """
+
+    def expanded(**env: str) -> str:
+        # Strip any COVERAGE_* the caller's shell exported, so the default case
+        # measures the recipe rather than the environment running the suite.
+        base = {k: v for k, v in os.environ.items() if not k.startswith("COVERAGE_")}
+        command = ["just", "--justfile", str(REPO_ROOT / "justfile")]
+        command += ["--dry-run", "coverage-gate"]
+        result = subprocess.run(  # noqa: S603 - fixed binary, owned justfile
+            command,
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env={**base, **env, "PYTEST_ADDOPTS": ""},
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stderr
+
+    assert 'coverage_diff.py "origin/main" "20"' in expanded(), (
+        "the coverage gate's defaults changed; the pinned default is origin/main "
+        "at 20% and several documents quote it"
+    )
+    assert 'coverage_diff.py "HEAD~5" "99"' in expanded(
+        COVERAGE_BASE="HEAD~5", COVERAGE_THRESHOLD="99"
+    ), (
+        "COVERAGE_BASE and COVERAGE_THRESHOLD are not wired into the recipe, so "
+        "a merge workflow cannot pin them without editing the justfile (B06)"
+    )

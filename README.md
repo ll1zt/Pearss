@@ -36,12 +36,12 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - **MCP 控制平面**：22 个工具（10 读 + 12 写）经 Core API 调用（审计天然覆盖），写操作走 elicitation 确认且校验确认参数==执行参数；**每个工具声明 `ToolAnnotations`**（读/破坏性/开放世界），写操作成功返回带 `audit_id`；正文优先走 `item://{item_id}` Resource，不支持 Resource 的客户端可用 `get_item_body`（带截断，ADR 0013）；工具面 snapshot 由 `just contract` 校验
 - **systemd 用户服务**：`just install-unit`，开机自启 + 崩溃重启
 
-### 尚未接线
+### 验证与测试
 
-部分接线的命令，运行会说明缺了什么而不是假装通过：
+以下命令均已接线，没有占位：
 
-- `just contract`：MCP 工具面 snapshot + OpenAPI 全文档 snapshot，均已接（OpenAPI 用 snapshot 手法替代 nixpkgs 缺失的 oasdiff）
-- `just test-e2e`：单进程全链路已接（真 uvicorn + MCP 客户端 + 本地 fixture origin）；Compose 多容器拓扑暂不需要
+- `just contract`：MCP 工具面 snapshot + OpenAPI 全文档 snapshot 双校验（OpenAPI 用 snapshot 手法替代 nixpkgs 缺失的 oasdiff）
+- `just test-e2e`：单进程全链路（真 uvicorn + MCP 客户端 + 本地 fixture origin）；Compose 多容器拓扑暂不需要
 
 其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
 **备份与恢复演练**（§7.5）、**条件请求持久化回路**（`record_raw_fetch` 生产路径
@@ -54,7 +54,7 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 
 - 已安装 [Nix](https://nixos.org/download/)，并启用 `experimental-features = nix-command flakes`
 - 已安装 [direnv](https://direnv.net/)，并启用 shell hook
-- Docker（仅运行 `just e2e` 或 P3 服务时需要）
+- Docker（仅 P3 的多服务容器化拓扑需要；当前 `just test-e2e` 不需要）
 
 ### 首次启动
 

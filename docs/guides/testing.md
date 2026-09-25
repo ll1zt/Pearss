@@ -209,7 +209,10 @@ just coverage-diff HEAD~3  # 或指定 base
 ### OpenAPI
 
 - 规范文件保存在版本控制中
-- CI 使用 oasdiff 比较基线和当前 spec，破坏式变化须失败
+- CI 用 **snapshot 比对**阻断破坏式变更：`app.openapi()` 的全文档与
+  `tests/contract/openapi.json` 对比，不一致即失败（`oasdiff` 在 nixpkgs 不可用，
+  故用与 MCP 工具面相同的 snapshot 手法，见上文「契约层」）。
+  更新：`OPENAPI_SNAPSHOT_UPDATE=1 just contract`
 - endpoint 的示例、enum、错误响应必须可由测试解析/验证
 - 对外操作至少有成功、422、403、409/幂等和外部任务失败路径测试
 
@@ -263,12 +266,13 @@ just test            # unit + fixture
 just test-integration
 just test-e2e
 just contract        # OpenAPI + MCP snapshot
-just ci              # 以上全部 + lint + migration checks
+just ci              # 以上全部 + lint + migration checks + 覆盖率门禁
 just coverage        # 全量覆盖率（生产代码）
 just coverage-diff   # 只检查本次新增行的覆盖（默认相对 origin/main）
 ```
 
-CI 唯一入口：
+CI 唯一入口（`just ci-nix` 就是这两行；`.forgejo/workflows/ci.yml` 必须与它同步，
+由 `test_the_documented_ci_entry_point_is_what_the_workflow_runs` 机械对账）：
 
 ```bash
 nix flake check

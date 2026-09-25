@@ -243,7 +243,8 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 ### 7.1 契约腐化 → CI 契约检查
 
-- OpenAPI：CI 跑 oasdiff，breaking change 直接标红
+- OpenAPI：`app.openapi()` 全文档与 `tests/contract/openapi.json` 比对（snapshot 手法）。
+  破坏式变更必须显式接受——**不是**用 `oasdiff`：它在 nixpkgs 里不可用，详见 §9 权衡表。
 - MCP 工具面：工具名称/schema/描述做 snapshot 测试；任何变更必须显式更新 snapshot
 - 错误分类法：enum 在代码中单一来源，API schema、文档、诊断工具均从它生成
 
@@ -277,7 +278,12 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 CI 顺序：`nix flake check` → `nix develop --command just ci`，其中 `just ci` 按如下顺序执行：
 
-`ruff` → `mypy` → `import-linter` → unit + fixture 测试 → Alembic migration 检查 → `oasdiff` → MCP 工具 snapshot → e2e（compose 起栈）
+`ruff` → `mypy` → `import-linter` → 单元 + fixture + 集成 + e2e 测试（一次带覆盖率的运行）→ Alembic migration 往返检查 → contract snapshot（MCP 工具面 + OpenAPI）→ 变更行覆盖率门禁
+
+每次改动这段顺序时，`just ci-nix` 与 `.forgejo/workflows/ci.yml` 必须同步——
+`test_the_documented_ci_entry_point_is_what_the_workflow_runs` 机械对账两者。
+（旧的 `oasdiff` 与 compose e2e 条目已删除：前者在 nixpkgs 不可用、由 snapshot 取代，
+后者是多进程 compose 拓扑，本仓库的 e2e 是单进程真服务，见 §10.2。）
 
 ```
 repo/
@@ -308,7 +314,7 @@ repo/
     integration/         # SQLite + ASGI + MCP 客户端 + systemd 级行为
     contract/mcp_tools.json   # 工具面 snapshot（just contract）
     fixtures/            # 采集器快照（实际位于 plugins/collectors/rss/fixtures）
-    e2e/                 # 预留：需 compose，尚未接线
+    e2e/                 # 单进程全链路（真 uvicorn + MCP 客户端 + fixture origin），`just test-e2e`
     evals/               # P2 agent golden 任务，尚未创建
   docs/
     api/                 # style-guide.md, mcp-tool-guide.md
@@ -343,10 +349,10 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 处理器顺序 | 翻译 > 摘要 > TTS | 可逆 | 可达性 > 消费形式 |
 | 多用户准备 | 预留 tenant_id | 难逆 | 迁移痛点在数据模型 |
 | 架构边界 | 四层包 + import-linter CI 强制 | 可逆 | 约定靠工具不靠自觉 |
-| 契约保护 | oasdiff + 工具 snapshot 测试 | 可逆 | 破坏式变更必须显式 |
+| 契约保护 | snapshot 测试（MCP 工具面 + OpenAPI 全文档） | 可逆 | 破坏式变更必须显式；`oasdiff` 在 nixpkgs 不可用，改用 snapshot |
 | 外部世界钉住 | 每源/爬虫 fixture 快照 | 可逆 | 网站改版是最大腐化源 |
 | Agent 协作 | AGENTS.md + justfile | 可逆 | agent 是主要编码协作者 |
-| 备份策略 | 事实源备份、派生物重建 | 可逆 | 重放即恢复，备份减负；**尚未实施**，见 §7.5 |
+| 备份策略 | 事实源备份、派生物重建 | 可逆 | 重放即恢复，备份减负；已实现（`just backup` / `just restore`，systemd timer 定时执行） |
 | 去重匹配次序 | 身份（id/guid）优先于内容 | 难逆 | 正文被改写时只按 content_hash 匹配会漏，进而撞冻结 GUID（ADR 0008 相关） |
 | 开发环境 | **Nix Flake + direnv**（pkgs.mkShell，不用 devenv） | 可逆 | 系统依赖、解释器与工具链可复现且自动激活；不用 devenv 以保证纯求值（ADR 0002） |
 | Python 依赖 | **uv + uv.lock** | 可逆 | 快速、Python 原生依赖解析；避免为每个 PyPI 包维护 Nix derivation |
@@ -378,7 +384,7 @@ D2 快照需突出：error_class 分布突变（`structure_changed` 扎堆）、
 | 翻译 | LLM API 插件（默认） | DeepL / 本地模型可换 | 成本低，顺带摘要 |
 | TTS | Kokoro（本地 CPU，Apache 2.0） | Piper（GPL 注意）/ 云 API | 处理器插件 P3 引入 |
 | 日志 | structlog JSON + correlation_id | — | 诊断工具的数据基础 |
-| 质量门禁 | ruff + mypy + import-linter + pytest + MCP 工具 snapshot | P2 加 agent evals | 由 `just ci` 统一执行；**oasdiff 不在 nixpkgs，OpenAPI diff 未接线**（`just contract` 会说明而非隐藏） |
+| 质量门禁 | ruff + mypy + import-linter + pytest（含 contract snapshot） | P2 加 agent evals | 由 `just ci` 统一执行；OpenAPI 破坏式变更由 snapshot 比对阻断（`oasdiff` 不在 nixpkgs，见 §7.1） |
 | 部署 | **systemd 用户服务（当前）** | Docker 单容器 → P3 compose 多服务 | Docker 不作为默认开发环境；容器化尚未做 |
 
 ## 10. 开发环境、CI 与供应链纪律
@@ -418,16 +424,16 @@ just test             # 单元 + fixture 测试
 just test-integration # SQLite / 临时服务集成测试
 just lint             # ruff + mypy + import-linter
 just fix              # 自动修复可修复的 lint 与格式问题
-just contract         # OpenAPI diff + MCP snapshot
+just contract         # MCP 工具面 + OpenAPI 双 snapshot
 just migrate          # alembic upgrade head
 just migrate-check    # 验证 upgrade / downgrade / upgrade 往返
 just revision "msg"   # 生成新 migration
-just e2e              # compose 全链路测试
-just ci               # lint + test + test-integration + migrate-check + contract
-just ci-nix           # CI 实际执行的命令，含 nix flake check
+just test-e2e         # 单进程全链路（真服务 + MCP 客户端 + fixture origin）
+just ci               # lint + ci-covered + migrate-check + contract + coverage-gate
+just ci-nix           # CI 实际执行的命令：nix flake check + just ci
 ```
 
-尚未接线的命令（`run`、`contract`、`e2e`）在 `justfile` 中是显式占位，运行会说明缺少什么，而不是报“无此命令”。
+`just ci` 的每一步都已接线；没有任何命令是占位。
 
 ### 10.4 CI 的唯一环境入口
 

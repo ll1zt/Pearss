@@ -44,6 +44,18 @@ jobs:
           git -C source -c advice.detachedHead=false checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$CI_SHA"
 
+      # The first gate, and by far the cheapest (~2s): it evaluates the flake
+      # and builds the dev shells' derivations, so a flake that cannot evaluate
+      # fails here instead of forty minutes into the suite. §7.6 of the
+      # architecture spec and three other documents already described this as
+      # CI's first step; it was not running, which meant `just ci-nix` -- whose
+      # comment calls it "the exact command CI executes" -- had no caller.
+      # `test_the_documented_ci_entry_point_is_what_the_workflow_runs` now keeps
+      # the documented entry point and this file from drifting apart again.
+      - name: Check the flake
+        working-directory: source
+        run: nix flake check
+
       - name: Run quality gates
         working-directory: source
         env:

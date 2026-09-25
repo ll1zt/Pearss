@@ -110,10 +110,18 @@ coverage-diff base="origin/main" threshold="20":
         --cov --cov-report= >/dev/null
     uv run python scripts/coverage_diff.py "{{base}}" "{{threshold}}"
 
-# The changed-line gate, as CI runs it: same measurement as coverage-diff,
-# parameterized through the environment so a merge workflow can pin the base
-# and threshold without editing this file (B06).
-coverage-gate base="origin/main" threshold="20":
+# The changed-line gate, as CI runs it: same measurement as coverage-diff.
+#
+# `COVERAGE_BASE` and `COVERAGE_THRESHOLD` override the defaults, so a merge
+# workflow can pin them without editing this file (B06); a positional argument
+# still wins, so `just coverage-gate HEAD~3 5` works from a shell.
+#
+#   COVERAGE_BASE=origin/main COVERAGE_THRESHOLD=25 just coverage-gate
+#
+# The comment used to claim this parameterization while the recipe took plain
+# positional defaults, which meant setting the variables did nothing at all --
+# a gate described as configurable that silently ignored its configuration.
+coverage-gate base=env_var_or_default("COVERAGE_BASE", "origin/main") threshold=env_var_or_default("COVERAGE_THRESHOLD", "20"):
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f .coverage
