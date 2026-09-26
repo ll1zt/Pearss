@@ -485,9 +485,14 @@ def test_an_unparseable_error_body_does_not_break_classification(
 #     Then 不把译文错位拼接到别的段落上
 #
 #   AC-23 纯文本正文的产物形态不变
-#     Given 条目正文是普通段落（无结构）
+#     Given 条目正文是普通段落(无结构)
 #     When 翻译
-#     Then 产物仍是段落序列，可读性不退化
+#     Then 产物仍是段落序列, 可读性不退化
+#
+#   AC-24 provider 的回复是不可信数据
+#     Given provider 返回含 </p><script> 的回复
+#     When 组装产物
+#     Then 产物经 sanitize_html 后无残留, 且不带解析用包装
 # --------------------------------------------------------------------------
 
 RICH_BODY = (
@@ -694,3 +699,252 @@ def test_plain_paragraphs_still_produce_readable_paragraphs(
     # be a fragment of a sentence inside someone else's tag. The per-block
     # request is also what makes "which block failed?" answerable.
     assert len(seen) == 2, f"one request per paragraph, got {len(seen)}"
+
+
+# --------------------------------------------------------------------------
+# The structure machinery's own edge cases
+#
+# These are the paths the structure change added that a happy-path test cannot
+# reach: markup the parser rejects, nodes that must be skipped, inline content
+# that is not worth a shell, and markers a provider mangles. Each one is a
+# degradation path, so each is pinned to the degradation it promises rather
+# than to the code that implements it.
+# --------------------------------------------------------------------------
+
+
+def test_markup_the_parser_rejects_falls_back_to_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable body must still be translated, as plain paragraphs.
+
+    The input this processor is handed is sanitised HTML, so this is a
+    should-not-happen path -- but the wrong response is to refuse. The *text*
+    is perfectly readable, and refusing would hold an item's gate shut over a
+    tag the parser disliked.
+    """
+    from plugins.processors.translate.processor import _split_blocks
+
+    body, units = _split_blocks(prose="Some readable prose.", markup="")
+    assert body is None, "nothing to rebuild a tree from"
+    assert units == [{"element": None, "text": "Some readable prose.", "shells": []}]
+
+
+def test_noise_nodes_are_skipped_and_comments_ignored() -> None:
+    """`script`/`style` content is not article prose, and comments are not nodes.
+
+    Translating a `<script>` body would send code to the provider (the same
+    defect class as the code block, but with a worse payload), and a comment is
+    not an element to be rebuilt.
+    """
+    from plugins.processors.translate.processor import _split_blocks
+
+    _body, units = _split_blocks(
+        prose="x",
+        markup=(
+            "<!-- a comment --><script>evil()</script><style>.a{}</style>"
+            "<p>Real prose here.</p>"
+        ),
+    )
+    texts = [unit["text"] for unit in units if unit["text"]]
+    assert texts == ["Real prose here."], texts
+    assert "evil()" not in " ".join(texts)
+
+
+def test_inline_code_is_not_given_a_shell() -> None:
+    """`code` inside a paragraph keeps its text and loses its tag.
+
+    Deliberate: `code` is in the preserved set, so it is never a *marker*
+    either. The sentence still reads correctly (the identifier is part of the
+    prose), and the alternative -- a shell whose content the provider is told
+    not to translate -- would need a second marker kind for no reader benefit.
+    """
+    from plugins.processors.translate.processor import _split_blocks
+
+    _body, units = _split_blocks(prose="x", markup="<p>Use <code>foo()</code> now.</p>")
+    assert units[0]["text"] == "Use foo() now."
+    assert units[0]["shells"] == [], "an inline code span gets no marker shell"
+
+
+def test_a_marker_the_provider_lost_is_dropped_not_guessed() -> None:
+    """The promise: prose survives, the tag may not.
+
+    Four ways a provider can mangle a marker -- dropped, unbalanced, an index
+    that does not exist, and mismatched open/close pairs. In every case the
+    *text* must come through and no `[[n]]` may reach the reader; a guessed tag
+    around the wrong words would be worse than a missing tag.
+    """
+    from plugins.processors.translate.processor import _restore_inline
+
+    shells = [("<a href='/x'>", "</a>")]
+    assert _restore_inline("plain text", shells) == "plain text"
+    assert _restore_inline("see [[0]]link", shells) == "see link"
+    assert _restore_inline("see [[5]]x[[/5]]", shells) == "see x"
+    assert _restore_inline("see [[0]]x[[/1]]", [*shells, ("<b>", "</b>")]) == "see x"
+    # A well-formed marker is restored, which is the case all the above are the
+    # *degradation* of.
+    assert _restore_inline("see [[0]]link[[/0]]", shells) == "see <a href='/x'>link</a>"
+
+
+def test_a_nested_inline_pair_is_restored_once_per_pass() -> None:
+    """Nested inline markup restores inner-out across passes.
+
+    `strong` inside `a` is two markers whose spans nest, so a single pass can
+    only satisfy the inner one; the outer pass then wraps the result. Pinned
+    because a single-pass implementation would silently leave the outer tag
+    off, which reads as "the link is gone" in the product.
+    """
+    from plugins.processors.translate.processor import _restore_inline
+
+    shells = [("<a href='/x'>", "</a>"), ("<strong>", "</strong>")]
+    restored = _restore_inline("see [[0]]the [[1]]docs[[/1]][[/0]] now", shells)
+    assert restored == "see <a href='/x'>the <strong>docs</strong></a> now"
+
+
+def test_absolutise_leaves_markup_it_cannot_parse_alone() -> None:
+    """A link that stays relative is cosmetic; a dropped product is not.
+
+    The absolutiser is best-effort by design, so its failure mode is stated:
+    return the markup untouched (tested through the public path below, since an
+    HTML fragment reaching it always parses).
+    """
+    from plugins.processors.translate.processor import _absolutise
+
+    assert _absolutise("", base="https://h.example/p") == ""
+    # `a` without href and an element with no URL attribute are left as-is.
+    assert (
+        _absolutise("<p>no links <span>x</span></p>", base="https://h.example/p")
+        == "<p>no links <span>x</span></p>"
+    )
+
+
+# --------------------------------------------------------------------------
+# AC-24: the provider's reply is untrusted markup
+#
+# The product used to be built by escaping text into fresh `<p>` tags, so a
+# hostile reply could only ever be text. Now the reply's *text* is assembled
+# into markup, which means a reply containing `</p><script>` closes the block
+# early and injects whatever follows. The store-time allowlist (ADR 0007) has
+# to apply here for the same reason it applies to a feed body: the boundary
+# belongs where untrusted input becomes stored content.
+# --------------------------------------------------------------------------
+
+
+def test_a_hostile_provider_reply_cannot_inject_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-24: a reply that closes the tag early is neutralised, not published.
+
+    The provider is a remote service reached over the network; its output is
+    exactly as untrusted as a blog page. Without the boundary, the reply below
+    stores a live `<script>` (and an `onerror` handler on an injected image)
+    into an artifact that every reader then serves.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+
+    hostile = (
+        "</p><script>steal(document.cookie)</script>"
+        '<img src="x" onerror="steal()">'
+        '<p onclick="steal()">text'
+    )
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kw: httpx.Response(
+            200, json={"choices": [{"message": {"content": hostile}}]}
+        ),
+    )
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    process(
+        {
+            "item_id": "i",
+            "title": "T",
+            "content": "<p>Long enough prose here.</p>",
+            "url": "https://b.example/p",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+    product = stored[0]
+
+    assert "<script" not in product, product
+    assert "onclick" not in product, product
+    assert "onerror" not in product, product
+    assert "steal" not in product, product
+    # The text is what the reader gets, inside the block's own tag.
+    assert "text" in product
+
+
+def test_the_product_carries_no_parsing_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-24 (the other half): sanitising must not change the product's shape.
+
+    The wrapper exists to make a fragment parse as a document; it is not
+    content and must not reach the reader, or every translated item would gain
+    an element (and a nesting level) the original never had.
+    """
+    product, _ = _translate(monkeypatch, RICH_BODY)
+
+    assert not product.startswith("<div>"), product[:80]
+    assert product.count("<div") == 0, product[:200]
+    # And the sanitised product still keeps the structure it was built with.
+    for tag in ("<h2", "<pre", "<img", "<a "):
+        assert tag in product, product[:200]
+
+
+def test_sanitising_preserves_the_absolute_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-24: order matters -- absolutise, then sanitise, and the URL survives.
+
+    The allowlist permits `href`/`src` and restricts their schemes, so an
+    absolutised `http`/`https` URL passes through. If sanitising stripped them,
+    AC-21's guarantee would be silently undone by the boundary that protects
+    it.
+    """
+    product, _ = _translate(monkeypatch, RICH_BODY, url="https://blog.example/post")
+
+    assert 'src="https://blog.example/img/ebpf.png"' in product
+    assert 'href="https://blog.example/docs/start"' in product
+
+
+def test_a_comment_inside_a_block_keeps_the_text_around_it() -> None:
+    """A comment is not content, but the text next to it is.
+
+    `<p>a<!-- c -->b</p>` is one paragraph reading "ab". Dropping the comment is
+    the point; dropping the text *after* it (the comment's tail) would silently
+    eat part of the sentence, which is the kind of loss that shows up as a
+    truncated translation rather than as a missing tag.
+    """
+    from plugins.processors.translate.processor import _split_blocks
+
+    _body, units = _split_blocks(prose="ab", markup="<p>a<!-- a comment -->b</p>")
+    assert len(units) == 1
+    assert units[0]["text"] == "ab", (
+        f"the text either side of a comment must survive: {units[0]['text']!r}"
+    )
+
+
+def test_sanitising_an_empty_product_yields_an_empty_artifact() -> None:
+    """A product that sanitises to nothing is an empty artifact, not a `<div>`.
+
+    Reachable through the provider, not just defensively: a reply that is
+    entirely markup the allowlist drops sanitises away, and the fallback must
+    be the empty-artifact SUCCESS the title-only path already uses -- an item
+    whose chain cannot produce content must not hold its gate shut forever.
+    """
+    from plugins.processors.translate.processor import _sanitise
+
+    assert _sanitise("") == ""
+    assert _sanitise("<script>evil()</script>") == ""
+    assert _sanitise("<p>kept</p>") == "<p>kept</p>"
