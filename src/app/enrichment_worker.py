@@ -408,32 +408,34 @@ def _execute_row(
         else:
             content = filestore.read_body(item.content_ref)
         try:
-            try:
-                result = run_processor(
-                    processor,
-                    plugin_id=row.plugin_id,
-                    item_ctx={
-                        "item_id": item.id,
-                        "title": item.title or "",
-                        "content": content,
-                        "url": item.url,
-                        "lang": row.lang,
-                        "upstream_digest": _digest_of(upstream_ref),
-                    },
-                    target_lang=row.lang or "en",
-                    deadline=deadline,
-                    cancelled=cancel_event,
-                )
-            finally:
-                # Released here, in the innermost finally, so every exit from
-                # the fetch frees the host: success, a classified failure, an
-                # unexpected exception, a timeout, or a cancel. Anything later
-                # would leave the host marked busy through the result write.
-                if paced:
-                    pacer().release(host)
+            result = run_processor(
+                processor,
+                plugin_id=row.plugin_id,
+                item_ctx={
+                    "item_id": item.id,
+                    "title": item.title or "",
+                    "content": content,
+                    "url": item.url,
+                    "lang": row.lang,
+                    "upstream_digest": _digest_of(upstream_ref),
+                },
+                target_lang=row.lang or "en",
+                deadline=deadline,
+                cancelled=cancel_event,
+            )
         except ProcessorError as exc:
             error_class = exc.error_class
             detail = exc.detail
+            # Recorded here, inside the handler, so it lands before the
+            # `finally` below releases the host slot. The sibling waiting on
+            # that slot re-checks the cooldown under the pacer's lock, so the
+            # order is defence in depth rather than the only thing protecting
+            # this window: releasing first leaves the sibling a few hundred
+            # microseconds (one lock acquisition) to get in, which it lost in
+            # every trace measured. Recording first removes the window instead
+            # of relying on the sibling being slower.
+            if error_class is ErrorClass.BLOCKED:
+                pacer().record_blocked(host)
         except Exception as exc:
             error_class = ErrorClass.NETWORK
             detail = f"{type(exc).__name__}: {exc}"
@@ -463,13 +465,14 @@ def _execute_row(
                 )
                 outcome["skipped"] += 1
             return outcome
+        finally:
+            # Every exit from a paced fetch frees the host -- success, a
+            # classified failure, an unexpected exception, a timeout, a cancel.
+            # It runs *after* the handlers above, which is what makes the
+            # cooldown observable to the sibling that is waiting on this slot.
+            if paced:
+                pacer().release(host)
         attempts = row.attempt_count + 1
-        # A refusal is the origin asking us to stop (403/429): honour it for
-        # every row on that host, not just this one. The classification is the
-        # taxonomy's own blocked class, so the pacer cannot disagree with what
-        # the operator sees in the run history.
-        if error_class is ErrorClass.BLOCKED:
-            pacer().record_blocked(host)
         transient = error_class.value in TRANSIENT_CLASSES
         if transient and attempts < max_attempts:
             backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))

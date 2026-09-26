@@ -208,7 +208,9 @@ class HostPacer:
 
         Holding the slot across the *fetch* is the caller's job (`release` in a
         `finally`), not this method's: this returns as soon as admission is
-        granted, and the fetch starts immediately afterwards.
+        granted, and the fetch starts immediately afterwards. The caller must
+        also record any refusal *before* releasing -- see the worker -- so the
+        sibling this gate wakes up sees the cooldown rather than racing it.
 
         False means the host went on cooldown while waiting, or the budget was
         spent -- the caller leaves its row queued for the next sweep rather
