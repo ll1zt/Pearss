@@ -311,3 +311,66 @@ def test_a_slot_left_held_blocks_the_next_row_until_the_budget_expires() -> None
     assert time.monotonic() - started >= 1.0, (
         "the sibling should have waited out its budget, not declined at once"
     )
+
+
+def test_a_woken_sibling_sees_a_cooldown_recorded_before_the_release() -> None:
+    """A sibling waiting at the gate must be refused by a cooldown already set.
+
+    This is the ordering the worker is expected to respect: record the refusal,
+    then release the slot. What it pins is the pacer's side of that contract --
+    that a cooldown installed before a release is visible to the row the release
+    wakes -- which is the half the pacer is responsible for.
+
+    Stated honestly: it does **not** prove the worker calls them in that order.
+    Reversing the worker's two statements still passes this test and the whole
+    suite, because the woken sibling has to re-acquire the pacer lock while the
+    recorder already holds it, so the sibling loses by a few hundred
+    microseconds (measured in a worker trace). The ordering is therefore defence
+    in depth; what actually fixed the load-dependent failures was making the
+    politeness tests order-independent, which is done in the integration suite.
+    """
+    pacer, _clock, _slept = _pacer(min_interval=60.0, max_per_sweep=5)
+
+    # A sibling is waiting at the gate: the slot is taken by the fetch that is
+    # about to be refused.
+    assert pacer.pace("blog.example") is True
+    outcome: list[bool] = []
+
+    def sibling() -> None:
+        outcome.append(pacer.pace("blog.example"))
+
+    worker = threading.Thread(target=sibling, daemon=True)
+    worker.start()
+
+    # The correct order: install the cooldown, *then* release.
+    pacer.record_blocked("blog.example")
+    pacer.release("blog.example")
+    worker.join(timeout=10)
+
+    assert outcome == [False], (
+        "the waiting sibling must be refused by the cooldown that was installed "
+        "before the release; if it is admitted, the worker released the slot "
+        "before recording the refusal"
+    )
+
+
+def test_a_sibling_is_admitted_when_no_cooldown_was_recorded() -> None:
+    """The other half: a successful fetch releases and the sibling proceeds.
+
+    Without this, the test above could be satisfied by refusing everything.
+    """
+    pacer, _clock, _slept = _pacer(min_interval=0.0, max_per_sweep=5)
+
+    assert pacer.pace("blog.example") is True
+    outcome: list[bool] = []
+
+    def sibling() -> None:
+        outcome.append(pacer.pace("blog.example"))
+        pacer.release("blog.example")
+
+    worker = threading.Thread(target=sibling, daemon=True)
+    worker.start()
+    pacer.release("blog.example")
+    worker.join(timeout=10)
+
+    assert outcome == [True], "a healthy fetch must let the sibling through"
