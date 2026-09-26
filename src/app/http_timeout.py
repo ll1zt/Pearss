@@ -107,9 +107,6 @@ class HeaderTimeoutProtocol(H11Protocol):
     # `_update_deadline`) and rescheduled on every burst of header bytes until
     # then.
     _header_deadline: asyncio.TimerHandle | None = None
-    # Sticky per connection: a complete request has been parsed at least once,
-    # so this socket has entered keep-alive territory.
-    _request_served: bool = False
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         """Arm the deadline as soon as the connection exists.
@@ -146,35 +143,45 @@ class HeaderTimeoutProtocol(H11Protocol):
         self._update_deadline()
 
     def _update_deadline(self) -> None:
-        """Arm while a request is being assembled, disarm once one exists.
+        """Arm while a request is incomplete; disarm once one has arrived.
 
-        Driven by *whether a request has ever completed on this connection*,
-        which is the distinction that matters and the one h11's state alone
-        cannot express. A connection that has served a request is a keep-alive
-        socket: it is idle by design, and the deadline protects "no complete
-        request yet" rather than "no bytes right now".
+        The distinction is `their_state is DONE`, and the two ways to get this
+        wrong are both instructive because a real socket was needed to find
+        them:
+
+        * Treating `IDLE` as "no request" (the first attempt) never closed
+          anything: h11 reports IDLE both for a connection that has sent
+          nothing and for one whose request was already dispatched.
+        * Tracking "has ever served a request" *stickily* (the second attempt,
+          which fixed the keep-alive case) opened a hole instead: a client that
+          sends a complete request and then a *partial* second one leaves h11
+          in IDLE again, and refused to arm -- so slowloris survived over
+          keep-alive. Measured: the partial second request stayed open
+          indefinitely.
+
+        So the state is re-derived from h11 on every byte: DONE means a request
+        arrived (disarm -- the socket is legitimately idle between requests),
+        and anything else means the parser is mid-connection, which covers both
+        a fresh connection and the second half of a reused one.
         """
         transport = getattr(self, "transport", None)
         if transport is None or transport.is_closing():
             self._cancel_header_deadline()
             return
-        if self._has_served_a_request():
+        if self._request_arrived():
             self._cancel_header_deadline()
             return
         self._arm_header_deadline()
 
-    def _has_served_a_request(self) -> bool:
-        """Whether a complete request has been parsed on this connection.
+    def _request_arrived(self) -> bool:
+        """Whether h11 has a complete request in hand right now.
 
-        Sticky per connection, and set from h11's own `DONE` state -- the one
-        point in the parser's cycle that means "a full request arrived" rather
-        than "waiting" (IDLE covers both, which is why this is tracked rather
-        than re-derived).
+        `DONE` is the only state that means it: h11 sets it when the request is
+        complete and reaches IDLE again once the response has been sent, which
+        is why this is read rather than latched.
         """
         conn = getattr(self, "conn", None)
-        if conn is not None and conn.their_state is h11.DONE:
-            self._request_served = True
-        return self._request_served
+        return conn is not None and conn.their_state is h11.DONE
 
     def connection_lost(self, exc: Exception | None) -> None:
         """Cancel the deadline: a closed connection has nothing to protect."""
@@ -198,8 +205,8 @@ class HeaderTimeoutProtocol(H11Protocol):
     def _on_header_timeout(self) -> None:
         """Close a connection whose request header never completed."""
         self._header_deadline = None
-        if self._has_served_a_request():
-            return  # a request arrived; the deadline was already disarmed
+        if self._request_arrived():
+            return  # the request arrived; the deadline was already disarmed
         transport = getattr(self, "transport", None)
         if transport is None or transport.is_closing():
             return

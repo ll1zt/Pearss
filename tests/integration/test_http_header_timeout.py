@@ -412,3 +412,142 @@ def test_a_slow_but_progressing_request_is_not_killed(
     assert b"200" in received, (
         f"a slow but progressing request must be served, got {received[:120]!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# AC-27 (clamping) and the protocol's internal guards
+#
+# The clamping branch and the two early returns in `_on_header_deadline` are
+# cheap to reach and are exactly where a "just in case" line would rot
+# unnoticed, so they are driven directly rather than through a socket.
+# --------------------------------------------------------------------------
+
+
+def test_an_oversized_setting_is_clamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-27: an absurd value is bounded, not honoured.
+
+    `99999` seconds is not a timeout in any useful sense; it is the protection
+    switched off by another spelling. The clamp keeps the variable's promise
+    ("bounded") true for every value an operator can write.
+    """
+    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "99999")
+    value = header_timeout_seconds()
+
+    assert value == 300.0, f"an oversized value must clamp, got {value}"
+
+
+def _bare_protocol() -> HeaderTimeoutProtocol:
+    """A protocol instance with no event loop and no real transport.
+
+    Constructed through `__new__` so the deadline helpers can be driven
+    directly: these are the branches a socket cannot arrange deterministically
+    (a peer that vanishes between two reads, a timer firing just as a request
+    lands), and each must be a no-op rather than an error inside a timer
+    callback -- an exception there surfaces as an asyncio "never retrieved"
+    noise line and can leave the connection unclosed in the case that matters.
+    """
+    return HeaderTimeoutProtocol.__new__(HeaderTimeoutProtocol)
+
+
+class _ClosingTransport:
+    """A transport that reports itself closing, recording any close() call."""
+
+    def __init__(self) -> None:
+        self.closes = 0
+
+    def is_closing(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.closes += 1
+
+    def get_extra_info(self, name: str, default: Any = None) -> Any:
+        return default
+
+
+def test_the_deadline_handler_is_harmless_when_it_has_nothing_to_do() -> None:
+    """The handler's early returns: a served request, or a transport already gone.
+
+    Both are reachable in production -- a request that arrives as the deadline
+    fires, and a peer that disconnected first -- and both must be no-ops.
+    """
+    # (a) A connection whose transport is already closing: nothing to close.
+    closing = _ClosingTransport()
+    protocol = _bare_protocol()
+    protocol.transport = closing  # type: ignore[assignment]
+    protocol._on_header_timeout()
+
+    assert closing.closes == 0, (
+        "a transport that is already closing must not be touched again"
+    )
+
+    # (b) No transport at all (the connection was lost before the timer ran).
+    protocol = _bare_protocol()
+    protocol.transport = None  # type: ignore[assignment]
+    protocol._on_header_timeout()  # must not raise
+
+    # (c) The handler leaves its own handle cleared, so a later arm starts from
+    #     a known state rather than cancelling a stale one.
+    assert protocol._header_deadline is None
+
+
+def test_no_deadline_is_armed_once_the_transport_is_closing() -> None:
+    """A closing transport must not get a timer.
+
+    Reachable when a peer disconnects between two reads: `_update_deadline`
+    then finds a transport that is already closing and must cancel rather than
+    arm. Asserting the handle stays unset also pins that the cancel happened,
+    which a leaked timer would hide.
+    """
+    protocol = _bare_protocol()
+    protocol.transport = _ClosingTransport()  # type: ignore[assignment]
+    protocol._header_deadline = None
+
+    protocol._update_deadline()
+
+    assert protocol._header_deadline is None, (
+        "a closing transport must not have a header deadline armed"
+    )
+
+
+def test_a_partial_request_on_a_reused_connection_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-25 (keep-alive): a partial *second* request must be closed too.
+
+    The hole this pins, found by an injection check that survived its first
+    test: after an idle keep-alive socket was exempted, a client could send a
+    complete request and then a partial second one and hold the connection open
+    forever (measured, >4s beyond a 1s deadline). h11 reports IDLE in that state
+    exactly as it does for a fresh connection, so a design that *latches* "this
+    connection has served a request" stops protecting the connection it just
+    decided to trust. Slowloris over a reused connection is the same attack with
+    one complete request in front of it.
+
+    The payload is load-bearing. `X-S: ` (a field with no value) is a header h11
+    *rejects*, so uvicorn closes the connection for its own reason and this test
+    passed without the deadline doing anything -- which is exactly how the first
+    version failed to catch its injection. A start line with no terminating CRLF
+    leaves h11 genuinely waiting, which is the state under test.
+    """
+    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "1")
+    with _server() as (host, port):
+        sock = socket.create_connection((host, port), timeout=15)
+        try:
+            request = f"GET /p HTTP/1.1\r\nHost: {host}\r\n\r\n".encode()
+            sock.sendall(request)
+            first = _read_one_response(sock)
+            assert b"200" in first, first[:120]
+
+            sock.sendall(b"GET /p HTTP/1.1\r\n")
+            closed_after = _seconds_until_close(sock, budget=5.0)
+        finally:
+            sock.close()
+
+    assert closed_after is not None, (
+        "a partial request on a reused connection must be closed like any other "
+        "incomplete header; leaving it open is slowloris with one complete "
+        "request in front of it"
+    )
