@@ -1309,3 +1309,51 @@ def test_every_started_test_server_is_also_asked_to_stop() -> None:
         "shutdown(), so the thread loops on a closed socket and slows every "
         "later test in the process (issue #53):\n" + "\n".join(offenders)
     )
+
+
+def test_every_entry_point_installs_the_header_timeout_protocol() -> None:
+    """The half-open-header fix must be reachable from every launch path.
+
+    `app/http_timeout.py` is only in effect when uvicorn is told to use it
+    (`--http app.http_timeout:HeaderTimeoutProtocol`). That is a wiring detail
+    living in two files outside the Python package, which is exactly the shape
+    of drift that stays invisible: the module keeps its tests green, the
+    launcher silently runs the stock protocol, and the protection is off in
+    production only.
+
+    Checked mechanically because the failure has no other symptom. Both entry
+    points are covered -- the packaged launcher (`nix/package.nix`, how a
+    deployment starts) and the developer recipes (`justfile`) -- since a
+    developer running `just run` would otherwise test a different socket
+    behavior than the one being shipped.
+    """
+    protocol = "app.http_timeout:HeaderTimeoutProtocol"
+    entry_points = {
+        "nix/package.nix": (REPO_ROOT / "nix/package.nix").read_text(encoding="utf-8"),
+        "justfile": (REPO_ROOT / "justfile").read_text(encoding="utf-8"),
+    }
+
+    for name, text in entry_points.items():
+        assert protocol in text, (
+            f"{name} starts uvicorn without {protocol}, so the half-open "
+            "request-header timeout is not installed on that path (issue #9). "
+            "It is wired through uvicorn's --http seam because ASGI middleware "
+            "cannot see a request whose header never completed."
+        )
+
+
+def test_the_timeout_is_documented_where_an_operator_will_look() -> None:
+    """A security knob nobody can find is a knob nobody sets.
+
+    The timeout has a working default, so this is not about *requiring*
+    configuration -- it is that an operator debugging a closed connection, or
+    tuning the bound for their network, must be able to find the variable name
+    and the behavior without reading the source.
+    """
+    text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "PEARSS_HTTP_HEADER_TIMEOUT_SECONDS" in text, (
+        "the header-timeout variable is absent from .env.example, which is "
+        "where env-reference.md and operators both point (see the guard that "
+        "requires every variable the code reads to be documented there)"
+    )

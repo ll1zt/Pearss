@@ -297,4 +297,11 @@ also_copy = [
   # config and runs the unit suite in it, so the next path a test reads from
   # the repository root fails there rather than silently disabling the gate.
   ".forgejo",
+  # Fourth distinct path, and the same lesson again: the guard that checks
+  # every entry point installs the header-timeout protocol (issue #9) reads
+  # `nix/package.nix` alongside the justfile. Without this entry the unit suite
+  # died inside the mutmut tree during stats collection -- the gate reporting
+  # nothing rather than reporting success, which is the failure mode the list
+  # above exists to prevent.
+  "nix",
 ]
