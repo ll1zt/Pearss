@@ -1,8 +1,8 @@
 """The fulltext processor: extraction, fetch bounds, and error taxonomy.
 
-Scenario register: src/plugins/processors/fulltext/SCENARIOS.md (AC-1..AC-6);
-AC-7/AC-8 live in tests/integration/test_fulltext_chain.py, where the
-app-level wiring belongs. Every origin in this suite is a local
+Scenario register: src/plugins/processors/fulltext/SCENARIOS.md (AC-1..AC-6 and
+AC-9..AC-13); AC-7/AC-8 live in tests/integration/test_fulltext_chain.py, where
+the app-level wiring belongs. Every origin in this suite is a local
 ThreadingHTTPServer or a pure function; no test touches a real blog.
 """
 
@@ -340,7 +340,10 @@ def test_the_processor_id_is_stable() -> None:
 
 
 # --------------------------------------------------------------------------
-# AC-8..AC-12: the product keeps the article's structure (issue #32)
+# AC-9..AC-13: the product keeps the article's structure (issue #32).
+# AC-8 is the chain-level scenario in tests/integration/test_fulltext_chain.py;
+# this branch arrived second, so it takes the numbers above it rather than
+# colliding with the register that landed first.
 # --------------------------------------------------------------------------
 #
 # The first extractor returned plain text and re-wrapped every block as a bare
@@ -383,7 +386,7 @@ def _fetch_product(origin: _Origin, html_text: str) -> str:
 
 
 def test_user_full_text_keeps_the_articles_structure(origin: _Origin) -> None:
-    """AC-8: headings, images, code, lists, quotes, tables and links survive.
+    """AC-9: headings, images, code, lists, quotes, tables and links survive.
 
     A reader that receives bare paragraphs cannot show a code block as code,
     a diagram as an image, or a link as a link — which is what the summary
@@ -413,7 +416,7 @@ def test_user_full_text_keeps_the_articles_structure(origin: _Origin) -> None:
 
 
 def test_user_full_text_keeps_image_alt_and_absolute_urls(origin: _Origin) -> None:
-    """AC-9: relative href/src are resolved against the item URL, alt kept.
+    """AC-10: relative href/src are resolved against the item URL, alt kept.
 
     The artifact is rendered somewhere else entirely (a reader, a phone), so
     a relative path is a broken link there — and an image with no alt is
@@ -427,7 +430,7 @@ def test_user_full_text_keeps_image_alt_and_absolute_urls(origin: _Origin) -> No
 
 
 def test_user_full_text_does_not_repeat_nested_blocks(origin: _Origin) -> None:
-    """AC-10: a quote's paragraph appears once, not twice.
+    """AC-11: a quote's paragraph appears once, not twice.
 
     Walking descendants while also emitting the ancestor printed the sentence
     twice (measured: the same blockquote text appeared twice in the product).
@@ -438,7 +441,7 @@ def test_user_full_text_does_not_repeat_nested_blocks(origin: _Origin) -> None:
 
 
 def test_user_full_text_keeps_code_indentation(origin: _Origin) -> None:
-    """AC-11: whitespace inside <pre> is code, not layout to collapse."""
+    """AC-12: whitespace inside <pre> is code, not layout to collapse."""
     product = _fetch_product(origin, RICH_ARTICLE)
 
     assert "bpftool prog list" in product
@@ -448,7 +451,7 @@ def test_user_full_text_keeps_code_indentation(origin: _Origin) -> None:
 
 
 def test_user_full_text_is_still_sanitised(origin: _Origin) -> None:
-    """AC-12: structure is kept, danger is not.
+    """AC-13: structure is kept, danger is not.
 
     The extractor now passes markup through, so the sanitiser is doing real
     work here rather than seeing pre-escaped text.
