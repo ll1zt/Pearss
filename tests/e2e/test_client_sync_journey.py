@@ -833,6 +833,12 @@ class _OpenAIOrigin:
 
     def __init__(self) -> None:
         self.requests = 0
+        # Every request, because the processor sends one per translatable block
+        # (ADR 0031): "what was translated" is the union across them, and a
+        # single remembered body would only show the last block -- which is how
+        # a test asserting on the whole article would pass while the article
+        # was nowhere in the call.
+        self.request_bodies: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         origin = self
 
@@ -847,6 +853,7 @@ class _OpenAIOrigin:
                 with origin._lock:
                     origin.requests += 1
                     origin.last_request = body
+                    origin.request_bodies.append(body)
                 reply = f"[译] {user_text}"
                 payload = json.dumps(
                     {
@@ -1146,7 +1153,9 @@ async def test_j11_the_chain_translates_the_extracted_full_text(
 
                 assert article.requests >= 1, "the article page was never fetched"
                 assert provider.requests >= 1, "the provider was never called"
-                sent_to_provider = json.dumps(provider.last_request)
+                # Every request, not just the last: the chain now sends one
+                # per block, so the article is spread across them.
+                sent_to_provider = json.dumps(provider.request_bodies)
 
     # What the reader is served, and what the provider was asked to translate.
     assert "ARCHITECTURE SECTION" in sent_to_provider, (
@@ -1183,4 +1192,14 @@ async def test_j11_the_chain_translates_the_extracted_full_text(
     assert "ARCHITECTURE SECTION" in translation_layer, (
         "the translation layer must correspond to the extracted article, which "
         f"is what it sits above; it was {translation_layer[:300]}"
+    )
+    # And the translation keeps the article's *structure*, not just its words
+    # (ADR 0031, issue #33): the heading is still a heading, and the link is
+    # still a link pointing at the article's own host.
+    assert "<h2" in translation_layer, (
+        f"the heading must stay a heading in the translation: {translation_layer[:300]}"
+    )
+    assert f'href="{article.url_for("/deep")}"' in translation_layer, (
+        "the link must survive translation and point at the origin: "
+        f"{translation_layer[:300]}"
     )
