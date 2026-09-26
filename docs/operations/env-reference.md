@@ -105,6 +105,12 @@ PEARSS_DOCS_ENABLED=0
 # 请求体上限（字节），超限 413。0 = 不限。默认 1MB。
 # PEARSS_MAX_BODY_BYTES=1048576
 
+# 半开请求头超时（秒）。连接建立后在该时长内未收到完整请求头即关闭；
+# 每个收到的字节重置窗口（针对「无进展」而非「总时长」）。
+# 默认 15，上限 300；0/负数/nan/inf 等坏值回落到默认，无法关闭。
+# 经 `uvicorn --http app.http_timeout:HeaderTimeoutProtocol` 安装。
+# PEARSS_HTTP_HEADER_TIMEOUT_SECONDS=15
+
 # 远程 MCP 客户端需在此放宽 DNS-rebinding 保护，逗号分隔。
 # loopback 始终放行；端口必须用 host:* 通配（浏览器会带端口）。
 # PEARSS_MCP_ALLOWED_HOSTS=pearss.example.com:*
