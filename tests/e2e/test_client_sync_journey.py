@@ -40,6 +40,8 @@ from tests.e2e.conftest import (
     API_TOKEN,
     READER_PASSWORD,
     READER_USERNAME,
+    VALID_FEED,
+    _FixtureOrigin,
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
@@ -987,3 +989,198 @@ async def test_j10_a_translated_source_leads_with_the_translation_in_the_reader(
         original_part = after_rule.split(">", 1)[1].strip()
         assert original_part, "the original body is gone below the rule"
         assert "[译]" not in original_part, "the translation leaked below the rule"
+
+
+class _ArticleOrigin:
+    """A real article origin: serves the item's own page on the loopback.
+
+    The fulltext processor fetches the item URL, so covering the real
+    `[fulltext, translate]` chain means giving it a real page to extract. The
+    page is deliberately *article-like* (a heading, prose, a link) so the
+    extractor's structural algorithm -- not a fixture special case -- is what
+    produces the product.
+    """
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self._lock = threading.Lock()
+        origin = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                with origin._lock:
+                    origin.requests += 1
+                body = (
+                    "<html><head><title>t</title></head><body>"
+                    "<nav>navigation to be dropped</nav>"
+                    "<article>"
+                    "<h2>ARCHITECTURE SECTION</h2>"
+                    "<p>" + ("A long paragraph of English prose. " * 20) + "</p>"
+                    "<p>See the <a href='/deep'>deep link</a> for more.</p>"
+                    "</article>"
+                    "<footer>footer to be dropped</footer></body></html>"
+                ).encode()
+                self.send_response(200)
+                self.send_header("content-type", "text/html; charset=utf-8")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args: object) -> None:
+                pass
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.port = int(self._httpd.server_address[1])
+
+    def url_for(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def __enter__(self) -> _ArticleOrigin:
+        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+def _article_feed(article: _ArticleOrigin) -> bytes:
+    """The valid fixture, rewritten so item URLs point at the article origin.
+
+    The feed's own descriptions stay short (that is what makes fulltext work),
+    and each item's link is redirected to the loopback page the processor will
+    actually fetch -- the same substitution a real deployment performs by
+    simply having a real URL, without touching the parser under test.
+    """
+    text = VALID_FEED.read_text()
+    text = text.replace(
+        "https://blog.example.com/2026/01/",
+        f"{article.url_for('/2026/01/')}",
+    ).replace(
+        "https://blog.example.com/",
+        f"{article.url_for('/')}",
+    )
+    return text.encode()
+
+
+async def test_j11_the_chain_translates_the_extracted_full_text(
+    served: str,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator's scenario end to end, with the real plugins.
+
+    Given a summary-only source whose chain is [fulltext, translate]
+    When the real fulltext processor extracts the article and the real
+    translate processor runs against a local provider
+    Then the translation the reader is served is a translation of the
+    *extracted article*, not of the feed's short summary
+
+    This is the whole of issue #34 in one journey: the two processors, the
+    real extractor, the real provider call and the real Reader output. Before
+    the dataflow rule, the translation was of the summary, so the reader saw a
+    translated stub above an untranslated article.
+    """
+    from app.enrichment_worker import default_processors, sweep_queue
+
+    with _ArticleOrigin() as article:
+        feed = _article_feed(article)
+        with _FixtureOrigin(feed) as feed_origin:
+            source_id: str | None = None
+            with _OpenAIOrigin() as provider:
+                monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", provider.base_url)
+                monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "e2e-provider-key")
+                monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "e2e-model")
+
+                async with httpx.AsyncClient(
+                    base_url=served,
+                    headers={"Authorization": f"Bearer {API_TOKEN}"},
+                ) as client:
+                    created = await client.post(
+                        "/v1/sources",
+                        headers={"Idempotency-Key": "journey-chain-1"},
+                        json={
+                            "url": feed_origin.url,
+                            "schedule_policy": {
+                                "type": "fixed",
+                                "interval": "30m",
+                            },
+                            "pipeline_chain": [
+                                {
+                                    "plugin_id": "fulltext",
+                                    "kind": "fulltext",
+                                    "required": True,
+                                },
+                                {
+                                    "plugin_id": "translate",
+                                    "kind": "translation",
+                                    "lang": "zh",
+                                    "required": True,
+                                },
+                            ],
+                        },
+                    )
+                    assert created.status_code == 201, created.text
+                    source_id = created.json()["id"]
+                    triggered = await client.post(
+                        f"/v1/sources/{source_id}:trigger",
+                        headers={"Idempotency-Key": "journey-chain-trigger-1"},
+                    )
+                    assert triggered.status_code == 200, triggered.text
+
+                # The real sweep, with the real processors. The chain advances
+                # one position per sweep, so drive it until it settles.
+                for _ in range(6):
+                    report = sweep_queue(
+                        session_factory(),
+                        processors=default_processors(),
+                        row_session_factory=session_factory,
+                    )
+                    if not (
+                        report["succeeded"] or report["failed"] or report["retried"]
+                    ):
+                        break
+                else:  # pragma: no cover - a hung chain is a real failure
+                    raise AssertionError("the chain never settled")
+
+                assert article.requests >= 1, "the article page was never fetched"
+                assert provider.requests >= 1, "the provider was never called"
+                sent_to_provider = json.dumps(provider.last_request)
+
+    # What the reader is served, and what the provider was asked to translate.
+    assert "ARCHITECTURE SECTION" in sent_to_provider, (
+        "the translation must be made from the extracted article; the provider "
+        f"was sent {sent_to_provider[:400]}"
+    )
+    assert "short summary" not in sent_to_provider.lower(), (
+        "the feed summary must not be what was translated"
+    )
+
+    async with httpx.AsyncClient(base_url=served) as http:
+        reader = Client(http, NNW)
+        await reader.login()
+        assert reader.token is not None
+        every_id = list((await reader.titles()).keys())
+        response = await http.post(
+            "/api/greader.php/reader/api/0/stream/items/contents",
+            headers=reader._header(),
+            data={"T": reader.token, "i": every_id},
+        )
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        bodies = [str(item["summary"]["content"]) for item in items]
+        stacked = [body for body in bodies if "[译]" in body]
+        assert stacked, f"no item carries a translation; bodies: {bodies}"
+        body = stacked[0]
+
+    # The three layers, in the documented order: translation, full text,
+    # original summary -- and the translation is a translation of the article.
+    assert 'data-pearss="translation-separator"' in body
+    assert 'data-pearss="fulltext-separator"' in body
+    assert "ARCHITECTURE SECTION" in body, "the extracted article must be served"
+    translation_layer = body.split('data-pearss="translation-separator"', 1)[0]
+    assert "ARCHITECTURE SECTION" in translation_layer, (
+        "the translation layer must correspond to the extracted article, which "
+        f"is what it sits above; it was {translation_layer[:300]}"
+    )
