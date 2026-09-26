@@ -344,11 +344,12 @@ def _execute_row(
             outcome["skipped"] += 1
             return outcome
         processor = processors[row.plugin_id]
-        if row.plugin_id in PACED_PROCESSORS and not pacer().pace(host):
-            # Nothing was attempted: this row lost its turn because a sibling
-            # row on the same host was refused (cooldown) or the wait budget
-            # ran out. Hand it back to the queue rather than burning an
-            # attempt, so the next sweep retries it for free.
+        # A paced fetch takes the host's slot for its whole duration and frees
+        # it in the `finally` below (issue #57). Holding it across the fetch is
+        # what lets a sibling row see the *outcome* -- whether this fetch was
+        # refused -- instead of racing the cooldown that outcome installs.
+        paced = row.plugin_id in PACED_PROCESSORS
+        if paced and not pacer().pace(host):
             fenced = _fenced_update(
                 session,
                 row_id=row_id,
@@ -367,6 +368,12 @@ def _execute_row(
                     row_id,
                     host or "-",
                 )
+            if paced:
+                # Admission was declined before any fetch, so the slot this
+                # row may have taken while waiting must be handed on: a later
+                # row for the host would otherwise wait for a turn that was
+                # never taken.
+                pacer().release(host)
             session.commit()
             return outcome
         upstream_spec, upstream_ref = _resolve_upstream(session, item=item, row=row)
@@ -393,6 +400,18 @@ def _execute_row(
                     },
                 )
                 outcome["skipped"] += 1
+                if paced:
+                    # unreachable via the scheduler as configured: the claim
+                    # loop takes the oldest `concurrency` rows, so a paced
+                    # row's upstream row is claimed (and run) before the
+                    # downstream one is looked at. Measured against a
+                    # [translate, fulltext] chain, which is the only shape
+                    # where a paced row has a non-paced upstream: only the
+                    # upstream rows were claimed and this branch was never
+                    # entered. Kept because the release is required if that
+                    # claim order ever changes -- without it the host would
+                    # stay marked busy and its queue would go quiet.
+                    pacer().release(host)  # pragma: no cover
                 session.commit()
                 return outcome
             content = filestore.read_body(upstream_ref)
@@ -417,6 +436,16 @@ def _execute_row(
         except ProcessorError as exc:
             error_class = exc.error_class
             detail = exc.detail
+            # Recorded here, inside the handler, so it lands before the
+            # `finally` below releases the host slot. The sibling waiting on
+            # that slot re-checks the cooldown under the pacer's lock, so the
+            # order is defence in depth rather than the only thing protecting
+            # this window: releasing first leaves the sibling a few hundred
+            # microseconds (one lock acquisition) to get in, which it lost in
+            # every trace measured. Recording first removes the window instead
+            # of relying on the sibling being slower.
+            if error_class is ErrorClass.BLOCKED:
+                pacer().record_blocked(host)
         except Exception as exc:
             error_class = ErrorClass.NETWORK
             detail = f"{type(exc).__name__}: {exc}"
@@ -446,13 +475,14 @@ def _execute_row(
                 )
                 outcome["skipped"] += 1
             return outcome
+        finally:
+            # Every exit from a paced fetch frees the host -- success, a
+            # classified failure, an unexpected exception, a timeout, a cancel.
+            # It runs *after* the handlers above, which is what makes the
+            # cooldown observable to the sibling that is waiting on this slot.
+            if paced:
+                pacer().release(host)
         attempts = row.attempt_count + 1
-        # A refusal is the origin asking us to stop (403/429): honour it for
-        # every row on that host, not just this one. The classification is the
-        # taxonomy's own blocked class, so the pacer cannot disagree with what
-        # the operator sees in the run history.
-        if error_class is ErrorClass.BLOCKED:
-            pacer().record_blocked(host)
         transient = error_class.value in TRANSIENT_CLASSES
         if transient and attempts < max_attempts:
             backoff = BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))

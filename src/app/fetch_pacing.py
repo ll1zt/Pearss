@@ -141,6 +141,12 @@ class HostPacer:
         self._last_dispatch: dict[str, float] = {}
         self._dispatched_this_sweep: dict[str, int] = {}
         self._cooldown_until: dict[str, float] = {}
+        # Hosts with a fetch in flight right now (issue #57). A refusal can
+        # only be recorded once the fetch that met it has returned, so without
+        # this a sibling row -- already admitted by the per-sweep cap -- can
+        # dispatch inside that window and hammer the host the cooldown exists
+        # to protect.
+        self._in_flight: dict[str, threading.Event] = {}
 
     @classmethod
     def from_env(cls) -> HostPacer:
@@ -187,16 +193,61 @@ class HostPacer:
     def pace(self, host: str) -> bool:
         """Wait out the interval before fetching `host`; False = don't fetch.
 
-        This is the call that makes the spacing real: it runs immediately
-        before the fetch, in the worker thread that is about to make it, so
-        concurrent rows for one host are serialised here rather than racing
-        out of a thread pool together. Returned False means the host went on
-        cooldown while we waited (a sibling row was refused) or the wait hit
-        its budget — the caller leaves its row queued.
+        Admission is two waits in a fixed order, and the order is the point:
+
+        1. **Wait for a sibling fetch on this host to finish**, then take the
+           slot. The one fact that decides whether this fetch should happen at
+           all -- was the previous one refused? -- is not known until that
+           fetch returns, so waiting only for the interval let a second row
+           dispatch into the window between the refusal arriving and the
+           cooldown being recorded. How wide that window was depended on how
+           slow the origin was to answer (issue #57: a 3s refusal produced two
+           requests instead of one).
+        2. **Wait out `min_interval`** while holding the slot, re-checking the
+           cooldown each time round.
+
+        Holding the slot across the *fetch* is the caller's job (`release` in a
+        `finally`), not this method's: this returns as soon as admission is
+        granted, and the fetch starts immediately afterwards. The caller must
+        also record any refusal *before* releasing -- see the worker -- so the
+        sibling this gate wakes up sees the cooldown rather than racing it.
+
+        False means the host went on cooldown while waiting, or the budget was
+        spent -- the caller leaves its row queued for the next sweep rather
+        than burning an attempt.
         """
         if not host:
             return True
         deadline = self._clock() + self._max_wait
+        if not self._acquire(host, deadline):
+            return False
+        if self._await_interval(host, deadline):
+            return True
+        # Declined after acquiring: hand the slot on, so the next row for this
+        # host does not wait for a turn that was never taken.
+        self.release(host)
+        return False
+
+    def _acquire(self, host: str, deadline: float) -> bool:
+        """Take this host's fetch slot, waiting for a sibling to finish first."""
+        while True:
+            with self._lock:
+                current = self._in_flight.get(host)
+                if current is None or current.is_set():
+                    # Free, or the previous holder has finished (and may have
+                    # installed a cooldown this row will see on the next step).
+                    self._in_flight[host] = threading.Event()
+                    return True
+                wait_on = current
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                return False
+            # Bounded, so the loop re-checks the deadline rather than blocking
+            # indefinitely on a holder that somehow never releases.
+            wait_on.wait(min(0.25, remaining))
+
+    def _await_interval(self, host: str, deadline: float) -> bool:
+        """Wait out the configured spacing, re-checking the cooldown each pass."""
         while True:
             with self._lock:
                 now = self._clock()
@@ -211,6 +262,20 @@ class HostPacer:
             if remaining <= 0:
                 return False
             self._sleep(max(0.0, min(wait, remaining)))
+
+    def release(self, host: str) -> None:
+        """The fetch for `host` has returned (success or failure).
+
+        Called by the fetcher in a `finally`, so a crash inside the processor
+        cannot leave a host permanently marked busy -- that would turn a
+        transient error into a stalled queue.
+        """
+        if not host:
+            return
+        with self._lock:
+            holder = self._in_flight.pop(host, None)
+        if holder is not None:
+            holder.set()
 
     def record_blocked(self, host: str) -> None:
         """A host refused us (403/429): stop asking for the cooldown window."""

@@ -29,6 +29,11 @@ pytestmark = pytest.mark.integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Long enough that a sibling fetch could reach the origin while the refusal is
+# still in flight, which is exactly the window issue #57 is about. Deliberately
+# explicit rather than "however long the runner happens to take".
+SLOW_REFUSAL_DELAY = 2.0
+
 # Long enough to clear MIN_ARTICLE_CHARS after extraction, so a fetch that
 # happens is a fetch that succeeds (a failed fetch would muddy the counts).
 ARTICLE_HTML = (
@@ -39,11 +44,23 @@ ARTICLE_HTML = (
 
 
 class _RecordingOrigin:
-    """A real origin that timestamps every arrival."""
+    """A real origin that timestamps every arrival.
 
-    def __init__(self) -> None:
+    `delay` exists so a test can control how long the refusal takes to come
+    back, which is the variable the per-host cooldown's guarantee depends on:
+    a *slow* 429 is what let a sibling fetch slip through (issue #57), and a
+    test that only ever answers instantly was passing on a timing coincidence
+    rather than on the guarantee.
+    """
+
+    def __init__(self, *, delay: float = 0.0) -> None:
         self._arrivals: list[float] = []
         self._guard = threading.Lock()
+        self.delay = delay
+        # When set, every path answers 429. Lets a test state "this host is
+        # refusing us" without the result depending on which of its items the
+        # worker happens to fetch first (see the cooldown test).
+        self.refuse_everything = False
         self.responses: dict[str, tuple[int, bytes]] = {}
         outer = self
 
@@ -51,9 +68,21 @@ class _RecordingOrigin:
             def do_GET(self) -> None:
                 with outer._guard:
                     outer._arrivals.append(time.monotonic())
-                status, body = outer.responses.get(
-                    self.path, (200, ARTICLE_HTML.encode())
+                if outer.delay:
+                    # The delay is the *payload* this handler serves, not the
+                    # suite waiting for something to become ready: the request
+                    # under test is "a refusal that takes a while to arrive".
+                    # Held as a bounded loop so the wait is interruptible and
+                    # cannot silently drift longer than the configured value.
+                    until = time.monotonic() + outer.delay
+                    while time.monotonic() < until:
+                        time.sleep(min(0.05, max(0.0, until - time.monotonic())))
+                default = (
+                    (429, b"slow down")
+                    if outer.refuse_everything
+                    else (200, ARTICLE_HTML.encode())
                 )
+                status, body = outer.responses.get(self.path, default)
                 self.send_response(status)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -87,6 +116,14 @@ class _RecordingOrigin:
 @pytest.fixture
 def origin() -> Iterator[_RecordingOrigin]:
     one = _RecordingOrigin()
+    yield one
+    one.close()
+
+
+@pytest.fixture
+def slow_origin() -> Iterator[_RecordingOrigin]:
+    """An origin that takes a while to answer -- the shape that exposed #57."""
+    one = _RecordingOrigin(delay=SLOW_REFUSAL_DELAY)
     yield one
     one.close()
 
@@ -230,6 +267,14 @@ def test_user_rate_limited_host_is_left_alone(
     When the worker continues,
     Then it stops fetching that host for a cooldown — a rate-limited origin
     is a request to slow down, not an invitation to try the next item on it.
+
+    Every path refuses, on purpose. Refusing only the first item made this
+    assertion depend on which row the pool ran first: with the per-sweep cap
+    admitting both, a healthy row that went first *should* have been served and
+    the refusal should have arrived second — two arrivals, correct behaviour,
+    red test (it failed roughly one run in six under load, and passed alone).
+    With every path refusing, whichever row goes first is refused and the other
+    must be held back, so "exactly one" is the contract whatever the order.
     """
     from tests.migrated_schema import migrated_database
 
@@ -242,13 +287,16 @@ def test_user_rate_limited_host_is_left_alone(
     engine = sa.create_engine(migrated_database(tmp_path, "cooldown.db"))
     factory = sessionmaker(engine, expire_on_commit=False)
     try:
-        origin.responses["/post/0"] = (429, b"slow down")
+        origin.refuse_everything = True
         _seed_backlog(factory, origin, count=2)
 
         with factory() as session:
             _sweep(session, factory)
         after_first = len(origin.arrivals())
-        assert after_first == 1, "the first fetch is the one that gets the 429"
+        assert after_first == 1, (
+            "the host refused the first fetch it received; the sibling that was "
+            f"already admitted must not be sent after that. Arrivals: {after_first}"
+        )
 
         # The second item is still queued and the host is cooling: the next
         # sweep must not touch it.
@@ -257,5 +305,65 @@ def test_user_rate_limited_host_is_left_alone(
         assert len(origin.arrivals()) == after_first, (
             "a 429 puts the host on cooldown; no further fetches to it"
         )
+    finally:
+        engine.dispose()
+
+
+def test_a_slow_refusal_still_puts_the_host_on_cooldown(
+    slow_origin: _RecordingOrigin, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 429 must stop the host even when the refusal is slow to arrive.
+
+    The contract in the issue's words: a rate limit is a request to slow down,
+    not an invitation to try the next item on that host. That held only when
+    the origin answered instantly -- a slow refusal left a window in which the
+    sibling fetch, already admitted by the per-sweep cap, dispatched before the
+    cooldown was recorded.
+
+    Measured before the fix, with only the origin's latency varying:
+      delay 0s -> 1 request reaches the refusing host
+      delay 3s -> 2 requests reach it
+
+    The delay is a fixture value rather than whatever the runner does, so this
+    does not depend on machine load: it is the same deterministic window every
+    time, and it is *open* for 2 seconds -- far longer than any scheduling
+    jitter can account for.
+
+    **Every** path refuses, not just the first item's. Refusing one path made
+    the assertion depend on which row the pool happened to run first: if the
+    healthy row fetched second, two arrivals were correct behaviour and the
+    test was measuring scheduling order rather than the cooldown (it passed
+    alone and failed under load -- that is the signature). With every path
+    refusing, whichever row goes first is refused and the other must be held
+    back, so "exactly one arrival" is the contract regardless of order.
+    """
+    from tests.migrated_schema import migrated_database
+
+    monkeypatch.setenv("PEARSS_FETCH_MIN_INTERVAL", "1")
+    monkeypatch.setenv("PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP", "2")
+    monkeypatch.setenv("PEARSS_FETCH_COOLDOWN_SECONDS", "300")
+    _hermetic(monkeypatch, tmp_path)
+    _fresh_pacer(monkeypatch)
+
+    engine = sa.create_engine(migrated_database(tmp_path, "slow-cooldown.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    try:
+        slow_origin.refuse_everything = True
+        _seed_backlog(factory, slow_origin, count=2)
+
+        with factory() as session:
+            _sweep(session, factory)
+
+        arrivals = slow_origin.arrivals()
+        assert len(arrivals) == 1, (
+            "a host that answered 429 has asked us to slow down; a sibling "
+            "fetch reaching it in the same sweep is exactly what the cooldown "
+            f"is for. Arrivals: {len(arrivals)}"
+        )
+
+        # And the host stays alone on the next sweep.
+        with factory() as session:
+            _sweep(session, factory)
+        assert len(slow_origin.arrivals()) == 1, "the cooldown must hold across sweeps"
     finally:
         engine.dispose()
