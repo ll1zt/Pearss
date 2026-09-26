@@ -5,6 +5,10 @@ stays pending until every *required* product exists in a terminal state.
 The optional-spec branch (`required: false`) had no test at any layer -- a
 regression that started blocking on optional products would deadlock every
 chained source, silently.
+
+`upstream_for` is the chain's dataflow rule (ADR 0030): which earlier product
+a later spec's input is. It is pure, so its whole truth table is pinned here;
+the integration suite proves the worker and the reader obey it.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from core.enrichment import (
     EnrichmentSpec,
     EnrichmentStatus,
     chain_complete,
+    upstream_for,
 )
 
 pytestmark = pytest.mark.unit
@@ -107,3 +112,105 @@ def test_the_gate_distinguishes_products_by_language() -> None:
     }
 
     assert chain_complete(chain, other_lang) is False
+
+
+# --------------------------------------------------------------------------
+# ADR 0030: which product a later spec consumes
+#
+# Pure domain rule, so it is pinned here rather than only through the worker.
+# The chain tests in tests/integration/test_chain_dataflow.py prove the rule is
+# *applied*; these prove the rule itself, including the cases a chain test
+# cannot easily arrange (a tts_audio spec, an empty chain).
+# --------------------------------------------------------------------------
+
+
+def _kinds(*specs: tuple[str, EnrichmentKind]) -> tuple[EnrichmentSpec, ...]:
+    return tuple(EnrichmentSpec(plugin_id=plugin, kind=kind) for plugin, kind in specs)
+
+
+def test_a_later_spec_consumes_the_nearest_text_product() -> None:
+    chain = _kinds(
+        ("fulltext", EnrichmentKind.FULLTEXT),
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+    fulltext, translate = chain
+
+    assert upstream_for(chain, translate) is fulltext
+
+
+def test_position_decides_not_kind_pairing() -> None:
+    """A summary between a fulltext and a translation is what gets translated.
+
+    Position rather than a kind-to-kind mapping table: adding a spec in the
+    middle must change the pipeline in the obvious way, and the mapping
+    approach would silently keep sending the full text.
+    """
+    chain = _kinds(
+        ("fulltext", EnrichmentKind.FULLTEXT),
+        ("summary", EnrichmentKind.SUMMARY),
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+    _fulltext, summary, translate = chain
+
+    assert upstream_for(chain, translate) is summary
+
+
+def test_the_first_spec_has_no_upstream() -> None:
+    chain = _kinds(
+        ("fulltext", EnrichmentKind.FULLTEXT),
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+
+    assert upstream_for(chain, chain[0]) is None
+
+
+def test_a_translation_is_not_consumable() -> None:
+    """A translation must not be another spec's input.
+
+    Two reasons, both load-bearing: the prose it holds is already in the target
+    language, so re-consuming it would be a no-op that costs a provider call,
+    and a chain of translations would otherwise be able to feed itself.
+    """
+    chain = _kinds(
+        ("translate", EnrichmentKind.TRANSLATION),
+        ("translate2", EnrichmentKind.TRANSLATION),
+    )
+    _first, second = chain
+
+    assert upstream_for(chain, second) is None
+
+
+def test_a_non_text_product_is_not_consumable() -> None:
+    """`tts_audio` is an artifact, not a text input to anything after it."""
+    chain = _kinds(
+        ("tts", EnrichmentKind.TTS_AUDIO),
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+    _tts, translate = chain
+
+    assert upstream_for(chain, translate) is None
+
+
+def test_a_single_spec_chain_is_unchanged() -> None:
+    """The overwhelmingly common shape: `[translate]` alone."""
+    chain = _kinds(
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+
+    assert upstream_for(chain, chain[0]) is None
+
+
+def test_an_unknown_spec_is_not_in_the_chain() -> None:
+    """A spec that is not in the chain has no position, so no upstream.
+
+    Guards the worker's lookup: it matches a row's (plugin, kind, lang) against
+    the configured chain, and a row left over from a chain edit must fall back
+    to the item's own content rather than to an arbitrary neighbour.
+    """
+    chain = _kinds(
+        ("fulltext", EnrichmentKind.FULLTEXT),
+        ("translate", EnrichmentKind.TRANSLATION),
+    )
+    stranger = EnrichmentSpec(plugin_id="gone", kind=EnrichmentKind.TRANSLATION)
+
+    assert upstream_for(chain, stranger) is None
