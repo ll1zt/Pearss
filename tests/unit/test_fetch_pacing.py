@@ -15,6 +15,7 @@ dispatched before the cooldown was recorded.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -228,3 +229,85 @@ def test_a_crashed_fetch_does_not_stall_the_host() -> None:
 
     assert pacer.pace("blog.example") is True, "the slot survived the failure"
     pacer.release("blog.example")
+
+
+def test_waiting_for_a_sibling_gives_up_when_the_budget_runs_out() -> None:
+    """A holder that never releases must not block a row forever.
+
+    `_acquire` waits in bounded slices and re-checks the deadline, so an
+    abandoned slot (a fetcher that died without releasing, or one still inside
+    a very slow processor) costs this row its turn rather than a worker thread
+    forever. Returning False hands the row back to the queue, which is the same
+    outcome as any other declined admission.
+
+    Driven directly rather than with threads: the state under test is "the
+    deadline is already spent while a slot is held", which is what a real
+    timeout produces but is not deterministic to arrange through the fetch path.
+    """
+    pacer, clock, _slept = _pacer(min_interval=0.0, max_per_sweep=5)
+    assert pacer.pace("blog.example") is True, "the slot is now held"
+
+    # A second row's budget is already exhausted: it must decline rather than
+    # wait on a holder that never releases.
+    assert pacer._acquire("blog.example", clock() - 1.0) is False, (
+        "a spent budget must decline instead of blocking on the holder"
+    )
+    pacer.release("blog.example")
+
+
+def test_the_interval_wait_gives_up_when_the_budget_runs_out() -> None:
+    """The same bound applies to waiting out `min_interval`.
+
+    Reachable when a host's spacing plus a slow sibling exceeds the wait
+    budget: the row goes back to the queue instead of occupying a worker.
+    """
+    pacer, _clock, _slept = _pacer(min_interval=60.0, max_per_sweep=5)
+    assert pacer.pace("blog.example") is True
+    pacer.release("blog.example")
+
+    # A second row with no budget left cannot wait the 60s interval out.
+    assert pacer._await_interval("blog.example", -1.0) is False, (
+        "a spent budget must decline rather than sleep through the interval"
+    )
+
+
+def test_a_slot_left_held_blocks_the_next_row_until_the_budget_expires() -> None:
+    """What a missing release costs, stated as behaviour.
+
+    This is the *failure mode* the release contract prevents, pinned so the
+    contract has a visible consequence rather than only a comment: a slot held
+    by a row that never releases makes the next row for that host wait out its
+    whole budget and then decline, rather than fetching.
+
+    Uses the real clock deliberately. A manually-advanced clock cannot serve
+    two threads -- the sibling never observes the advance, so it never returns
+    -- and the property under test is precisely "the wait terminates", which a
+    fake clock would assert by construction. The budget here is small (a 10ms
+    interval gives a 5s minimum budget), so the test stays fast.
+
+    The end-to-end suite cannot assert this: by the time a test looks, some
+    other row has released the slot through its own normal path. An earlier
+    attempt to cover it there survived its injection check, which is why the
+    consequence is stated here instead.
+    """
+    pacer = HostPacer(min_interval=0.01, max_per_sweep=5, cooldown_seconds=300.0)
+
+    assert pacer.pace("blog.example") is True, "the slot is taken and not released"
+
+    outcome: list[bool] = []
+    started = time.monotonic()
+
+    def sibling() -> None:
+        outcome.append(pacer.pace("blog.example"))
+
+    worker = threading.Thread(target=sibling, daemon=True)
+    worker.start()
+    worker.join(timeout=20)
+
+    assert outcome == [False], (
+        "a host whose slot is never released must decline later rows after "
+        "their budget expires rather than serve them"
+    )
+    assert time.monotonic() - started >= 1.0, (
+        "the sibling should have waited out its budget, not declined at once"
+    )
