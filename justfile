@@ -202,7 +202,8 @@ run host="127.0.0.1" port="8000":
     # shellcheck disable=SC1091
     [ -f .env ] && source .env
     set +a
-    exec uv run uvicorn app.main:app --host {{host}} --port {{port}}
+    exec uv run uvicorn app.main:app --host {{host}} --port {{port}} \
+        --http app.http_timeout:HeaderTimeoutProtocol
 
 # Start the service using configuration from the environment, so a deployment
 # changes .env rather than the command line. This is what the systemd unit
@@ -214,9 +215,14 @@ serve:
     # shellcheck disable=SC1091
     [ -f .env ] && source .env
     set +a
+    # `--http` installs the header-timeout protocol (issue #9): a connection
+    # that stops mid-request-header is closed instead of holding a worker slot.
+    # uvicorn has no setting for this, so the protocol class is the seam; its
+    # timeout is PEARSS_HTTP_HEADER_TIMEOUT_SECONDS (default 15s).
     exec uv run uvicorn app.main:app \
         --host "${PEARSS_BIND_HOST:-127.0.0.1}" \
         --port "${PEARSS_PORT:-8000}" \
+        --http app.http_timeout:HeaderTimeoutProtocol \
         --proxy-headers --forwarded-allow-ips="127.0.0.1"
 
 # ---------------------------------------------------------------------------

@@ -123,9 +123,15 @@ let
 
       # The venv's interpreter, not the system one: that is what makes the
       # dependency set the one uv.lock pinned.
+      # --http installs the half-open request-header timeout (issue #9): a
+      # connection that stops mid-header is closed rather than holding a slot
+      # forever (measured: >120s with none). uvicorn exposes no setting for it,
+      # so the protocol class is the seam; the deadline is
+      # PEARSS_HTTP_HEADER_TIMEOUT_SECONDS (default 15s).
       exec ${venv}/venv/bin/python -m uvicorn app.main:app \
         --host "''${PEARSS_BIND_HOST:-127.0.0.1}" \
         --port "''${PEARSS_PORT:-8000}" \
+        --http app.http_timeout:HeaderTimeoutProtocol \
         --proxy-headers \
         --forwarded-allow-ips="''${PEARSS_FORWARDED_ALLOW_IPS:-127.0.0.1}"
     '';
