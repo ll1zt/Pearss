@@ -25,10 +25,10 @@ translate 同构：源通过 `pipeline_chain: [{"plugin_id": "fulltext",
 
 ### 2. 新增 `EnrichmentKind.FULLTEXT`，产物即正文、结构对齐翻译
 
-kind 枚举扩展（core.enrichment）。产物（artifact）是消毒后的 `<p>` 片段
-序列，与 translate 产物同形状；闸门语义不变——required spec 成功才放行。
-产物 pin 在 `input_hash` 上，内容变更加新行，永不回写 Item（ADR 0018 的
-「产物不改写条目」不变量原样适用）。
+kind 枚举扩展（core.enrichment）。产物（artifact）是经 ADR 0007 消毒的
+HTML 片段，保留原文块级标记（§4）；闸门语义不变——required spec 成功才
+放行。产物 pin 在 `input_hash` 上，内容变更加新行，永不回写 Item（ADR 0018
+的「产物不改写条目」不变量原样适用）。
 
 Reader API 不展示 fulltext 产物的初始决定已修订（2026-09-24，issue #29
 灰度第一天）：产物入库但对唯一消费路径不可见，等于读者永远拿不到全文，
@@ -54,12 +54,30 @@ Reader API 不展示 fulltext 产物的初始决定已修订（2026-09-24，issu
 ### 4. 抽取器：结构性算法，无站点规则
 
 lxml 解析 → 丢弃非内容子树（script/style/nav/aside/header/footer/form/
-svg/iframe…）→ 在剩余容器级元素中按可见文本密度取胜者 → 段落级展开。
-不引入 readability-lxml/trafilatura 依赖：博客页的结构足够规整，结构
-算法已够，而第三方抽取器引入的是一整条供应链与不可解释的启发式。
-段落分隔保留，块级标记在产物中统一为 `<p>`（消毒白名单的公共子集）。
+svg/iframe…）→ 在剩余容器级元素中按可见文本密度取胜者 → 保留胜出容器的
+子节点标记。不引入 readability-lxml/trafilatura 依赖：博客页的结构足够
+规整，结构算法已够，而第三方抽取器引入的是一整条供应链与不可解释的
+启发式。
 
-### 5. 信任边界：产物在进程内消毒后才落存储
+**产物形态：保留原文标记，不拍平为 `<p>`（2026-09-26 修订，issue #32）。**
+原实现把抽取结果降为纯文本再逐段包 `<p>`，实测（Dejavu、kxxt 等摘要源）
+丢失标题、图片、代码块、列表、引用、表格与链接，嵌套块（如
+`<blockquote><p>`）重复输出——博客的排版、配图与代码在阅读器里全部消失。
+现在序列化胜出容器的子节点：块级标记保留原标签，经 ADR 0007 的
+allowlist（已含 h1-h6/img/pre/code/ul/li/blockquote/table/a/figure）消毒；
+`pre` 内空白不折叠（缩进是代码语义）；相对 `href`/`src` 以条目 URL 为基
+绝对化（产物渲染在阅读器/手机上，相对路径在那里即断链），`img alt` 保留。
+容器自身的 `<article>`/`<main>` 标签不输出——那是包装，不属于内容。
+
+### 5. 内容门槛按可见文本度量，不按标记
+
+`_plain_length` 一律折算为可见文本（lxml 取 `text_content()` 后折叠空白）
+再计数，解析失败则退回按空白切词。理由：门槛用于「这条路要不要抓」与
+「抓到的算不算文章」两个决定，两者问的都是内容体量；标记权重若能凑数，
+一个短摘要配上几十个空 `<p>`/`<br>` 就能伪装成达标。这与全文产物的形态
+决策（§4，保留标记）是两条独立的线：存储保留结构，判定只看可见文本。
+
+### 6. 信任边界：产物在进程内消毒后才落存储
 
 原文页与 feed 正文同等不可信（AGENTS.md 安全规则）。抽取结果过
 `adapters.sanitize.sanitize_html`（ADR 0007 的同一 allowlist）再交给
