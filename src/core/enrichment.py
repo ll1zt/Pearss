@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Final
 
 
 class EnrichmentKind(StrEnum):
@@ -42,6 +43,24 @@ class EnrichmentStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+# Which product kinds may be *consumed as input* by a later spec (ADR 0030).
+#
+# A chain is a pipeline, so a later spec reads the earlier spec's product
+# rather than the Item's own body -- otherwise `[fulltext, translate]`
+# translates the feed's summary while the full text sits beside it (#34).
+#
+# A text product is consumable; a non-text one (tts_audio) is not a text
+# input to anything, and a translation is deliberately excluded so a chain of
+# translations cannot feed itself -- the prose is already in the target
+# language at that point, so re-consuming it would both loop and be a no-op.
+CONSUMABLE_KINDS: Final[frozenset[EnrichmentKind]] = frozenset(
+    {
+        EnrichmentKind.FULLTEXT,
+        EnrichmentKind.SUMMARY,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -79,3 +98,27 @@ def chain_complete(
         if status is not EnrichmentStatus.SUCCEEDED:
             return False
     return True
+
+
+def upstream_for(
+    chain: tuple[EnrichmentSpec, ...], spec: EnrichmentSpec
+) -> EnrichmentSpec | None:
+    """The spec whose product must feed `spec`'s input, or None (ADR 0030).
+
+    The *nearest preceding* consumable spec: `[fulltext, summary, translate]`
+    has translate consume the summary, and `[fulltext, translate]` has
+    translate consume the full text. Consumption is defined by chain position
+    rather than by kind pairing, so adding a spec between two others changes
+    the pipeline in the obvious way instead of needing a mapping table.
+
+    None means "the Item's own content", which is the behavior for a first
+    spec and for any spec whose predecessors are not text producers -- i.e.
+    exactly the single-spec chains that predate this rule.
+    """
+    upstream: EnrichmentSpec | None = None
+    for candidate in chain:
+        if candidate == spec:
+            return upstream
+        if candidate.kind in CONSUMABLE_KINDS:
+            upstream = candidate
+    return None
