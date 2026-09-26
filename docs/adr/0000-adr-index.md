@@ -80,3 +80,4 @@ docs/adr/
 | [0027](0027-ssrf-tailnet-exemption.md) | SSRF 守卫的 tailnet 网段豁免与拒绝原因拆分 | accepted（**收窄 0016 的私有地址定义**） | 2026-09-19 |
 | [0028](0028-fulltext-processor.md) | Fulltext 处理器：摘要型 feed 的网页正文抽取（按源 opt-in、新 kind、阈值回退语义） | accepted | 2026-09-23 |
 | [0029](0029-fetch-politeness.md) | 抓取礼貌：per-host 限速、单轮上限与冷却（宿主侧实施，不读 robots.txt） | accepted | 2026-09-24 |
+| [0030](0030-chain-internal-dataflow.md) | 处理器链内的数据流：后序 spec 消费最近前序产物（位置定序、translation 不可消费、依赖入行、上游未就绪即等待） | accepted（**补充 ADR 0018 未定义的链内输入通道**） | 2026-09-26 |

@@ -552,12 +552,25 @@ class ItemEnrichment(Base):
     model: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(64), nullable=True
     )
-    # Claim fencing (A10): set when a sweeper claims the row, checked before
-    # every result write. NULL means not owned; stale-claim recovery clears it.
+    # Claim fencing (A10): set when a sweeper claims the row and cleared by
+    # stale-claim recovery; every result write is gated on it. NULL means the
+    # row is not owned by any sweeper.
     lease_expires_at: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.Text, nullable=True
     )
     owner_token: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
+    # Chain dataflow (ADR 0030): which earlier product fed this spec's input.
+    # NULL/NULL is a first-class state -- the spec read the Item's own content,
+    # which is what every single-spec chain does and what every chain did
+    # before the dependency existed. Set together when a later spec consumed an
+    # earlier spec's product; the digest is that product's identity so a
+    # revised upstream is detectable rather than silently ignored.
+    upstream_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
+    upstream_digest: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
         sa.String(64), nullable=True
     )
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)

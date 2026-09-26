@@ -140,10 +140,16 @@ Item 行，连带其 `read_state`、`item_enrichment` 与正文文件。两条�
 | `lang` | 适用语言；非语言产物可为空 |
 | `payload_ref` | 产物存储引用 |
 | `input_hash` | 处理所依据的 Item 内容版本 |
+| `upstream_plugin_id` / `upstream_digest` | 本产物消费的前序产物（插件 + 产物摘要）；两者均为 NULL = 读的是 Item 原始正文（ADR 0030） |
 | `status` | `queued` / `running` / `succeeded` / `failed` |
 | `error_class` | 失败分类，适用时填写 |
 
 不变量：`item_id + plugin_id + plugin_version + kind + lang + input_hash` 唯一；同一输入可以存在多个版本产物；派生物可通过重放管道重建。
+
+链内数据流（ADR 0030）：后序 spec 的输入是最近一个前序**可消费**产物（`fulltext`、
+`summary`；`translation` 明确不可消费以免自我喂养）。`upstream_*` 记录的是**已消费**的
+依赖，而上游解析按 `input_hash` 钉版本，因此条目内容修订后的新行消费新产物，旧行作为
+历史保留。`upstream_*` **不**参与唯一约束：该表的契约是同一内容版本重处理 = 替换该行。
 
 ### Job 与 JobRun
 
