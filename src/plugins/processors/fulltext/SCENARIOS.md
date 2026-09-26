@@ -3,10 +3,11 @@
 场景编号登记表。测试文件 `test_processor.py` 头部声明与该表机械对账；
 实现前先跑红，红证据进 PR。
 
-本表与链级场景分两册，编号不重叠：AC-7（backfill 补全文）与 AC-8（采集 →
-排队行 → sweep → 闸门打开，产物落库且条目正文不被改写）声明在
-`tests/integration/test_fulltext_chain.py`（app 层接线归那里）；本表的结构类
-场景从 AC-9 起（#32 的场景在本分支后落地，故让号，见该提交说明）。
+本表与链级场景分两册，编号不重叠：AC-7（backfill 补全文）在本表，测试落在
+tests/integration/test_fulltext_chain.py；AC-8（采集 → 排队行 → sweep →
+闸门打开，产物落库且条目正文不被改写）声明在该文件的 docstring（app 层
+接线归那里）。本表的结构类场景从 AC-9 起（#32 的场景在本分支后落地，故
+让号，见该提交说明）。
 
 ## AC-1 用户订阅的摘要源，新条目自动带全文入库
   Given 一个只在 feed 里输出摘要的源，处理链为 [{"plugin_id":"fulltext","kind":"fulltext"}]

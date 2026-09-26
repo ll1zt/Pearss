@@ -148,3 +148,93 @@ def test_user_chain_gated_item_publishes_after_fulltext_completes(
             assert filestore.read_body(stored_item.content_ref) == summary
     finally:
         engine.dispose()
+
+
+def test_user_existing_items_get_fulltext_queued_by_backfill(tmp_path: Path) -> None:
+    """AC-7: a source that joins the chain late gets its stored items queued.
+
+    The register promises this for fulltext, and it is the only way an item
+    collected *before* the chain existed ever gets a body — the gate only
+    sees items stored after the chain was configured. Verified as
+    already-correct behavior rather than a repair: the commit that lands this
+    test does not change `backfill_chain`. It is pinned because the plugin's
+    own promise was resting on a translate-only test, so a regression that
+    dropped fulltext's spec kind would have passed the whole suite while
+    every pre-chain item silently stayed a summary.
+
+    Idempotency is part of the promise ("re-running costs nothing"), so the
+    second call is asserted to queue zero rather than assumed to.
+    """
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import Source as SourceRow
+    from adapters.repository import backfill_chain
+    from tests.migrated_schema import migrated_database
+
+    engine = sa.create_engine(migrated_database(tmp_path, "fulltext-backfill.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    try:
+        with factory() as session:
+            session.add(
+                SourceRow(
+                    id="src-late",
+                    tenant_id="default",
+                    type="rss",
+                    url="https://late.example/feed",
+                    canonical_url="https://late.example/feed",
+                    status="active",
+                    trust_level="standard",
+                    schedule_policy="{}",
+                    pipeline_chain='[{"plugin_id":"fulltext","kind":"fulltext"}]',
+                    created_at="2026-01-01T00:00:00.000000Z",
+                    updated_at="2026-01-01T00:00:00.000000Z",
+                )
+            )
+            # Stored and published before the chain existed.
+            session.add(
+                ItemRow(
+                    id="late-item",
+                    source_id="src-late",
+                    guid="g-late",
+                    content_hash="hash-late",
+                    title="Published as a summary",
+                    url="https://late.example/1",
+                    publish_status="published",
+                    tenant_id="default",
+                    created_at="2026-01-01T00:00:00.000000Z",
+                    updated_at="2026-01-01T00:00:00.000000Z",
+                )
+            )
+            session.commit()
+
+            assert backfill_chain(session, source_id="src-late") == 1
+            session.commit()
+
+            row = session.execute(
+                sa.text(
+                    "select status, plugin_id, kind, input_hash from item_enrichment"
+                    " where item_id = :i"
+                ),
+                {"i": "late-item"},
+            ).one()
+            # The fulltext product, keyed to the stored revision so a content
+            # change later is a new row rather than a silent overwrite.
+            assert (row[0], row[1], row[2], row[3]) == (
+                "queued",
+                "fulltext",
+                "fulltext",
+                "hash-late",
+            )
+            # Already-published stays published: backfill adds products, it
+            # does not reopen the gate on something clients already cached.
+            assert (
+                session.scalar(
+                    sa.text("select publish_status from item where id = :i"),
+                    {"i": "late-item"},
+                )
+                == "published"
+            )
+
+            # Idempotent: the same items are not queued twice.
+            assert backfill_chain(session, source_id="src-late") == 0
+    finally:
+        engine.dispose()
