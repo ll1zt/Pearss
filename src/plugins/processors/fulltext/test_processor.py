@@ -57,6 +57,11 @@ class _Origin:
         return f"http://127.0.0.1:{self.port}{path}"
 
     def stop(self) -> None:
+        # shutdown() asks serve_forever() to stop; server_close() only closes the
+        # listening socket, leaving the loop to spin on a closed socket. At ~89%
+        # of a core per leaked server that is not a tidy-up detail -- it slowed
+        # every later test in the same process (measured, issue #53).
+        self._httpd.shutdown()
         self._httpd.server_close()
 
 

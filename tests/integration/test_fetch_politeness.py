@@ -76,6 +76,11 @@ class _RecordingOrigin:
             return list(self._arrivals)
 
     def close(self) -> None:
+        # shutdown() asks serve_forever() to stop; server_close() only closes the
+        # listening socket. Without shutdown the loop keeps running on a closed
+        # socket and spins at ~89% of a core forever -- measured, see
+        # tests/integration/test_server_lifecycle.py.
+        self._httpd.shutdown()
         self._httpd.server_close()
 
 
