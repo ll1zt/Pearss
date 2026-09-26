@@ -73,12 +73,27 @@ issue 列了两条路：
 - provider 返回空 content 仍走既有 `parse` 失败（`_parse_reply` 的契约不变），整项失败而非
   半错位发布。AC-22 钉住这条交互，并用注入确认（放行空回复 → 测试变红）。
 
-### 6. 相对 URL 绝对化
+### 6. 产物过消毒边界（本决策是安全回归的修复，必须写明）
+
+改动前 translate **不需要**消毒：产物是把 provider 文本 `escape` 进新造的 `<p>` 标签，
+文本永远只是文本。改为「把 provider 文本组装成标记」之后，这条安全性消失了——回复
+`</p><script>steal(...)</script>` 会提前闭合块并把脚本写进产物，而每个 reader 都会提供它
+（注入验证：去掉边界后，字符串原样落库）。
+
+因此产物在 store 之前过 `sanitize_html`（ADR 0007 的同一 allowlist），与管线处理 feed
+正文、fulltext 处理抽取结果同一条规则：**边界放在不可信输入变成存储内容的那一点**。
+用 `<div>` 包裹是为了让片段按文档解析，随后**显式移除**该包装——它是解析装置不是内容，
+留着会给每个译文条目凭空加一层元素。
+
+顺序是「先绝对化、后消毒」：allowlist 允许 `href`/`src`，也限制 scheme，所以绝对化后的
+http/https URL 能通过；测试钉住这条顺序，否则消毒会悄悄撤销 AC-21 的保证。
+
+### 7. 相对 URL 绝对化
 
 产物像 fulltext 产物一样渲染在别处（阅读器/手机），`a href`/`img src` 以条目 URL 为基绝对化。
 与 #39 同一理由、同一方法；解析失败则原样返回（少一个绝对化，不该丢产物）。
 
-### 7. 纯文本正文的产物形态不变
+### 8. 纯文本正文的产物形态不变
 
 绝大多数 feed 是普通段落。没有结构的正文切出来就是若干个 `p` 单元，产物仍是段落序列
 （AC-23 钉住：`<p>` 数不变、不新增 wrapper）。这条是为了防止「为了修结构化正文而给所有
@@ -113,7 +128,7 @@ issue 列了两条路：
 
 ## 验收
 
-`src/plugins/processors/translate/test_processor.py`（AC-19..AC-23，登记见该文件头注释）、
+`src/plugins/processors/translate/test_processor.py`（AC-19..AC-24，登记见该文件头注释）、
 `tests/e2e/test_client_sync_journey.py::test_j11`（真插件 + 真 provider + 真 Reader，断言译文层
 仍是 `<h2>` 且链接指向原站）。
 
@@ -126,3 +141,6 @@ issue 列了两条路：
 | 去掉 URL 绝对化 | AC-21 |
 | 关掉 inline 标记还原 | AC-19 |
 | 放行空 provider 回复 | AC-22 |
+| 移除消毒边界 | AC-24（打印出落库的 `<script>`）|
+| 只去掉包装剥离 | AC-24 形状断言 + AC-23 |
+| 恢复非贪婪标记正则 | inline 嵌套测试 |
