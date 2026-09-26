@@ -44,6 +44,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import h11
 import httpx
 import pytest
 
@@ -451,6 +452,12 @@ def _bare_protocol() -> HeaderTimeoutProtocol:
     return HeaderTimeoutProtocol.__new__(HeaderTimeoutProtocol)
 
 
+class _DoneConnection:
+    """A stand-in h11 connection holding a complete request (`their_state`)."""
+
+    their_state = h11.DONE
+
+
 class _ClosingTransport:
     """A transport that reports itself closing, recording any close() call."""
 
@@ -488,9 +495,36 @@ def test_the_deadline_handler_is_harmless_when_it_has_nothing_to_do() -> None:
     protocol.transport = None  # type: ignore[assignment]
     protocol._on_header_timeout()  # must not raise
 
-    # (c) The handler leaves its own handle cleared, so a later arm starts from
+    # (c) The request arrived just as the deadline fired: h11 holds a complete
+    #     request, so closing now would kill a request that is about to be
+    #     served. Reachable in production as a genuine race (the timer and the
+    #     final header bytes arriving in the same loop iteration), which is why
+    #     the handler re-checks instead of trusting that it fired for a reason.
+    arrived = _bare_protocol()
+    arrived.conn = _DoneConnection()  # type: ignore[assignment]
+    closed: list[bool] = []
+
+    class _OpenTransport:
+        def is_closing(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            closed.append(True)
+
+        def get_extra_info(self, name: str, default: Any = None) -> Any:
+            return default
+
+    arrived.transport = _OpenTransport()  # type: ignore[assignment]
+    arrived._on_header_timeout()
+
+    assert closed == [], (
+        "a complete request must not be closed by a deadline that fired in the "
+        "same instant"
+    )
+
+    # (d) The handler leaves its own handle cleared, so a later arm starts from
     #     a known state rather than cancelling a stale one.
-    assert protocol._header_deadline is None
+    assert arrived._header_deadline is None
 
 
 def test_no_deadline_is_armed_once_the_transport_is_closing() -> None:
