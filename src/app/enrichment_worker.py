@@ -34,6 +34,7 @@ from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.repository import timestamp
+from adapters.repository.enrichment import upstream_for_spec
 from app.fetch_pacing import PACED_PROCESSORS, host_of, pacer
 from app.processor_runtime import LEASE_GRACE_SECONDS, run_processor
 from core.enrichment import EnrichmentStatus
@@ -368,6 +369,35 @@ def _execute_row(
                 )
             session.commit()
             return outcome
+        upstream_spec, upstream_ref = _resolve_upstream(session, item=item, row=row)
+        if upstream_spec is not None:
+            if upstream_ref is None:
+                # Not a failure: the upstream has simply not produced yet. The
+                # row goes back untouched and unrecorded, so a later sweep runs
+                # it. Falling back to the item's own body here is precisely the
+                # mismatched-layers outcome this rule exists to remove.
+                LOGGER.info(
+                    "enrichment %s waiting for the upstream product from %s",
+                    row_id,
+                    upstream_spec.plugin_id,
+                )
+                _fenced_update(
+                    session,
+                    row_id=row_id,
+                    owner_token=owner_token,
+                    values={
+                        "status": EnrichmentStatus.QUEUED.value,
+                        "owner_token": None,
+                        "lease_expires_at": None,
+                        "updated_at": timestamp(datetime.now(UTC)),
+                    },
+                )
+                outcome["skipped"] += 1
+                session.commit()
+                return outcome
+            content = filestore.read_body(upstream_ref)
+        else:
+            content = filestore.read_body(item.content_ref)
         try:
             result = run_processor(
                 processor,
@@ -375,9 +405,10 @@ def _execute_row(
                 item_ctx={
                     "item_id": item.id,
                     "title": item.title or "",
-                    "content": filestore.read_body(item.content_ref),
+                    "content": content,
                     "url": item.url,
                     "lang": row.lang,
+                    "upstream_digest": _digest_of(upstream_ref),
                 },
                 target_lang=row.lang or "en",
                 deadline=deadline,
@@ -390,11 +421,16 @@ def _execute_row(
             error_class = ErrorClass.NETWORK
             detail = f"{type(exc).__name__}: {exc}"
         else:
+            stored = filestore.store_body(result)
             _record_success(
                 session,
                 row_id=row_id,
                 owner_token=owner_token,
-                result=filestore.store_body(result),
+                result=stored,
+                upstream_plugin_id=(
+                    upstream_spec.plugin_id if upstream_spec is not None else None
+                ),
+                upstream_digest=_digest_of(upstream_ref),
             )
             if _fence_holds(session, row_id=row_id, owner_token=owner_token):
                 _open_gate_if_complete(
@@ -497,10 +533,72 @@ def _fenced_update(
     return bool(result.rowcount)
 
 
+def _resolve_upstream(
+    session: Session, *, item: ItemRow, row: ItemEnrichment
+) -> tuple[Any | None, str | None]:
+    """`row`'s upstream spec, plus the product ref it must consume (ADR 0030).
+
+    Resolved from the source's *configured* chain rather than from the row
+    alone: the row records what it consumed when it last succeeded, while the
+    chain says what it should consume now, and after an operator edits a chain
+    the latter is the authority. Reading only the stored columns would make a
+    chain edit invisible to every existing row until its content changed.
+    """
+    from adapters.repository.enrichment import chain_for_source
+
+    chain = chain_for_source(session, source_id=item.source_id)
+    for spec in chain:
+        if (
+            spec.plugin_id == row.plugin_id
+            and spec.kind.value == row.kind
+            and spec.lang == row.lang
+        ):
+            return upstream_for_spec(
+                session,
+                item_id=item.id,
+                content_hash=row.input_hash,
+                spec=spec,
+                chain=chain,
+            )
+    # The row's spec is no longer in the configured chain (an operator removed
+    # it). Falling back to the item's own content is the honest reading: the
+    # row's stored dependency describes what it consumed last time, and the
+    # current configuration says this spec consumes nothing.
+    return None, None
+
+
+def _digest_of(ref: str | None) -> str | None:
+    """The product identity for a payload reference, or None (ADR 0030).
+
+    The reference is already content-addressed (`cas://<sha256 of the bytes>`),
+    so its digest component *is* the product's identity -- no second hash, no
+    second column, and no way for the recorded value to drift from the bytes it
+    names.
+
+    None means "there was no upstream product", which must stay distinct from
+    an empty string: the column's NULL is the statement that this spec read the
+    Item's own content, and `""` would be a dependency on nothing.
+    """
+    if ref is None:
+        return None
+    return ref.rsplit("/", 1)[-1]
+
+
 def _record_success(
-    session: Session, *, row_id: str, owner_token: str, result: str
+    session: Session,
+    *,
+    row_id: str,
+    owner_token: str,
+    result: str,
+    upstream_plugin_id: str | None = None,
+    upstream_digest: str | None = None,
 ) -> None:
-    """The fenced success write; the caller checks the fence before opening."""
+    """The fenced success write; the caller checks the fence before opening.
+
+    The dependency is written in the same statement as the payload on purpose:
+    a row claiming it consumed a product while its artifact says otherwise
+    would be two facts about one thing.
+    """
     session.execute(
         update(ItemEnrichment)
         .where(
@@ -510,6 +608,8 @@ def _record_success(
         .values(
             status=EnrichmentStatus.SUCCEEDED.value,
             payload_ref=result,
+            upstream_plugin_id=upstream_plugin_id,
+            upstream_digest=upstream_digest,
             updated_at=timestamp(datetime.now(UTC)),
         )
     )
