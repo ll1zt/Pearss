@@ -401,7 +401,17 @@ def _execute_row(
                 )
                 outcome["skipped"] += 1
                 if paced:
-                    pacer().release(host)
+                    # unreachable via the scheduler as configured: the claim
+                    # loop takes the oldest `concurrency` rows, so a paced
+                    # row's upstream row is claimed (and run) before the
+                    # downstream one is looked at. Measured against a
+                    # [translate, fulltext] chain, which is the only shape
+                    # where a paced row has a non-paced upstream: only the
+                    # upstream rows were claimed and this branch was never
+                    # entered. Kept because the release is required if that
+                    # claim order ever changes -- without it the host would
+                    # stay marked busy and its queue would go quiet.
+                    pacer().release(host)  # pragma: no cover
                 session.commit()
                 return outcome
             content = filestore.read_body(upstream_ref)
