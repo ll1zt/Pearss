@@ -159,6 +159,23 @@ def _chain(*specs: tuple[str, str]) -> str:
 
 FULLTEXT_TRANSLATE = _chain(("fulltext", "fulltext"), ("translate", "translation"))
 TRANSLATE_ONLY = _chain(("translate", "translation"))
+
+
+def _two_target_translate(*langs: str) -> str:
+    """A chain with one translation spec per target language."""
+    return json.dumps(
+        [
+            {
+                "plugin_id": "translate",
+                "kind": "translation",
+                "lang": lang,
+                "required": True,
+            }
+            for lang in langs
+        ]
+    )
+
+
 FULLTEXT_SUMMARY_TRANSLATE = _chain(
     ("fulltext", "fulltext"), ("summary", "summary"), ("translate", "translation")
 )
@@ -168,6 +185,7 @@ FULLTEXT_SUMMARY_TRANSLATE = _chain(
 class Row:
     plugin_id: str
     kind: str
+    lang: str | None
     input_hash: str
     status: str
     payload_ref: str | None
@@ -190,15 +208,16 @@ class World:
             Row(
                 plugin_id=row[0],
                 kind=row[1],
-                input_hash=row[2],
-                status=row[3],
-                payload_ref=row[4],
-                upstream_plugin_id=row[5],
-                upstream_digest=row[6],
+                lang=row[2],
+                input_hash=row[3],
+                status=row[4],
+                payload_ref=row[5],
+                upstream_plugin_id=row[6],
+                upstream_digest=row[7],
             )
             for row in self.session.execute(
                 sa.text(
-                    "select plugin_id, kind, input_hash, status, payload_ref,"
+                    "select plugin_id, kind, lang, input_hash, status, payload_ref,"
                     " upstream_plugin_id, upstream_digest from item_enrichment"
                     " order by rowid"
                 )
@@ -600,3 +619,56 @@ def test_the_stored_translation_corresponds_to_the_full_text(world: World) -> No
     assert "Full article heading" in stored["translate"]
     assert "Short summary" not in stored["translate"]
     assert world.gate() == "ready", "the whole chain succeeding must open the gate"
+
+
+def test_a_row_left_by_an_edited_chain_falls_back_to_the_item_body(
+    world: World,
+) -> None:
+    """AC-15 (the chain is the authority): a stale row is still processed.
+
+    Planned as `translate`-only with two translation targets: the chain runs,
+    then the operator narrows it to a single target while rows from the first
+    configuration are still waiting. Those rows name a spec that is no longer
+    configured, and the honest reading of "this spec consumes nothing now" is
+    the Item's own content -- not a product from a pipeline that no longer
+    exists, and not a permanent stall.
+
+    Reachable in practice: it is what happens to queued rows after any chain
+    edit, which is why `_resolve_upstream` resolves the configured chain rather
+    than trusting the row's stored columns alone.
+    """
+    # Two targets, neither of them the body's own language: the pipeline drops
+    # a translation spec whose text is already in the target language, so an
+    # English target here would never queue a row at all.
+    world.store_item(content=SUMMARY, chain=_two_target_translate("zh", "ja"))
+    assert len(world.rows("translate")) == 2, world.rows()
+
+    # The operator keeps only the Chinese target.
+    world.session.execute(
+        sa.text(
+            "update source set pipeline_chain = :c, target_lang = :l where id = :s"
+        ),
+        {"c": _two_target_translate("zh"), "l": "zh", "s": world.source_id},
+    )
+    world.session.commit()
+
+    run_chain(world, {"translate": EchoTranslate})
+
+    kept = [row for row in world.rows("translate") if row.lang == "zh"]
+    assert len(kept) == 1, kept
+    assert kept[0].status == "succeeded", "the still-configured spec must run"
+    assert kept[0].upstream_plugin_id is None
+
+    # The row whose spec was removed from the chain still has to be processed:
+    # it must not stall the queue forever.
+    removed_spec_rows = [row for row in world.rows("translate") if row.lang == "ja"]
+    assert len(removed_spec_rows) == 1, removed_spec_rows
+    row = removed_spec_rows[0]
+    assert row.status == "succeeded", (
+        f"a row left behind by a chain edit must still be processed, got {row}"
+    )
+    assert row.upstream_plugin_id is None
+    assert row.upstream_digest is None, (
+        "it consumed nothing, so it records no dependency"
+    )
+    assert SUMMARY in world.product_of(row), "it read the item's own body"
