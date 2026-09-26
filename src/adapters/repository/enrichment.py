@@ -22,6 +22,7 @@ from core.enrichment import (
     EnrichmentSpec,
     EnrichmentStatus,
     chain_complete,
+    upstream_for,
 )
 
 TENANT = "default"
@@ -147,6 +148,43 @@ def statuses_for_item(
         (row.plugin_id, row.kind, row.lang): EnrichmentStatus(row.status)
         for row in rows
     }
+
+
+def upstream_for_spec(
+    session: Session,
+    *,
+    item_id: str,
+    content_hash: str,
+    spec: EnrichmentSpec,
+    chain: tuple[EnrichmentSpec, ...],
+) -> tuple[EnrichmentSpec | None, str | None]:
+    """The upstream spec for `spec` and its stored product ref (ADR 0030).
+
+    Returns `(None, None)` when the spec reads the Item's own content, and
+    `(upstream_spec, None)` when it consumes an upstream that has not produced
+    a product for this content version yet -- the caller must tell "no upstream
+    to wait for" apart from "waiting", and a single None cannot say both.
+
+    Scoped to `content_hash` on purpose: the product must belong to the Item
+    version being processed now. Resolving "the newest succeeded row" instead
+    would feed a *different revision* of the upstream product into a spec
+    running against this one -- the stale-text failure the dependency exists to
+    prevent.
+    """
+    upstream = upstream_for(chain, spec)
+    if upstream is None:
+        return None, None
+    ref = session.execute(
+        select(ItemEnrichment.payload_ref)
+        .where(
+            ItemEnrichment.item_id == item_id,
+            ItemEnrichment.input_hash == content_hash,
+            ItemEnrichment.plugin_id == upstream.plugin_id,
+            ItemEnrichment.status == EnrichmentStatus.SUCCEEDED.value,
+        )
+        .order_by(ItemEnrichment.updated_at.desc())
+    ).scalar_one_or_none()
+    return upstream, ref
 
 
 def is_source_chain_complete(
