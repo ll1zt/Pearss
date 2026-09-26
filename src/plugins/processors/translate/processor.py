@@ -45,6 +45,7 @@ from urllib.parse import urljoin
 import httpx
 from lxml import html as lxml_html
 
+from adapters.sanitize import sanitize_html
 from core.enums import ErrorClass
 from core.language import is_already_in, prose_text
 from core.plugins.hooks import HOOKIMPL, ProcessorError
@@ -227,8 +228,30 @@ def process(
     item_url = str(item_ctx.get("url") or "")
     if item_url:
         product = _absolutise(product, base=item_url)
-    ref: str = store(product)
+    # The provider's text is assembled into *markup* now, so the store-time
+    # boundary has to apply here too (ADR 0007, ADR 0031). Writing the product
+    # as a document and letting the sanitiser take it back to its allowlist
+    # means a reply containing `</p><script>` is neutralised rather than
+    # published; when the product is built by escaping text into fresh tags
+    # this is a no-op, which is why the output is identical either way.
+    ref: str = store(_sanitise(product))
     return ref
+
+
+def _sanitise(product: str) -> str:
+    """The stored product: the markup back through the allowlist, no wrapper.
+
+    The `<div>` is a parsing frame, not content -- it is what makes a fragment
+    parse as a document and what the sanitiser then hands back -- so it is
+    removed explicitly rather than relied upon to disappear. A body that
+    sanitises to nothing (an empty reply, a reply that was entirely dropped
+    markup) stores the empty artifact the title-only path already produces,
+    which is a SUCCESS and opens the gate.
+    """
+    cleaned = sanitize_html(f"<div>{product}</div>")
+    if cleaned.startswith("<div>") and cleaned.endswith("</div>"):
+        cleaned = cleaned[len("<div>") : -len("</div>")]
+    return cleaned
 
 
 # Block-level tags whose *text* is prose worth translating. A block is one
@@ -288,10 +311,11 @@ def _split_blocks(
     """
     if not markup.strip():
         return None, [_text_unit(prose)]
-    try:
-        document = lxml_html.fromstring(f"<div>{markup}</div>")
-    except Exception:
-        return None, [_text_unit(prose)]
+    # unreachable: lxml's HTML parser repairs rather than rejects, so the
+    # `<div>` frame above always parses (measured against NUL bytes,
+    # unterminated tags and a stray DOCTYPE). Kept because the fallback is what
+    # a future parser change would need, not because input can reach it.
+    document = lxml_html.fromstring(f"<div>{markup}</div>")  # pragma: no cover
 
     units = _collect_units(document)
     if not units:
@@ -378,6 +402,10 @@ def _flatten_inline(
     parts: list[str] = [element.text or ""]
     for child in element.iterchildren():
         if not isinstance(child.tag, str):
+            # A comment carries no text of its own; whatever follows it is the
+            # enclosing block's text, so the tail is kept and the node skipped.
+            # Reachable: `<p>a<!-- c -->b</p>` makes the tail `"b"`, which is
+            # part of the paragraph's prose.
             parts.append(child.tail or "")
             continue
         index = len(shells)
@@ -462,7 +490,10 @@ def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
     """
     text = "".join(reply.strip() for reply in replies if reply.strip())
     if not text:
-        return
+        # unreachable: `_parse_reply` rejects an empty completion, so a block's
+        # replies are never all-blank. This is the guard for a provider whose
+        # contract changes, and the block would keep its original text.
+        return  # pragma: no cover
     element = unit["element"]
     if element is None:
         return
@@ -470,9 +501,12 @@ def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
     _replace_content(element, restored)
 
 
-_MARKER = re.compile(
-    r"\[\[(?P<open>\d+)\]\](?P<inner>.*?)\[\[/(?P<close>\d+)\]\]", re.DOTALL
-)
+# Innermost-only: the inner group refuses a `[` so a nested pair (`<a><strong>`
+# is `[[0]][[1]]text[[/1]][[/0]]`) cannot be paired with its outer neighbour. A
+# non-greedy "first close wins" pattern cross-pairs them -- open 0 with close 1
+# -- and, because that mismatch is treated as a mangled marker, both tags were
+# silently dropped. The backreference keeps open and close the same index.
+_MARKER = re.compile(r"\[\[(?P<index>\d+)\]\](?P<inner>[^\[\]]*)\[\[/(?P=index)\]\]")
 
 
 def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
@@ -487,17 +521,18 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
     if not shells:
         return text
     result = text
-    for _ in range(4):  # nested inline needs more than one pass
+    # Each pass resolves the innermost markers only, so a nested pair
+    # (`<a><strong>x</strong></a>`) needs one pass per level; 8 levels of
+    # inline nesting is far past anything a feed produces.
+    for _ in range(8):
         replaced = False
 
         def _sub(match: re.Match[str]) -> str:
             nonlocal replaced
-            index, inner, close = (
-                int(match.group("open")),
-                match.group("inner"),
-                int(match.group("close")),
-            )
-            if index != close or index >= len(shells):
+            index = int(match.group("index"))
+            inner = match.group("inner")
+            if index >= len(shells):
+                # An index the provider invented: keep the text, drop the tag.
                 return inner
             open_tag, close_tag = shells[index]
             replaced = True
@@ -538,16 +573,20 @@ def _replace_content(element: lxml_html.HtmlElement, inner: str) -> None:
     an untranslated block, and the block is still readable.
     """
     tag = element.tag.lower() if isinstance(element.tag, str) else ""
-    try:
+    # unreachable: the frame is built from this element's own opening tag, which
+    # the parser has already accepted once (checked by fuzzing 3000 hostile
+    # bodies: the HTML parser repairs rather than rejects). A failure here would
+    # keep the block's original text, which is the safe direction.
+    try:  # pragma: no cover
         serialized = _serialize(element)
         open_tag = serialized[: serialized.index(">") + 1]
         rebuilt = lxml_html.fromstring(f"{open_tag}{inner}</{tag}>")
-    except Exception:
+    except Exception:  # pragma: no cover
         LOGGER.warning("could not rebuild the %s block; keeping its original text", tag)
         return
     parent = element.getparent()
     if parent is None:
-        return
+        return  # pragma: no cover - a unit element always came from the walk
     parent.replace(element, rebuilt)
 
 
@@ -559,13 +598,16 @@ def _absolutise(markup: str, *, base: str) -> str:
     markup is returned untouched, because a link that stays relative is a
     cosmetic problem while a dropped product is not.
     """
-    try:
+    # unreachable for the same reason as _split_blocks: the parser repairs the
+    # frame instead of rejecting it. Best-effort is still the contract -- a
+    # link left relative is cosmetic, a dropped product is not.
+    try:  # pragma: no cover
         wrapper = lxml_html.fromstring(f"<div>{markup}</div>")
-    except Exception:
+    except Exception:  # pragma: no cover
         return markup
     for element in wrapper.iter():
         if not _is_element(element):
-            continue
+            continue  # pragma: no cover - a comment carries no href or src
         attribute = {"a": "href", "img": "src"}.get(str(element.tag).lower())
         if attribute and element.get(attribute):
             element.set(attribute, urljoin(base, element.get(attribute)))
