@@ -344,11 +344,12 @@ def _execute_row(
             outcome["skipped"] += 1
             return outcome
         processor = processors[row.plugin_id]
-        if row.plugin_id in PACED_PROCESSORS and not pacer().pace(host):
-            # Nothing was attempted: this row lost its turn because a sibling
-            # row on the same host was refused (cooldown) or the wait budget
-            # ran out. Hand it back to the queue rather than burning an
-            # attempt, so the next sweep retries it for free.
+        # A paced fetch takes the host's slot for its whole duration and frees
+        # it in the `finally` below (issue #57). Holding it across the fetch is
+        # what lets a sibling row see the *outcome* -- whether this fetch was
+        # refused -- instead of racing the cooldown that outcome installs.
+        paced = row.plugin_id in PACED_PROCESSORS
+        if paced and not pacer().pace(host):
             fenced = _fenced_update(
                 session,
                 row_id=row_id,
@@ -367,6 +368,12 @@ def _execute_row(
                     row_id,
                     host or "-",
                 )
+            if paced:
+                # Admission was declined before any fetch, so the slot this
+                # row may have taken while waiting must be handed on: a later
+                # row for the host would otherwise wait for a turn that was
+                # never taken.
+                pacer().release(host)
             session.commit()
             return outcome
         upstream_spec, upstream_ref = _resolve_upstream(session, item=item, row=row)
@@ -393,27 +400,37 @@ def _execute_row(
                     },
                 )
                 outcome["skipped"] += 1
+                if paced:
+                    pacer().release(host)
                 session.commit()
                 return outcome
             content = filestore.read_body(upstream_ref)
         else:
             content = filestore.read_body(item.content_ref)
         try:
-            result = run_processor(
-                processor,
-                plugin_id=row.plugin_id,
-                item_ctx={
-                    "item_id": item.id,
-                    "title": item.title or "",
-                    "content": content,
-                    "url": item.url,
-                    "lang": row.lang,
-                    "upstream_digest": _digest_of(upstream_ref),
-                },
-                target_lang=row.lang or "en",
-                deadline=deadline,
-                cancelled=cancel_event,
-            )
+            try:
+                result = run_processor(
+                    processor,
+                    plugin_id=row.plugin_id,
+                    item_ctx={
+                        "item_id": item.id,
+                        "title": item.title or "",
+                        "content": content,
+                        "url": item.url,
+                        "lang": row.lang,
+                        "upstream_digest": _digest_of(upstream_ref),
+                    },
+                    target_lang=row.lang or "en",
+                    deadline=deadline,
+                    cancelled=cancel_event,
+                )
+            finally:
+                # Released here, in the innermost finally, so every exit from
+                # the fetch frees the host: success, a classified failure, an
+                # unexpected exception, a timeout, or a cancel. Anything later
+                # would leave the host marked busy through the result write.
+                if paced:
+                    pacer().release(host)
         except ProcessorError as exc:
             error_class = exc.error_class
             detail = exc.detail
