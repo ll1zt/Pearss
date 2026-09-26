@@ -31,6 +31,12 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_LOG_LEVEL",
         "PEARSS_DOCS_ENABLED",
         "PEARSS_MAX_BODY_BYTES",
+        # Half-open request-header timeout (issue #9). Host-side by design: the
+        # deadline is enforced by the HTTP protocol class in the parent
+        # process, and a sandboxed child has no socket to time out. It must not
+        # reach a child either -- nothing there reads it, and passing it would
+        # widen the allowlist for a value with no consumer.
+        "PEARSS_HTTP_HEADER_TIMEOUT_SECONDS",
         "PEARSS_AUDIT_RETENTION_DAYS",
         "PEARSS_SCHEDULER_ENABLED",
         "PEARSS_TICK_SECONDS",
