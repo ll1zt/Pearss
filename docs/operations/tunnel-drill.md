@@ -139,8 +139,70 @@ journalctl -u pearss -n 100 | grep -ciE "egress_denied|zlib|AttributeError"
 **判据**：`egress_denied` 为 0（除非真订阅了私网源）；`zlib`/`AttributeError` 为 0
 （这两个是 gzip 双重解压与 handle_request 的历史回归信号）。
 
-## 7. 记录
+## 7. 半开请求头超时（慢速资源占用）
 
-把 1–6 的实测结果写回本文件末尾，附日期与 curl 的实际输出。
+**这一节回答的问题**：一个只发了半截请求头就挂住的连接，多久会被服务端关掉？
+
+**先确认本机是哪条路径**——这决定了改哪一层。2026-09-26 实测本机（`funnelEnabled = false`，
+见 `hosts/<host>/pearss.nix`）的实际拓扑：
+
+```bash
+tailscale funnel status        # 本机实测：只打印 "tailnet only"，没有 "Funnel on"
+ss -ltn | grep -E ':(8000|10000)'   # 只有 8000；没有 10000
+ps aux | grep -c '[n]ginx'          # 0：本机 nginx 未启用
+```
+
+结论：**本机没有 nginx、也没有 funnel**。路径是
+`tailscale serve :8443 -> 127.0.0.1:8000`。因此 issue #9 设想的「Funnel → nginx → Pearss」
+在本机不成立——那个形态只在 `funnelEnabled = true` 时存在（那时 nginx 才监听 127.0.0.1:10000）。
+判据：**先看 `funnelEnabled`**，再决定测哪条路径。
+
+```bash
+# 应用层（uvicorn）直连：这是所有路径的最后一段
+check_half_open_header() {
+  local host="$1" port="$2" wait="${3:-15}" rc=0
+  exec 3<>"/dev/tcp/$host/$port" || return 2
+  printf 'GET /p HTTP/1.1\r\nHost: x\r\nX-S: ' >&3 || rc=3
+  [ "$rc" = 0 ] && { timeout "$wait" cat <&3 >/dev/null || rc=1; }
+  exec 3<&- 2>/dev/null
+  return "$rc"
+}
+check_half_open_header 127.0.0.1 8000 15 && echo "closed in time" || echo "STILL OPEN (no header timeout)"
+# 期望（修复后）：15 秒内被关闭
+# 实测（2026-09-26，未修复）：15s / 120s 均仍为 STILL OPEN
+
+# 经 tailscale serve 的 TLS 一段（python3 只有标准库依赖）
+python3 - <<'PYEOF'
+import socket, ssl, sys, time
+host, port, wait = "pearss.example.ts.net", 8443, 60.0
+ctx = ssl.create_default_context()
+with socket.create_connection((host, port), timeout=8) as raw:
+    with ctx.wrap_socket(raw, server_hostname=host) as s:
+        s.sendall(b"GET /p HTTP/1.1\r\nHost: x\r\nX-S: ")
+        s.settimeout(wait)
+        start = time.monotonic()
+        try:
+            s.recv(64); print("closed in time")
+        except socket.timeout:
+            print("STILL OPEN after %.0fs" % wait)
+PYEOF
+# 实测（2026-09-26，未修复）：60s 仍为 STILL OPEN
+```
+
+**判据**：修复后两段都应在 N 秒内关闭（N 由修复决定，当前定为 15 秒量级）。
+未修复时两段都保持——即「无短超时」是**应用层与 tailscale 两段共有**的行为，
+修一层不够。
+
+**修复落点**：`.env` 的 `PEARSS_HTTP_HEADER_TIMEOUT_SECONDS`（默认 15）。
+应用层超时消灭了直达 uvicorn 的半开连接；但**它不解决 tailscale serve 这一段**
+（tailscale 与后端的连接可能在应用关闭前一直挂着），所以本项在 tunnel 形态下
+仍应保留为已知限制，直到有独立的边缘超时。`funnelEnabled = true` 的部署
+（nginx 在 10000）另需在 `nix/tunnel.nix` 的 location 内显式设
+`client_header_timeout` —— nginx 的默认值在本环境不可依赖（issue #9 记录的实测
+与默认值不符）。
+
+## 8. 记录
+
+把 1–7 的实测结果写回本文件末尾，附日期与 curl 的实际输出。
 **未实测的项目标注"未验证"，不要凭推断勾选**——ADR 0019 的教训：
 静态判断协议符合度是不可靠的，隧道配置同理。
