@@ -379,11 +379,18 @@ def _test_files() -> list[Path]:
     This file is about test conventions, so its own docstrings quote the very
     patterns the guards below forbid (`assert_called`, `or True`). Scanning it
     would make each guard fail on its own explanation.
+
+    The comparison resolves both sides. `rglob` yields paths relative to the
+    process's cwd while `__file__` is absolute, so the obvious
+    `path != Path(__file__)` is always true and excluded nothing -- this file was
+    being scanned despite the promise above, and every guard that quotes its own
+    forbidden pattern was one edit away from failing on itself (issue #53).
     """
+    here = Path(__file__).resolve()
     return sorted(
         path
         for path in [*Path("tests").rglob("*.py"), *Path("src").rglob("test_*.py")]
-        if "__pycache__" not in path.parts and path != Path(__file__)
+        if "__pycache__" not in path.parts and path.resolve() != here
     )
 
 
@@ -1263,4 +1270,42 @@ def test_no_recipe_body_repeats_a_command() -> None:
         "these recipe bodies run the same command twice in a row, which is what "
         "a resolved merge conflict looks like when both sides' copy is kept:\n"
         + "\n".join(offenders)
+    )
+
+
+def test_every_started_test_server_is_also_asked_to_stop() -> None:
+    """A file that starts `serve_forever()` must call `shutdown()` somewhere.
+
+    `server_close()` closes the listening socket; it does not stop the loop,
+    which returns only once `shutdown()` sets its flag. A server torn down with
+    `server_close()` alone leaves a thread spinning on a closed socket at ~89%
+    of a core, and because coverage traces every thread, every *later* test in
+    the process is charged for it (issue #53):
+
+        test_items_api setup, median     before 1120 ms   after 63 ms
+        the two affected files together  before 161 s     after 12 s
+
+    Two of the ten `serve_forever()` sites had this bug. The mistake is invisible
+    in review -- `server_close()` reads like the complete teardown, and it is the
+    name a careful author would reach for -- so it is checked mechanically. The
+    property is coarse on purpose (the file must mention `shutdown`, not a
+    per-server pairing): it is the *omission* that shipped twice, and a guard
+    that tries to pair lifecycles textually would be wrong on the first refactor.
+
+    Comments and docstrings are skipped, so explaining the bug is not a way to
+    trip it -- several of these files carry a comment saying why.
+    """
+    offenders: list[str] = []
+    for path in _test_files():
+        # Only code counts: a comment quoting `serve_forever` is not a server.
+        code = "\n".join(text for _, text in _code_lines(path))
+        if "serve_forever" not in code:
+            continue
+        if ".shutdown()" not in code:
+            offenders.append(str(path))
+
+    assert not offenders, (
+        "these files start a server with serve_forever() but never call "
+        "shutdown(), so the thread loops on a closed socket and slows every "
+        "later test in the process (issue #53):\n" + "\n".join(offenders)
     )
