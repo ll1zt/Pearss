@@ -10,6 +10,15 @@ time, exactly as credentials do for collectors:
     PEARSS_TRANSLATE_API_KEY    bearer token
     PEARSS_TRANSLATE_MODEL      model id
 
+The product keeps the article's structure (ADR 0031): the body is split into
+block-level units, only the *text* of a translatable block is sent, and the
+translation is refilled into the original tag shell. Images, code blocks and
+tables are copied through verbatim rather than translated — a provider asked
+to translate `bpftrace -e 'kprobe:do_sys_open'` can only mangle it, and
+whitespace inside `<pre>` is code semantics that a prose round-trip destroys.
+Flattening the article to paragraphs was what left readers a wall of text with
+no headings, diagram, code or links beside an intact original (#33).
+
 The processor never touches the database; the worker owns the row's
 lifecycle. Failures are ProcessorError values with the standard taxonomy:
 a 401 from the provider is `auth`, a 429 is `blocked`, a malformed reply
@@ -29,9 +38,12 @@ from __future__ import annotations
 import html
 import logging
 import os
+import re
 from typing import Any, Final
+from urllib.parse import urljoin
 
 import httpx
+from lxml import html as lxml_html
 
 from core.enums import ErrorClass
 from core.language import is_already_in, prose_text
@@ -151,8 +163,12 @@ def process(
 ) -> str:
     """Translate the item's text into `target_lang`; return the storage ref.
 
-    The item body keeps its HTML; the translation carries the same prose in
-    simple paragraphs, so the reader can render both faithfully.
+    The product keeps the source's block structure (ADR 0031): translatable
+    blocks are sent as text and refilled into their original tag shells, while
+    non-text nodes (images, code, tables) are copied through verbatim. The
+    reader therefore gets the same article it would have read in the original
+    language -- headings to skim, a diagram, a code block, working links --
+    rather than a wall of paragraphs.
 
     Content already written in `target_lang` is not sent anywhere. It produces
     an empty artifact — the same shape as an item with no text — which is a
@@ -180,30 +196,382 @@ def process(
         )
         return str(store(""))
 
-    base, key, models = _configured()
-    chunks = _segment(source_text)
-    if len(chunks) > 1:
-        LOGGER.info(
-            "item %s: %d chars split into %d segments for translation",
-            item_ctx.get("item_id", "?"),
-            len(source_text),
-            len(chunks),
-        )
+    base_url, key, models = _configured()
     language = _LANG_NAMES.get(target_lang, target_lang)
 
-    translated: list[str] = []
-    for chunk in chunks:
-        translated.append(
-            _translate_one(chunk, language=language, base=base, key=key, models=models)
+    # What the provider is asked to translate, and the template the product is
+    # rebuilt from. The units of translation are the article's own blocks, so
+    # the prose is not reflowed across tag boundaries.
+    body, units = _split_blocks(prose=source_text, markup=item_ctx.get("content", ""))
+    requests: list[str] = []
+    for unit in units:
+        unit_text = str(unit["text"])
+        if unit_text:
+            requests.extend(_segment(unit_text))
+    if len(requests) > 1:
+        LOGGER.info(
+            "item %s: %d blocks split into %d segments for translation",
+            item_ctx.get("item_id", "?"),
+            len(units),
+            len(requests),
         )
-    paragraphs = "".join(
-        f"<p>{html.escape(p)}</p>"
-        for segment in translated
-        for p in segment.splitlines()
-        if p.strip()
-    )
-    ref: str = store(paragraphs)
+
+    translated = [
+        _translate_one(chunk, language=language, base=base_url, key=key, models=models)
+        for chunk in requests
+    ]
+    product = _rebuild(body=body, units=units, translated=translated)
+    # Absolutised for the same reason the fulltext extractor does it: the
+    # artifact is rendered in a reader or on a phone, where a relative path
+    # points at the reader's host instead of the article's (issue #39).
+    item_url = str(item_ctx.get("url") or "")
+    if item_url:
+        product = _absolutise(product, base=item_url)
+    ref: str = store(product)
     return ref
+
+
+# Block-level tags whose *text* is prose worth translating. A block is one
+# translation unit on purpose: sending the flattened article as one string and
+# re-wrapping the reply by line is what collapsed multi-paragraph bodies into a
+# single paragraph and lost every tag around them (#33).
+_TRANSLATABLE_BLOCKS: Final[frozenset[str]] = frozenset(
+    {
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "li",
+        "blockquote",
+        "figcaption",
+        "dd",
+        "dt",
+        "td",
+        "th",
+        "summary",
+        "caption",
+        "div",
+    }
+)
+
+# Non-text nodes copied through verbatim, never sent to a provider. Code is
+# here because `pre`/`code` content is not prose and its whitespace is
+# semantics; img keeps its alt (not prose to translate).
+_PRESERVED: Final[frozenset[str]] = frozenset({"pre", "code", "img", "svg", "math"})
+
+# Containers that are never article content in themselves.
+_SKIPPED: Final[frozenset[str]] = frozenset({"script", "style", "noscript", "template"})
+
+
+def _split_blocks(
+    *, prose: str, markup: str
+) -> tuple[lxml_html.HtmlElement | None, list[dict[str, Any]]]:
+    """Split the body into the units to translate, in document order.
+
+    Returns the parsed body (None when there is nothing to walk) plus one dict
+    per unit. A unit with empty `text` is a preserved node (an image, a code
+    block) and is left alone; a unit with text is a translatable block whose
+    content is replaced by its translation.
+
+    The tree is returned rather than a list of tag shells so that *container*
+    structure survives by construction: `ul`, `figure`, `table` and `blockquote`
+    are rebuilt around their own children instead of being dropped because the
+    walk flattened them away (which is how `<ul>` was lost the first time).
+
+    Falls back to a single text unit when the markup cannot be parsed, because
+    the alternative is refusing to translate a body whose *text* is perfectly
+    readable -- the input this processor is trusted with is sanitised HTML, and
+    a malformed page should still get a translation.
+    """
+    if not markup.strip():
+        return None, [_text_unit(prose)]
+    try:
+        document = lxml_html.fromstring(f"<div>{markup}</div>")
+    except Exception:
+        return None, [_text_unit(prose)]
+
+    units = _collect_units(document)
+    if not units:
+        return None, [_text_unit(prose)]
+    return document, units
+
+
+def _text_unit(text: str) -> dict[str, Any]:
+    """A bare text unit: the fallback shape, and the title-only case."""
+    return {"element": None, "text": text, "shells": []}
+
+
+def _collect_units(root: lxml_html.HtmlElement) -> list[dict[str, Any]]:
+    """Walk the tree, emitting one unit per translatable block.
+
+    The walk stops descending at a translatable block: an `li` containing a
+    `p` is ONE unit (`li`'s prose includes the `p`'s), not two, so the same
+    sentence cannot be translated twice and reassembled out of order.
+
+    A block's *inline* children (links, emphasis, inline code) are kept as
+    paired marker shells rather than flattened, so the rebuilt block still has
+    working links and its emphasis -- "同构" as the issue asks, without asking
+    the provider to translate a sentence in fragments.
+    """
+    units: list[dict[str, Any]] = []
+    for child in root.iterchildren():
+        if not isinstance(child.tag, str):
+            continue  # comments and processing instructions
+        tag = child.tag.lower()
+        if tag in _SKIPPED:
+            continue
+        if tag in _PRESERVED:
+            units.append({"element": child, "text": "", "shells": []})
+            continue
+        if tag in _TRANSLATABLE_BLOCKS:
+            shells: list[tuple[str, str]] = []
+            text = _flatten_inline(child, shells)
+            units.append({"element": child, "text": text, "shells": shells})
+            continue
+        # A structural wrapper (article/section/ul/ol/table/figure/...): recurse
+        # without emitting anything of its own.
+        units.extend(_collect_units(child))
+    return units
+
+
+# Inline elements worth keeping inside a translated block. Each becomes a
+# paired marker around its own text, so the provider translates the whole
+# sentence while the tag survives; `a` is the one that really matters (a
+# translation whose links are gone is a dead end for the reader).
+_INLINE: Final[frozenset[str]] = frozenset(
+    {
+        "a",
+        "strong",
+        "b",
+        "em",
+        "i",
+        "u",
+        "s",
+        "del",
+        "ins",
+        "mark",
+        "small",
+        "sub",
+        "sup",
+        "abbr",
+        "q",
+        "cite",
+        "time",
+        "span",
+    }
+)
+
+
+def _flatten_inline(
+    element: lxml_html.HtmlElement, shells: list[tuple[str, str]]
+) -> str:
+    """An element's text with inline children replaced by paired markers.
+
+    `[[0]]inner[[/0]]` marks the region that belongs inside the element whose
+    shell is `shells[0]`. Paired rather than one-sided so the *translated*
+    inner text can be recovered and put back inside the original tag: a
+    one-sided marker would leave the shell with nothing to hold.
+    """
+    parts: list[str] = [element.text or ""]
+    for child in element.iterchildren():
+        if not isinstance(child.tag, str):
+            parts.append(child.tail or "")
+            continue
+        index = len(shells)
+        tag = child.tag.lower()
+        if tag not in _INLINE or tag in _PRESERVED:
+            # Inline code, or anything not worth a shell: keep the text, drop
+            # the tag. `code` is here because its content is not prose.
+            parts.append(_flatten_inline(child, shells))
+            parts.append(child.tail or "")
+            continue
+        open_tag = _open_tag(child)
+        close_tag = f"</{tag}>"
+        shells.append((open_tag, close_tag))
+        inner = _flatten_inline(child, shells)
+        parts.append(f"[[{index}]]{inner}[[/{index}]]")
+        parts.append(child.tail or "")
+    return "".join(parts)
+
+
+def _open_tag(element: lxml_html.HtmlElement) -> str:
+    """The element's opening tag with its attributes, and nothing inside."""
+    attributes = "".join(
+        f' {name}="{value}"' for name, value in sorted(element.attrib.items())
+    )
+    tag = element.tag.lower() if isinstance(element.tag, str) else "span"
+    return f"<{tag}{attributes}>"
+
+
+def _is_element(node: Any) -> bool:
+    """Whether a node is a real element (not a comment or PI).
+
+    lxml yields comments and processing instructions from `iterchildren()` and
+    types them as elements, so the check is a runtime necessity even though the
+    stubs claim it is always true.
+    """
+    return isinstance(getattr(node, "tag", None), str)
+
+
+def _serialize(element: lxml_html.HtmlElement) -> str:
+    """An element's subtree as HTML (the tag shell the product is rebuilt in)."""
+    return str(lxml_html.tostring(element, encoding="unicode"))
+
+
+def _rebuild(
+    *,
+    body: lxml_html.HtmlElement | None,
+    units: list[dict[str, Any]],
+    translated: list[str],
+) -> str:
+    """Put each translation back into its block, and serialize the body.
+
+    `translated` is consumed in order. A unit's prose is one segment unless it
+    exceeds MAX_CHARS, so a unit maps to one or more replies; `_fill_unit`
+    consumes the replies for one unit only, which is what keeps a short
+    provider reply from shifting later blocks (they keep their original text
+    instead of receiving someone else's translation).
+    """
+    cursor = 0
+    for unit in units:
+        if not unit["text"]:
+            continue  # preserved node: image, code block -- left untouched
+        count = max(1, len(_segment(unit["text"])))
+        replies = translated[cursor : cursor + count]
+        cursor += count
+        _fill_unit(unit, replies)
+    if body is None:
+        # The fallback path: no tree to rebuild, so the replies are the
+        # paragraphs and the units list holds exactly one of them.
+        return "".join(_paragraphs(reply) for reply in translated if reply.strip())
+    return "".join(
+        _serialize(child) for child in body.iterchildren() if _is_element(child)
+    )
+
+
+def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
+    """Put one unit's translation into its element, in place.
+
+    Inline markers are restored first, so the block's links and emphasis are
+    inside the translation. A block the provider did not answer for keeps its
+    original text: that is the only outcome that cannot mislead, since a
+    borrowed neighbour's translation reads as plausible output.
+    """
+    text = "".join(reply.strip() for reply in replies if reply.strip())
+    if not text:
+        return
+    element = unit["element"]
+    if element is None:
+        return
+    restored = _restore_inline(text, unit.get("shells") or [])
+    _replace_content(element, restored)
+
+
+_MARKER = re.compile(
+    r"\[\[(?P<open>\d+)\]\](?P<inner>.*?)\[\[/(?P<close>\d+)\]\]", re.DOTALL
+)
+
+
+def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
+    """Wrap each marked span in its original tag.
+
+    A marker the provider dropped, duplicated or unbalanced is dropped from the
+    output rather than guessed at: the translated *text* is the part that
+    matters, and a misplaced link is worse than a missing tag. The prose
+    survives either way, and this is the only failure mode here -- it cannot
+    corrupt the text.
+    """
+    if not shells:
+        return text
+    result = text
+    for _ in range(4):  # nested inline needs more than one pass
+        replaced = False
+
+        def _sub(match: re.Match[str]) -> str:
+            nonlocal replaced
+            index, inner, close = (
+                int(match.group("open")),
+                match.group("inner"),
+                int(match.group("close")),
+            )
+            if index != close or index >= len(shells):
+                return inner
+            open_tag, close_tag = shells[index]
+            replaced = True
+            return f"{open_tag}{inner}{close_tag}"
+
+        result = _MARKER.sub(_sub, result)
+        if not replaced:
+            break
+    # Any marker left over (unbalanced, or an index the provider invented) is
+    # stripped so no `[[0]]` reaches the reader.
+    return _LEFTOVER_MARKER.sub("", result)
+
+
+_LEFTOVER_MARKER = re.compile(r"\[\[/?\d+\]\]")
+
+
+def _paragraphs(text: str) -> str:
+    """Wrap plain text as paragraphs, one per line the provider returned."""
+    return "".join(
+        f"<p>{html.escape(line.strip())}</p>"
+        for line in text.splitlines()
+        if line.strip()
+    )
+
+
+def _replace_content(element: lxml_html.HtmlElement, inner: str) -> None:
+    """Replace `element`'s content with `inner`, keeping the tag and attributes.
+
+    The node is rebuilt by *parsing* `<tag attrs>inner</tag>` rather than by
+    setting `.text`, because `inner` may contain restored inline markup (a link,
+    emphasis) and assigning it as text would escape it into visible
+    `&lt;strong&gt;`. The opening tag is taken from the element's own
+    serialization, so attributes, their quoting and an empty `<p>` survive
+    exactly as the source had them.
+
+    A parse failure leaves the element untouched -- the original text, still
+    inside its own tag. That is the safe direction: a mangled tag is worse than
+    an untranslated block, and the block is still readable.
+    """
+    tag = element.tag.lower() if isinstance(element.tag, str) else ""
+    try:
+        serialized = _serialize(element)
+        open_tag = serialized[: serialized.index(">") + 1]
+        rebuilt = lxml_html.fromstring(f"{open_tag}{inner}</{tag}>")
+    except Exception:
+        LOGGER.warning("could not rebuild the %s block; keeping its original text", tag)
+        return
+    parent = element.getparent()
+    if parent is None:
+        return
+    parent.replace(element, rebuilt)
+
+
+def _absolutise(markup: str, *, base: str) -> str:
+    """Resolve relative `href`/`src` against the item URL.
+
+    Only for `a` and `img`: those are the attributes a reader follows or
+    fetches. Best-effort by design -- if the fragment cannot be parsed the
+    markup is returned untouched, because a link that stays relative is a
+    cosmetic problem while a dropped product is not.
+    """
+    try:
+        wrapper = lxml_html.fromstring(f"<div>{markup}</div>")
+    except Exception:
+        return markup
+    for element in wrapper.iter():
+        if not _is_element(element):
+            continue
+        attribute = {"a": "href", "img": "src"}.get(str(element.tag).lower())
+        if attribute and element.get(attribute):
+            element.set(attribute, urljoin(base, element.get(attribute)))
+    return "".join(
+        _serialize(child) for child in wrapper.iterchildren() if _is_element(child)
+    )
 
 
 def _segment(text_to_split: str) -> list[str]:
