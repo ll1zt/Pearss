@@ -454,3 +454,243 @@ def test_an_unparseable_error_body_does_not_break_classification(
     exc = _classify()
     assert exc.error_class is ErrorClass.PARSE
     assert "no parseable error body" in exc.detail
+
+
+# --------------------------------------------------------------------------
+# Structure-preserving translation (ADR 0031, issue #33)
+#
+# The register for these scenarios is this header; they are plugin-level and
+# live with the plugin, unlike the chain-level ones (AC-14..AC-18) which are in
+# tests/integration/test_chain_dataflow.py.
+#
+#   AC-19 译文保留原文块级结构
+#     Given 条目正文含 h2/strong/figure+img/pre+code/ul+li/a
+#     When 翻译
+#     Then 产物保留这些标签（不是一串裸 <p>）
+#
+#   AC-20 非文本节点不送 provider，且原样保留
+#     Given 正文含 <pre><code> 代码块与 <img>
+#     When 翻译
+#     Then provider 输入不含代码内容；产物中的代码原样（缩进/换行不折叠）、
+#          图片 src 与 alt 原样
+#
+#   AC-21 图片地址绝对化
+#     Given 正文用相对路径 <img src="/img/x.png">
+#     When 翻译
+#     Then 产物中的 src 以条目 URL 为基解析为绝对 URL
+#
+#   AC-22 provider 段数不匹配时不静默错位
+#     Given provider 返回的段数少于请求的段数
+#     When 翻译
+#     Then 不把译文错位拼接到别的段落上
+#
+#   AC-23 纯文本正文的产物形态不变
+#     Given 条目正文是普通段落（无结构）
+#     When 翻译
+#     Then 产物仍是段落序列，可读性不退化
+# --------------------------------------------------------------------------
+
+RICH_BODY = (
+    "<h2>Understanding eBPF</h2>"
+    "<p>eBPF runs sandboxed programs <strong>in the kernel</strong>.</p>"
+    '<figure><img src="/img/ebpf.png" alt="Architecture diagram"></figure>'
+    "<pre><code>bpftool prog list\n    bpftrace -e 'kprobe:do_sys_open'</code></pre>"
+    "<ul><li>Observability</li><li>Networking</li></ul>"
+    '<p>See the <a href="/docs/start">official docs</a>.</p>'
+)
+
+
+def _rich_provider(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A provider that marks each request so the product is greppable.
+
+    Records every input, so a test can assert what was *not* sent (the code
+    block, the image alt text) as well as what came back.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    seen: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url, json=kwargs.get("json"))
+        user = json.loads(request.read())["messages"][1]["content"]
+        seen.append(user)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"[译]{user}"}}]}
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return seen
+
+
+def _translate(
+    monkeypatch: pytest.MonkeyPatch,
+    body: str,
+    *,
+    url: str = "https://blog.example/post",
+) -> tuple[str, list[str]]:
+    seen = _rich_provider(monkeypatch)
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    ref = process(
+        {"item_id": "i-1", "title": "T", "content": body, "url": url},
+        target_lang="zh",
+        store=fake_store,
+    )
+    assert ref == "cas://product"
+    assert stored, "a product must have been stored"
+    return stored[0], seen
+
+
+def test_the_translation_keeps_the_articles_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-19: headings, emphasis, images, code, lists and links survive.
+
+    Measured on the deployed code before this fix: every one of these tags was
+    gone from the product, leaving a single wall of `<p>` text -- so the
+    translated article had no headings to skim, no diagram, no code block and
+    no links, while the original beneath it had all of them.
+    """
+    product, _ = _translate(monkeypatch, RICH_BODY)
+
+    for tag in ("<h2", "<strong", "<img", "<pre", "<code", "<ul", "<li", "<a "):
+        assert tag in product, f"{tag} was dropped from the product: {product[:200]}"
+
+
+def test_the_code_block_is_not_sent_to_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-20: code is copied through, never translated.
+
+    A second defect the reproduction surfaced: the code block *was* sent, so a
+    provider was asked to translate `bpftrace -e 'kprobe:do_sys_open'` -- a
+    pointless call, a chance to mangle it, and the reason its indentation came
+    back collapsed (whitespace is code semantics).
+    """
+    product, seen = _translate(monkeypatch, RICH_BODY)
+
+    joined = "\n".join(seen)
+    assert "bpftrace" not in joined, (
+        f"the provider must not be asked to translate code; it saw {joined[:200]}"
+    )
+    assert "kprobe" not in joined
+    # ...and the code survives verbatim in the product, whitespace included.
+    assert "bpftool prog list\n    bpftrace -e 'kprobe:do_sys_open'" in product, (
+        f"the code block must be preserved verbatim: {product[:300]}"
+    )
+
+
+def test_the_image_is_preserved_with_its_alt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-20: an image is not text; it is carried through untouched."""
+    product, seen = _translate(monkeypatch, RICH_BODY)
+
+    assert 'alt="Architecture diagram"' in product, product[:300]
+    assert "Architecture diagram" not in "\n".join(seen), (
+        "alt text is not prose to translate"
+    )
+
+
+def test_a_relative_image_url_becomes_absolute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-21: the product is rendered elsewhere, so relative is a broken link.
+
+    Same reasoning as the fulltext extractor's URL handling (issue #39): the
+    artifact is served in a reader or on a phone, where `/img/ebpf.png` points
+    at the reader's own host.
+    """
+    product, _ = _translate(monkeypatch, RICH_BODY, url="https://blog.example/post")
+
+    assert 'src="https://blog.example/img/ebpf.png"' in product, product[:300]
+
+
+def test_a_provider_reply_with_no_content_fails_visibly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-22: a provider that answers nothing produces a failure, not a product.
+
+    The rule that matters is the one a partial reply could break: a block must
+    never receive *another* block's translation, because that product reads as
+    plausible output while carrying the wrong text under the right heading.
+    Driving the provider to return fewer blocks than were asked for shows how
+    that is guaranteed here -- an empty `choices[0].message.content` is already
+    a `parse` failure (the existing reply contract), so the item is retried or
+    reported rather than published half-misaligned.
+
+    This test exists to pin that interaction, since the block-per-request shape
+    (ADR 0031) makes "a reply per block" the expectation a provider could
+    violate in exactly this way.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+
+    replies = iter(["【一】", ""])  # the second block gets no content
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        content = next(replies, "")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    body = "<p>First paragraph.</p><p>Second paragraph.</p>"
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            {
+                "item_id": "i",
+                "title": "T",
+                "content": body,
+                "url": "https://b.example/p",
+            },
+            target_lang="zh",
+            store=fake_store,
+        )
+    assert excinfo.value.error_class is ErrorClass.PARSE, (
+        "an empty reply is the existing parse failure; classification unchanged"
+    )
+    assert stored == [], "no partial product may be stored"
+
+
+def test_plain_paragraphs_still_produce_readable_paragraphs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-23: the overwhelmingly common input must not degrade.
+
+    Most feeds are plain prose. The product must remain a paragraph sequence
+    with the translated text, not a wrapped or restructured document.
+    """
+    product, seen = _translate(
+        monkeypatch, "<p>Hello there.</p><p>Second paragraph.</p>"
+    )
+
+    assert product.count("<p>") == 2, product
+    assert "Hello there." in product
+    assert "Second paragraph." in product
+    assert "<div" not in product and "<article" not in product, (
+        "plain prose must not gain a wrapper element"
+    )
+    # One request per paragraph, and that is the deliberate trade (ADR 0031):
+    # a unit's prose has to reach the provider whole or the rebuilt block would
+    # be a fragment of a sentence inside someone else's tag. The per-block
+    # request is also what makes "which block failed?" answerable.
+    assert len(seen) == 2, f"one request per paragraph, got {len(seen)}"
