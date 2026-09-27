@@ -95,10 +95,31 @@ ADR 0021「删除就是删除」下这条路径必然被走到，所以该选项
 按源过滤: SCAN item（无 source_id 前缀索引）
 ```
 
-### 事实 8：本机规模下**不需要** ANN 索引
+### 事实 8：本机规模下**不需要** ANN 索引，也**不需要** numpy
 
-暴力全量余弦（7,000 × 384 维，纯 Python 无 numpy）：**224 ms**；有 numpy 降到 ms 级。
-`sqlite-vec` 解决的是 10 万～千万级的 ANN 问题，此处是过早优化。
+暴力全量点积实测（7,000 × 384 维，**纯标准库**）：
+
+| 实现 | 耗时 |
+|---|---|
+| `sum(a*b for a,b in zip(r,q))` ← 最初误测的写法 | 224 ms |
+| `sum(map(operator.mul, r, q))` | 50 ms |
+| **`math.sumprod(r, q)`**（3.12+ 内置 C 函数）| **10.6 ms** |
+| `math.sumprod` + `heapq.nlargest` top-20 | 11.1 ms |
+| 30,000 × 384（4.3× 数据）| 48.6 ms |
+
+**更正**：本 ADR 初稿写「纯 Python 224 ms，需先引入 numpy」——那是**测量方法错误**
+（把生成器表达式的开销当成了语言上限）。`math.sumprod` 是 CPython 的 C 实现，且项目
+floor 已是 Python 3.13（`requires-python = ">=3.13,<3.14"`），故它**必然可用且零依赖**。
+
+端到端混合链路实测（FTS5 + 向量全量 + RRF 融合）：**11.4 ms**。
+因此：
+- **不引入 numpy**：为 10ms 的路径加一个二进制依赖不划算，而且 `math.sumprod` 就在标准库里
+- **不上 ANN 索引**：`sqlite-vec` 解决的是 10 万～千万级问题，此处是过早优化
+
+存储形式的权衡（同一次实测）：`list[float]` 每条 ~3 KB 开销但点积 **10.4 ms**；
+`array('f')` 紧凑（1.5 KB/条）但点积 **38 ms**（约 3.7× 慢）。float32 存储相对 float64
+的 top-20 排序重合 **20/20**，即精度无损。故：**存 float32 紧凑，载入内存时转成
+`list[float]`** 供 `math.sumprod` 使用——两边都拿到最优。
 
 ### 事实 9：存储代价可以忽略
 
@@ -189,7 +210,7 @@ embedding 是派生物，与 translation / fulltext 同类，因此复用 `item_
 
 ```
 路径 A: FTS5 BM25（精确关键词，0.3–1.4ms）
-路径 B: 向量余弦全量（语义，numpy 后 ms 级）
+路径 B: 向量余弦全量（语义，`math.sumprod` 后 10.6 ms）
 融合:   RRF（Reciprocal Rank Fusion, k=60）
 ```
 
@@ -197,8 +218,10 @@ embedding 是派生物，与 translation / fulltext 同类，因此复用 `item_
 候选**——语义召回被字面召回封顶。这正是「换了说法就搜不到」的成因，而它恰好是向量检索要
 解决的问题。
 
-**前提**：先把 numpy 引入（事实 8 显示纯 Python 全量 224ms 会让人感觉到）。numpy 是纯增量
-依赖，不动架构。级联只在规模大 10 倍后再考虑。
+**不引入 numpy、不引入向量扩展**：事实 8 已更正——`math.sumprod`（标准库内置 C 函数，
+Python 3.12+，项目 floor 为 3.13）将全量点积做到 10.6 ms，完整混合链路 11.4 ms。
+这比引入一个二进制依赖更简单，且零供应链成本。
+级联只在规模大 10 倍后再考虑（30,000 条时 48.6 ms，仍在可接受范围）。
 
 ### 8. 用「相关文章」替代「实时聚类」
 
@@ -263,7 +286,8 @@ embedding 是派生物，与 translation / fulltext 同类，因此复用 `item_
   （向量不是文本输入）
 - migration：FTS5 虚表 + 索引 + 模型身份纳入唯一标识
 - `app/items_routes.py` / `app/mcp/tools/reads.py`：检索面
-- 依赖：`numpy`（向量）、`onnxruntime` 或 `sentence-transformers`（本地推理），均经 `uv add`
+- 依赖：`onnxruntime` 或 `sentence-transformers`（本地 embedding 推理），经 `uv add`。
+  **向量检索本身零依赖**（`math.sumprod` + `heapq`，均为标准库）
 - 架构文档 §1.3 / C2 行同步修订
 - 数据集：三语 golden query 集（fixture）
 
@@ -274,6 +298,6 @@ embedding 是派生物，与 translation / fulltext 同类，因此复用 `item_
 3. **S2b** 检索面（API / MCP / 闸门）
 4. **S3** 本地多语言 embedding + 模型身份纳入标识
 5. **S3b** 相关文章 / 近重复提示
-6. **S4** RRF 混合检索（前置：numpy）
+6. **S4** RRF 混合检索（**零新依赖**：`math.sumprod` + `heapq`）
 
 各步独立可交付、独立可测，拆分为原子化 issue（见 issue 追踪）。
