@@ -48,6 +48,7 @@ import pytest
 
 from core.alerting import (
     ALERT_DEFAULTS,
+    AlertState,
     HealthVerdict,
     alert_body,
     decide_health,
@@ -264,3 +265,273 @@ def test_verdict_is_a_frozen_value() -> None:
     assert isinstance(verdict, HealthVerdict)
     with pytest.raises((AttributeError, TypeError)):
         verdict.degraded = False  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# AC-32: the repeat interval, stated as the state machine's truth table
+#
+# `AlertState` is where "one message per state change" lives, so its cases are
+# pinned here rather than only through the scheduler. Each is a distinct edge a
+# regression could flatten: without these, "fires once" passes even if the
+# re-notify path never works, and "recovery is prompt" passes even if recovery
+# is suppressed entirely.
+# --------------------------------------------------------------------------
+
+
+def _verdict_with(degraded: bool) -> HealthVerdict:
+    return HealthVerdict(degraded=degraded, reason="r" if degraded else "")
+
+
+def test_a_continuing_outage_renotifies_after_the_interval() -> None:
+    """AC-32: the *other* side of the interval -- it must not be a one-shot.
+
+    A degradation that lasts for days and is never mentioned again is its own
+    kind of silence: the operator who ignored the first message has no way to
+    see that it is still true. Pinned here because the tests that assert "only
+    once" pass equally against an implementation that can never repeat at all.
+    """
+    state = AlertState()
+
+    assert (
+        state.should_send(_verdict_with(True), now=0.0, min_interval_seconds=100)
+        is True
+    )
+    assert (
+        state.should_send(_verdict_with(True), now=50.0, min_interval_seconds=100)
+        is False
+    )
+    assert (
+        state.should_send(_verdict_with(True), now=101.0, min_interval_seconds=100)
+        is True
+    ), "past the interval, a still-broken system must say so again"
+
+
+def test_the_first_degraded_verdict_always_sends() -> None:
+    """No prior send means nothing to suppress: the first message is the point.
+
+    Guards an off-by-one where a fresh process with `last_sent_at=None` treats
+    the interval as already elapsed against a zero clock.
+    """
+    state = AlertState()
+    # A large clock value with no history: the interval must not be measured
+    # against it and suppress the very first alert.
+    assert (
+        state.should_send(_verdict_with(True), now=10_000.0, min_interval_seconds=3600)
+        is True
+    )
+
+
+def test_a_recovered_then_degraded_again_pair_is_two_messages() -> None:
+    """Two transitions, two messages -- even inside one interval window.
+
+    The failure this pins is a rate limiter applied to transitions instead of to
+    repeats: a system that flaps back into trouble within the hour must not have
+    its second collapse swallowed.
+    """
+    state = AlertState()
+    assert state.should_send(_verdict_with(True), now=0.0, min_interval_seconds=3600)
+    assert state.should_send(_verdict_with(False), now=1.0, min_interval_seconds=3600)
+    assert (
+        state.should_send(_verdict_with(True), now=2.0, min_interval_seconds=3600)
+        is True
+    ), "a new collapse is news, not a repeat"
+
+
+# --------------------------------------------------------------------------
+# The adapter's own edges
+# --------------------------------------------------------------------------
+
+
+def test_an_unusable_timeout_setting_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in the environment must not remove the bound.
+
+    The timeout is what keeps a wedged gateway from stalling a scheduler tick,
+    so reading a bad value as 0 (connect immediately / never) would reintroduce
+    the failure it exists to prevent.
+    """
+    from adapters.alerting import DEFAULT_TIMEOUT_SECONDS, alert_timeout_seconds
+
+    for bad in ("abc", "0", "-1"):
+        monkeypatch.setenv("PEARSS_ALERT_TIMEOUT_SECONDS", bad)
+        assert alert_timeout_seconds() == DEFAULT_TIMEOUT_SECONDS, bad
+
+    monkeypatch.setenv("PEARSS_ALERT_TIMEOUT_SECONDS", "7.5")
+    assert alert_timeout_seconds() == 7.5
+
+
+def test_sending_without_an_endpoint_warns_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unconfigured endpoint is reported once, not once per tick.
+
+    The journal should explain why nothing is being alerted, without becoming
+    its own source of noise (the same reasoning as decision 2).
+    """
+    from adapters import alerting
+
+    monkeypatch.delenv("PEARSS_ALERT_URL", raising=False)
+    monkeypatch.delenv("NOTIFY_URL", raising=False)
+    # The once-per-process flag is module state; reset it so the test does not
+    # depend on which test ran first.
+    monkeypatch.setattr(alerting, "_UNCONFIGURED_WARNED", False, raising=False)
+
+    with caplog.at_level("WARNING", logger="adapters.alerting"):
+        assert alerting.send_alert("body", title="t", source="s") is False
+        assert alerting.send_alert("body", title="t", source="s") is False
+
+    warnings = [r for r in caplog.records if "no alert endpoint" in r.getMessage()]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+
+
+def test_an_unexpected_exception_is_also_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The side channel must survive *any* failure, not only httpx's.
+
+    A gateway misconfigured to something that raises a different way (a bad
+    scheme, a transport that raises ValueError) must not take the scheduler
+    down with it. The broad handler exists for exactly this; here it is driven.
+    """
+    from adapters import alerting
+
+    monkeypatch.setenv("PEARSS_ALERT_URL", "http://example.test/notify")
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("transport blew up")
+
+    # Patched on the module httpx itself, not on `alerting.httpx`: the adapter
+    # does not re-export httpx as part of its surface, and reaching through
+    # would make this test depend on an implementation detail (mypy flags it
+    # for the same reason).
+    import httpx as httpx_module
+
+    monkeypatch.setattr(httpx_module, "post", explode)
+
+    assert alerting.send_alert("body", title="t", source="s") is False
+
+
+def test_an_unreadable_error_class_map_is_skipped_not_guessed() -> None:
+    """A snapshot whose error map holds junk must not invent a dominant class.
+
+    `_dominant_error` runs on a plain dict from the adapter layer. Skipping an
+    unreadable entry is the honest move: coercing it to zero would be
+    indistinguishable from "no failures", which is the reading this module
+    exists to avoid manufacturing.
+    """
+    snapshot = _snapshot(success_rate=0.0, considered=50)
+    snapshot["runs_by_error_class"] = {"network": "not-a-number", "parse": 7}
+
+    verdict = _verdict(snapshot)
+
+    assert verdict.degraded is True
+    assert verdict.dominant_error_class == "parse", verdict
+    assert verdict.dominant_error_count == 7
+
+
+def test_an_empty_error_map_yields_no_dominant_class() -> None:
+    """A snapshot with no error counts at all is a valid (if odd) input."""
+    snapshot = _snapshot(success_rate=0.0, considered=50)
+    snapshot["runs_by_error_class"] = {}
+
+    verdict = _verdict(snapshot)
+
+    assert verdict.degraded is True
+    assert verdict.dominant_error_class is None
+    assert verdict.dominant_error_count == 0
+
+
+def test_a_degraded_verdict_with_no_rate_still_says_something_useful() -> None:
+    """A degraded verdict without numbers must not produce an empty message.
+
+    Reachable when the collapse is detected from a signal other than the rate
+    (the ADR's other two conditions), or when the snapshot carried no rate at
+    all. The message falls back to the reason and the action line, so the
+    operator is never sent a blank notification.
+    """
+    verdict = HealthVerdict(degraded=True, reason="enrichment retries exhausted")
+
+    body = alert_body(verdict)
+
+    assert "enrichment retries exhausted" in body
+    assert "action:" in body, body
+
+
+def test_a_verdict_without_a_reason_falls_back_to_a_default_sentence() -> None:
+    """`reason` is optional in the value, so the body supplies one.
+
+    A notification whose first line is blank reads as a bug in the notifier
+    rather than as a real condition.
+    """
+    body = alert_body(HealthVerdict(degraded=True))
+
+    assert body.splitlines()[0].strip(), body
+    assert "attention" in body, body
+
+
+def test_a_renotify_after_the_interval_records_the_new_send_time() -> None:
+    """The interval is measured from the *last send*, not from the first.
+
+    Pinned because the alternative is a slow drumbeat that looks right in a
+    single test: if the timestamp were never advanced, a system that stayed
+    broken would notify on every tick after the first interval elapsed.
+    """
+    state = AlertState()
+    assert state.should_send(_verdict_with(True), now=0.0, min_interval_seconds=100)
+    assert state.should_send(_verdict_with(True), now=100.0, min_interval_seconds=100)
+    # The second send moved the window, so 150 is inside it again.
+    assert (
+        state.should_send(_verdict_with(True), now=150.0, min_interval_seconds=100)
+        is False
+    )
+    assert state.should_send(_verdict_with(True), now=201.0, min_interval_seconds=100)
+
+
+def test_an_already_degraded_state_with_no_history_sends() -> None:
+    """A state constructed as already-degraded with no send on record notifies.
+
+    Reachable for a caller (or a future restart-handling path) that seeds the
+    state from the current condition rather than from a transition. The wrong
+    answer is to treat the missing timestamp as "we just sent one" and stay
+    silent about a system that is broken right now.
+    """
+    state = AlertState(degraded=True, last_sent_at=None)
+
+    assert (
+        state.should_send(_verdict_with(True), now=500.0, min_interval_seconds=3600)
+        is True
+    )
+
+
+def test_the_recovery_body_says_what_recovered() -> None:
+    """The recovery message is its own string, and it must be about collection.
+
+    Asserted on the body rather than on the payload: the earlier integration
+    check matched the *title* ("Pearss recovered"), so the body could have been
+    empty and the test would still have passed. A notification whose text says
+    nothing is the same silence this module exists to end.
+    """
+    body = alert_body(HealthVerdict(degraded=False))
+
+    assert "recovered" in body.lower(), body
+    assert "collection" in body.lower(), body
+
+
+def test_a_healthy_verdict_on_a_healthy_state_sends_nothing() -> None:
+    """The most common call in production: healthy, and already was healthy.
+
+    Pinned because it is the only path that neither transitions nor renotifies,
+    and a regression that returned `True` here would notify on every tick of a
+    perfectly working system -- the fastest possible way to get a channel muted.
+    """
+    state = AlertState()
+
+    assert (
+        state.should_send(_verdict_with(False), now=0.0, min_interval_seconds=3600)
+        is False
+    )
+    assert (
+        state.should_send(_verdict_with(False), now=10_000.0, min_interval_seconds=3600)
+        is False
+    )

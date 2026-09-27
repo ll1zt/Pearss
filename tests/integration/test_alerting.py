@@ -489,3 +489,89 @@ def test_a_backing_off_source_is_visible_in_the_journal(
     assert "source" in logged, f"no per-source line at all:\n{logged}"
     if "failing" in logged:
         assert "consecutive failure" in logged, logged
+
+
+# --------------------------------------------------------------------------
+# The async wrapper: the loop's own failure handling
+#
+# `_check_health_and_alert` is what the scheduler's tick loop actually calls, and
+# its two branches (a raised failure, and a successful send being announced) are
+# the difference between "an alerting problem stays an alerting problem" and
+# "the tick loop dies". Neither is reachable through `_alert_if_needed` alone.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_wrapper_swallows_a_failing_health_check(
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-34: a broken health check must not take the tick loop down.
+
+    The snapshot query can fail for its own reasons (a locked database, a schema
+    mismatch after a bad migration). The tick loop calls this after every
+    collection pass, so an escaping exception here would stop collection
+    entirely -- the outage being alerted about, caused by the alerting.
+    """
+    scheduler = _scheduler(session_factory)
+
+    def explode() -> bool:
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(scheduler, "_alert_if_needed", explode, raising=False)
+
+    with caplog.at_level("WARNING", logger="app.scheduler"):
+        # Must not raise.
+        await scheduler._check_health_and_alert()
+
+    assert any("health check failed" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_wrapper_announces_a_sent_alert(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A delivered alert is logged, because the alternative is guessing.
+
+    The operator reading the journal cannot see the notification that arrived on
+    their phone, so the journal has to say one was sent -- otherwise "did it
+    fire?" is unanswerable from the host.
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    _finish_runs(session_factory, succeeded=0, failed=40)
+    scheduler = _scheduler(session_factory)
+
+    with caplog.at_level("INFO", logger="app.scheduler"):
+        await scheduler._check_health_and_alert()
+
+    assert len(sink.bodies()) == 1
+    assert any("health alert sent" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
+def test_a_supplied_client_is_used_for_the_post(
+    sink: _AlertSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sender accepts a client so a caller can reuse one.
+
+    Driven directly because going through the scheduler constructs its own
+    client; this is the injection point a future caller (or a test) would use to
+    share a connection pool.
+    """
+    import httpx
+
+    from adapters.alerting import send_alert
+
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    with httpx.Client() as client:
+        assert send_alert("body", title="t", source="s", client=client) is True
+
+    (payload,) = sink.bodies()
+    assert payload["text"] == "body"
