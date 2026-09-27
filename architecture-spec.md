@@ -34,7 +34,7 @@
 | 编号 | 需求 | 说明 |
 |---|---|---|
 | C1 | RSS 输出 | 标准 RSS feed，可配置过滤，稳定 GUID |
-| C2 | 查询 API | 面向 agent 的紧凑查询；大内容走 Resource/ID 引用 |
+| C2 | 查询 API | 面向 agent 的紧凑查询；大内容走 Resource/ID 引用；**检索**：FTS5 中日文全文 + 向量语义 + RRF 混合（ADR 0035）|
 | C3 | 富媒体输出 | TTS 音频等产物以 RSS enclosure 输出 |
 | C4 | Reader API | Google Reader API 兼容端点（`/api/greader.php`，FreshRSS 协议），NNW 以 FreshRSS 账号登录，已读/星标多端同步 |
 | C5 | 发布闸门 | Item 带 `publish_status`；挂载处理链的条目 enrich 完成前不发布——防 NNW 缓存原文导致译文永不显示 |
@@ -77,7 +77,9 @@
 
 - 多用户的完整实现（仅预留 tenant_id）
 - Web 管理 UI（Swagger 兜底，仅可信网内；公网部署经 `PEARSS_DOCS_ENABLED=0` 关闭，ADR 0016）
-- 全文搜索引擎
+- 通用全文搜索引擎（**边界**：pearss 只为自己订阅的条目建检索——FTS5 精确关键词 + 本地
+  向量语义检索 + RRF 融合，规模以万条计；**不**引入独立搜索服务、不做通用网页搜索、
+  不做跨租户检索。见 ADR 0035）
 - P1/P2 阶段的已读状态同步（C4 原定 P3，**已提前到 P1**，见 ADR 0004）
 - 推送通知、移动端专属能力
 - P1 阶段将全部 Python 第三方包写成 Nix derivation（以 uv 管理为准）
@@ -228,7 +230,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 | B4 处理插件 | Processor hookspec | P3 | 翻译插件跑通 enrich |
 | B5 错误分类法 | JobRun.error_class（enum 单源） | P1 ✅ | 五分类落库且 DB CHECK 强制；分类优先级与重试表同源 |
 | C1 RSS 输出 | ~~发布服务~~ | P1 → 公网化移除（ADR 0016） | 无鉴权 feed 不能上公网；内容消费收敛到 C4 Reader API，`rss_out` 模块保留供 P3 复用 |
-| C2 查询 API | /v1/items + item://{id} | P1 ✅ | 紧凑摘要 + keyset 分页 + 字段选择；正文独立端点 |
+| C2 查询 API | /v1/items + item://{id} | P1 ✅ → 检索增强见 ADR 0035 | 紧凑摘要 + keyset 分页 + 字段选择；正文独立端点；检索（全文/语义/混合）与向量为 P3 之后新增能力 |
 | C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
 | C4 Reader API | /api/greader.php | P1 ✅（原 P3） | NNW FreshRSS 登录 + 已读/星标同步，实测通过；ADR 0004 提前 |
 | C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 Reader API 与 MCP 工具两条路径均不可见（公开 RSS 渲染已移除，ADR 0016）；P3 处理器链联动待做。**注意**：`ready` → `published` 由可观察的首次输出触发，**每条输出路径都会写 `first_publish`**（Reader API contents 与 `/v1/items/{id}/body`；公开 RSS 渲染已移除，ADR 0016） |
