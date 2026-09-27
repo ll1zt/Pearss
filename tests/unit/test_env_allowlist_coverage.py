@@ -69,6 +69,17 @@ HOST_SIDE: frozenset[str] = frozenset(
         # The A3 ingest credential (ADR 0022). Host-side and only host-side:
         # the collectors never push content, so a sandboxed child has no
         # business holding the token that can.
+        # Alerting (ADR 0034). Host-side by design: the scheduler sends these
+        # from the parent process, and a sandboxed child has no business
+        # knowing where notifications go. `PEARSS_ALERT_URL` falls back to the
+        # deployment's `NOTIFY_URL` (the shared notify gateway), so a host that
+        # already injects that for other services needs no second setting.
+        "PEARSS_ALERT_URL",
+        "NOTIFY_URL",
+        "PEARSS_ALERT_SUCCESS_RATE_THRESHOLD",
+        "PEARSS_ALERT_MIN_RUNS",
+        "PEARSS_ALERT_MIN_INTERVAL_SECONDS",
+        "PEARSS_ALERT_TIMEOUT_SECONDS",
         "PEARSS_INGEST_TOKEN",
     }
 )
