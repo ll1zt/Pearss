@@ -84,3 +84,4 @@ docs/adr/
 | [0031](0031-translation-structure.md) | 翻译产物的结构：块级切分 + 原标签壳回填，非文本节点（代码/图片）不经 provider，inline 用成对标记保留 | accepted（**补充 ADR 0018 的产物形态**；**修订 ADR 0030 的产物形状假设**） | 2026-09-26 |
 | [0032](0032-half-open-request-header-timeout.md) | 半开请求头超时：应用层 uvicorn 协议类实施（nginx 本机未运行）、默认开启不可关闭、针对无进展而非总时长 | accepted（**补充 ADR 0016 的入口加固面**；**记录 ADR 0020 部署形态在本机的实际拓扑**） | 2026-09-26 |
 | [0033](0033-same-host-concurrency.md) | 同 host 并发度：同一 host 同时只允许一次抓取在途，已认领行在得知被拒后让位（不消耗 attempt） | accepted（**补充 ADR 0029 未定义的并发度契约**） | 2026-09-26 |
+| [0034](0034-alert-when-intervention-is-needed.md) | 需要介入时主动告警：复用部署侧 notify 网关（不自建出网通道/不持凭据）、边沿触发、有界重发、退避期日志 | accepted（**补充 ADR 0019 健康面的“主动”一侧**） | 2026-09-27 |
