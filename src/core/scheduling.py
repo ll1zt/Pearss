@@ -192,6 +192,12 @@ class ScheduleDecision:
     # answer to "when" is "now".
     next_due_at: datetime | None
     consecutive_failures: int
+    # The most recent failure's classification, carried out so a caller can say
+    # *why* a source is waiting. `failing: 3 consecutive failures, class network`
+    # is actionable; `failing: 3 consecutive failures` sends the reader back to
+    # the run history to find out what actually broke (issue #4, mode 2: a source
+    # in backoff used to render identically to a healthy one in the journal).
+    error_class: ErrorClass | None = None
 
 
 def decide_schedule(
@@ -238,6 +244,7 @@ def decide_schedule(
             interval_seconds=interval,
             next_due_at=None,
             consecutive_failures=consecutive_failures,
+            error_class=error_class,
         )
 
     if last_fetch_at.tzinfo is None:
@@ -253,6 +260,7 @@ def decide_schedule(
             interval_seconds=interval,
             next_due_at=None,
             consecutive_failures=consecutive_failures,
+            error_class=error_class,
         )
 
     if is_due(elapsed, interval):
@@ -261,6 +269,7 @@ def decide_schedule(
             interval_seconds=interval,
             next_due_at=None,
             consecutive_failures=consecutive_failures,
+            error_class=error_class,
         )
 
     return ScheduleDecision(
@@ -268,6 +277,7 @@ def decide_schedule(
         interval_seconds=interval,
         next_due_at=last_fetch_at + timedelta(seconds=interval),
         consecutive_failures=consecutive_failures,
+        error_class=error_class,
     )
 
 

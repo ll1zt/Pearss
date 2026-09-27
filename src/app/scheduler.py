@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import secrets
+import socket
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,6 +53,7 @@ from adapters.repository import (
 # alias keeps the call sites in this module short.
 from adapters.repository import timestamp as _iso
 from app.pipeline import CollectionResult, collect_source
+from core.alerting import AlertState
 from core.enums import ErrorClass, JobRunStatus
 from core.job_state import JobRunEvent
 from core.models import schedule_policy_from_json
@@ -322,6 +324,24 @@ def run_tick(
                 session.commit()
 
             if not decision.due:
+                # A source in backoff used to be indistinguishable from a
+                # healthy one in the journal: the decision was discarded here,
+                # so "waiting because it keeps failing" and "nothing to do yet"
+                # rendered identically (issue #4, mode 2). Log only the failing
+                # case -- a healthy source that is simply not due yet is the
+                # normal, silent state, and logging it would put one line per
+                # source per tick into the journal.
+                if decision.consecutive_failures > 0:
+                    LOGGER.info(
+                        "source %s failing: %d consecutive failure(s),"
+                        " last class %s, next probe at %s",
+                        source_id,
+                        decision.consecutive_failures,
+                        decision.error_class or "-",
+                        decision.next_due_at.isoformat()
+                        if decision.next_due_at
+                        else "-",
+                    )
                 return "skipped"
 
             with session_factory() as session:
@@ -414,6 +434,11 @@ class Scheduler:
         self._next_prune_at = 0.0
         self._next_reap_at = 0.0
         self._task: asyncio.Task[None] | None = None
+        # Edge detection for alerts (ADR 0034): in memory by design, since what
+        # it tracks is "have we already said this" -- a property of this
+        # process's alerting, not a fact worth coupling to the database whose
+        # failure is one of the things worth alerting about.
+        self._alert_state = AlertState()
         # Guards against a slow tick overlapping the next one. Without it a
         # fetch longer than the interval would stack up runs indefinitely.
         self._lock = asyncio.Lock()
@@ -480,10 +505,81 @@ class Scheduler:
             await asyncio.sleep(self._tick_seconds)
             try:
                 await self.tick_once()
+                await self._check_health_and_alert()
                 await self._reap_orphaned_runs_if_due()
                 await self._prune_audit_if_due()
             except OperationalError:
                 LOGGER.warning("scheduler storage operation failed; retrying next poll")
+
+    async def _check_health_and_alert(self) -> None:
+        """Speak up when collection needs a person (ADR 0034, issue #4).
+
+        Runs after the tick's collection work, on the scheduler's own loop,
+        reading the same `system_snapshot` an operator would fetch by hand --
+        one source of truth for the numbers rather than a second computation
+        that can disagree with the endpoint.
+
+        Off the event loop (`to_thread`): the snapshot is a few queries and the
+        send is an HTTP POST to another host, and neither belongs on the loop
+        that also serves requests. Failures here cannot reach the caller: the
+        whole body catches, because an alerting problem becoming a collection
+        outage is a strictly worse outcome than not being told (ADR 0034
+        decision 6).
+        """
+        try:
+            sent = await asyncio.to_thread(self._alert_if_needed)
+        except Exception as exc:
+            LOGGER.warning(
+                "health check failed (%s); retrying next tick", type(exc).__name__
+            )
+            return
+        if sent:
+            LOGGER.info("health alert sent")
+
+    def _alert_if_needed(self) -> bool:
+        """Read the snapshot, decide, and maybe send. Returns whether it sent.
+
+        Synchronous on purpose so it can be handed to a thread; every decision
+        is `core.alerting`'s, and this method only supplies the clock and the
+        sender.
+        """
+        from adapters.alerting import send_alert
+        from adapters.repository.inspection import system_snapshot
+        from core.alerting import ALERT_DEFAULTS, alert_body, decide_health
+
+        with self._session_factory() as session:
+            snapshot = system_snapshot(session, tenant_id=TENANT)
+        verdict = decide_health(
+            snapshot,
+            success_rate_threshold=float(
+                os.environ.get(
+                    "PEARSS_ALERT_SUCCESS_RATE_THRESHOLD",
+                    str(ALERT_DEFAULTS.success_rate_threshold),
+                )
+            ),
+            min_runs=int(
+                os.environ.get("PEARSS_ALERT_MIN_RUNS", str(ALERT_DEFAULTS.min_runs))
+            ),
+            min_interval_seconds=ALERT_DEFAULTS.min_interval_seconds,
+        )
+        min_interval = float(
+            os.environ.get(
+                "PEARSS_ALERT_MIN_INTERVAL_SECONDS",
+                str(ALERT_DEFAULTS.min_interval_seconds),
+            )
+        )
+        if not self._alert_state.should_send(
+            verdict, now=time.monotonic(), min_interval_seconds=min_interval
+        ):
+            return False
+        return send_alert(
+            alert_body(verdict),
+            title="Pearss collection degraded"
+            if verdict.degraded
+            else "Pearss recovered",
+            source=f"pearss@{socket.gethostname()}",
+            severity="error" if verdict.degraded else "info",
+        )
 
     async def _reap_orphaned_runs_if_due(self) -> None:
         """Close runs left `running`, on every tick (with a wide grace).
