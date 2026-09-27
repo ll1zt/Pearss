@@ -105,6 +105,20 @@ PEARSS_DOCS_ENABLED=0
 # 请求体上限（字节），超限 413。0 = 不限。默认 1MB。
 # PEARSS_MAX_BODY_BYTES=1048576
 
+# 主动告警（ADR 0034）。采集失败到需要人工/agent 介入时发一条通知。
+# 边沿触发：状态由好变差发一条、恢复再发一条，持续失败期间不重复轰炸。
+# 端点留空 = 关闭告警（记一条一次性 warning）；默认回落到部署的 NOTIFY_URL
+# （通知网关，见 host-config 的 docs/manuals/notify-gateway.md）。
+# PEARSS_ALERT_URL=
+# 判定阈值：最近 run 成功率低于此值且样本不少于 MIN_RUNS 才告警
+# （MIN_RUNS 防止启动瞬间单次失败误报）。
+# PEARSS_ALERT_SUCCESS_RATE_THRESHOLD=0.5
+# PEARSS_ALERT_MIN_RUNS=10
+# 同一告警状态在此间隔内不重发；恢复通知不受限制。
+# PEARSS_ALERT_MIN_INTERVAL_SECONDS=3600
+# 发送超时（秒）：告警在 scheduler tick 内发出，必须短到不拖住 tick。
+# PEARSS_ALERT_TIMEOUT_SECONDS=10
+
 # 半开请求头超时（秒）。连接建立后在该时长内未收到完整请求头即关闭；
 # 每个收到的字节重置窗口（针对「无进展」而非「总时长」）。
 # 默认 15，上限 300；0/负数/nan/inf 等坏值回落到默认，无法关闭。
