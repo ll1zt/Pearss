@@ -2,6 +2,7 @@ import os
 import pathlib
 import sys
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
@@ -84,10 +85,35 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=_include_object,
     )
 
     with context.begin_transaction():
         context.run_migrations()
+
+
+# Objects SQLite creates for itself. Autogenerate compares the models against
+# the database, so anything in the database that no model declares looks like
+# something to drop -- and dropping it would be wrong every time:
+#
+#   - `sqlite_stat1`, created by the ANALYZE migration 0022 runs;
+#   - the FTS5 full-text table and the five shadow tables it maintains
+#     (migration 0023). A virtual table cannot be represented in metadata at all.
+#
+# A prefix list rather than "ignore anything unmanaged": a genuinely undeclared
+# index must still fail the check, which is the whole point of running it
+# (issue #107). A *new* virtual table therefore fails until it is named here,
+# and that is the intended cost -- one deliberate line beats a silent drop.
+_UNMANAGED_TABLE_PREFIXES = ("sqlite_", "item_fts")
+
+
+def _include_object(
+    object_: Any, name: str | None, type_: str, reflected: bool, compare_to: Any
+) -> bool:
+    """Keep SQLite's own objects out of the autogenerate diff."""
+    if type_ == "table" and name is not None:
+        return not name.startswith(_UNMANAGED_TABLE_PREFIXES)
+    return True
 
 
 def run_migrations_online() -> None:
@@ -107,6 +133,7 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            include_object=_include_object,
             # SQLite cannot ALTER constraints; render_as_batch makes
             # table-scoped changes recreate-and-copy, which keeps migrations
             # working on both SQLite today and Postgres in P3.
