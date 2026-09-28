@@ -75,6 +75,11 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "Search collected items. Returns summaries only — titles, urls, ids "
             "and timestamps. Bodies are at the item://{id} Resource, or the "
             "get_item_body tool.\n\n"
+            "Two ways to search, and they answer different questions:\n"
+            "- q: substring match on the title only.\n"
+            "- full_text: real search over titles and bodies, most relevant "
+            "first. Use it when the words you are looking for may be in the "
+            "article rather than its headline. There is no need to pass both.\n\n"
             "Filter on the server, not in your context. These cost nothing here "
             "and are expensive if you pull a wide list and filter it yourself: "
             "- fields: comma-separated subset of id,guid,title,url,published_at,"
@@ -82,13 +87,15 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB "
             "with fields=id).\n"
             "- limit: how many rows (default 20, max 100). Ask for what you need.\n"
-            "- source_id, q, since, until, publish_status: narrow the query.\n"
+            "- source_id, q, full_text, since, until, publish_status: narrow "
+            "the query.\n"
             "So 'recent posts from one source' is one narrowed call, not a wide "
             "list you then scan."
         ),
     )
     async def search_items(
         q: str | None = None,
+        full_text: str | None = None,
         source_id: str | None = None,
         limit: int = 20,
         # source_id is included by default so a result is self-describing: a
@@ -111,6 +118,11 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "limit": min(limit, 100),
             "fields": fields,
         }
+        if full_text:
+            params["full_text"] = full_text
+            # Ranking is the whole point of a body search, and the API asks for
+            # it explicitly (sort=relevance is a 422 without full_text).
+            params["sort"] = "relevance"
         for name, value in (
             ("q", q),
             ("source_id", source_id),

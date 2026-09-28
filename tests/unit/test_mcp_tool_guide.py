@@ -171,6 +171,20 @@ def test_the_guide_states_the_limit_defaults_the_code_uses() -> None:
     )
 
 
+def test_the_search_tool_says_which_parameter_searches_what() -> None:
+    """Issue #70: `q` searched titles while the description implied everything.
+
+    A model that reads "Search collected items" and passes `q` gets title
+    matches only, and nothing in the answer says the body was never looked at.
+    The description has to draw the line itself, and name the parameter that
+    crosses it.
+    """
+    text = _descriptions()["search_items"].lower()
+    assert "title only" in text, text
+    assert "full_text" in text, text
+    assert "bodies" in text, text
+
+
 # --------------------------------------------------------------------------
 # AC-56: the guide's own numbering is navigable
 # --------------------------------------------------------------------------

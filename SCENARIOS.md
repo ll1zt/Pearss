@@ -34,7 +34,7 @@
 | AC-47..52 | #64 工具体覆盖（追加号段） | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_mcp_tool_coverage.py` |
 | AC-53..54 | #68 list_plugins 的 limit 与分页 | `docs/api/mcp-tool-guide.md` §2 | 已合并 | `tests/integration/test_list_plugins_limit.py` |
 | AC-55..57 | #69 guide 一致性与缺席的守卫（原声明 49..51） | `docs/api/mcp-tool-guide.md` §2 / §6 | 保留 | — |
-| AC-58..61 | #70 search_items 的 q 语义与边界（原声明 52..55） | issue #70 | 保留 | — |
+| AC-58..61 | #70 search_items 的 q 语义与边界（原声明 52..55） | issue #70 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（描述必须写明 q 只匹配标题、full_text 搜正文） |
 | AC-62..63 | #71 窄工具与 /v1 的形状差异（原声明 56..57） | issue #71 | 保留 | — |
 | AC-64..65 | #72 list_enrichments 的维度（原声明 58..59） | issue #72 | 保留 | — |
 | AC-66..68 | #73 工具面常驻上下文预算（原声明 60..62） | issue #73 | 保留 | — |
@@ -44,7 +44,7 @@
 | AC-78..80 | #77 列表查询全表扫与索引（原声明 72..74） | ADR 0035 §9 | 已合并 | `tests/integration/test_item_query_plan.py` |
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
-| AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 保留 | — |
+| AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
 | AC-99..104 | #82 本地 embedding（原声明 93..98） | ADR 0035 §9 | 保留 | — |
 | AC-105..109 | #83 RRF 混合检索（原声明 99..103） | ADR 0035 §9 | 保留 | — |
 

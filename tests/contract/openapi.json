@@ -399,7 +399,8 @@
         "description": "The sortable orders, whitelisted rather than free-form.\n\nAn arbitrary column name here would either fail at the database or, if\ninterpolated, become an injection point — SQL identifiers cannot be passed\nas query parameters.",
         "enum": [
           "-published_at",
-          "published_at"
+          "published_at",
+          "relevance"
         ],
         "title": "ItemSort",
         "type": "string"
@@ -1394,7 +1395,7 @@
     },
     "/v1/items": {
       "get": {
-        "description": "List collected items, newest first by default.\n\nBodies are not included at any `fields` setting; fetch them from\n`/v1/items/{id}/body`. Pending items never appear.",
+        "description": "List collected items, newest first by default.\n\nTwo ways to search, and they answer different questions: `q` is a substring\nmatch on the title, and `full_text` is a real search over titles and bodies\n(ADR 0035). `full_text` with `sort=relevance` ranks by FTS5's bm25; without\nit the matches keep the time order and its keyset cursor.\n\nBodies are not included at any `fields` setting; fetch them from\n`/v1/items/{id}/body`. Pending items never appear.",
         "operationId": "searchItems",
         "parameters": [
           {
@@ -1509,6 +1510,25 @@
               ],
               "description": "Substring match on the title.",
               "title": "Q"
+            }
+          },
+          {
+            "description": "Full-text search over titles and bodies, through the FTS5 index. Pair it with sort=relevance for best-match order; without it the matches stay newest-first.",
+            "in": "query",
+            "name": "full_text",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Full-text search over titles and bodies, through the FTS5 index. Pair it with sort=relevance for best-match order; without it the matches stay newest-first.",
+              "title": "Full Text"
             }
           },
           {

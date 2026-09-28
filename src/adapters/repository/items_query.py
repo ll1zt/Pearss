@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
 from adapters.repository._shared import EPOCH_FLOOR, row_to_item, visible_item_rows
+from adapters.repository.search_index import count_matches, search_rows
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.models import Item
 
@@ -26,6 +27,11 @@ class ItemFilter:
     source_id: str | None = None
     publish_status: str | None = None
     query: str | None = None
+    # Full-text over the title *and* the body, through the FTS5 index. Separate
+    # from `query` on purpose: `query` is a title substring match that callers
+    # already depend on, and this is a different question (see issue #80, ADR
+    # 0035 decision 2).
+    full_text: str | None = None
     since: str | None = None
     until: str | None = None
 
@@ -70,6 +76,27 @@ def query_items(
     # The generated column, not the expression: an indexed expression is only
     # matched while its text is identical, and the sort key has to keep using
     # the index it is named for (see db_models.Item.sort_key).
+    if filter.full_text:
+        # A different query shape, not a different condition: the order is
+        # relevance and the rows come from the index, so it cannot be expressed
+        # as one more WHERE on the keyset query below.
+        # A separate name from the keyset branch's `rows`: the two hold
+        # different shapes, and reusing one name is how a type checker (and a
+        # reader) loses track of which branch they are in.
+        matches, next_cursor = search_rows(
+            session,
+            conditions=_filter_conditions(
+                tenant_id, replace(filter, full_text=None), ItemRow.sort_key
+            ),
+            text=filter.full_text,
+            limit=limit,
+            cursor=cursor,
+        )
+        return ItemPage(
+            items=[row_to_item(row) for row, _score in matches],
+            next_cursor=next_cursor,
+        )
+
     sort_column = ItemRow.sort_key
 
     query = select(ItemRow).where(*_filter_conditions(tenant_id, filter, sort_column))
@@ -149,6 +176,15 @@ def count_matching(session: Session, *, tenant_id: str, filter: ItemFilter) -> i
     This is what tells a caller whether "clear this source" means three items
     or three thousand; paging to the end to find out costs a request per page.
     """
+    if filter.full_text:
+        return count_matches(
+            session,
+            conditions=_filter_conditions(
+                tenant_id, replace(filter, full_text=None), ItemRow.sort_key
+            ),
+            text=filter.full_text,
+        )
+
     sort_column = ItemRow.sort_key
     return int(
         session.execute(

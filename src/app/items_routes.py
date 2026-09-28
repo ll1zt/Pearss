@@ -81,6 +81,11 @@ class ItemSort(StrEnum):
 
     PUBLISHED_DESC = "-published_at"
     PUBLISHED_ASC = "published_at"
+    # Only meaningful with `full_text`: an order by relevance needs something to
+    # be relevant *to*. Asking for it without a query is a 422 rather than a
+    # silent fall back to the time order, because the caller would otherwise
+    # read the results as ranked when they are not.
+    RELEVANCE = "relevance"
 
 
 class ItemSummary(BaseModel):
@@ -178,16 +183,40 @@ def read_items(
     q: str | None = Query(
         default=None, max_length=200, description="Substring match on the title."
     ),
+    full_text: str | None = Query(
+        default=None,
+        max_length=200,
+        description=(
+            "Full-text search over titles and bodies, through the FTS5 index. "
+            "Pair it with sort=relevance for best-match order; without it the "
+            "matches stay newest-first."
+        ),
+    ),
     since: str | None = Query(default=None, max_length=32),
     until: str | None = Query(default=None, max_length=32),
 ) -> dict[str, Any]:
     """List collected items, newest first by default.
+
+    Two ways to search, and they answer different questions: `q` is a substring
+    match on the title, and `full_text` is a real search over titles and bodies
+    (ADR 0035). `full_text` with `sort=relevance` ranks by FTS5's bm25; without
+    it the matches keep the time order and its keyset cursor.
 
     Bodies are not included at any `fields` setting; fetch them from
     `/v1/items/{id}/body`. Pending items never appear.
     """
     del _
     selected = _select(fields)
+    if sort is ItemSort.RELEVANCE and not full_text:
+        raise api_error(
+            status_code=422,
+            code="relevance_without_query",
+            message="sort=relevance needs full_text to rank by.",
+            suggestion=(
+                "Pass full_text=<what to search for>, or ask for one of the "
+                "published_at orders."
+            ),
+        )
     descending = sort is ItemSort.PUBLISHED_DESC
 
     parsed_cursor = _parse_cursor(cursor)
@@ -199,6 +228,7 @@ def read_items(
                 publish_status.value if publish_status is not None else None
             ),
             query=q,
+            full_text=full_text,
             since=_parse_bound(since, code="invalid_since", field="since"),
             until=_parse_bound(until, code="invalid_until", field="until"),
         )
