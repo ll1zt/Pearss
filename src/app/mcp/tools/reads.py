@@ -279,11 +279,15 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=reads,
         description=(
             "List registered collector plugins with their manifest, version "
-            "and lifecycle status. Read-only."
+            "and lifecycle status. Pass `cursor` from a previous response's "
+            "next_cursor to page. Read-only."
         ),
     )
-    async def list_plugins(limit: int = 20) -> dict[str, Any]:
-        status, payload, _ = await core.get("/v1/plugins")
+    async def list_plugins(limit: int = 20, cursor: str = "") -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": min(limit, 100)}
+        if cursor:
+            params["cursor"] = cursor
+        status, payload, _ = await core.get("/v1/plugins", **params)
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)

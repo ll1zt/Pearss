@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text as sa_text
 
@@ -30,7 +30,14 @@ from adapters.repository import (
     timestamp,
     upsert_plugin,
 )
-from app.api_conventions import api_error, idempotency_key, remember, replay_or_none
+from app.api_conventions import (
+    api_error,
+    decode_cursor,
+    encode_cursor,
+    idempotency_key,
+    remember,
+    replay_or_none,
+)
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import by_name, plugins_for_surface
 from core.enums import PluginStatus
@@ -61,9 +68,20 @@ def _plugin_representation(manifest: Any, status: str) -> dict[str, Any]:
 def read_plugins(
     request: Request,
     _: Principal = Depends(read_required),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
 ) -> dict[str, Any]:
-    """Every registered collector with its manifest and lifecycle status."""
+    """Registered collectors, oldest page first, with manifest and status.
+
+    Offset paging with an opaque cursor, the same shape `/v1/sources` uses and
+    for the same reason: the set is bounded (tens of plugins, and it changes
+    only on install/uninstall) and the order is stable, so a row cannot shift
+    under a reader mid-walk. `next_cursor` is what makes a short page honest --
+    a `limit` that truncates without saying so is silent data loss, which is
+    the failure this endpoint's bound exists to avoid (issue #68).
+    """
     del _
+    offset = decode_cursor(cursor)
     with request.app.state.session_factory() as session:
         statuses = {
             row.id: row.status for row in list_plugin_rows(session, tenant_id="default")
@@ -72,8 +90,10 @@ def read_plugins(
         {**manifest, "status": statuses.get(str(manifest["id"]), "enabled")}
         for manifest in plugins_for_surface()
     ]
+    has_more = offset + limit < len(plugins)
     return {
-        "data": plugins,
+        "data": plugins[offset : offset + limit],
+        "next_cursor": encode_cursor(offset + limit) if has_more else None,
         "correlation_id": current_correlation_id(),
     }
 
