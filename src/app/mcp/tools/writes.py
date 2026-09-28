@@ -27,6 +27,7 @@ from app.mcp.confirmation import (
     _confirmation_verdict,
     _delete_items_confirmation,
     _delete_source_items_confirmation,
+    _items_fingerprint,
     _matches,
     _remove_source_confirmation,
     _retry_enrichments_confirmation,
@@ -584,12 +585,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                     "support elicitation, which writes require"
                 ),
             }
-        # The count is what the user saw; comparing it catches a list that
-        # changed between the prompt and the call, which the titles alone
-        # would not if two items were swapped.
+        # Compare the batch the user saw against the batch about to run. The
+        # count is the cheap first gate; the fingerprint is the one that covers
+        # content, because two batches can share a count (and even titles)
+        # while differing in every body -- see issue #67.
         if not (
             _matches(data["source_id"], source_id)
             and _matches(data["item_count"], str(len(items)))
+            and _matches(data["items_fingerprint"], _items_fingerprint(items))
         ):
             return {
                 "aborted": True,

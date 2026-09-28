@@ -16,6 +16,7 @@ carry that rule:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Any, cast
@@ -74,6 +75,32 @@ def _matches(confirmed: Any, actual: Any) -> bool:
         )
     expected = actual if isinstance(actual, str) else _render(actual)
     return str(confirmed).strip() == expected
+
+
+def _items_fingerprint(items: list[dict[str, Any]]) -> str:
+    """A stable digest of a submitted batch, in order.
+
+    The confirmation must be *of the items that execute*, but the items can
+    carry article bodies -- too large for an elicitation form, which lists
+    titles instead because a prompt the user cannot read is not a
+    confirmation. This is what reconciles the two: a short string that changes
+    if any field of any item changes, so `_matches` can compare the batch the
+    user was shown against the batch about to run without the bodies travelling
+    through the dialog.
+
+    Order is significant and deliberately preserved: the user was shown the
+    titles in this order, the response reports results in this order, and a
+    batch's own dedupe is first-wins -- so a permutation is a different request.
+    Only the dicts *inside* each item are canonicalised (via `sort_keys`), never
+    the list, which would erase exactly the distinction above.
+
+    Titles alone are not enough, which is the measured reason this exists: two
+    batches with identical titles and identical counts but different bodies
+    digest differently, and comparing counts alone accepted the second batch
+    (see issue #67).
+    """
+    canonical = json.dumps(items, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _comma_join(values: list[str]) -> str:
@@ -236,7 +263,9 @@ def _submit_items_confirmation(
 
     Item titles are listed rather than bodies: a prompt the user cannot read
     is not a confirmation, and a body can be arbitrarily long. The count is
-    carried separately so a truncated list is still an honest one.
+    carried separately so a truncated list is still an honest one, and the
+    fingerprint covers what the titles cannot -- two batches can share titles
+    and a count while differing in every body.
     """
     titles = "; ".join(
         str(item.get("title") or "(untitled)")[:60] for item in items[:5]
@@ -249,6 +278,9 @@ def _submit_items_confirmation(
         _fields={
             "source_id": source_id,
             "item_count": str(len(items)),
+            # Machine-checkable, and the only thing here that covers the bodies
+            # the form deliberately does not show. `titles` stays for the human.
+            "items_fingerprint": _items_fingerprint(items),
             "titles": f"{titles}{more}",
         },
     )
