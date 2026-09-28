@@ -29,6 +29,7 @@ from adapters.repository.deletion import (
 )
 from adapters.repository.enrichment import (
     backfill_chain,
+    backlog_for_source,
     chain_for_source,
     enqueue_chain,
     parse_chain,
@@ -122,6 +123,7 @@ __all__ = [
     "ReclaimPlan",
     "StoreOutcome",
     "backfill_chain",
+    "backlog_for_source",
     "chain_for_source",
     "claim_job_run",
     "collectable_sources",

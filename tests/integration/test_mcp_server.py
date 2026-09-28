@@ -264,6 +264,10 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # fallback for clients that cannot read the item:// Resource.
         "get_item_body",
         "get_system_snapshot",
+        # The task-level tool (ADR 0036, issue #73): "why is this source not
+        # updating" was a fixed several-call sequence ending in a confident
+        # answer built from whichever of them the caller happened to run.
+        "diagnose_source",
         "list_jobs",
         "list_runs",
         # Diagnostics: one row in full, which `list_*` truncates and

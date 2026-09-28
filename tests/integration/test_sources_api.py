@@ -1654,3 +1654,53 @@ async def test_user_backfill_queues_a_watchable_batch_not_the_whole_backlog(
             sa.text("select count(*) from item_enrichment")
         ).scalar()
     assert total == 11, "3 + 3 + 5 rows queued, never more than asked for"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_diagnose_answers_the_question_in_one_call(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """The aggregate endpoint behind `diagnose_source` (ADR 0036, issue #73).
+
+    Asserted as one payload rather than as four queries: the point of the
+    endpoint is that a caller does not have to know which four, in which order,
+    and that stopping early is not possible.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "diagnose-source-1"},
+        json={"url": "https://diagnose.example/feed", "schedule_policy": policy()},
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+
+    response = await writer.get(f"/v1/sources/{source_id}:diagnose")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["source"]["id"] == source_id
+    assert body["source"]["status"] == "active"
+    assert body["source"]["schedule_policy"] == policy()
+    # The chain is empty for this source, which is a fact the answer states
+    # rather than omits -- an absent key would be indistinguishable from "the
+    # question was not asked".
+    assert body["source"]["pipeline_chain"] is None
+    assert body["chain"] == {
+        "queued": 0,
+        "running": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "oldest_queued_at": None,
+    }
+    assert body["runs"] == []
+    assert body["collection"]["loop_alive"] is True
+    assert body["correlation_id"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_diagnose_refuses_an_unknown_source(writer: httpx.AsyncClient) -> None:
+    """A diagnostic that invents an answer is worse than one that says 404."""
+    response = await writer.get("/v1/sources/nope:diagnose")
+    assert response.status_code == 404, response.text

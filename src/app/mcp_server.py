@@ -49,6 +49,11 @@ def build_mcp_server(app: Any) -> MCPServer:
             # rather than 22 times in per-tool schemas -- they are identical
             # across tools, and the body fields a schema *could* declare change
             # per call. See the guide's section on outputSchema (issue #74).
+            "Filter on the server rather than in your context: list tools "
+            "take `fields` and `limit`, and a narrower request costs "
+            "proportionally less to read. Some tools report per-item outcomes "
+            "in each result's `action` field; branch on that rather than on the "
+            "status code.\n\n"
             "Some fields appear in results rather than in any tool's schema: "
             "`truncated_items` and `total_chars` mean part of the result was "
             "cut to fit, and a narrower request would return the rest; "
