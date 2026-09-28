@@ -8,7 +8,6 @@ contract, not tidiness.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
@@ -117,49 +116,6 @@ def _shrink(value: Any, *, cap_list: bool = True) -> Any:
             clipped.append({"truncated_items": len(value) - len(clipped)})
         return clipped
     return value
-
-
-def _render(value: Any) -> str:
-    """Canonical text form of an argument, for confirmation and comparison.
-
-    The elicited field is a string because MCP cannot render a nested object in
-    an elicitation schema. Comparing the canonical form of the executed value
-    against the confirmed one is what keeps "the confirmation matched the
-    execution" checkable rather than assumed.
-    """
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
-
-
-def _matches(confirmed: Any, actual: Any) -> bool:
-    """Whether a confirmed value equals the value about to be executed.
-
-    Strings compare as themselves; anything structured compares as its
-    canonical JSON, which is the form the schema carries. Rendering a string
-    through json.dumps would add quotes the client never sent, so every string
-    comparison would fail and every write would abort.
-
-    Booleans compare by truth value: the elicitation field is typed `bool`, so
-    the client returns a real boolean, and comparing it as text ("True" against
-    the JSON "true") would reject every confirmation of a flag.
-    """
-    if isinstance(actual, bool):
-        if isinstance(confirmed, bool):
-            return confirmed == actual
-        return confirmed.strip().lower() in (
-            ("true", "1") if actual else ("false", "0")
-        )
-    expected = actual if isinstance(actual, str) else _render(actual)
-    return str(confirmed).strip() == expected
-
-
-def _comma_join(values: list[str]) -> str:
-    """Join a list into the one string an elicitation schema can carry.
-
-    Elicitation fields are primitives only, so a list travels as text and is
-    compared back in that form. The join must be deterministic or every
-    confirmation of a batch would be rejected as drift.
-    """
-    return ",".join(values)
 
 
 def _truncate(payload: dict[str, Any]) -> dict[str, Any]:
