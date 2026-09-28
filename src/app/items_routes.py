@@ -19,11 +19,13 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from adapters.correlation import current as current_correlation_id
+from adapters.db_models import ItemEnrichment
 from adapters.filestore import read_body
 from adapters.repository import (
     ItemFilter,
@@ -36,7 +38,14 @@ from adapters.repository import (
 from adapters.repository import (
     delete_items as repository_delete_items,
 )
-from app.api_conventions import api_error, idempotency_key, remember, replay_or_none
+from app.api_conventions import (
+    api_error,
+    decode_cursor,
+    enrichment_page,
+    idempotency_key,
+    remember,
+    replay_or_none,
+)
 from app.auth import Principal, read_required, write_required
 from core.enums import PublishStatus
 from core.models import Item
@@ -331,6 +340,53 @@ def read_item(
             suggestion="Search items to find the intended id.",
         )
     return {name: v for name, v in _field_map(item).items() if name in selected}
+
+
+@router.get("/items/{item_id}/enrichments", operation_id="listItemEnrichments")
+def list_item_enrichments(
+    request: Request,
+    item_id: str = Path(min_length=1, max_length=64),
+    _: Principal = Depends(read_required),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Why *this* item is being held: its processor-chain rows, and nothing else.
+
+    The dimension the source-scoped route lacks. An agent that already has an
+    item id (from search_items) had to list its whole source's chain rows and
+    filter them in context -- the shape the guide's "filter on the server" rule
+    exists to avoid -- and it needed a title search first, which can come back
+    empty for the very item it is holding (issue #72).
+
+    A *pending* item is answered, unlike every other item read. The gate hides
+    content, and these rows are the reason the content is held -- answering 404
+    here would make the route useless for exactly the question it exists for (a
+    chain that failed and left an item stuck). The source-scoped route already
+    returned these rows for a source's pending items, so this is the consistent
+    choice rather than a new exception; `detail` carries the processor's own
+    error text, which is metadata about the attempt rather than the item.
+
+    An id that names nothing is still 404.
+    """
+    del _
+    offset = decode_cursor(cursor)
+    with request.app.state.session_factory() as session:
+        if get_item(session, item_id) is None:
+            raise api_error(
+                status_code=404,
+                code="item_not_found",
+                message=f"No item with id {item_id!r}.",
+                suggestion="Search items to find the intended id.",
+            )
+        query = sa.select(ItemEnrichment).where(ItemEnrichment.item_id == item_id)
+        if status is not None:
+            query = query.where(ItemEnrichment.status == status)
+        rows = list(session.execute(query).scalars().all())
+
+    return enrichment_page(
+        rows, limit=limit, offset=offset, correlation_id=current_correlation_id()
+    )
 
 
 @router.get("/items/{item_id}/body", operation_id="getItemBody")

@@ -276,22 +276,53 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=reads,
         description=(
-            "Processor-chain rows for one source: what translations are "
-            "queued/running/succeeded/failed, with error classes and attempt "
-            "counts. Use it to see why an item is being held by the gate."
+            "Processor-chain rows: what a source's (or one item's) translations, "
+            "full texts or other products are doing -- queued, running, "
+            "succeeded, failed -- with error classes and attempt counts. Pass "
+            "item_id to ask why one item you already have an id for is being "
+            "held; pass source_id for the whole source's chain. This is the tool "
+            'for "why is this stuck": get_item does not carry chain state.'
         ),
     )
     async def list_enrichments(
-        source_id: str, status: str = "", limit: int = 20, cursor: str = ""
+        item_id: str = "",
+        source_id: str = "",
+        status: str = "",
+        limit: int = 20,
+        cursor: str = "",
     ) -> dict[str, Any]:
+        """Chain rows for one item, or for one source's items.
+
+        Two filters, one tool: `list_runs(job_id)` is the same shape (child rows
+        selected by their parent), and a caller holding an item id should not
+        have to pull its source's whole chain into context and filter it there.
+        """
         params: dict[str, Any] = {"limit": min(limit, 100)}
         if status:
             params["status"] = status
         if cursor:
             params["cursor"] = cursor
-        http_status, payload, _ = await core.get(
-            f"/v1/sources/{source_id}/enrichments", **params
-        )
+        if item_id:
+            path = f"/v1/items/{item_id}/enrichments"
+        elif source_id:
+            path = f"/v1/sources/{source_id}/enrichments"
+        else:
+            # Not a protocol error: the model can fix this by calling a tool it
+            # already has, and the message says which one gives it the id.
+            return {
+                "error": {
+                    "code": "missing_target",
+                    "message": (
+                        "Pass item_id (one item's chain rows) or source_id "
+                        "(every item of one source)."
+                    ),
+                    "suggestion": (
+                        "search_items returns item ids; list_sources returns "
+                        "source ids."
+                    ),
+                }
+            }
+        http_status, payload, _ = await core.get(path, **params)
         if http_status != 200:
             return _error_from(payload, http_status)
         return _truncate(payload)
