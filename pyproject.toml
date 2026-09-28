@@ -304,4 +304,12 @@ also_copy = [
   # nothing rather than reporting success, which is the failure mode the list
   # above exists to prevent.
   "nix",
+  # Fifth and sixth distinct paths, and the same lesson again: the
+  # scenario-number guards read `SCENARIOS.md` (the registry itself) and
+  # `architecture-spec.md` (which may cite scenario numbers) from the
+  # repository root, so both must exist in the tree the mutation gate builds.
+  # Without them stats collection dies on a FileNotFoundError -- the gate
+  # reporting nothing rather than reporting success.
+  "SCENARIOS.md",
+  "architecture-spec.md",
 ]
