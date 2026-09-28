@@ -39,6 +39,7 @@ from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Source as SourceRow
 from adapters.repository._shared import row_to_item
+from adapters.repository.search_index import deindex_items
 from core.models import Item
 
 LOGGER = logging.getLogger(__name__)
@@ -157,6 +158,11 @@ def delete_items(
     ).scalar_one()
 
     session.execute(delete(ItemRow).where(ItemRow.id.in_(found_ids)))
+    # `item_fts` is a virtual table, so the schema's ON DELETE CASCADE does not
+    # reach it and the rows have to go explicitly. This is the one place that
+    # needs it: both source-level deletions funnel through here, so one call
+    # covers delete_item, delete_source_items and remove_source.
+    deindex_items(session, found_ids)
     # Flush before counting references: the rows must be gone from the
     # transaction's view of the table, or every body still looks referenced by
     # the rows being deleted and nothing is ever reclaimed.

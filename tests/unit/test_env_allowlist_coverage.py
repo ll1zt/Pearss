@@ -53,6 +53,7 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_READER_PASSWORD",
         "PEARSS_BACKFILL_SOURCE_ID",  # enrichment-backfill CLI plumbing
         "PEARSS_BACKFILL_LIMIT",
+        "PEARSS_REINDEX_BATCH",  # reindex CLI plumbing
         "PEARSS_ENRICHMENT_CONCURRENCY",  # worker sweep concurrency
         "PEARSS_TICK_CONCURRENCY",  # scheduler tick concurrency
         # Fetch politeness (issue #35). Host-side by design: the sandboxed

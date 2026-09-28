@@ -35,6 +35,7 @@ from adapters.repository import (
     set_source_title_if_absent,
     store_item,
 )
+from adapters.repository.search_index import index_item
 from adapters.sanitize import sanitize_html
 from app import collector_registry
 from app.collector_registry import Registration as CollectorRegistration
@@ -129,10 +130,15 @@ def normalise_and_store(
         # stored content. Every reader of the store — RSS, the Reader API, any
         # future output — therefore serves safe HTML without having to remember
         # to sanitise, which is the failure mode a per-render sanitiser invites.
+        # Sanitised once, kept in hand: the index below needs the same text the
+        # store gets, and reading the file back to get it would be a second
+        # source of the same bytes. The condition stays on the *raw* body, so an
+        # item whose markup sanitises away is still stored with an empty body
+        # rather than becoming title-only -- that is a different state, and this
+        # change has no business choosing it.
+        body_markup = sanitize_html(result.body)
         if result.body:
-            item = with_content_ref(
-                item, filestore.store_body(sanitize_html(result.body))
-            )
+            item = with_content_ref(item, filestore.store_body(body_markup))
 
         outcome = store_item(session, item)
         if outcome.action in (
@@ -150,6 +156,15 @@ def normalise_and_store(
             # its own English posts to be told there was nothing to do. The
             # decision is the same one the processor makes, from the same
             # function, so the two can never disagree about an item.
+            # The search index is written here, in the same transaction as the
+            # row it describes, and only for the outcomes that write or advance
+            # the row -- a deduped-away draft changed nothing to index.
+            index_item(
+                session,
+                item_id=item.id,
+                title=item.title,
+                body=body_markup,
+            )
             wanted = _specs_needing_work(chain, body=result.body, title=item.title)
             if wanted:
                 enqueue_chain(

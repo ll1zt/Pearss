@@ -304,6 +304,20 @@ enrichment-backfill source_id limit="":
     exec uv run python -m app.enrichment_backfill
 
 
+# Index stored items the search index does not have yet (bulk catch-up).
+# The scheduler tops the index up on its own; this is for a corpus that predates
+# it, or for not waiting. Idempotent.
+# Usage: just reindex [batch]
+reindex batch="":
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    export PEARSS_REINDEX_BATCH="{{batch}}"
+    exec uv run python -m app.reindex
+
+
 # Back up the fact-source data (SQLite snapshot + file store) into PEARSS_BACKUP_DIR (default backups/).
 backup:
     #!/usr/bin/env bash
