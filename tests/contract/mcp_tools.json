@@ -142,6 +142,28 @@
       "type": "object"
     }
   },
+  "diagnose_source": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false,
+      "read_only_hint": true
+    },
+    "description": "Why a source is not updating, answered in one call: its status and schedule, its job and the last few runs with their error classes, how much is stuck behind its processing chain (and since when), and whether the collection loop is alive at all. Use this instead of assembling the answer from list_jobs, list_runs and list_enrichments yourself -- their order matters, and stopping early produces a confident answer from half the evidence.",
+    "input_schema": {
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "diagnose_sourceArguments",
+      "type": "object"
+    }
+  },
   "get_item": {
     "annotations": {
       "destructive_hint": false,
@@ -427,7 +449,7 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource, or the get_item_body tool.\n\nTwo ways to search, and they answer different questions:\n- q: substring match on the title only.\n- full_text: real search over titles and bodies, most relevant first. Use it when the words you are looking for may be in the article rather than its headline. There is no need to pass both.\n\nFilter on the server, not in your context. These cost nothing here and are expensive if you pull a wide list and filter it yourself: - fields: comma-separated subset of id,guid,title,url,published_at,source_id,publish_status. Requesting fewer fields is the single biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB with fields=id).\n- limit: how many rows (default 20, max 100). Ask for what you need.\n- source_id, q, full_text, since, until, publish_status: narrow the query.\nSo 'recent posts from one source' is one narrowed call, not a wide list you then scan.",
+    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. Pass one or the other, not both. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the single biggest saving (see the instructions).",
     "input_schema": {
       "properties": {
         "fields": {
@@ -641,7 +663,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022). Use this to store content you have gathered elsewhere: pass the title, the source URL, the publication time and the body, and Pearss stores it through the same pipeline as collected items.\n\nThe target must be a source of type 'agent' -- create one first with add_source using a url like 'agent://newsletter-intake'. Pushing into an rss or web source is refused, because that would mix content from one origin into another's provenance.\n\n`source_id` is the path, never an argument: an item's source is not yours to choose. Items are visible to readers as soon as they are stored unless the source has a processing chain. Submitted HTML is sanitised on the way in, so it does not need pre-cleaning, and what you send is treated as data rather than trusted.\n\nThe response reports what happened per item: branch on each result's `action`, not on the status code. A 201 means the submission was accepted, not that every item was new -- `skip_same_source` and `suppress` mean an identical item already existed. Two items differing only in external_id still count as one when their content is identical, so an empty body does not distinguish them.\n\nRequires confirmation: this adds content to the corpus, where the source's processing chain can make real outbound requests to the submitted URLs and spend provider budget on it.",
+    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content, and Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, because that would mix one origin's content into another's provenance. Items are visible to readers as soon as they are stored, unless the source has a processing chain. Requires confirmation: this adds content to the corpus, where the chain can make real outbound requests to the submitted URLs and spend provider budget on it.",
     "input_schema": {
       "properties": {
         "items": {

@@ -186,6 +186,56 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 
 
 # --------------------------------------------------------------------------
+# AC-66 / AC-67: the standing surface has a bound, and a task has one tool
+# --------------------------------------------------------------------------
+
+# Names + descriptions + input schemas: the part of the tool face that is in
+# every conversation whether the tools are used or not. A *budget* rather than a
+# measurement, because a number nobody enforces is how this grew past 3,500
+# tokens in the first place (AC-66).
+#
+# 14,000 is what the surface measured after the pass that moved cross-tool
+# guidance into the server instructions. The number matters less than the fact
+# that growth now has to be argued for in a diff. It is deliberately not 8,000:
+# cutting that far means deleting the selection guidance -- "use
+# delete_source_items to clear a bad crawl", "set_source_status instead" -- that
+# keeps a model from reaching for the irreversible tool.
+SURFACE_BUDGET_CHARS = 14_000
+
+
+def test_the_tool_face_stays_within_its_budget() -> None:
+    """AC-66: the bound is the deliverable, so it is a test, not a paragraph."""
+    snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    sizes = {
+        name: len(name)
+        + len(tool["description"])
+        + len(json.dumps(tool.get("input_schema", {}), ensure_ascii=False))
+        for name, tool in snapshot.items()
+    }
+    biggest = sorted(sizes.items(), key=lambda pair: -pair[1])[:5]
+    assert sum(sizes.values()) <= SURFACE_BUDGET_CHARS, (
+        f"the tool face is {sum(sizes.values())} characters against a "
+        f"{SURFACE_BUDGET_CHARS} budget, and every conversation carries it "
+        f"whether or not these tools are used. Largest contributors: {biggest}. "
+        "Tighten them, move the shared part into the server instructions, or "
+        "raise the budget deliberately in this file."
+    )
+
+
+def test_a_task_level_tool_exists_for_the_question_that_needed_one() -> None:
+    """AC-67: a question always answered by the same several calls gets one tool.
+
+    The proof that `diagnose_source` is that tool rather than another projection
+    is that its description can name the calls it replaces. If it could not name
+    them, it would be a projection with a longer name.
+    """
+    snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    description = snapshot["diagnose_source"]["description"]
+    for replaced in ("list_jobs", "list_runs", "list_enrichments"):
+        assert replaced in description, (replaced, description)
+
+
+# --------------------------------------------------------------------------
 # AC-56: the guide's own numbering is navigable
 # --------------------------------------------------------------------------
 

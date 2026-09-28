@@ -52,6 +52,24 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=reads,
         description=(
+            "Why a source is not updating, answered in one call: its status and "
+            "schedule, its job and the last few runs with their error classes, "
+            "how much is stuck behind its processing chain (and since when), and "
+            "whether the collection loop is alive at all. Use this instead of "
+            "assembling the answer from list_jobs, list_runs and "
+            "list_enrichments yourself -- their order matters, and stopping "
+            "early produces a confident answer from half the evidence."
+        ),
+    )
+    async def diagnose_source(source_id: str) -> dict[str, Any]:
+        status, payload, _ = await core.get(f"/v1/sources/{source_id}:diagnose")
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        annotations=reads,
+        description=(
             "One source in full: schedule policy, pipeline chain, folder, "
             "status, and the paging state that bounds what collection has "
             "covered. Use it when diagnosing one source -- `list_sources` is "
@@ -72,25 +90,12 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=reads,
         description=(
-            "Search collected items. Returns summaries only — titles, urls, ids "
-            "and timestamps. Bodies are at the item://{id} Resource, or the "
-            "get_item_body tool.\n\n"
-            "Two ways to search, and they answer different questions:\n"
-            "- q: substring match on the title only.\n"
-            "- full_text: real search over titles and bodies, most relevant "
-            "first. Use it when the words you are looking for may be in the "
-            "article rather than its headline. There is no need to pass both.\n\n"
-            "Filter on the server, not in your context. These cost nothing here "
-            "and are expensive if you pull a wide list and filter it yourself: "
-            "- fields: comma-separated subset of id,guid,title,url,published_at,"
-            "source_id,publish_status. Requesting fewer fields is the single "
-            "biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB "
-            "with fields=id).\n"
-            "- limit: how many rows (default 20, max 100). Ask for what you need.\n"
-            "- source_id, q, full_text, since, until, publish_status: narrow "
-            "the query.\n"
-            "So 'recent posts from one source' is one narrowed call, not a wide "
-            "list you then scan."
+            "Search collected items. `q` searches the title only, as a "
+            "substring; `full_text` searches titles and bodies and ranks by "
+            "relevance — use it when the words may be in the article rather "
+            "than its headline. Pass one or the other, not both. `source_id`, "
+            "`since`, `until` and `publish_status` narrow the query, and "
+            "`fields` is the single biggest saving (see the instructions)."
         ),
     )
     async def search_items(

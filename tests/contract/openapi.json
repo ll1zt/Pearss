@@ -2980,6 +2980,56 @@
         ]
       }
     },
+    "/v1/sources/{source_id}:diagnose": {
+      "get": {
+        "description": "Everything one question needs: why is this source not updating?\n\nDeclared *before* `GET /sources/{source_id}` on purpose: that route's path\nparameter matches `:diagnose` too, and Starlette takes the first route that\nmatches, so the other order answers 404 with `source_id` set to\n\"abc:diagnose\". The POST verbs elsewhere in this module do not have the\nproblem because no GET route can shadow them.\n\nAn aggregate endpoint rather than six calls, which is ADR 0036's rule for a\nquestion that is always asked the same way: the source's own state, its job\nand recent runs with their error classes, how much is stuck behind its\nprocessing chain, and whether the collection loop is alive at all. The order\nthose calls go in is knowledge the caller should not have to have, and\nstopping after two of them produces a confident answer built from half the\nevidence.\n\n`get_source` remains the full single row; this is the diagnostic view.",
+        "operationId": "diagnoseSource",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Diagnosesource",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Diagnose Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
     "/v1/sources/{source_id}:ingest": {
       "post": {
         "description": "Push items into an agent source (A3, ADR 0022).\n\nThe draft is built here and handed to `normalise_and_store`, the same call\na collector's parse output takes. Everything downstream -- sanitising at\nthe store boundary, content-addressed storage, the six-way dedupe, the\npublish gate -- is therefore shared with collection rather than\nreimplemented, which is the whole point of the design: a second writer\nwould either bypass sanitisation or force it to be duplicated.\n\nScope is `ingest`: a credential that can push content is not automatically\none that can delete sources, rewrite schedules or read anyone's state. The\nfull token holds both, so this narrows the *ingest* credential rather than\nthe full one (ADR 0022).\n\nItems are visible on submit when the source has no chain, matching a\nchainless rss source. The user's decision (2026-09-14) was explicit that\nagent content should be visible without a hold-back step.",

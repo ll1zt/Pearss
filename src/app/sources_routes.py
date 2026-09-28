@@ -26,8 +26,11 @@ from sqlalchemy.orm import Session
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
 from adapters.repository import (
+    backlog_for_source,
     create_source,
     get_source,
+    job_for_source,
+    list_job_runs,
     list_sources,
     parse_chain,
     timestamp,
@@ -58,6 +61,11 @@ from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
 
 LOGGER = logging.getLogger(__name__)
+
+# How many recent runs the diagnostic view carries. Enough to see a failure
+# streak, few enough that the answer stays one screen: the runs themselves have
+# their own paged endpoint.
+DIAGNOSE_RUNS = 5
 
 TENANT = "default"
 
@@ -311,6 +319,88 @@ def read_sources(
     return {
         "data": [_source_payload(row) for row in page],
         "next_cursor": encode_cursor(offset + limit) if has_more else None,
+        "correlation_id": current_correlation_id(),
+    }
+
+
+@router.get("/sources/{source_id}:diagnose", operation_id="diagnoseSource")
+def diagnose_source(
+    request: Request,
+    source_id: str,
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """Everything one question needs: why is this source not updating?
+
+    Declared *before* `GET /sources/{source_id}` on purpose: that route's path
+    parameter matches `:diagnose` too, and Starlette takes the first route that
+    matches, so the other order answers 404 with `source_id` set to
+    "abc:diagnose". The POST verbs elsewhere in this module do not have the
+    problem because no GET route can shadow them.
+
+    An aggregate endpoint rather than six calls, which is ADR 0036's rule for a
+    question that is always asked the same way: the source's own state, its job
+    and recent runs with their error classes, how much is stuck behind its
+    processing chain, and whether the collection loop is alive at all. The order
+    those calls go in is knowledge the caller should not have to have, and
+    stopping after two of them produces a confident answer built from half the
+    evidence.
+
+    `get_source` remains the full single row; this is the diagnostic view.
+    """
+    del _
+    with request.app.state.session_factory() as session:
+        row = _require_source(session, source_id)
+        job = job_for_source(session, source_id)
+        runs = (
+            list_job_runs(session, job_id=job.id, limit=DIAGNOSE_RUNS)
+            if job is not None
+            else []
+        )
+        chain = backlog_for_source(session, source_id)
+        source = {
+            "id": row.id,
+            "type": row.type,
+            "status": row.status,
+            "url": row.url,
+            "title": row.title,
+            "schedule_policy": (
+                json.loads(row.schedule_policy) if row.schedule_policy else None
+            ),
+            "pipeline_chain": (
+                json.loads(row.pipeline_chain) if row.pipeline_chain else None
+            ),
+            "target_lang": row.target_lang,
+            "folder": row.folder,
+            # A paging collector's interval: how far back it has reached. Null
+            # for feeds, which do not page.
+            "seen_frontier": row.seen_frontier,
+            "floor_cursor": row.floor_cursor,
+        }
+        job_summary = (
+            None
+            if job is None
+            else {
+                "id": job.id,
+                "status": job.status,
+                "schedule": job.schedule,
+                "priority": job.priority,
+            }
+        )
+
+    # Read from the running object rather than from the database: the loop's
+    # liveness is a property of this process, and a row would be a second
+    # opinion that can disagree with it.
+    scheduler = getattr(request.app.state, "scheduler", None)
+    loop_alive, loop_owner = (
+        scheduler.liveness() if scheduler is not None else (True, "")
+    )
+
+    return {
+        "source": source,
+        "job": job_summary,
+        "runs": runs,
+        "chain": chain,
+        "collection": {"loop_alive": loop_alive, "loop_owner": loop_owner},
         "correlation_id": current_correlation_id(),
     }
 

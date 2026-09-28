@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enrichment import (
@@ -132,6 +134,39 @@ def enqueue_chain(
         )
         queued += 1
     return queued
+
+
+def backlog_for_source(session: Session, source_id: str) -> dict[str, Any]:
+    """The chain's state for one source, as counts rather than rows.
+
+    "Why is this source not updating" usually wants "eleven items are stuck
+    behind a failed translation", not the eleven rows -- the rows are what
+    list_enrichments is for. `oldest_queued_at` is the part counts cannot say:
+    a queue of one that has been waiting an hour is a different problem from a
+    queue of one that just arrived.
+    """
+    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    counts: dict[str, int] = {
+        status: int(total)
+        for status, total in session.execute(
+            select(ItemEnrichment.status, func.count())
+            .where(ItemEnrichment.item_id.in_(item_ids))
+            .group_by(ItemEnrichment.status)
+        ).all()
+    }
+    oldest = session.execute(
+        select(func.min(ItemEnrichment.created_at)).where(
+            ItemEnrichment.item_id.in_(item_ids),
+            ItemEnrichment.status == EnrichmentStatus.QUEUED.value,
+        )
+    ).scalar_one_or_none()
+    return {
+        "queued": counts.get(EnrichmentStatus.QUEUED.value, 0),
+        "running": counts.get(EnrichmentStatus.RUNNING.value, 0),
+        "succeeded": counts.get(EnrichmentStatus.SUCCEEDED.value, 0),
+        "failed": counts.get(EnrichmentStatus.FAILED.value, 0),
+        "oldest_queued_at": oldest,
+    }
 
 
 def statuses_for_item(
