@@ -46,8 +46,22 @@ API_TABLES = {"idempotency_record"}
 # belongs in the expected set -- and the migration's downgrade drops it, because
 # it created it.
 STATS_TABLE = "sqlite_stat1"
+
+# An FTS5 table is a virtual table plus five shadow tables SQLite maintains for
+# it. They are equally real, and equally not something a later autogenerate
+# should offer to drop: naming them here is what keeps this list a description
+# of the schema rather than a wish about it.
+FTS_TABLES = {
+    f"item_fts{suffix}"
+    for suffix in ("", "_data", "_idx", "_content", "_docsize", "_config")
+}
+
 EXPECTED_TABLES = (
-    P1_TABLES | READER_TABLES | API_TABLES | {"plugin", "item_enrichment", STATS_TABLE}
+    P1_TABLES
+    | READER_TABLES
+    | API_TABLES
+    | {"plugin", "item_enrichment", STATS_TABLE}
+    | FTS_TABLES
 )
 
 

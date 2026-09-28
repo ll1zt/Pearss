@@ -53,6 +53,7 @@ from adapters.repository import (
 # The fixed-width format has one definition (adapters.timestamps); the
 # alias keeps the call sites in this module short.
 from adapters.repository import timestamp as _iso
+from adapters.repository.search_index import index_missing
 from app.pipeline import CollectionResult, collect_source
 from core.alerting import AlertState
 from core.enums import ErrorClass, JobRunStatus
@@ -91,6 +92,15 @@ PRUNE_INTERVAL_SECONDS = 3600.0
 # order SQLite's own documentation suggests, and matching the prune interval
 # keeps one maintenance cadence rather than two.
 OPTIMIZE_INTERVAL_SECONDS = 3600.0
+# How often to index items the search index is missing (issue #79). The write
+# path indexes an item when its text changes, so this is a catch-up for the
+# corpus that predates the index and for a write that failed after its item was
+# committed. Minutes rather than hours because the symptom is "search cannot
+# find something I can see", and the pass costs one scan.
+INDEX_CATCHUP_INTERVAL_SECONDS = 300.0
+# How many items one pass will index. Bounded so a first run over a large
+# corpus does not hold a transaction open; the next pass takes the rest.
+INDEX_CATCHUP_BATCH = 200
 # Per-tick reaping grace. A live run of *this* process must never be reaped:
 # timing out a run that is actually still collecting loses its result and
 # frees the active-run slot for a duplicate. Routine collection is one page;
@@ -416,6 +426,7 @@ class Scheduler:
         on_tick: Callable[[TickReport], None] | None = None,
         prune_every: float = PRUNE_INTERVAL_SECONDS,
         optimize_every: float = OPTIMIZE_INTERVAL_SECONDS,
+        index_every: float = INDEX_CATCHUP_INTERVAL_SECONDS,
         concurrency: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -430,6 +441,7 @@ class Scheduler:
         self._on_tick = on_tick
         self._prune_every = prune_every
         self._optimize_every = optimize_every
+        self._index_every = index_every
         raw = os.environ.get("PEARSS_TICK_CONCURRENCY", "").strip()
         try:
             self._concurrency = (
@@ -443,6 +455,7 @@ class Scheduler:
         self._next_prune_at = 0.0
         self._next_reap_at = 0.0
         self._next_optimize_at = 0.0
+        self._next_index_at = 0.0
         self._task: asyncio.Task[None] | None = None
         # Edge detection for alerts (ADR 0034): in memory by design, since what
         # it tracks is "have we already said this" -- a property of this
@@ -519,6 +532,7 @@ class Scheduler:
                 await self._reap_orphaned_runs_if_due()
                 await self._prune_audit_if_due()
                 await self._optimize_if_due()
+                await self._index_if_due()
             except OperationalError:
                 LOGGER.warning("scheduler storage operation failed; retrying next poll")
 
@@ -681,6 +695,34 @@ class Scheduler:
 
         await asyncio.to_thread(optimize)
         self._next_optimize_at = self._monotonic() + self._optimize_every
+
+    async def _index_if_due(self) -> None:
+        """Index items the search index does not have yet (issue #79).
+
+        The write path indexes an item when its text changes, so this is not the
+        path that keeps the index current -- it is the one that keeps it from
+        staying *incomplete*. A corpus that predates migration 0023, or a write
+        that failed after its item was committed, is otherwise invisible to
+        search until someone remembers `just reindex`.
+
+        Bounded per pass: an unbounded catch-up over a large corpus would hold
+        one transaction open for as long as it takes, and the next pass picks up
+        where this one stopped.
+        """
+        now = self._monotonic()
+        if now < self._next_index_at:
+            return
+
+        def catch_up() -> int:
+            with self._session_factory() as session:
+                indexed = index_missing(session, limit=INDEX_CATCHUP_BATCH)
+                session.commit()
+            return indexed
+
+        indexed = await asyncio.to_thread(catch_up)
+        self._next_index_at = self._monotonic() + self._index_every
+        if indexed:
+            LOGGER.info("indexed %d item(s) into the search index", indexed)
 
     async def tick_once(self) -> TickReport:
         """Run one pass off the event loop, at most one at a time."""
