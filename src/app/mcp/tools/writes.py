@@ -7,12 +7,17 @@ under a fresh Idempotency-Key. The order is the contract: confirmation is of
 the same request that executes, never a rubber stamp (ADR 0010, and
 docs/api/mcp-tool-guide.md's presentation rules).
 
-The bodies are the closures that lived in build_mcp_server, moved verbatim;
-`register_writes` is what build_mcp_server calls instead of inlining them.
+The bodies are the closures that lived in build_mcp_server; `register_writes`
+is what build_mcp_server calls instead of inlining them. Each one is now three
+things: derive the fields it confirms, hand them to `_guarded_write`, and
+describe the request. The confirm/compare/execute/attribute sequence lives in
+that one helper because writing it out twelve times is how a field went
+uncompared (issue #67, and then #76 for the shape itself).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Annotated, Any
 
 from mcp.server.mcpserver import MCPServer
@@ -22,29 +27,79 @@ from mcp.server.mcpserver.resolve import Resolve
 from app.mcp.confirmation import (
     Confirmation,
     _add_source_confirmation,
+    _add_source_fields,
     _backfill_source_confirmation,
-    _comma_join,
-    _confirmation_verdict,
+    _backfill_source_fields,
     _delete_items_confirmation,
+    _delete_items_fields,
     _delete_source_items_confirmation,
-    _items_fingerprint,
-    _matches,
+    _delete_source_items_fields,
     _remove_source_confirmation,
+    _remove_source_fields,
     _retry_enrichments_confirmation,
+    _retry_enrichments_fields,
     _set_plugin_status_confirmation,
+    _set_plugin_status_fields,
     _set_source_folder_confirmation,
+    _set_source_folder_fields,
     _set_source_status_confirmation,
+    _set_source_status_fields,
     _submit_items_confirmation,
+    _submit_items_fields,
     _trigger_job_confirmation,
+    _trigger_job_fields,
     _update_schedule_policy_confirmation,
+    _update_schedule_policy_fields,
+    _write_verdict,
 )
-from app.mcp.core_client import CoreAPIClient, _fresh_key, _infer_source_type
+from app.mcp.core_client import CoreAPIClient, _fresh_key
 from app.mcp.rendering import (
     _attributed,
     _error_from,
     _truncate,
     write_annotations,
 )
+
+
+async def _guarded_write(
+    core: CoreAPIClient,
+    *,
+    confirmed: Any,
+    fields: dict[str, Any],
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    ok: tuple[int, ...] = (200,),
+    extra: Callable[[int], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Confirm, compare, execute and attribute one write.
+
+    Every write tool is this sequence, so it is written once. `confirmed` and
+    `fields` are the whole contract between a tool and its confirmation: the
+    tool hands over the same `fields` its resolver put in the dialog, so
+    "the confirmation covers what executes" is one computation used twice
+    rather than two lists kept in step by hand. That is the difference #76 is
+    about -- twelve hand-written comparisons are twelve chances to miss a
+    field, and #67 was one of them.
+
+    `ok` is the statuses that are *outcomes* rather than errors: a 409 from an
+    already-enabled plugin and a 502 from a source that failed while
+    triggering are answers, and reporting them as errors would hide the
+    diagnosis. `extra` builds the keys a response carries beyond the Core API
+    payload, from the status -- the audit note for add_source, the status code
+    for set_plugin_status (which a caller needs precisely because a 409 is an
+    outcome).
+    """
+    verdict = _write_verdict(confirmed, fields)
+    if verdict is not None:
+        return verdict
+    status, payload, audit_id = await core.request(
+        method, path, json_body=body, idempotency_key=_fresh_key()
+    )
+    if status not in ok:
+        return _error_from(payload, status)
+    extras = extra(status) if extra is not None else {}
+    return _truncate(_attributed({**payload, **extras}, audit_id))
 
 
 def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
@@ -78,38 +133,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         target_lang: str = "",
         folder: str = "",
     ) -> dict[str, Any]:
-        requested = type.strip().lower()
-        source_type = _infer_source_type(url) if requested == "auto" else requested
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        # The confirmed values must be the ones executed. A confirmation of one
-        # request followed by execution of another would make the dialog a
-        # rubber stamp.
-        if not (
-            _matches(data["url"], url)
-            and _matches(data["type"], source_type)
-            and _matches(data["schedule_policy"], schedule_policy)
-            and _matches(data["pipeline_chain"], pipeline_chain)
-            and _matches(data["target_lang"], target_lang)
-            and _matches(data["folder"], folder)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "POST",
-            "/v1/sources",
-            json_body={
+        fields = _add_source_fields(
+            url, schedule_policy, type, pipeline_chain, target_lang, folder
+        )
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path="/v1/sources",
+            body={
                 "url": url,
-                "type": source_type,
+                "type": fields["type"],
                 "schedule_policy": schedule_policy,
                 "pipeline_chain": pipeline_chain,
                 "target_lang": target_lang or None,
@@ -117,12 +152,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 # omitting the key keeps the API's own default in charge.
                 **({"folder": folder} if folder else {}),
             },
-            idempotency_key=_fresh_key(),
-        )
-        if status not in (200, 201):
-            return _error_from(payload, status)
-        return _truncate(
-            _attributed({**payload, "audit": "recorded by the Core API"}, audit_id)
+            ok=(200, 201),
+            extra=lambda _status: {"audit": "recorded by the Core API"},
         )
 
     @server.tool(
@@ -140,32 +171,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_update_schedule_policy_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not (
-            _matches(data["source_id"], source_id)
-            and _matches(data["schedule_policy"], schedule_policy)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "PATCH",
-            f"/v1/sources/{source_id}",
-            json_body={"schedule_policy": schedule_policy},
-            idempotency_key=_fresh_key(),
+        fields = _update_schedule_policy_fields(source_id, schedule_policy)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="PATCH",
+            path=f"/v1/sources/{source_id}",
+            body={"schedule_policy": schedule_policy},
         )
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
@@ -182,31 +196,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_set_source_status_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not (
-            _matches(data["source_id"], source_id) and _matches(data["status"], status)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        code, payload, audit_id = await core.request(
-            "PATCH",
-            f"/v1/sources/{source_id}",
-            json_body={"status": status},
-            idempotency_key=_fresh_key(),
+        fields = _set_source_status_fields(source_id, status)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="PATCH",
+            path=f"/v1/sources/{source_id}",
+            body={"status": status},
         )
-        if code != 200:
-            return _error_from(payload, code)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
@@ -225,31 +223,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_set_source_folder_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not (
-            _matches(data["source_id"], source_id) and _matches(data["folder"], folder)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        code, payload, audit_id = await core.request(
-            "PATCH",
-            f"/v1/sources/{source_id}",
-            json_body={"folder": folder},
-            idempotency_key=_fresh_key(),
+        fields = _set_source_folder_fields(source_id, folder)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="PATCH",
+            path=f"/v1/sources/{source_id}",
+            body={"folder": folder},
         )
-        if code != 200:
-            return _error_from(payload, code)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -269,28 +251,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         ctx: Context,
         confirmed: Annotated[Confirmation | None, Resolve(_remove_source_confirmation)],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not _matches(data["source_id"], source_id):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "DELETE",
-            f"/v1/sources/{source_id}",
-            idempotency_key=_fresh_key(),
+        fields = _remove_source_fields(source_id)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="DELETE",
+            path=f"/v1/sources/{source_id}",
         )
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -306,32 +274,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         ctx: Context,
         confirmed: Annotated[Confirmation | None, Resolve(_delete_items_confirmation)],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        # The schema carries one string, so the list arrives as a comma-joined
-        # value. Comparing the parse back to the request is what keeps the
-        # dialog a confirmation rather than a formality.
-        if not _matches(data["item_ids"], _comma_join(item_ids)):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "POST",
-            "/v1/items:delete",
-            json_body={"item_ids": item_ids},
-            idempotency_key=_fresh_key(),
+        fields = _delete_items_fields(item_ids)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path="/v1/items:delete",
+            body={"item_ids": item_ids},
         )
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -354,39 +305,20 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_delete_source_items_confirmation)
         ] = None,
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not (
-            _matches(data["source_id"], source_id)
-            and _matches(data["since"], since)
-            and _matches(data["until"], until)
-            and _matches(data["include_published"], include_published)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
+        fields = _delete_source_items_fields(source_id, since, until, include_published)
         body: dict[str, Any] = {"include_published": include_published}
         if since:
             body["since"] = since
         if until:
             body["until"] = until
-        status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/sources/{source_id}/items:delete",
-            json_body=body,
-            idempotency_key=_fresh_key(),
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}/items:delete",
+            body=body,
         )
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -400,31 +332,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         ctx: Context,
         confirmed: Annotated[Confirmation | None, Resolve(_trigger_job_confirmation)],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not _matches(data["source_id"], source_id):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
+        fields = _trigger_job_fields(source_id)
         # A 502 here is a real outcome to report, not a transport failure: the
         # run happened and the source failed, with the error_class explaining
         # which. Returning it as an error would hide the diagnosis.
-        status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/sources/{source_id}:trigger",
-            idempotency_key=_fresh_key(),
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}:trigger",
+            ok=(200, 502),
         )
-        if status not in (200, 502):
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -442,28 +361,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_backfill_source_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not _matches(data["source_id"], source_id):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/sources/{source_id}:backfill-chain",
-            idempotency_key=_fresh_key(),
+        fields = _backfill_source_fields(source_id)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}:backfill-chain",
+            ok=(200, 201),
         )
-        if status not in (200, 201):
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -480,28 +386,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_retry_enrichments_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not _matches(data["source_id"], source_id):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/sources/{source_id}:retry-enrichments",
-            idempotency_key=_fresh_key(),
+        fields = _retry_enrichments_fields(source_id)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}:retry-enrichments",
         )
-        if status != 200:
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -520,31 +412,19 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             Confirmation | None, Resolve(_set_plugin_status_confirmation)
         ],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        if not (
-            _matches(data["plugin_id"], plugin_id) and _matches(data["status"], status)
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
+        fields = _set_plugin_status_fields(plugin_id, status)
         operation = ":enable" if status == "enabled" else ":disable"
-        core_status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/plugins/{plugin_id}{operation}",
-            idempotency_key=_fresh_key(),
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/plugins/{plugin_id}{operation}",
+            # A 409 means "already in that state", which is an outcome; the
+            # status code travels with the result so the caller can tell.
+            ok=(200, 409),
+            extra=lambda core_status: {"status_code": core_status},
         )
-        if core_status not in (200, 409):
-            return _error_from(payload, core_status)
-        return _truncate(_attributed({**payload, "status_code": core_status}, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -580,34 +460,13 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         ctx: Context,
         confirmed: Annotated[Confirmation | None, Resolve(_submit_items_confirmation)],
     ) -> dict[str, Any]:
-        data = _confirmation_verdict(confirmed)
-        if data is None:
-            return {
-                "declined": True,
-                "reason": (
-                    "not confirmed: the user declined, or this client does not "
-                    "support elicitation, which writes require"
-                ),
-            }
-        # Compare the batch the user saw against the batch about to run. The
-        # count is the cheap first gate; the fingerprint is the one that covers
-        # content, because two batches can share a count (and even titles)
-        # while differing in every body -- see issue #67.
-        if not (
-            _matches(data["source_id"], source_id)
-            and _matches(data["item_count"], str(len(items)))
-            and _matches(data["items_fingerprint"], _items_fingerprint(items))
-        ):
-            return {
-                "aborted": True,
-                "reason": "confirmed arguments differ from requested",
-            }
-        status, payload, audit_id = await core.request(
-            "POST",
-            f"/v1/sources/{source_id}:ingest",
-            json_body={"items": items},
-            idempotency_key=_fresh_key(),
+        fields = _submit_items_fields(source_id, items)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}:ingest",
+            body={"items": items},
+            ok=(200, 201),
         )
-        if status not in (200, 201):
-            return _error_from(payload, status)
-        return _truncate(_attributed(payload, audit_id))

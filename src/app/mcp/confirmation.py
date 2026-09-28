@@ -10,8 +10,14 @@ carry that rule:
   canonical forms of confirmed vs executed values are compared, with the
   string/boolean coercions that keep every confirmation of a plain string or
   a flag from failing spuriously
-- `_confirmation_verdict` reads the client's answer and reduces it to the one
-  decision every write needs: run, or not
+- one `_<tool>_fields(...)` per write tool is the *single* list of what that
+  tool confirms and executes. Its resolver puts those fields in the dialog and
+  its body hands the same dict to the guard, so the two cannot disagree -- the
+  twelve hand-written comparison lists these replaced are exactly the shape
+  that had missed a field (issue #67, then #76)
+- `_confirmation_verdict` reads the client's answer, and `_write_verdict` turns
+  it into the one decision every write needs: run, or refuse as `declined` /
+  `aborted`
 """
 
 from __future__ import annotations
@@ -28,6 +34,15 @@ from app.mcp.core_client import _infer_source_type
 from core.folders import DEFAULT_FOLDER
 
 LOGGER = logging.getLogger(__name__)
+
+# The two things a write can answer instead of running. Spelled once, because
+# they are the contract a client branches on rather than twelve tool-specific
+# wordings that happen to have matched.
+_DECLINED_REASON = (
+    "not confirmed: the user declined, or this client does not support "
+    "elicitation, which writes require"
+)
+_ABORTED_REASON = "confirmed arguments differ from requested"
 
 
 class Confirmation(BaseModel):
@@ -180,6 +195,31 @@ def _confirm_resolver(**kwargs: Any) -> Elicit[Any]:
     return _asked(_confirmation_schema(fields), summary)
 
 
+def _add_source_fields(
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+) -> dict[str, Any]:
+    """What add_source confirms and executes, derived in one place.
+
+    `type` is resolved to the type that will actually be sent, so the user is
+    asked about a concrete source rather than about the literal "auto".
+    """
+    requested = type.strip().lower()
+    source_type = _infer_source_type(url) if requested == "auto" else requested
+    return {
+        "url": url,
+        "type": source_type,
+        "schedule_policy": _render(schedule_policy),
+        "pipeline_chain": _render(pipeline_chain),
+        "target_lang": target_lang,
+        "folder": folder,
+    }
+
+
 def _add_source_confirmation(
     url: str,
     schedule_policy: dict[str, Any],
@@ -189,71 +229,124 @@ def _add_source_confirmation(
     folder: str = "",
 ) -> Elicit[Any]:
     """The add_source question: names the source and prefills every argument."""
-    requested = type.strip().lower()
-    source_type = _infer_source_type(url) if requested == "auto" else requested
+    fields = _add_source_fields(
+        url, schedule_policy, type, pipeline_chain, target_lang, folder
+    )
     return _confirm_resolver(
         _summary=(
-            f"Add {url} as a {source_type} source with policy "
-            f"{_render(schedule_policy)}, chain {_render(pipeline_chain)} "
-            f"(lang {target_lang or 'none'}) and folder "
-            f"{folder or DEFAULT_FOLDER}?"
+            f"Add {fields['url']} as a {fields['type']} source with policy "
+            f"{fields['schedule_policy']}, chain {fields['pipeline_chain']} "
+            f"(lang {fields['target_lang'] or 'none'}) and folder "
+            f"{fields['folder'] or DEFAULT_FOLDER}?"
         ),
-        _fields={
-            "url": url,
-            "type": source_type,
-            "schedule_policy": _render(schedule_policy),
-            "pipeline_chain": _render(pipeline_chain),
-            "target_lang": target_lang,
-            "folder": folder,
-        },
+        _fields=fields,
     )
+
+
+def _update_schedule_policy_fields(
+    source_id: str, schedule_policy: dict[str, Any]
+) -> dict[str, Any]:
+    """What update_schedule_policy confirms and executes, derived in one place."""
+    return {
+        "source_id": source_id,
+        "schedule_policy": _render(schedule_policy),
+    }
 
 
 def _update_schedule_policy_confirmation(
     source_id: str, schedule_policy: dict[str, Any]
 ) -> Elicit[Any]:
+    fields = _update_schedule_policy_fields(source_id, schedule_policy)
     return _confirm_resolver(
-        _summary=f"Set source {source_id} schedule to {_render(schedule_policy)}?",
-        _fields={
-            "source_id": source_id,
-            "schedule_policy": _render(schedule_policy),
-        },
+        _summary=f"Set source {source_id} schedule to {fields['schedule_policy']}?",
+        _fields=fields,
     )
+
+
+def _set_source_status_fields(source_id: str, status: str) -> dict[str, Any]:
+    """What set_source_status confirms and executes, derived in one place."""
+    return {"source_id": source_id, "status": status}
 
 
 def _set_source_status_confirmation(source_id: str, status: str) -> Elicit[Any]:
+    fields = _set_source_status_fields(source_id, status)
     return _confirm_resolver(
-        _summary=f"Set source {source_id} status to {status}?",
-        _fields={"source_id": source_id, "status": status},
+        _summary=f"Set source {fields['source_id']} status to {fields['status']}?",
+        _fields=fields,
     )
+
+
+def _set_source_folder_fields(source_id: str, folder: str) -> dict[str, Any]:
+    """What set_source_folder confirms and executes, derived in one place."""
+    return {"source_id": source_id, "folder": folder}
 
 
 def _set_source_folder_confirmation(source_id: str, folder: str) -> Elicit[Any]:
+    fields = _set_source_folder_fields(source_id, folder)
     return _confirm_resolver(
-        _summary=f"Move source {source_id} to folder {folder}?",
-        _fields={"source_id": source_id, "folder": folder},
+        _summary=f"Move source {fields['source_id']} to folder {fields['folder']}?",
+        _fields=fields,
     )
+
+
+def _trigger_job_fields(source_id: str) -> dict[str, Any]:
+    """What trigger_job confirms and executes, derived in one place."""
+    return {"source_id": source_id}
 
 
 def _trigger_job_confirmation(source_id: str) -> Elicit[Any]:
+    fields = _trigger_job_fields(source_id)
     return _confirm_resolver(
-        _summary=f"Fetch source {source_id} now?",
-        _fields={"source_id": source_id},
+        _summary=f"Fetch source {fields['source_id']} now?",
+        _fields=fields,
     )
+
+
+def _backfill_source_fields(source_id: str) -> dict[str, Any]:
+    """What backfill_source confirms and executes, derived in one place."""
+    return {"source_id": source_id}
 
 
 def _backfill_source_confirmation(source_id: str) -> Elicit[Any]:
+    fields = _backfill_source_fields(source_id)
     return _confirm_resolver(
-        _summary=f"Backfill processing products for source {source_id}?",
-        _fields={"source_id": source_id},
+        _summary=f"Backfill processing products for source {fields['source_id']}?",
+        _fields=fields,
     )
+
+
+def _retry_enrichments_fields(source_id: str) -> dict[str, Any]:
+    """What retry_enrichments confirms and executes, derived in one place."""
+    return {"source_id": source_id}
 
 
 def _retry_enrichments_confirmation(source_id: str) -> Elicit[Any]:
+    fields = _retry_enrichments_fields(source_id)
+    source = fields["source_id"]
     return _confirm_resolver(
-        _summary=(f"Requeue failed processing-chain products for source {source_id}?"),
-        _fields={"source_id": source_id},
+        _summary=f"Requeue failed processing-chain products for source {source}?",
+        _fields=fields,
     )
+
+
+def _submit_items_fields(source_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    """What submit_items confirms and executes, derived in one place.
+
+    The fingerprint is the field that covers what the dialog cannot show: two
+    batches can share a count and even every title while differing in every
+    body, so `item_count` alone accepted the second batch (issue #67). Titles
+    stay in the list for the human reading the prompt.
+    """
+    titles = "; ".join(
+        str(item.get("title") or "(untitled)")[:60] for item in items[:5]
+    )
+    more = "" if len(items) <= 5 else f" (+{len(items) - 5} more)"
+    return {
+        "source_id": source_id,
+        "item_count": str(len(items)),
+        "items_fingerprint": _items_fingerprint(items),
+        "titles": f"{titles}{more}",
+    }
 
 
 def _submit_items_confirmation(
@@ -267,30 +360,32 @@ def _submit_items_confirmation(
     fingerprint covers what the titles cannot -- two batches can share titles
     and a count while differing in every body.
     """
-    titles = "; ".join(
-        str(item.get("title") or "(untitled)")[:60] for item in items[:5]
-    )
-    more = "" if len(items) <= 5 else f" (+{len(items) - 5} more)"
+    fields = _submit_items_fields(source_id, items)
     return _confirm_resolver(
         _summary=(
-            f"Push {len(items)} item(s) into agent source {source_id}? {titles}{more}"
+            f"Push {len(items)} item(s) into agent source {source_id}? "
+            f"{fields['titles']}"
         ),
-        _fields={
-            "source_id": source_id,
-            "item_count": str(len(items)),
-            # Machine-checkable, and the only thing here that covers the bodies
-            # the form deliberately does not show. `titles` stays for the human.
-            "items_fingerprint": _items_fingerprint(items),
-            "titles": f"{titles}{more}",
-        },
+        _fields=fields,
     )
+
+
+def _set_plugin_status_fields(plugin_id: str, status: str) -> dict[str, Any]:
+    """What set_plugin_status confirms and executes, derived in one place."""
+    return {"plugin_id": plugin_id, "status": status}
 
 
 def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
+    fields = _set_plugin_status_fields(plugin_id, status)
     return _confirm_resolver(
-        _summary=f"Set plugin {plugin_id} status to {status}?",
-        _fields={"plugin_id": plugin_id, "status": status},
+        _summary=f"Set plugin {fields['plugin_id']} status to {fields['status']}?",
+        _fields=fields,
     )
+
+
+def _remove_source_fields(source_id: str) -> dict[str, Any]:
+    """What remove_source confirms and executes, derived in one place."""
+    return {"source_id": source_id}
 
 
 def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
@@ -312,8 +407,18 @@ def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
             "clients keep what they have already cached, and re-subscribing "
             "the same feed starts over with no history. This cannot be undone."
         ),
-        _fields={"source_id": source_id},
+        _fields=_remove_source_fields(source_id),
     )
+
+
+def _delete_items_fields(item_ids: list[str]) -> dict[str, Any]:
+    """What delete_items confirms and executes, derived in one place.
+
+    The list travels as one comma-joined string because an elicitation field is
+    a primitive; the join is deterministic, so a reordered or shortened list
+    compares unequal.
+    """
+    return {"item_ids": _comma_join(item_ids)}
 
 
 def _delete_items_confirmation(item_ids: list[str]) -> Elicit[Any]:
@@ -325,8 +430,23 @@ def _delete_items_confirmation(item_ids: list[str]) -> Elicit[Any]:
             f"Permanently delete {len(item_ids)} item(s): {listed}? Their "
             "bodies, read state and translations go too. This cannot be undone."
         ),
-        _fields={"item_ids": _comma_join(item_ids)},
+        _fields=_delete_items_fields(item_ids),
     )
+
+
+def _delete_source_items_fields(
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> dict[str, Any]:
+    """What delete_source_items confirms and executes, derived in one place."""
+    return {
+        "source_id": source_id,
+        "since": since,
+        "until": until,
+        "include_published": include_published,
+    }
 
 
 def _delete_source_items_confirmation(
@@ -349,12 +469,7 @@ def _delete_source_items_confirmation(
             "The subscription and its crawl position are kept, so collection "
             "resumes. This cannot be undone."
         ),
-        _fields={
-            "source_id": source_id,
-            "since": since,
-            "until": until,
-            "include_published": include_published,
-        },
+        _fields=_delete_source_items_fields(source_id, since, until, include_published),
     )
 
 
@@ -385,3 +500,31 @@ def _confirmation_verdict(answer: Any) -> dict[str, Any] | None:
             return None
         values = data.model_dump() if hasattr(data, "model_dump") else dict(data)
     return values if values.get("confirmed") else None
+
+
+def _write_verdict(confirmed: Any, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """The refusal to return instead of running, or None to proceed.
+
+    This is the second gate, and the one this module owns. The first is the
+    protocol's: the SDK seals `request_state` with a digest of the whole
+    arguments, so a retry that drifted is refused before any tool body runs.
+    This gate is what covers the remaining case -- a client that answers the
+    form with values other than the ones it was prefilled with.
+
+    `fields` is the same dict the resolver put in the dialog, so the comparison
+    covers exactly the values about to execute. There is no second list to keep
+    in step, which is what the twelve hand-written comparisons got wrong once
+    (issue #67) and had twelve chances to get wrong again (issue #76).
+
+    A missing or null confirmed field counts as drift rather than raising: the
+    answer came from a client, and a client that omits a field has not confirmed
+    it.
+    """
+    values = _confirmation_verdict(confirmed)
+    if values is None:
+        return {"declined": True, "reason": _DECLINED_REASON}
+    for name, executed in fields.items():
+        confirmed_value = values.get(name)
+        if confirmed_value is None or not _matches(confirmed_value, executed):
+            return {"aborted": True, "reason": _ABORTED_REASON}
+    return None

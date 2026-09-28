@@ -1134,9 +1134,13 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
     """A confirmation of one request must not authorise another -- for every
     write tool, not just add_source.
 
-    Each tool has its own `_matches(...)` guard; a missing one lets a tampered
-    client execute something the user never saw. The tamper rewrites the first
-    string field the tool asks about, so the guard for that tool is exercised.
+    Every tool hands its confirmed fields to the same guard
+    (`app.mcp.tools.writes._guarded_write`). What this pins is a tool that stops
+    doing so, which would let a tampered client execute something the user never
+    saw. The tamper rewrites the first string field the tool asks about, so the
+    comparison for that tool is exercised; the twelve tools share one
+    implementation, so this is a sweep over the arguments rather than over
+    twelve copies of the code.
     """
     # (tool, args, field the tamper will flip)
     cases: list[tuple[str, dict[str, Any], str]] = [
