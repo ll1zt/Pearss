@@ -67,7 +67,10 @@ def query_items(
 
     `cursor` is the (sort_value, id) of the final row of the previous page.
     """
-    sort_column = func.coalesce(ItemRow.published_at, EPOCH_FLOOR)
+    # The generated column, not the expression: an indexed expression is only
+    # matched while its text is identical, and the sort key has to keep using
+    # the index it is named for (see db_models.Item.sort_key).
+    sort_column = ItemRow.sort_key
 
     query = select(ItemRow).where(*_filter_conditions(tenant_id, filter, sort_column))
 
@@ -146,7 +149,7 @@ def count_matching(session: Session, *, tenant_id: str, filter: ItemFilter) -> i
     This is what tells a caller whether "clear this source" means three items
     or three thousand; paging to the end to find out costs a request per page.
     """
-    sort_column = func.coalesce(ItemRow.published_at, EPOCH_FLOOR)
+    sort_column = ItemRow.sort_key
     return int(
         session.execute(
             select(func.count())

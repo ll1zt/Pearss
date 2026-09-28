@@ -14,6 +14,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase
 
+from adapters.timestamps import EPOCH_FLOOR
+
 # P1 targets SQLite and P3 may move to Postgres, so column types stay within
 # the subset both support: no JSON-specific operators, no native enums.
 
@@ -249,6 +251,21 @@ class Item(Base):
     tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
     created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
     updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # The feed's ordering key: `coalesce(published_at, EPOCH_FLOOR)` as a
+    # VIRTUAL generated column, purely so it can be indexed by name.
+    #
+    # The expression form cannot be relied on. An index on `coalesce(...)`
+    # matches a query only while the expression text is character-for-character
+    # the same, so it goes *silently* unused the first time the floor, the
+    # function or the rendered binding changes -- measured: an expression index
+    # served this page in 0.13ms, and the same query rendering the floor as a
+    # bound parameter fell back to a full scan plus a temp B-tree (3.0ms).
+    # Matching on a column name cannot fail that way.
+    sort_key: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text,
+        sa.Computed(f"coalesce(published_at, '{EPOCH_FLOOR}')", persisted=False),
+        nullable=False,
+    )
 
     __table_args__ = (
         enum_check(
@@ -261,6 +278,13 @@ class Item(Base):
         # Cross-source dedupe looks items up by content hash once per stored
         # draft during every collection.
         sa.Index("ix_item_content_hash", "content_hash"),
+        # Every feed read is "gate-visible rows, newest first", paged. The
+        # status index cannot serve it: the gate is a negation
+        # (`publish_status != 'pending'`) and the ordering is on the sort key,
+        # so that index was never chosen -- the plan was a full scan plus a
+        # temp B-tree (issue #77).
+        sa.Index("ix_item_sort_key_id", "sort_key", "id"),
+        sa.Index("ix_item_source_sort_key_id", "source_id", "sort_key", "id"),
     )
 
 
