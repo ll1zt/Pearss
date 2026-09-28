@@ -571,6 +571,42 @@
       "type": "object"
     }
   },
+  "set_source_pipeline_chain": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": true,
+      "read_only_hint": false
+    },
+    "description": "Set a source's processing chain, and its target language with it. Requires confirmation: items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. Pass an empty list to clear the chain, so items publish as soon as they are stored; passing no target_lang sets it to none, which is what the confirmation says. Run backfill_source afterwards to put already-stored items through the chain. Use add_source to set a chain on a new source.",
+    "input_schema": {
+      "properties": {
+        "pipeline_chain": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Pipeline Chain",
+          "type": "array"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "target_lang": {
+          "default": "",
+          "title": "Target Lang",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "pipeline_chain"
+      ],
+      "title": "set_source_pipeline_chainArguments",
+      "type": "object"
+    }
+  },
   "set_source_status": {
     "annotations": {
       "destructive_hint": false,

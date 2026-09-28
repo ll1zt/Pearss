@@ -295,3 +295,176 @@ def test_every_tool_annotation_matches_what_its_description_claims() -> None:
         "audiences is being told about a side effect that does not exist:\n  "
         + "\n  ".join(problems)
     )
+
+
+# --------------------------------------------------------------------------
+# ADR 0036's reverse constraint: every tool lands on an endpoint that exists
+# --------------------------------------------------------------------------
+
+
+def _endpoint_calls() -> dict[str, set[tuple[str, str]]]:
+    """The (method, path) each MCP tool function calls, as route templates.
+
+    Read from the source rather than from a list here, because the constraint is
+    about the code: ADR 0036 allows one endpoint to back several tools, and
+    requires the other direction -- a tool may not call an operation `/v1` does
+    not have. That is exactly the kind of statement a list can agree with while
+    the code does not.
+
+    Two shapes count, and the second one is why this had to be checked rather
+    than assumed: a read calls `core.get(...)` directly, while every write goes
+    through `_guarded_write(..., method=..., path=...)`. A first version looked
+    only for `core.<verb>` and silently saw none of the thirteen write tools --
+    found by injecting a nonexistent endpoint into `trigger_job` and watching the
+    guard stay green.
+    """
+    calls: dict[str, set[tuple[str, str]]] = {}
+    tools_dir = REPO_ROOT / "src/app/mcp/tools"
+    for path in sorted(tools_dir.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        def visit(node: ast.AST, owner: str) -> None:
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                owner = node.name
+            if isinstance(node, ast.Call):
+                found = _endpoint_of(node)
+                if found is not None:
+                    calls.setdefault(owner, set()).add(found)
+            for child in ast.iter_child_nodes(node):
+                visit(child, owner)
+
+        visit(tree, path.stem)
+
+    return {name: found for name, found in calls.items() if found}
+
+
+def _keyword(call: ast.Call, name: str) -> ast.expr | None:
+    return next((kw.value for kw in call.keywords if kw.arg == name), None)
+
+
+def _endpoint_of(call: ast.Call) -> tuple[str, str] | None:
+    """The (method, path template) of an endpoint call, or None."""
+    func = call.func
+    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+
+    # `_guarded_write(core, method="PATCH", path=f"...")` -- every write tool,
+    # and the only shape that names both parts as literals at the call site.
+    if name == "_guarded_write":
+        method = _keyword(call, "method")
+        path = _keyword(call, "path")
+        if isinstance(method, ast.Constant) and isinstance(method.value, str):
+            rendered = _render_path(path) if path is not None else None
+            if rendered is not None:
+                return (method.value.upper(), rendered)
+        return None
+
+    if not isinstance(func, ast.Attribute) or not isinstance(func.value, ast.Name):
+        return None
+    if func.value.id != "core":
+        return None
+
+    if func.attr == "request":
+        # `core.request(method, path, ...)`. Only a literal method is usable
+        # here: the one call with variables is inside `_guarded_write` itself,
+        # and its concrete pairs come from that helper's call sites.
+        if len(call.args) < 2 or not isinstance(call.args[0], ast.Constant):
+            return None
+        if not isinstance(call.args[0].value, str):
+            return None
+        rendered = _render_path(call.args[1])
+        if rendered is None:
+            return None
+        return (call.args[0].value.upper(), rendered)
+
+    if func.attr in {"get", "post", "patch", "delete"}:
+        if not call.args:
+            return None
+        rendered = _render_path(call.args[0])
+        if rendered is None:
+            return None
+        return (func.attr.upper(), rendered)
+
+    return None
+
+
+def _render_path(node: ast.expr) -> str | None:
+    """An f-string path as the template OpenAPI uses: `{name}` for each hole."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        rendered = ""
+        for part in node.values:
+            if isinstance(part, ast.Constant):
+                rendered += str(part.value)
+            elif isinstance(part, ast.FormattedValue):
+                rendered += "{" + ast.unparse(part.value) + "}"
+        return rendered
+    return None
+
+
+# One tool assembles its path from literals at the call site: `set_plugin_status`
+# picks between `:enable` and `:disable` by argument, so the f-string has a hole
+# outside a parameter position and there is no static template to compare. Named
+# rather than pattern-skipped, so the exemption is visible and the next one has
+# to be justified; the prefix is still checked above.
+_ASSEMBLED_PATHS = {"set_plugin_status"}
+
+
+def test_every_tool_calls_an_endpoint_that_exists() -> None:
+    """ADR 0036, reverse direction (issue #71, AC-62).
+
+    The ADR allows an endpoint to back several tools; it does not allow a tool
+    to call an operation `/v1` does not have. That is the half that keeps the
+    tool face a *projection* rather than a second implementation, and it is
+    checkable: every endpoint a tool calls has to be a method and path pair the
+    committed OpenAPI document declares.
+    """
+    spec = json.loads(
+        (REPO_ROOT / "tests/contract/openapi.json").read_text(encoding="utf-8")
+    )
+    known = {
+        (method.upper(), path)
+        for path, operations in spec["paths"].items()
+        for method in operations
+    }
+    calls = _endpoint_calls()
+    assert calls, "no endpoint calls found; is the tools layout intact?"
+    # Both halves of the surface have to be represented, or the guard is only
+    # watching part of it.
+    assert len(calls) >= 20, sorted(calls)
+
+    resolved = {
+        (tool, method, path) for tool, found in calls.items() for method, path in found
+    }
+    unresolved = {
+        (tool, method, path)
+        for tool, method, path in resolved
+        if (method, path) not in known
+    }
+
+    unknown = sorted(
+        f"{tool} -> {method} {path}"
+        for tool, method, path in unresolved
+        if tool not in _ASSEMBLED_PATHS
+    )
+    assert not unknown, (
+        "these tools call /v1 operations the OpenAPI document does not declare, "
+        f"so they are not projections of anything: {unknown}"
+    )
+
+    # An exemption that stops hiding anything is either a fixed bug or a guard
+    # that went blind, and both are worth failing over.
+    idle = sorted(_ASSEMBLED_PATHS - {tool for tool, _m, _p in unresolved})
+    assert not idle, f"exemptions that now hide nothing: {idle}"
+
+    # Exemptions still have to be anchored: the static part of an assembled path
+    # must have a declared endpoint in front of it, so a typo in the prefix
+    # fails even though the suffix cannot be resolved.
+    declared_paths = sorted(spec["paths"])
+    for tool in sorted(_ASSEMBLED_PATHS):
+        for _method, path in sorted(calls[tool]):
+            prefix = path.split("{", 1)[0]
+            assert any(declared.startswith(prefix) for declared in declared_paths), (
+                f"{tool}'s assembled path {path!r} has no declared endpoint "
+                f"under {prefix!r}"
+            )

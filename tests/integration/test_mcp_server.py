@@ -277,6 +277,11 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "update_schedule_policy",
         "set_source_status",
         "set_source_folder",
+        # The fourth narrow tool on the same PATCH endpoint (ADR 0036, issue
+        # #71): `add_source` sets a chain only at creation, so without this one
+        # "subscribe first, decide to translate later" had no path but deleting
+        # the source.
+        "set_source_pipeline_chain",
         "remove_source",
         # Deletion (ADR 0021): remove_source stops flagging and starts
         # deleting; these two clear items while keeping the subscription,
