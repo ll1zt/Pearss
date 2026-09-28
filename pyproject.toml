@@ -312,4 +312,8 @@ also_copy = [
   # reporting nothing rather than reporting success.
   "SCENARIOS.md",
   "architecture-spec.md",
+  # Seventh path, same lesson: the guard that insists deployment units take the
+  # checkout path as a parameter reads `deploy/`, so the tree `just mutate`
+  # builds has to contain it.
+  "deploy",
 ]

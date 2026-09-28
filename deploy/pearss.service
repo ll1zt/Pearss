@@ -9,9 +9,16 @@
 # start time with a message that looks like a Nix problem rather than a PATH
 # problem.
 
+# `@CHECKOUT@` is substituted by `just install-unit` with the checkout this
+# repository actually lives in. It is a placeholder rather than `%h/dev/Pearss`
+# because that path was wrong for every deployment that is not this machine's
+# home directory -- a second host, a worktree, another user -- and the failure
+# surfaced as a Nix error rather than as "the unit points somewhere that does
+# not exist" (issue #88).
+
 [Unit]
 Description=Pearss — single-user, agent-first RSS+ system
-Documentation=file://%h/dev/Pearss/README.md
+Documentation=file://@CHECKOUT@/README.md
 After=network-online.target
 Wants=network-online.target
 
@@ -20,7 +27,7 @@ Type=simple
 
 # The project directory. Everything relative in .env (the SQLite path, the
 # content-addressed storage directory) resolves against this.
-WorkingDirectory=%h/dev/Pearss
+WorkingDirectory=@CHECKOUT@
 
 # The environment is the flake's, not the ambient one: `nix develop` gives the
 # service the same interpreter and tooling that CI uses, so "works on my
