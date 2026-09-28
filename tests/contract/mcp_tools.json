@@ -266,12 +266,17 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Processor-chain rows for one source: what translations are queued/running/succeeded/failed, with error classes and attempt counts. Use it to see why an item is being held by the gate.",
+    "description": "Processor-chain rows: what a source's (or one item's) translations, full texts or other products are doing -- queued, running, succeeded, failed -- with error classes and attempt counts. Pass item_id to ask why one item you already have an id for is being held; pass source_id for the whole source's chain. This is the tool for \"why is this stuck\": get_item does not carry chain state.",
     "input_schema": {
       "properties": {
         "cursor": {
           "default": "",
           "title": "Cursor",
+          "type": "string"
+        },
+        "item_id": {
+          "default": "",
+          "title": "Item Id",
           "type": "string"
         },
         "limit": {
@@ -280,6 +285,7 @@
           "type": "integer"
         },
         "source_id": {
+          "default": "",
           "title": "Source Id",
           "type": "string"
         },
@@ -289,9 +295,6 @@
           "type": "string"
         }
       },
-      "required": [
-        "source_id"
-      ],
       "title": "list_enrichmentsArguments",
       "type": "object"
     }

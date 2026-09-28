@@ -51,6 +51,40 @@ IDEMPOTENCY_WINDOW = timedelta(days=7)
 # (moved verbatim from sources_routes; see the module docstring)
 
 
+def enrichment_page(
+    rows: list[Any], *, limit: int, offset: int, correlation_id: str
+) -> dict[str, Any]:
+    """One page of processor-chain rows, in the shape both routes return.
+
+    Shared because the two routes differ only in which rows they select, and a
+    caller that switches between "this item's chain rows" and "this source's"
+    should not have to handle two payload shapes for the same kind of thing.
+    `total` counts every match rather than this page, so a short page is
+    announced instead of implied.
+    """
+    return {
+        "data": [
+            {
+                "id": row.id,
+                "item_id": row.item_id,
+                "plugin_id": row.plugin_id,
+                "kind": row.kind,
+                "lang": row.lang,
+                "status": row.status,
+                "error_class": row.error_class,
+                "detail": row.detail,
+                "attempt_count": row.attempt_count,
+            }
+            for row in rows[offset : offset + limit]
+        ],
+        "total": len(rows),
+        "next_cursor": (
+            encode_cursor(offset + limit) if offset + limit < len(rows) else None
+        ),
+        "correlation_id": correlation_id,
+    }
+
+
 def api_error(
     *,
     status_code: int,

@@ -49,6 +49,7 @@ from app.api_conventions import (
     api_error,
     decode_cursor,
     encode_cursor,
+    enrichment_page,
     idempotency_key,
     remember,
     replay_or_none,
@@ -742,27 +743,9 @@ def list_source_enrichments(
         if status is not None:
             query = query.where(ItemEnrichment.status == status)
         rows = session.execute(query).scalars().all()
-        return {
-            "data": [
-                {
-                    "id": row.id,
-                    "item_id": row.item_id,
-                    "plugin_id": row.plugin_id,
-                    "kind": row.kind,
-                    "lang": row.lang,
-                    "status": row.status,
-                    "error_class": row.error_class,
-                    "detail": row.detail,
-                    "attempt_count": row.attempt_count,
-                }
-                for row in rows[offset : offset + limit]
-            ],
-            "total": len(rows),
-            "next_cursor": (
-                encode_cursor(offset + limit) if offset + limit < len(rows) else None
-            ),
-            "correlation_id": current_correlation_id(),
-        }
+        return enrichment_page(
+            rows, limit=limit, offset=offset, correlation_id=current_correlation_id()
+        )
 
 
 @router.post("/sources/{source_id}:retry-enrichments", operation_id="retryEnrichments")

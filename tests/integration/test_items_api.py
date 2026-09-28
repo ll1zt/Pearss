@@ -705,3 +705,77 @@ async def test_an_empty_id_list_is_refused(
         json={"item_ids": []},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_one_items_chain_rows_are_asked_for_directly(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-64 (issue #72): "why is this item held" in one call.
+
+    The item is *pending*, which is the case the route exists for -- and the
+    only read that answers for a pending item, because the gate hides it
+    everywhere else. Answering 404 here would make the diagnostic useless for
+    the situation that needs it.
+    """
+    with store() as session:
+        session.execute(
+            sa.text(
+                "insert into item_enrichment (id, item_id, plugin_id,"
+                " plugin_version, kind, lang, status, attempt_count, tenant_id,"
+                " input_hash, created_at, updated_at)"
+                " values ('enr-1', 'item-0000', 'translate', '1', 'translation',"
+                " 'en', 'failed', 3, 'default', 'hash', '2026-01-01T00:00:00.000000Z',"
+                " '2026-01-01T00:00:00.000000Z')"
+            )
+        )
+        session.execute(
+            sa.text("update item set publish_status = 'pending' where id = 'item-0000'")
+        )
+        session.commit()
+
+    response = await client.get("/v1/items/item-0000/enrichments")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [row["id"] for row in body["data"]] == ["enr-1"]
+    assert body["data"][0]["status"] == "failed"
+    assert body["data"][0]["attempt_count"] == 3
+    assert body["total"] == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unknown_items_chain_rows_are_a_404(client: httpx.AsyncClient) -> None:
+    """A diagnostic that invents an empty answer is worse than one that says 404."""
+    response = await client.get("/v1/items/nope/enrichments")
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_source_scoped_listing_is_unchanged(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-65: the existing shape keeps working, and both routes agree."""
+    with store() as session:
+        session.execute(
+            sa.text(
+                "insert into item_enrichment (id, item_id, plugin_id,"
+                " plugin_version, kind, lang, status, attempt_count, tenant_id,"
+                " input_hash, created_at, updated_at)"
+                " values ('enr-2', 'item-0000', 'translate', '1', 'translation',"
+                " 'en', 'queued', 0, 'default', 'hash2',"
+                " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
+            )
+        )
+        session.commit()
+
+    by_source = await client.get("/v1/sources/src-1/enrichments")
+    by_item = await client.get("/v1/items/item-0000/enrichments")
+    assert by_source.status_code == 200, by_source.text
+    assert by_item.status_code == 200, by_item.text
+    assert [row["id"] for row in by_source.json()["data"]] == ["enr-2"]
+    # The same rows, and the same shape: the two routes differ only in which
+    # rows they select.
+    assert by_item.json()["data"] == by_source.json()["data"]
