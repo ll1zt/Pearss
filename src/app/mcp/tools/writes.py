@@ -507,7 +507,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Enable or disable a collector plugin. Requires confirmation: a "
-            "disabled plugin stops collecting every source it serves."
+            "disabled plugin stops collecting every source it serves, and "
+            "enabling one resumes real outbound requests to the sites those "
+            "sources point at."
         ),
     )
     async def set_plugin_status(
@@ -567,7 +569,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "existed. Two items differing only in external_id still count as "
             "one when their content is identical, so an empty body does not "
             "distinguish them.\n\n"
-            "Requires confirmation: this adds content to the corpus."
+            "Requires confirmation: this adds content to the corpus, where "
+            "the source's processing chain can make real outbound requests to "
+            "the submitted URLs and spend provider budget on it."
         ),
     )
     async def submit_items(

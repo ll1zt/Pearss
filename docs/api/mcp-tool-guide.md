@@ -32,7 +32,10 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
    这条规则的依据是**粒度**，不是"Resource 不进上下文"—— 后者是错的：
    `resources/read` 的 `text` 与工具结果同样进入对话上下文，MCP 没有
    "读取但不进上下文"的语义。Resource 仍优先，因为部分客户端把它当附件。
-2. **列表必须分页 + 截断**。默认 `limit=50`，上限 100，与 `/v1` 一致。
+2. **列表必须分页 + 截断**。MCP 工具默认 `limit=20`、`/v1` 默认 `limit=50`，
+   上限两边都是 100。MCP 侧给得比 `/v1` 小，是因为工具结果直接进模型上下文，而 `/v1`
+   的默认值还要服务 Reader API 那类按页取全量的调用方——**两侧默认值本来就不同**，
+   旧版本这里写「默认 50，与 `/v1` 一致」，两个数字都不对（issue #69）。
    **调用方要的那一页就是返回的那一页**：`_truncate` 不对主结果集（`data`）套
    `MAX_LIST_ITEMS` 兜底——它的长度由调用方的 `limit` 决定，而该 `limit` 已被
    `/v1` 端点限制在 1..100。兜底只作用于**其它**列表（任意深度的嵌套数组、写操作的
@@ -72,12 +75,22 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
   没有挂起点），因此回归测试用 **barrier 强制交错**，并用
   `test_the_shared_client_keeps_no_per_call_result_state` 钉住「client 上不存在
   per-call 结果状态」这条不变量（实测：只加回属性时，并发场景仍绿，只有这条守卫变红）
-- 每个工具必须声明 `ToolAnnotations`，且与描述里的副作用陈述一致：读工具
-  `readOnlyHint=true`、`openWorldHint=false`；删除类 `destructiveHint=true`；
-  发起外部请求或消耗 provider 预算的写 `openWorldHint=true`。写工具一律
-  `idempotentHint=false`——它们不接受调用方提供的稳定幂等键（每次调用新生成），
-  重试即新意图。注解是机器可读的副作用声明：host 依据 `destructiveHint` 决定
-  是否追加自己的确认，所以它与描述同属契约（进 snapshot）
+- 每个工具必须声明 `ToolAnnotations`，且**与描述里的副作用陈述同源**。规则按下表
+  读：左边是描述必须说的话，右边是随之而来的注解。**不要按工具类别记**——旧版本这里
+  写「读工具 `openWorldHint=false`」，读起来像「读工具统一为 false」的属性，而它其实
+  是「不发起外部请求、不消耗 provider 预算」的**结论**：真出现一个出网的读工具，
+  照类别记就会把它标错，照下表记则不会（issue #69）
+
+  | 描述说的 | 注解必须是 |
+  |---|---|
+  | 需要用户确认 | `readOnlyHint=false` |
+  | 有不可逆后果（删除、force publish） | `destructiveHint=true` |
+  | 发起外部请求、或消耗 provider 预算 | `openWorldHint=true` |
+  | （写工具） | `idempotentHint=false`——不接受调用方提供的稳定幂等键（每次新生成），重试即新意图 |
+
+  三条与描述的一致性由 `tests/unit/test_mcp_tool_guide.py` 机械对账（措辞 ⇔ hint），
+  所以「注解是契约」不只是 snapshot 里的一行 diff。注解是机器可读的副作用声明：
+  host 依据 `destructiveHint` 决定是否追加自己的确认，所以它与描述同属契约（进 snapshot）
 - 破坏性操作（删除、force publish）在描述里显式标注不可逆后果
 
 ### 需要确认的清单（当前）
@@ -159,7 +172,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
   `error_class` 取值范围
 - 描述里写清**副作用**：是否发起外部请求、是否改变状态、是否可逆
 
-## 七、订阅归类（folder）
+## 八、订阅归类（folder）
 
 `Source` 带一个 `folder`：订阅在客户端侧边栏中的分组。**一订阅一分类**，
 跟随 FreshRSS（其源码明确 "a feed can only be in one category"，客户端也按该模型实现；
@@ -184,9 +197,9 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 斜杠会产生客户端无法往返的路径）。MCP 侧对应 `set_source_folder` 与 `add_source` 的
 `folder` 参数。
 
-## 八、传输与挂载
+## 九、传输与挂载
 
-- 传输：**Streamable HTTP**（§9），与 Core API 同进程挂载，端点 `/mcp`
+- 传输：**Streamable HTTP**（`architecture-spec.md` §9），与 Core API 同进程挂载，端点 `/mcp`
 
 **入站鉴权（客户端 → `/mcp`）**
 
@@ -213,7 +226,14 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 
 - 未来 P3 拆分子模块 server + Gateway 时，本规范继续适用，只是挂载点变化
 
-## 九、验收清单（改工具面时逐条过）
+## 十、验收清单（改工具面时逐条过）
+
+> **章节编号说明**：2026-09-28 之前本文件有两个「七、」段（「命名与描述」与
+> 「订阅归类（folder）」），使「第七节」无法判定指向何处。去重后编号整体后移一位：
+> 原「八、传输与挂载」现为**第九节**，原「九、验收清单」现为**第十节**。
+> ADR 0010 里「写进 mcp-tool-guide 第八节」指的是**现在的第九节**（actor 归因那段）——
+> 已接受的 ADR 不改写，所以映射记在这里。编号唯一且递增由
+> `tests/unit/test_mcp_tool_guide.py` 守住。
 
 1. 工具是否经 `/v1` 而非直调仓储？（审计覆盖）
 2. 返回值是否可能含正文、HTML、token、私有 URL？
