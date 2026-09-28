@@ -512,7 +512,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Enable or disable a collector plugin. Requires confirmation: a disabled plugin stops collecting every source it serves.",
+    "description": "Enable or disable a collector plugin. Requires confirmation: a disabled plugin stops collecting every source it serves, and enabling one resumes real outbound requests to the sites those sources point at.",
     "input_schema": {
       "properties": {
         "plugin_id": {
@@ -593,7 +593,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022). Use this to store content you have gathered elsewhere: pass the title, the source URL, the publication time and the body, and Pearss stores it through the same pipeline as collected items.\n\nThe target must be a source of type 'agent' -- create one first with add_source using a url like 'agent://newsletter-intake'. Pushing into an rss or web source is refused, because that would mix content from one origin into another's provenance.\n\n`source_id` is the path, never an argument: an item's source is not yours to choose. Items are visible to readers as soon as they are stored unless the source has a processing chain. Submitted HTML is sanitised on the way in, so it does not need pre-cleaning, and what you send is treated as data rather than trusted.\n\nThe response reports what happened per item: branch on each result's `action`, not on the status code. A 201 means the submission was accepted, not that every item was new -- `skip_same_source` and `suppress` mean an identical item already existed. Two items differing only in external_id still count as one when their content is identical, so an empty body does not distinguish them.\n\nRequires confirmation: this adds content to the corpus.",
+    "description": "Push items into an agent source (A3, ADR 0022). Use this to store content you have gathered elsewhere: pass the title, the source URL, the publication time and the body, and Pearss stores it through the same pipeline as collected items.\n\nThe target must be a source of type 'agent' -- create one first with add_source using a url like 'agent://newsletter-intake'. Pushing into an rss or web source is refused, because that would mix content from one origin into another's provenance.\n\n`source_id` is the path, never an argument: an item's source is not yours to choose. Items are visible to readers as soon as they are stored unless the source has a processing chain. Submitted HTML is sanitised on the way in, so it does not need pre-cleaning, and what you send is treated as data rather than trusted.\n\nThe response reports what happened per item: branch on each result's `action`, not on the status code. A 201 means the submission was accepted, not that every item was new -- `skip_same_source` and `suppress` mean an identical item already existed. Two items differing only in external_id still count as one when their content is identical, so an empty body does not distinguish them.\n\nRequires confirmation: this adds content to the corpus, where the source's processing chain can make real outbound requests to the submitted URLs and spend provider budget on it.",
     "input_schema": {
       "properties": {
         "items": {
