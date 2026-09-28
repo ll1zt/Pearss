@@ -25,13 +25,22 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.e2e.conftest import _auto_accept
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 
 
 def _audit_row(session_factory: sessionmaker[Session], audit_id: str) -> Any:
-    """The audit row with this id, or None. Returned as a row for direct reads."""
+    """The audit row with this id, or None. Returned as a row for direct reads.
+
+    Drains first, because the row is written *after* the response is on the
+    wire (the middleware's fire-and-forget contract, issue #18): looking it up
+    straight after a tool call is a race that wins on an idle machine.
+    """
+    assert CorrelationAndAuditMiddleware.drain_audit(), (
+        "the audit worker did not finish, so a missing row would prove nothing"
+    )
     with session_factory() as db:
         return db.execute(
             sa.text(

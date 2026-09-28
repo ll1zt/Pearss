@@ -33,6 +33,7 @@ from mcp.types import CallToolResult
 from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.e2e.conftest import API_TOKEN, READER_PASSWORD, READER_USERNAME
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
@@ -157,7 +158,9 @@ async def test_subscribe_collect_consume_replay(
         assert replayed.status_code == 201
         assert replayed.headers.get("idempotent-replay") == "true"
 
-    # Exactly one source exists, however many times it was added.
+    # Exactly one source exists, however many times it was added. The audit
+    # row is written after the response, so wait for it before counting.
+    CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as db:
         count = db.execute(text("select count(*) from source")).scalar_one()
         assert count == 1, count

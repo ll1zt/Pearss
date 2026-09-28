@@ -96,7 +96,17 @@ def _seed_source(factory: sessionmaker[Session]) -> str:
 
 
 def _stored_audit_ids(url: str) -> set[str]:
-    """Every audit row id on disk, the ground truth to compare against."""
+    """Every audit row id on disk, the ground truth to compare against.
+
+    Drains first: the middleware promises the id when the response starts and
+    writes the row afterwards, so reading the table straight away is a race
+    that passes on an idle machine and fails on a loaded one. `drain_audit`
+    returns False on timeout, and that has to fail loudly -- otherwise a slow
+    worker looks like a cross-talk bug.
+    """
+    assert CorrelationAndAuditMiddleware.drain_audit(), (
+        "the audit worker did not finish, so an audit-row set would be a lie"
+    )
     engine = create_engine_for(url)
     try:
         with engine.connect() as conn:
@@ -161,15 +171,7 @@ async def test_concurrent_writes_each_receive_their_own_audit_id(
         f"audit ids: {ids}"
     )
     # And they are real rows, not merely distinct strings: attributability is
-    # the entire point of returning one. `drain_audit` first, because the
-    # middleware promises the id at response.start time and writes the row
-    # afterwards; asserting on the table before the worker drains is the race
-    # this assertion would otherwise be. A False return means the row count
-    # below proves nothing, so it fails here instead of looking like a
-    # cross-talk bug.
-    assert CorrelationAndAuditMiddleware.drain_audit(), (
-        "the audit worker did not finish, so an audit-row count would be a lie"
-    )
+    # the entire point of returning one. The reader drains before it looks.
     stored = _stored_audit_ids(database_url)
     assert set(ids) <= stored, f"ids with no audit row: {set(ids) - stored}"
 
