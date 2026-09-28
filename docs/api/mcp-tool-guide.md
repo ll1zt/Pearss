@@ -56,6 +56,16 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 - 工具返回值必须带 `audit_id`，让操作可归因、可追溯。Core API 在 `X-Audit-ID`
   响应头上回显本次写入的审计行 id（审计行由中间件在响应发出**之后**写入，因此
   id 无法走 body），MCP 层读到后并入工具结果。读操作不被审计，因此不携带该字段
+- **audit id 必须随响应返回，不得存在共享 client 的属性上**。`CoreAPIClient`
+  是**单实例**、由 `MCPServer` 服务所有并发请求，而写工具都是 `async def`；
+  把 id 存在 client 属性上意味着第二个调用者在第一个读取前就覆写了它，
+  于是调用者报出**别人的**审计 id —— 一个精确到足以误导排查的错误答案
+  （issue #64）。因此 `request()` 返回 `(status, payload, audit_id)`，
+  工具用局部变量。
+  注意这个缺陷是**潜伏型**：单纯的 `asyncio.gather` 不会触发（赋值与返回之间
+  没有挂起点），因此回归测试用 **barrier 强制交错**，并用
+  `test_the_shared_client_keeps_no_per_call_result_state` 钉住「client 上不存在
+  per-call 结果状态」这条不变量（实测：只加回属性时，并发场景仍绿，只有这条守卫变红）
 - 每个工具必须声明 `ToolAnnotations`，且与描述里的副作用陈述一致：读工具
   `readOnlyHint=true`、`openWorldHint=false`；删除类 `destructiveHint=true`；
   发起外部请求或消耗 provider 预算的写 `openWorldHint=true`。写工具一律
