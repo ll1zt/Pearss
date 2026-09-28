@@ -22,6 +22,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -605,6 +606,88 @@ def test_user_gets_effective_execution_level_coverage(
         assert missing in result.stderr
 
 
+# The budget for the nested `just` call below. It is not a performance
+# assertion -- what the test asserts is an exit code -- so the bound exists only
+# to catch a *hang*, and it is set from measurement instead of taste: the call
+# costs about 10s here, and about 25s inside the tree `just mutate` builds,
+# where it starts with a cold tree. At 60s it was a second assertion nobody
+# meant to make: on a loaded runner the call exceeded it, and the failure
+# surfaced as "the unit suite does not pass inside the tree" with a pile of
+# ResourceWarnings, naming the mutation gate for a problem that was neither
+# (issue #93). A timeout now says it was a timeout.
+INNER_SUITE_TIMEOUT = 300.0
+
+
+def _tail(text: str | None, limit: int = 2000) -> str:
+    """The end of a captured stream, which is where the reason usually is."""
+    body = text if text else "(nothing)"
+    return body if len(body) <= limit else "..." + body[-limit:]
+
+
+def _run_inner_suite(
+    command: list[str],
+    *,
+    timeout: float = INNER_SUITE_TIMEOUT,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a nested command, and make a timeout fail *as* a timeout.
+
+    `subprocess.run(timeout=...)` raises `TimeoutExpired` rather than returning,
+    so the caller's `assert result.returncode ...` never runs: the test errors
+    inside the timeout machinery and the child's output is discarded on POSIX.
+    Killing the child by hand and reading what it wrote first keeps the
+    diagnosis, because "slow" and "hung" need different fixes.
+    """
+    process = subprocess.Popen(  # noqa: S603 - fixed recipe and generated fixture
+        command,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    started = time.monotonic()
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        pytest.fail(
+            f"the nested command did not finish within {timeout:g}s "
+            f"(killed after {time.monotonic() - started:.1f}s): {command!r}\n"
+            "This is a timeout, not a wrong exit code: either raise the budget "
+            "or find what is hanging. Output written before the kill:\n"
+            f"--- stdout ---\n{_tail(stdout)}\n--- stderr ---\n{_tail(stderr)}"
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def test_the_nested_command_reports_a_timeout_as_a_timeout() -> None:
+    """Given a command that outlives its budget, the failure must say "timeout".
+
+    The message is the whole fix: before it, an expired budget surfaced as "the
+    unit suite does not pass inside the tree `just mutate` builds", which names
+    the mutation gate for a problem that was neither the gate nor the code
+    (issue #93). The payload writes to stderr before sleeping so that there is
+    something to report after the kill.
+    """
+    with pytest.raises(pytest.fail.Exception) as failure:
+        _run_inner_suite(
+            # `sleep` here is the payload under test, not the suite waiting for
+            # something to become ready: this command is meant to outlive it.
+            # `exec` so the kill lands on the sleeper itself and no orphan is
+            # left behind holding the pipes.
+            ["bash", "-c", "echo partial-diagnosis >&2; exec sleep 30"],
+            timeout=0.5,
+        )
+
+    message = str(failure.value)
+    assert "did not finish within 0.5s" in message
+    assert "killed after" in message
+    assert "timeout, not a wrong exit code" in message
+    assert "partial-diagnosis" in message
+
+
 def test_user_required_suite_fails_when_no_tests_are_selected(tmp_path: Path) -> None:
     """Given a valid marked test, selecting an empty suite must fail in just."""
     module = tmp_path / "test_selected.py"
@@ -612,13 +695,8 @@ def test_user_required_suite_fails_when_no_tests_are_selected(tmp_path: Path) ->
         "import pytest\n@pytest.mark.unit\ndef test_present(): pass\n",
         encoding="utf-8",
     )
-    result = subprocess.run(  # noqa: S603 - fixed recipe and generated fixture
-        ["just", "--justfile", str(REPO_ROOT / "justfile"), "_test", "e2e"],  # noqa: S607
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
+    result = _run_inner_suite(
+        ["just", "--justfile", str(REPO_ROOT / "justfile"), "_test", "e2e"],
         env={
             **os.environ,
             "PYTEST_ADDOPTS": f"-c {REPO_ROOT / 'pyproject.toml'} {module}",
