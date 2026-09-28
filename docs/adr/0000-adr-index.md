@@ -43,7 +43,7 @@ docs/adr/
 
 - **不改写已接受的 ADR**：历史决策就是历史。要改就写新 ADR，并在旧文件头部把状态改为 `superseded by NNNN`
 - 新 ADR 的「理由」必须引用它 supersede 的那份，说清环境发生了什么变化
-- 本文件末尾的**索引表是本目录的完整索引**（0000–0035，逐条一行），新增 ADR 时同步补一行
+- 本文件末尾的**索引表是本目录的完整索引**（0000–0036，逐条一行），新增 ADR 时同步补一行
 - `architecture-spec.md` §8「关键设计决策记录」是按决策点组织的**精选对照表**，
   只收录跨组件、可逆性等级需要写明的那部分，**不是**完整索引——两份表用途不同，
   不要互相取代；新增 ADR 后若它改变了某个决策点的取舍，才同步 §8
@@ -63,7 +63,7 @@ docs/adr/
 | [0007](0007-sanitize-feed-html-at-store-time.md) | 入库前用 nh3 净化正文 HTML | accepted | 2026-09-04 |
 | [0008](0008-source-canonical-url-not-null.md) | source.canonical_url 必须 NOT NULL | accepted | 2026-09-04 |
 | [0009](0009-derived-schedule-without-apscheduler.md) | 调度时间从策略与历史推导，不引入 APScheduler | accepted | 2026-09-04 |
-| [0010](0010-mcp-tools-via-core-api.md) | MCP 工具面经 Core API 调用，用官方 mcp SDK | accepted | 2026-09-04 |
+| [0010](0010-mcp-tools-via-core-api.md) | MCP 工具面经 Core API 调用，用官方 mcp SDK | **部分 superseded**（「工具与 endpoint 一一对应」被 0036 修订） | 2026-09-04 |
 | [0011](0011-telegram-collector-decisions.md) | Telegram 采集器：t.me 原生 URL、CSS 取图、可选回溯 | accepted | 2026-09-05 |
 | [0012](0012-authenticated-collectors.md) | 登录型采集器：允许使用用户自供凭据 | accepted（**修订 collector-guide 第 14 行**） | 2026-09-05 |
 | [0013](0013-get-item-body-tool.md) | 允许 get_item_body 工具，以截断为条件 | accepted（**修订 AGENTS.md 第 99 行**） | 2026-09-05 |
@@ -89,3 +89,4 @@ docs/adr/
 | [0033](0033-same-host-concurrency.md) | 同 host 并发度：同一 host 同时只允许一次抓取在途，已认领行在得知被拒后让位（不消耗 attempt） | accepted（**补充 ADR 0029 未定义的并发度契约**） | 2026-09-26 |
 | [0034](0034-alert-when-intervention-is-needed.md) | 需要介入时主动告警：复用部署侧 notify 网关（不自建出网通道/不持凭据）、边沿触发、有界重发、退避期日志 | accepted（**补充 ADR 0019 健康面的“主动”一侧**） | 2026-09-27 |
 | [0035](0035-retrieval-capability.md) | 检索能力：FTS5 中日文全文（重叠 bigram+unigram 预分词、短语查询）、本地多语言向量（384 维）、RRF 混合（非级联）；**修订架构 §1.3 的“全文搜索引擎”非目标** | accepted（**修订 architecture-spec §1.3 非目标边界**） | 2026-09-27 |
+| [0036](0036-tool-face-is-a-semantic-projection.md) | 工具面是 /v1 的语义投影：一 endpoint 可对多工具、聚合放端点里 | accepted（**修订 ADR 0010 的「工具与 endpoint 一一对应」一句**） | 2026-09-28 |
