@@ -305,14 +305,20 @@ MCP server 挂在同一应用的 `/mcp`（Streamable HTTP）。工具：
 > “读取但不物化”的语义。规则的真实依据是**不得批量返回正文** —— 列表工具一次带 N 篇
 > 正文才是必然的上下文爆炸。
 
-**过滤在服务器端做**：`search_items` 的 `fields` 是最省的单一杠杆。实测（真实库 4677 条）：
+**过滤在服务器端做**：`search_items` 的 `fields` 是最省的单一杠杆——裁剪发生在 SQL 里，
+而不是让模型先拉宽再由自己筛。实测（迁移库、100 条条目、经真实 MCP 客户端）：
 
 ```text
-search_items(limit=100)                        32,434 字符
-search_items(limit=100, fields=id)              4,323 字符   (-87%)
-search_items(limit=5, fields=id,title,
-             source_id=…, q=…)                      66 字符
+search_items(limit=100)                        30,262 字符   ← 100 行, 默认字段
+search_items(limit=100, fields=id)              4,662 字符   (-85%)
+search_items(limit=5, fields=id,title, q=…)        796 字符
 ```
+
+绝对值随标题长度变化，作用只是给出**量级**；比例关系由
+`tests/integration/test_mcp_server.py::test_narrowing_fields_cuts_what_reaches_the_model`
+守住。而「`limit=100` 真的拿到 100 行」由 `tests/integration/test_mcp_list_truncation.py`
+守住——旧版本这里写的是 32,434 / 4,323（-87%），那组数字与代码行为**已经分叉**：当时
+`limit>20` 会被展示层的兜底砍到 20 行，数字的推导基础不成立（issue #65）。
 
 ### 鉴权
 

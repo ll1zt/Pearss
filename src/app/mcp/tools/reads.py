@@ -264,10 +264,14 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "counts. Use it to see why an item is being held by the gate."
         ),
     )
-    async def list_enrichments(source_id: str, status: str = "") -> dict[str, Any]:
-        params: dict[str, Any] = {}
+    async def list_enrichments(
+        source_id: str, status: str = "", limit: int = 20, cursor: str = ""
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": min(limit, 100)}
         if status:
             params["status"] = status
+        if cursor:
+            params["cursor"] = cursor
         http_status, payload, _ = await core.get(
             f"/v1/sources/{source_id}/enrichments", **params
         )

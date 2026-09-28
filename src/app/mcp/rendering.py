@@ -19,6 +19,11 @@ from adapters.audit import SENSITIVE_QUERY_KEYS
 MAX_STRING_CHARS = 200
 MAX_LIST_ITEMS = 20
 
+# The key every list endpoint returns its page under. It is the caller's own
+# result set, sized by the `limit` they asked for, so the fallback must not cut
+# it -- see `_truncate`.
+RESULT_SET_KEY = "data"
+
 # What a redacted value leaves in place of itself. The same marker the audit
 # module writes, so a reader who has seen one has seen both.
 _REDACTED = "<redacted>"
@@ -85,12 +90,17 @@ def _redact_urls(value: str, *, depth: int = 0) -> str:
     )
 
 
-def _shrink(value: Any) -> Any:
+def _shrink(value: Any, *, cap_list: bool = True) -> Any:
     """Redact credentials, then bound strings and list lengths at any depth.
 
     Redaction runs before the length check so a token sitting past the truncation
     point cannot survive by being cut in half -- and the bound is applied to what
     is actually returned.
+
+    `cap_list` is turned off for exactly one list: the caller's own result set,
+    which `_truncate` exempts. The parameter does not propagate -- every list
+    *inside* it keeps the bound, since those are the ones that grow without
+    anyone asking.
     """
     if isinstance(value, str):
         value = _redact_urls(value)
@@ -100,6 +110,8 @@ def _shrink(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _shrink(item) for key, item in value.items()}
     if isinstance(value, list):
+        if not cap_list:
+            return [_shrink(item) for item in value]
         clipped = [_shrink(item) for item in value[:MAX_LIST_ITEMS]]
         if len(value) > len(clipped):
             clipped.append({"truncated_items": len(value) - len(clipped)})
@@ -153,12 +165,24 @@ def _comma_join(values: list[str]) -> str:
 def _truncate(payload: dict[str, Any]) -> dict[str, Any]:
     """Bound a tool response so one long title cannot dominate the context.
 
+    The caller's result set (`data`) is returned whole: its length *is* the
+    `limit` the caller asked for, and the endpoint already bounded that (1..100
+    for every list route). Cutting it here silently overrules the request -- a
+    caller cannot tell "20 rows exist" from "20 of 100 were shown", and cannot
+    ask for the rest -- which is exactly what issue #65 was.
+
+    Every other list, at any depth, keeps `MAX_LIST_ITEMS` and the
+    `truncated_items` marker. That is the fallback's real job: stopping an array
+    that grew unexpectedly (a manifest's feature list, a row's tags, a write
+    result's per-item rows) from eating the context -- not replacing pagination.
+
     The outer signature stays concrete so callers keep their declared return
-    type; the recursion is the untyped `_shrink` above. The point is a ceiling
-    on what a single call puts in front of the model, not tidiness.
+    type; the recursion is the untyped `_shrink` above.
     """
-    shrunk = _shrink(payload)
-    return shrunk if isinstance(shrunk, dict) else {}
+    return {
+        key: _shrink(value, cap_list=key != RESULT_SET_KEY)
+        for key, value in payload.items()
+    }
 
 
 def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:

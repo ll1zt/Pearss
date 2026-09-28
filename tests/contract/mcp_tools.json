@@ -247,6 +247,16 @@
     "description": "Processor-chain rows for one source: what translations are queued/running/succeeded/failed, with error classes and attempt counts. Use it to see why an item is being held by the gate.",
     "input_schema": {
       "properties": {
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
         "source_id": {
           "title": "Source Id",
           "type": "string"
