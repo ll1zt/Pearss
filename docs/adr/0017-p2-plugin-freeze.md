@@ -164,3 +164,16 @@ hookspec 冻结、pluggy 注册表、manifest 双向校验、P2b 子进程隔离
 
 「明确不做」中的**内置插件热重载：永久裁剪**依然成立，且被 `:reload` 的实现
 印证：它杀进程重 spawn，而不是进程内 reload。
+
+### 2026-09-09：条件请求回路已接线（上文“已知缺口”到期）
+
+上文正文里那条「`record_raw_fetch` 生产代码零调用、`not_modified` 对所有
+采集器不可达」在本文写就后不久即失效：`app/pipeline.py` 现在在每次抓取
+后调 `_record_raw_fetch_payload`（200 与 304 都落行，失败的抓取走
+`_record_raw_fetch_failure` ），下一轮的 `last_conditional_state()` 从最新
+RawFetch 行读回 ETag/Last-Modified 作为 `If-None-Match`。回路闭合由
+`tests/integration/test_pipeline.py::test_the_conditional_loop_closes_over_two_cycles`
+钉死（第一轮无条件、存下 validator；第二轮带 validator 收到 304）。
+
+**本文的决策未因此改动**，只是那条「已知缺口」不再是事实。原文按 ADR 惯例
+保留不重写。

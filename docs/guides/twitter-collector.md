@@ -18,7 +18,7 @@
 `collector.py` 只剩 bytes 到 `ItemDraft` 的纯函数。
 
 ```text
-collector.py   831 行  纯解析：bytes → ItemDraft；无网络、无凭据、无状态
+collector.py   1107 行 纯解析：bytes → ItemDraft；无网络、无凭据、无状态
 client.py      438 行  GraphQL 请求、凭据解析、queryId 恢复、错误分类
 paging.py      237 行  翻页算法：frontier / 断档 / 预算 / 部分成功（无 I/O）
 walk.py        238 行  三者粘合 + 沙箱 RPC 入口（注册表 `paged=True` 的实现）
@@ -36,7 +36,7 @@ walk.py        238 行  三者粘合 + 沙箱 RPC 入口（注册表 `paged=True
 | `paging.py` | `walk`、`Page`、`WalkResult`、`to_int`、`truncate_at_seen` | 只被 `walk.py` 调用 |
 | `walk.py` | `collect_pages`、`PagedWalkResult` | 注册表经 `plugin_runtime` 的 RPC 代理 |
 
-`collector.py` 里的 `collect_pages` 是一个**薄转发**（`collector.py:773`，转发体 6 行），
+`collector.py` 里的 `collect_pages` 是一个**薄转发**（`collector.py:1049`，转发体 6 行），
 存在的唯一理由是注册表的 paged 派发要在采集器模块上找到这个 hookimpl——
 `collector_id` 指向的是 `collector.py`。实现在 `walk.py`。
 
@@ -163,26 +163,21 @@ floor_cursor（该源走过的**最深**位置）       每轮的起点
 断档**不会被追**：检测与追讨是两件事，追断档等于开出第二个爬取方向。
 `walk.py` 记 `LOGGER.warning` 后继续从 frontier 走。
 
-> ⚠️ **已确认缺陷**：`page_sort_span()` 统计 `_entries()` 里**所有**带 `sortIndex`
-> 的条目，而游标条目（`cursor-top-*` / `cursor-bottom-*`）**也带** `sortIndex`。
-> 仓库 fixture 里能看到这一点：`fixtures/valid.json` 的
-> `cursor-bottom-4000000000000000001` 带 `sortIndex: "9999999999999999999"`；
-> `fixtures/no_posts.json` 的纯游标页只有 `cursor-bottom-1` 带 `"5"`。
+> ✅ **已修（2026-09-16）**：`page_sort_span()` 原本统计 `_entries()` 里**所有**带
+> `sortIndex` 的条目，而游标条目（`cursor-top-*` / `cursor-bottom-*`）**也带**
+> `sortIndex`，于是把游标算进了连续性区间——判据变成"含游标的区间"，而语义
+> 要求比较"推文区间"。
 >
-> **真实流量下的严重性（2026-09-14 实测两页后修正）**：真实载荷里
-> `cursor-bottom` 的 `sortIndex` 只比最旧推文**小 1**，`cursor-top` 只比
-> 最新推文大 1——游标紧贴推文区间，不是 fixture 里那种悬殊差距。因此
-> 污染带宽只有约 1 个单位，相邻页被误判需下一页 max 恰好落入其中，
-> **实测未触发**。
+> 真实载荷里 `cursor-bottom` 的 `sortIndex` 只比最旧推文**小 1**，`cursor-top` 只比
+> 最新推文大 1——污染带宽约 1 个单位，相邻页被误判需下一页 max 恰好落入其中，
+> 实测未触发，属低概率潜在缺陷。
 >
-> 所以这是**低概率的潜在缺陷，不是活跃故障**。判据仍然错（语义要求比较
-> "推文区间"，它比较的是"含游标的区间"），且 fixture 量纲与真实不符使测试
-> 在守护错误行为，故仍应修，但不紧急。
->
-> 修复方向：`page_sort_span` 只统计 `entryId` 以 `tweet-` 开头的条目，
-> 纯游标页返回 `None`（"无法证明连续性"，已有测试
-> `test_pages_without_sort_index_cannot_prove_continuity` 覆盖该语义）。
-> 详见 [twitter-improvements.md](twitter-improvements.md) 的 P0-2 与 P0-3。
+> 现按**结构**分类条目（与 `_tweets()` 同一判据）：游标与推广条目不算数，
+> 纯游标页返回 `None`（"无法证明连续性"，与"已证明成立"是不同的断言）。
+> 判据与 `_tweets()` 共用避免了二者分歧——否则区间会包含被丢弃的推文
+> （假断档）或漏掉保留的推文（漏报）。回归测试：
+> `test_pages_without_sort_index_cannot_prove_continuity` 及 fixtures
+> `valid.json` / `no_posts.json`（量纲已与真实载荷对齐）。
 
 ## 凭据解析
 
@@ -358,8 +353,6 @@ X 在不同时期把同一份数据放在不同位置，**只接受一种会静�
 `fixtures/conversation.json` 是脱敏语料（结构、字段组合、sortIndex 量纲
 照抄真实载荷；文本、用户名、头像 URL 为合成），同时含这三种条目形状。
 
-完整改进规划见 [twitter-improvements.md](twitter-improvements.md)。
-
 ## 标题类型前缀（`RT ` / `QT `）
 
 阅读器的列表视图**只显示标题**，所以正文里的 `↻ 某人 转推了` 横幅在那里
@@ -388,16 +381,30 @@ X 在不同时期把同一份数据放在不同位置，**只接受一种会静�
 **注意**：`bool` 是 `int` 子类，`isinstance(True, int)` 为真，所以守卫显式
 排除布尔值——否则会渲染出 `width="True"`。图片 URL 用原图，不取缩略图。
 
+## 明确不做
+
+以下项经讨论后决定不做，记录在案以防重新提出（真实载荷里有这些字段，
+不构成添加理由）：
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| 点赞/转推/回复/浏览量计数（`views` 等） | **不做** | 计数是快照且会腐烂；时间线的价值在内容不在热度指标 |
+| 图片改用 `?name=` 缩略图 | **不做** | 原图保留细节，CDN 响应可接受 |
+| 长推（`note_tweet`）标题加长 | **不做** | 首句截断已合理 |
+| 视频改为 `<iframe>` 嵌入 | **不做** | 与 ADR 0007 的禁令冲突，且 `<video>` 已够用 |
+| 正文渲染 `published_at` | **不做** | 阅读器自己就显示到达时间，每条都重复是噪声 |
+| 渲染作者头像 | **不做** | NNW 不注入自定义 CSS，服务端做圆不可能（inline `style` 是 XSS 面）；试过已撤销，署名改为纯文字 |
+
 
 ## 测试布局
 
 ```text
 src/plugins/collectors/twitter/
-  test_collector.py    57 个  解析（含 6 个实体区间、条目形状、标题前缀、图片尺寸）
+  test_collector.py    63 个  解析（含 6 个实体区间、条目形状、标题前缀、图片尺寸）
   test_client.py       29 个  请求形状、凭据解析、错误分类、queryId 恢复
   test_paging.py       21 个  frontier / 断档 / 预算 / 部分成功 / floor 候选
 tests/integration/
-  test_twitter_paging.py 13 个  真实仓库写入 + 真实 walk（MockTransport，离线）
+  test_twitter_paging.py 15 个  真实仓库写入 + 真实 walk（MockTransport，离线）
 ```
 
 集成层覆盖单元层到不了的部分：首轮定义 floor、第二轮停在 frontier、
@@ -428,8 +435,8 @@ frontier 只前移、floor 不被预算停止覆盖。全部离线——HTTP 层
 改动本目录时值得先跑的检查：
 
 ```bash
-just test        # 含本目录（test_collector 57 + test_client 29 + test_paging 21）
-                 #   + tests/integration/test_twitter_paging.py 13 个
+just test        # 含本目录（test_collector 63 + test_client 29 + test_paging 21）
+                 #   + tests/integration/test_twitter_paging.py 15 个
                  #   + tests/unit/test_cookiecloud.py，全部离线
 just lint        # import-linter 守四层依赖方向
 ```

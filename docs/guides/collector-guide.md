@@ -24,8 +24,7 @@
 > - `rss`（RSS 2.0 + Atom，**内置，进程内**）：5 套 fixture，fetch 钩子含 WordPress 全文升级
 > - `telegram`（公开频道预览页）：5 套 fixture，声明 backfill
 > - `twitter`（X 时间线，**登录型**，见 ADR 0012）：9 套 fixture，paged 走读。
->   实现细节与已知缺陷见 [twitter-collector.md](twitter-collector.md)，
->   基于真实载荷的改进规划见 [twitter-improvements.md](twitter-improvements.md)
+>   实现细节、已知缺陷与「明确不做」清单见 [twitter-collector.md](twitter-collector.md)
 > - `zhihu`（**登录型 + 签名**，见 ADR 0014）
 > - `zsxq`（**登录型**，见 ADR 0015）
 >

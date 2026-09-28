@@ -11,8 +11,9 @@ covers a *specific client's* usage of it. When Read You changes, only
 this file should need to change -- which is the point of keeping the two
 apart.
 
-Findings and reasoning are in
-docs/integrations/readyou-freshrss-compat-findings.md.
+Findings and reasoning are recorded in the scenario names below; the
+client's request shapes were read from `GoogleReaderAPI.kt` at
+Ashinch/ReadYou@d2b979c and replayed against a migrated instance.
 """
 
 from __future__ import annotations

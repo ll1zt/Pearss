@@ -10,8 +10,8 @@
 - 关联：ADR 0004（Reader API 提前到 P1，范围「只读 + 已读回写」）、
   ADR 0005 / 0006（凭据与 item id）、ADR 0010（A5 `discover_feed` 暂缓）、
   ADR 0021（删除就是删除）
-- 依据：`docs/integrations/readyou-freshrss-compat-findings.md`
-  （对 `Ashinch/ReadYou@d2b979c` 的逐调用点对照与实测记录）
+- 依据：对 `Ashinch/ReadYou@d2b979c` 的逐调用点对照与实测回放（核查记录
+  已随该轮文档清理移除；可执行结论在 `tests/integration/test_readyou_compat.py`）
 
 ## 背景
 
@@ -180,8 +180,8 @@ miniflux 同形（`len(itemRefs) + offset`）。另修正深度上限语义：
 永久循环；改为达到上限即报告结束。
 
 本 ADR 的决策 1–5 不变；决策 2 的推理同样适用于本次（**参数/字段被忽略
-→ 静默给出子集**）。完整排障见
-[`readyou-read-propagation-findings.md`](../integrations/readyou-read-propagation-findings.md)。
+→ 静默给出子集**）。回归测试见
+`tests/integration/test_reader_api.py` 的 continuation 游标用例。
 
 ## 修订（2026-09-16）：`t=` 重命名生效；`ac=unsubscribe` 从拒绝改为删除
 

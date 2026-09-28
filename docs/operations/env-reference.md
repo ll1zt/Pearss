@@ -70,6 +70,19 @@ PEARSS_DOCS_ENABLED=0
 # enrichment worker（翻译等处理链）的并发数。默认 3。
 # PEARSS_ENRICHMENT_CONCURRENCY=3
 
+# 抓取礼貌约束（ADR 0029）：只作用于会抓「条目自身 URL」的处理器（fulltext），
+# 即向第三方站点发请求的那类。限制按 host 计数。
+# 同一 host 两次抓取的最小间隔（秒）。慢是故意的：博客不是 API。
+# PEARSS_FETCH_MIN_INTERVAL=2
+# 一轮 sweep 内单个 host 最多派发的抓取数，超出部分留在队列下轮继续。
+# PEARSS_FETCH_MAX_PER_HOST_PER_SWEEP=2
+# host 返回 403/429（blocked 分类）后的冷静期（秒）。
+# PEARSS_FETCH_COOLDOWN_SECONDS=900
+# :backfill-chain 未显式给 limit 时，一次调用排队的条数上限。
+# 非法值（非整数或 < 1）一律回落到默认 10——无限默认曾是 122 次连发的入口；
+# 重复调用可继续（排队幂等）。
+# PEARSS_BACKFILL_DEFAULT_LIMIT=10
+
 # 0 = 只跑 API 不跑调度（不采集、不清理审计、不跑处理链）。
 # 容器资源紧张或只想对外提供 Reader API 时可设 0。
 # PEARSS_SCHEDULER_ENABLED=1

@@ -8,15 +8,20 @@
 
 P1 目标提供：
 
-- RSS/Atom 增量采集（ETag / Last-Modified）
-- 网站 Feed 自动发现
-- OPML 导入导出
+- RSS/Atom 增量采集（ETag / Last-Modified 条件请求回路已闭环）
 - 2–3 个准插件网页采集器
 - 固定与自适应调度策略
 - FastAPI Core API 与 FastMCP 操作面
 - 发布闸门、错误分类、审计、fixture 回归测试
 
-P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已读同步、第三方插件市场、翻译/TTS。
+P1 不提供：完整 Web 管理 UI、多用户、第三方插件市场、TTS。
+
+**超出 P1 计划已交付的能力**：处理器链（翻译、fulltext 正文抽取，见 ADR 0018/0028/
+0030/0031）、主动数据接入（`POST /v1/sources/{id}:ingest`，ADR 0022）、第三方
+插件装载器（ADR 0023/0025）、FTS5+向量混合检索（ADR 0035）。
+
+**与原始计划的偏差**：网站 Feed 自动发现（A5）已决定暂缓；Reader API 已读同步
+原定 P3，**已提前到 P1 交付**（ADR 0004）；OPML 导入导出（A6）仍未实现。
 
 ### 已完成
 
@@ -43,10 +48,8 @@ P1 不提供：完整 Web 管理 UI、全文搜索、多用户、Reader API 已�
 - `just contract`：MCP 工具面 snapshot + OpenAPI 全文档 snapshot 双校验（OpenAPI 用 snapshot 手法替代 nixpkgs 缺失的 oasdiff）
 - `just test-e2e`：单进程全链路（真 uvicorn + MCP 客户端 + 本地 fixture origin）；Compose 多容器拓扑暂不需要
 
-其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD、
-**备份与恢复演练**（§7.5）、**条件请求持久化回路**（`record_raw_fetch` 生产路径
-未接线——ETag/Last-Modified 未写回，304 路径对所有采集器不可达，见 ADR 0017
-已知缺口）。见 `architecture-spec.md` §5/§6。
+其余待实现项：OPML（A6）、`discover_feed`（A5，已暂缓）、`create_feed`/FeedOut CRUD。
+见 `architecture-spec.md` §5/§6。
 
 ## 快速开始
 
@@ -289,6 +292,10 @@ MCP server 挂在同一应用的 `/mcp`（Streamable HTTP）。工具：
 | `list_enrichments` | | 某源的处理器链产物状态 |
 | `retry_enrichments` | ⚠ | 重排失败的产物（会再次消耗 provider 额度） |
 | `backfill_source` | ⚠ | 为启用链之前的存量条目补排队 |
+
+另有 `get_source`、`get_item`、`list_runs`、`list_plugins`、`set_plugin_status`⚠、
+`delete_items`⚠、`delete_source_items`⚠、`submit_items`⚠ 共 22 个工具（与
+`tests/contract/mcp_tools.json` 同源，由 `just contract` 校验）。
 
 **取正文**：优先用 Resource `item://{item_id}` —— 部分客户端把它当附件，不占模型上下文。
 客户端不支持 Resource 时用 `get_item_body`（ADR 0013），它带截断并自述 `truncated` /

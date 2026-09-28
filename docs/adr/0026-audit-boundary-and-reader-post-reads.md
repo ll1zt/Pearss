@@ -11,7 +11,7 @@
   `tests/integration/test_app.py::test_a_refused_write_is_not_audited_because_it_never_reaches_the_endpoint`
 - 关联：ADR 0016（公开暴露加固——审计泛洪是资源耗尽向量）、
   ADR 0022（agent ingest 与令牌作用域）
-- 背景：深度评审（`problem2fix.md` C01/C02）指出仓库规则之间存在冲突：
+- 背景：一次仓库级深度评审指出仓库规则之间存在冲突：
   一处说「被拒写/认证失败都要审计」，另一处（ADR 0016）指出无条件审计
   每个拒绝是泛洪漏洞，而 Reader API 的 POST 读取用 header 认证又与
   「POST 只认表单 `T`」的成文规则矛盾。本 ADR 一次性裁定三者的边界。

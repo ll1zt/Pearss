@@ -169,8 +169,11 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
 
 ### 2.3 MCP 工具面（控制平面）
 
-- **P1（已实现，11 个）**：`list_sources`、`search_items`、`get_system_snapshot`、`list_jobs` / `list_runs`、`get_item_body`（截断取正文，ADR 0013）、`add_source`⚠、`update_schedule_policy`⚠、`set_source_status`⚠（暂停/恢复）、`remove_source`⚠、`trigger_job`⚠；正文优先走 `item://{item_id}` Resource
-- **P1（暂缓，尚无对应 Core API）**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6）、`create_feed`⚠（FeedOut 尚无 CRUD）
+- **已实现（22 个，与 `tests/contract/mcp_tools.json` 同源）**：
+  - 读：`list_sources`、`get_source`、`search_items`、`get_item`、`get_item_body`（截断取正文，ADR 0013）、`get_system_snapshot`、`list_jobs` / `list_runs`、`list_enrichments`、`list_plugins`
+  - 写⚠：`add_source`、`update_schedule_policy`、`set_source_status`（暂停/恢复）、`set_source_folder`、`remove_source`、`delete_items`、`delete_source_items`、`trigger_job`、`backfill_source`、`retry_enrichments`、`set_plugin_status`、`submit_items`
+  - 正文优先走 `item://{item_id}` Resource
+- **暂缓，尚无对应 Core API**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6）、`create_feed`⚠（FeedOut 尚无 CRUD）
 - ⚠ = 需 elicitation 用户确认。工具经 `/v1` 调用而非直调仓储，理由见 ADR 0010
 - **P2**：`diagnose_source`、`diagnose_plugin`、`get_logs(correlation_id)`、插件管理组（⚠：import/enable/disable）
 - **P3**：`run_processor`、`list_pending_items` / `retry_enrichment` / `force_publish`⚠、ingest token 管理
@@ -209,9 +212,9 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ RSS feed（最近 200 条窗口）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD、**备份与恢复演练**（§7.5） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；`nix develop --command just ci` 通过（879 测试）。未达成：「发现」环节与 OPML 迁移 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ ~~RSS feed（最近 200 条窗口）~~（公开 RSS 输出已由 ADR 0016 移除，`rss_out` 模块保留供 P3 复用）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；备份/恢复与首轮演练已落地（`just backup` / `just restore`，见 runbook）；`nix develop --command just ci` 通过。未达成：「发现」环节与 OPML 迁移 |
 | P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + **hookspec 冻结 + pluggy 注册表 + manifest/生命周期（已落地，ADR 0017）** + **子进程沙箱（已落地，ADR 0017）** + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
-| P3 完整形态 | Ingest API + 处理器插件框架（翻译→摘要→TTS）+ 发布闸门联动 + enclosure 音频 feed + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通；音频 feed 可订阅 |
+| P3 完整形态 | Ingest API（**已交付，ADR 0022**）+ 处理器插件框架（翻译→摘要→TTS，**翻译与 fulltext 已交付，降级链与结构见 ADR 0018/0030/0031**）+ 发布闸门联动（**已交付**）+ 第三方插件装载器（**已交付，ADR 0023/0025**）+ 检索能力（**已交付，ADR 0035**）+ enclosure 音频 feed + TTS + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通（已达成）；音频 feed 可订阅（未做） |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
 
 ## 6. 需求追踪矩阵
@@ -234,7 +237,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 | C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
 | C4 Reader API | /api/greader.php | P1 ✅（原 P3） | NNW FreshRSS 登录 + 已读/星标同步，实测通过；ADR 0004 提前 |
 | C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 Reader API 与 MCP 工具两条路径均不可见（公开 RSS 渲染已移除，ADR 0016）；P3 处理器链联动待做。**注意**：`ready` → `published` 由可观察的首次输出触发，**每条输出路径都会写 `first_publish`**（Reader API contents 与 `/v1/items/{id}/body`；公开 RSS 渲染已移除，ADR 0016） |
-| D1-D6 操作面 | MCP 工具组（11 工具） | P1 ✅ | 见 §2.3；D1 诊断类工具（diagnose_source 等）属 P2 |
+| D1-D6 操作面 | MCP 工具组（22 工具） | P1 ✅ | 见 §2.3 与 `tests/contract/mcp_tools.json`；D1 诊断类工具（diagnose_source 等）属 P2 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
 | F1 可复现环境 | Nix Flake + direnv + uv | P1 ✅ | clean slate 下 `nix develop --command just ci` 通过 |
 | F2 依赖供应链 | flake.lock + uv.lock | P1 ✅ | 两份锁文件均入库 |
@@ -267,7 +270,7 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 ### 7.4 Agent 协作腐化 → AGENTS.md + 标准命令
 
 - 根目录 `AGENTS.md`：项目目标、分层 import 规则、标准命令、测试要求、安全红线；主流编码 agent 可自动读取
-- `justfile`：`just sync / test / lint / contract / ci / migrate / run / e2e` 是人和 agent 唯一命令入口
+- `justfile`：`just sync / test / test-integration / test-e2e / lint / contract / ci / migrate / run` 是人和 agent 唯一命令入口
 - P2 起维护 agent eval 集：golden 任务及期望工具调用序列，防 MCP 工具变更造成 agent 操作能力回退
 
 ### 7.5 数据腐化 → 迁移纪律 + 备份分级
@@ -301,30 +304,34 @@ repo/
   pyproject.toml         # 元数据、依赖、ruff/mypy/pytest/import-linter 配置
   uv.lock                # 锁定 Python 依赖图
   alembic.ini            # sqlalchemy.url 故意留空，URL 由 env.py 从环境解析
-  migrations/versions/   # 0001 P1 七表 … 0005 时间戳定宽
+  migrations/versions/   # 0001 P1 七表 … 0021 链内上游产物（线性迁移）
   deploy/pearss.service  # systemd 用户服务（ADR 未单列，见 README）
   src/                   # src layout；四层由 import-linter 强制
     core/                # 纯领域：零框架 import（已 AST 核验）
     adapters/            # http / db / repository / rss_out / reader_api /
-                         # filestore / sanitize / audit / correlation / raw_payload
+                         # filestore / sanitize / audit / correlation / raw_payload /
+                         # cookiecloud / alerting / deadline_transport
     plugins/collectors/  # 准插件 + 其 fixture 与回归测试
-    app/                 # 组装：main / sources_routes / items_routes /
-                         # system_routes / reader_routes / pipeline / scheduler /
-                         # mcp_server / auth / middleware
+    plugins/processors/  # 处理器（translate / fulltext）
+    app/                 # 组装：main / *_routes / pipeline / scheduler /
+                         # plugin_loader / plugin_runtime / processor_runtime /
+                         # fetch_pacing / hardening / backup / mcp_server
   tests/
     unit/                # core 纯函数、状态机、去重、调度、脱敏、净化
     integration/         # SQLite + ASGI + MCP 客户端 + systemd 级行为
-    contract/mcp_tools.json   # 工具面 snapshot（just contract）
-    fixtures/            # 采集器快照（实际位于 plugins/collectors/rss/fixtures）
+    contract/            # MCP 工具面 + OpenAPI snapshot（just contract）
     e2e/                 # 单进程全链路（真 uvicorn + MCP 客户端 + fixture origin），`just test-e2e`
-    evals/               # P2 agent golden 任务，尚未创建
   docs/
     api/                 # style-guide.md, mcp-tool-guide.md
     domain/              # data-model.md, state-machines.md, error-taxonomy.md
-    guides/              # collector-guide.md, twitter-collector.md, twitter-improvements.md, testing.md
-    operations/          # runbook.md
+    guides/              # collector-guide.md, twitter-collector.md,
+                         # host-http-boundaries.md, testing.md
+    operations/          # runbook.md, env-reference.md, tunnel-drill.md
     integrations/        # netnewswire.md
     adr/                 # 一决策一文件，可 supersede；0000 为索引```
+
+> `tests/fixtures/`（采集器快照实际位于 `src/plugins/collectors/*/fixtures`）与
+> `tests/evals/`（P2 agent golden 任务）在本仓库**尚未创建**，故不列入树中。
 
 ### 7.7 运行期腐化信号
 
