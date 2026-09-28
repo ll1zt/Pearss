@@ -9,12 +9,32 @@ contract, not tidiness.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from mcp.types import ToolAnnotations
 
+from adapters.audit import SENSITIVE_QUERY_KEYS
+
 MAX_STRING_CHARS = 200
 MAX_LIST_ITEMS = 20
+
+# What a redacted value leaves in place of itself. The same marker the audit
+# module writes, so a reader who has seen one has seen both.
+_REDACTED = "<redacted>"
+
+# Any http(s) URL inside a result string. The invariant is deliberately about
+# the *value* rather than about which key holds it: enumerating keys (`url`,
+# `canonical_url`, ...) has to be extended for every new field, and the field
+# someone forgets is the one that leaks. A URL carrying a credential must not
+# reach the model no matter what it is called or where it is nested.
+_URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>\\]+", re.IGNORECASE)
+
+# Bounded because a query parameter can itself hold a URL (`?url=https://...`),
+# which can in turn hold one. The bound is what makes that recursion safe; two
+# levels covers every shape seen in a feed URL without accepting unbounded
+# blow-up on adversarial input.
+_MAX_URL_NESTING = 2
 
 # `get_item_body` bounds itself rather than inheriting MAX_STRING_CHARS: the
 # whole point of that tool is to hand over a body, so the generic shrinker would
@@ -25,10 +45,58 @@ DEFAULT_BODY_CHARS = 4000
 MAX_BODY_CHARS = 20000
 
 
+def _redact_url(url: str, *, depth: int = 0) -> str:
+    """Hide a URL's credentials while keeping its shape.
+
+    Host and path stay because they identify the resource; the parameter names
+    stay because "this feed carries a `token`" is not the secret, the value is.
+    Dropping the whole pair -- what `adapters.audit.redact_url` does, where the
+    record must not retain a private location at all -- would make a private
+    feed indistinguishable from a public one here, leaving an agent no way to
+    know the subscription it is reasoning about carries a credential.
+
+    The classification of which parameters are secrets is imported rather than
+    restated: two lists would drift, and the dangerous direction of drift is
+    the one that stops redacting.
+
+    A parameter whose *value* is itself a URL is redacted recursively (bounded
+    by `_MAX_URL_NESTING`), because a token can hide one hop down inside a
+    redirector parameter rather than at the top level.
+    """
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    parts: list[str] = []
+    for pair in query.split("&"):
+        name, equals, value = pair.partition("=")
+        if name.lower() in SENSITIVE_QUERY_KEYS:
+            parts.append(f"{name}={_REDACTED}" if equals else name)
+        elif depth < _MAX_URL_NESTING and "://" in value:
+            parts.append(f"{name}={_redact_urls(value, depth=depth + 1)}")
+        else:
+            parts.append(pair)
+    return f"{base}?{'&'.join(parts)}"
+
+
+def _redact_urls(value: str, *, depth: int = 0) -> str:
+    """Redact every http(s) URL in a string, whole or embedded in prose."""
+    return _URL_IN_TEXT.sub(
+        lambda match: _redact_url(match.group(0), depth=depth), value
+    )
+
+
 def _shrink(value: Any) -> Any:
-    """Bound strings and list lengths at any depth in a response."""
-    if isinstance(value, str) and len(value) > MAX_STRING_CHARS:
-        return f"{value[:MAX_STRING_CHARS]}…({len(value)} chars)"
+    """Redact credentials, then bound strings and list lengths at any depth.
+
+    Redaction runs before the length check so a token sitting past the truncation
+    point cannot survive by being cut in half -- and the bound is applied to what
+    is actually returned.
+    """
+    if isinstance(value, str):
+        value = _redact_urls(value)
+        if len(value) > MAX_STRING_CHARS:
+            return f"{value[:MAX_STRING_CHARS]}…({len(value)} chars)"
+        return value
     if isinstance(value, dict):
         return {key: _shrink(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -98,6 +166,11 @@ def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:
 
     The codes are shared rather than re-derived, so an agent seeing
     `source_not_found` from a tool and from the REST API is seeing one fact.
+
+    The values are redacted even though this path does not go through
+    `_truncate`: a suggestion is prose today and may legitimately name a URL
+    tomorrow, and a credential must not reach the model because the field that
+    carried it happened not to be a `url` key.
     """
     detail = payload.get("detail")
     error = detail.get("error") if isinstance(detail, dict) else None
@@ -107,10 +180,13 @@ def _error_from(payload: dict[str, Any], status: int) -> dict[str, Any]:
             "suggestion": "Retry, then check the Core API response directly.",
             "next_actions": ["get_system_snapshot"],
         }
+    suggestion = error.get("suggestion")
     return {
         "error": error.get("code", "unknown"),
         "error_class": error.get("error_class"),
-        "suggestion": error.get("suggestion"),
+        "suggestion": (
+            _redact_urls(suggestion) if isinstance(suggestion, str) else suggestion
+        ),
         "next_actions": ["list_sources", "get_system_snapshot"],
     }
 
