@@ -16,6 +16,7 @@ item is promoted (ADR 0035 decision 4).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
@@ -27,11 +28,13 @@ from core.language import prose_text
 from core.text_search import phrase_query, tokenize
 
 __all__ = [
+    "count_matches",
     "deindex_items",
     "index_item",
     "index_missing",
     "matching_item_ids",
     "optimize",
+    "search_rows",
 ]
 
 # A lightweight handle on the virtual table. FTS5 tables cannot live in the
@@ -124,6 +127,83 @@ def optimize(session: Session) -> None:
     run whenever a large batch has just gone in.
     """
     session.execute(sa.text("INSERT INTO item_fts(item_fts) VALUES('optimize')"))
+
+
+# FTS5's bm25 returns a *negative* score whose magnitude grows with
+# relevance, so "best first" is ASCENDING and the next page is *worse* --
+# a larger score. Reading that backwards is the mistake that silently reverses
+# the results, which is why it is written out rather than implied by a DESC.
+_SCORE: Any = sa.literal_column("bm25(item_fts)")
+
+
+def search_rows(
+    session: Session,
+    *,
+    conditions: Sequence[Any],
+    text: str,
+    limit: int,
+    cursor: tuple[str, str] | None,
+) -> tuple[list[tuple[Any, float]], str | None]:
+    """One page of matches, most relevant first, plus the cursor for the next.
+
+    `conditions` are the caller's filters, already built -- the gate included --
+    so this module does not need to know what an item filter is, and the
+    visibility rule stays in exactly one place.
+
+    Pagination is a keyset on (score, id) for the same reason the time-ordered
+    list uses one: an offset walks a shifting window. The score is stable for a
+    given query and index, and the id breaks ties, so "strictly past the last
+    row" is well defined. A cursor carries the score as its printed form, which
+    round-trips exactly.
+    """
+    expression = phrase_query(text)
+    if not expression:
+        return [], None
+
+    statement = (
+        sa.select(ItemRow, _SCORE.label("score"))
+        .select_from(_FTS.join(ItemRow, _FTS.c.item_id == ItemRow.id))
+        .where(*conditions)
+        .where(sa.text("item_fts MATCH :match").bindparams(match=expression))
+    )
+    if cursor is not None:
+        value, last_id = cursor
+        statement = statement.where(
+            sa.or_(
+                float(value) < _SCORE,
+                sa.and_(float(value) == _SCORE, ItemRow.id < last_id),
+            )
+        )
+    rows = session.execute(
+        statement.order_by(_SCORE.asc(), ItemRow.id.desc()).limit(limit + 1)
+    ).all()
+
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_cursor = None
+    if has_more and page:
+        last_row, last_score = page[-1]
+        next_cursor = f"{last_score!r}|{last_row.id}"
+    return [(row, score) for row, score in page], next_cursor
+
+
+def count_matches(session: Session, *, conditions: Sequence[Any], text: str) -> int:
+    """How many items the match selects in total.
+
+    Shares the conditions and the match clause with `search_rows` for the reason
+    the list count shares them with its page: a count that drifts from what it
+    counts is worse than no count.
+    """
+    expression = phrase_query(text)
+    if not expression:
+        return 0
+    statement = (
+        sa.select(sa.func.count())
+        .select_from(_FTS.join(ItemRow, _FTS.c.item_id == ItemRow.id))
+        .where(*conditions)
+        .where(sa.text("item_fts MATCH :match").bindparams(match=expression))
+    )
+    return int(session.execute(statement).scalar_one())
 
 
 def matching_item_ids(session: Session, *, query: str, limit: int) -> list[str]:

@@ -427,13 +427,25 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource, or the get_item_body tool.\n\nFilter on the server, not in your context. These cost nothing here and are expensive if you pull a wide list and filter it yourself: - fields: comma-separated subset of id,guid,title,url,published_at,source_id,publish_status. Requesting fewer fields is the single biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB with fields=id).\n- limit: how many rows (default 20, max 100). Ask for what you need.\n- source_id, q, since, until, publish_status: narrow the query.\nSo 'recent posts from one source' is one narrowed call, not a wide list you then scan.",
+    "description": "Search collected items. Returns summaries only \u2014 titles, urls, ids and timestamps. Bodies are at the item://{id} Resource, or the get_item_body tool.\n\nTwo ways to search, and they answer different questions:\n- q: substring match on the title only.\n- full_text: real search over titles and bodies, most relevant first. Use it when the words you are looking for may be in the article rather than its headline. There is no need to pass both.\n\nFilter on the server, not in your context. These cost nothing here and are expensive if you pull a wide list and filter it yourself: - fields: comma-separated subset of id,guid,title,url,published_at,source_id,publish_status. Requesting fewer fields is the single biggest saving (a 100-item list is ~32 KB with all fields, ~4 KB with fields=id).\n- limit: how many rows (default 20, max 100). Ask for what you need.\n- source_id, q, full_text, since, until, publish_status: narrow the query.\nSo 'recent posts from one source' is one narrowed call, not a wide list you then scan.",
     "input_schema": {
       "properties": {
         "fields": {
           "default": "id,guid,title,url,published_at,source_id",
           "title": "Fields",
           "type": "string"
+        },
+        "full_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Full Text"
         },
         "limit": {
           "default": 20,
