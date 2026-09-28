@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -84,6 +85,12 @@ DEFAULT_TICK_SECONDS = 60.0
 DEFAULT_TICK_CONCURRENCY = 3
 DEFAULT_TICKS = 60.0
 PRUNE_INTERVAL_SECONDS = 3600.0
+# How often to let SQLite refresh its own statistics (issue #77). `PRAGMA
+# optimize` decides what, if anything, is worth analysing from the queries it
+# has actually seen, so a pass that finds nothing costs a no-op; an hour is the
+# order SQLite's own documentation suggests, and matching the prune interval
+# keeps one maintenance cadence rather than two.
+OPTIMIZE_INTERVAL_SECONDS = 3600.0
 # Per-tick reaping grace. A live run of *this* process must never be reaped:
 # timing out a run that is actually still collecting loses its result and
 # frees the active-run slot for a duplicate. Routine collection is one page;
@@ -408,6 +415,7 @@ class Scheduler:
         tick_seconds: float = DEFAULT_TICK_SECONDS,
         on_tick: Callable[[TickReport], None] | None = None,
         prune_every: float = PRUNE_INTERVAL_SECONDS,
+        optimize_every: float = OPTIMIZE_INTERVAL_SECONDS,
         concurrency: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -421,6 +429,7 @@ class Scheduler:
         self._monotonic = monotonic
         self._on_tick = on_tick
         self._prune_every = prune_every
+        self._optimize_every = optimize_every
         raw = os.environ.get("PEARSS_TICK_CONCURRENCY", "").strip()
         try:
             self._concurrency = (
@@ -433,6 +442,7 @@ class Scheduler:
         # reaping orphaned runs - see _reap_orphaned_runs_if_due.
         self._next_prune_at = 0.0
         self._next_reap_at = 0.0
+        self._next_optimize_at = 0.0
         self._task: asyncio.Task[None] | None = None
         # Edge detection for alerts (ADR 0034): in memory by design, since what
         # it tracks is "have we already said this" -- a property of this
@@ -508,6 +518,7 @@ class Scheduler:
                 await self._check_health_and_alert()
                 await self._reap_orphaned_runs_if_due()
                 await self._prune_audit_if_due()
+                await self._optimize_if_due()
             except OperationalError:
                 LOGGER.warning("scheduler storage operation failed; retrying next poll")
 
@@ -642,6 +653,34 @@ class Scheduler:
         self._next_prune_at = self._monotonic() + self._prune_every
         if pruned:
             LOGGER.info("audit retention pruned %d row(s) older than %dd", pruned, days)
+
+    async def _optimize_if_due(self) -> None:
+        """Let SQLite refresh the planner's statistics (issue #77).
+
+        The feed's reads are served by indexes the planner only chooses if it
+        knows how selective they are, and those statistics age: a table that
+        grows from a thousand rows to a million changes which plan is right,
+        while the planner keeps the estimate it computed at the index's
+        creation. `PRAGMA optimize` is the supported periodic form -- it runs
+        the ANALYZE passes it judges worthwhile from the queries this
+        connection has seen, and does nothing when there is nothing to do, so
+        the interval is a ceiling rather than a cost.
+
+        Same shape and the same rule as pruning: the interval advances only
+        after the pass returns, so a locked database retries on the next poll
+        rather than an hour later.
+        """
+        now = self._monotonic()
+        if now < self._next_optimize_at:
+            return
+
+        def optimize() -> None:
+            with self._session_factory() as session:
+                session.execute(text("PRAGMA optimize"))
+                session.commit()
+
+        await asyncio.to_thread(optimize)
+        self._next_optimize_at = self._monotonic() + self._optimize_every
 
     async def tick_once(self) -> TickReport:
         """Run one pass off the event loop, at most one at a time."""

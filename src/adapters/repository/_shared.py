@@ -14,6 +14,7 @@ from adapters.db_models import Item as ItemRow
 
 # The fixed-width format has one definition (adapters.timestamps); this
 # module re-exports it under the historical `timestamp` name.
+from adapters.timestamps import EPOCH_FLOOR as _EPOCH_FLOOR
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     PublishStatus,
@@ -36,7 +37,10 @@ class StoreOutcome:
     reason: str = ""
 
 
-EPOCH_FLOOR = "0000-01-01T00:00:00.000000Z"
+# Re-exported: the value is part of the timestamp format, so it is defined
+# beside the format (adapters/timestamps.py) and imported here for the
+# callers that already reach it through this module.
+EPOCH_FLOOR = _EPOCH_FLOOR
 
 
 def _optional_timestamp(moment: datetime | None) -> str | None:

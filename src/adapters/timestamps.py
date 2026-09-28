@@ -15,7 +15,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-__all__ = ["fixed_width_utc"]
+__all__ = ["EPOCH_FLOOR", "fixed_width_utc"]
+
+# The floor a dateless item sorts at. Not a substitute for NULL: `published_at`
+# stays nullable because "this item has no date" is a fact worth keeping, and
+# this value exists only to give those rows a stable position in the feed. It
+# lives here because it is part of the format -- it has to be fixed-width text
+# in exactly this shape for its comparisons to be the same comparisons.
+EPOCH_FLOOR = "0000-01-01T00:00:00.000000Z"
 
 
 def fixed_width_utc(moment: datetime) -> str:
