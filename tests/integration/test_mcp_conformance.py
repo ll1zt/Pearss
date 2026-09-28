@@ -375,6 +375,18 @@ async def test_server_discover_answers(mcp_url: str) -> None:
     assert result.get("capabilities"), result
     # The identity a client uses to decide whether to keep talking.
     assert result.get("instructions"), "discover must carry the server instructions"
+    # Issue #74: no tool's outputSchema declares these, because a schema that
+    # pins body fields would lie about `fields=` and `_truncate`. They are
+    # stated once, here, so a client can learn they exist at all.
+    instructions = result["instructions"]
+    for field in (
+        "truncated_items",
+        "total_chars",
+        "audit_id",
+        "correlation_id",
+        "error",
+    ):
+        assert field in instructions, (field, instructions)
 
 
 @pytest.mark.asyncio

@@ -217,6 +217,32 @@ def test_the_guide_section_numbers_are_unique_and_increasing() -> None:
     )
 
 
+def test_the_guide_records_why_the_output_schema_is_permissive() -> None:
+    """Issue #74: the shell looks like waste, and deleting it costs something.
+
+    A permissive outputSchema is what makes the SDK emit `structuredContent` at
+    all, so "this schema carries no information" is an invitation to remove it
+    and take structured output with it. The reason has to be written down
+    somewhere a reader finds it.
+    """
+    text = _guide_text()
+    assert "additionalProperties" in text, text[:200]
+    assert "structuredContent" in text
+
+
+def test_the_guide_records_the_naming_decision() -> None:
+    """Issue #75: not prefixing is a decision, and the trigger to revisit is named.
+
+    "There is no prefix" reads as an oversight; the measurement that makes it
+    deliberate -- the host namespaces by server, so the client sees
+    `pearss_list_sources` either way -- is what stops the next reader from
+    "fixing" it.
+    """
+    text = _guide_text()
+    assert "不带前缀" in text
+    assert "触发条件" in text
+
+
 # --------------------------------------------------------------------------
 # AC-57: an annotation is the machine-readable half of the description
 # --------------------------------------------------------------------------
