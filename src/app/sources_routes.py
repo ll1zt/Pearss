@@ -621,16 +621,27 @@ def list_source_enrichments(
     request: Request,
     source_id: str,
     status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
     _: Principal = Depends(read_required),
 ) -> dict[str, Any]:
     """Processor-chain rows for one source: the agent's visibility into
-    what the chain is doing and why an item is being held."""
+    what the chain is doing and why an item is being held.
+
+    Bounded like every other list route. This one had no bound at all, which
+    was survivable only while the MCP wrapper cut every list to 20; once the
+    wrapper stopped overruling the requested page (issue #65), an unbounded
+    `data` here would have been the one way a result set could still grow
+    without anyone asking. `total` counts every match, so a short page is
+    announced rather than implied.
+    """
     from sqlalchemy import select as _select
 
     from adapters.db_models import Item as _ItemRow
     from adapters.db_models import ItemEnrichment
 
     del _
+    offset = decode_cursor(cursor)
     with request.app.state.session_factory() as session:
         _require_source(session, source_id)
         query = _select(ItemEnrichment).where(
@@ -654,9 +665,12 @@ def list_source_enrichments(
                     "detail": row.detail,
                     "attempt_count": row.attempt_count,
                 }
-                for row in rows
+                for row in rows[offset : offset + limit]
             ],
             "total": len(rows),
+            "next_cursor": (
+                encode_cursor(offset + limit) if offset + limit < len(rows) else None
+            ),
             "correlation_id": current_correlation_id(),
         }
 

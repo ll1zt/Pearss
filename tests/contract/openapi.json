@@ -2710,7 +2710,7 @@
     },
     "/v1/sources/{source_id}/enrichments": {
       "get": {
-        "description": "Processor-chain rows for one source: the agent's visibility into\nwhat the chain is doing and why an item is being held.",
+        "description": "Processor-chain rows for one source: the agent's visibility into\nwhat the chain is doing and why an item is being held.\n\nBounded like every other list route. This one had no bound at all, which\nwas survivable only while the MCP wrapper cut every list to 20; once the\nwrapper stopped overruling the requested page (issue #65), an unbounded\n`data` here would have been the one way a result set could still grow\nwithout anyone asking. `total` counts every match, so a short page is\nannounced rather than implied.",
         "operationId": "listEnrichments",
         "parameters": [
           {
@@ -2736,6 +2736,34 @@
                 }
               ],
               "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           }
         ],
