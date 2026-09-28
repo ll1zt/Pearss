@@ -296,9 +296,14 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "List registered collector plugins with their manifest, version and lifecycle status. Read-only.",
+    "description": "List registered collector plugins with their manifest, version and lifecycle status. Pass `cursor` from a previous response's next_cursor to page. Read-only.",
     "input_schema": {
       "properties": {
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
         "limit": {
           "default": 20,
           "title": "Limit",

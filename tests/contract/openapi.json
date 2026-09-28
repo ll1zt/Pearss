@@ -1977,8 +1977,38 @@
     },
     "/v1/plugins": {
       "get": {
-        "description": "Every registered collector with its manifest and lifecycle status.",
+        "description": "Registered collectors, oldest page first, with manifest and status.\n\nOffset paging with an opaque cursor, the same shape `/v1/sources` uses and\nfor the same reason: the set is bounded (tens of plugins, and it changes\nonly on install/uninstall) and the order is stable, so a row cannot shift\nunder a reader mid-walk. `next_cursor` is what makes a short page honest --\na `limit` that truncates without saying so is silent data loss, which is\nthe failure this endpoint's bound exists to avoid (issue #68).",
         "operationId": "listPlugins",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1991,6 +2021,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "security": [
