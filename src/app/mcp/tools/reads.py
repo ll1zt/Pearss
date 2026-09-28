@@ -44,7 +44,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         ),
     )
     async def list_sources(limit: int = 20) -> dict[str, Any]:
-        status, payload = await core.get("/v1/sources", limit=min(limit, 100))
+        status, payload, _ = await core.get("/v1/sources", limit=min(limit, 100))
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -64,7 +64,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         ),
     )
     async def get_source(source_id: str) -> dict[str, Any]:
-        status, payload = await core.get(f"/v1/sources/{source_id}")
+        status, payload, _ = await core.get(f"/v1/sources/{source_id}")
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -120,7 +120,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         ):
             if value:
                 params[name] = value
-        status, payload = await core.get("/v1/items", **params)
+        status, payload, _ = await core.get("/v1/items", **params)
         if status != 200:
             return _error_from(payload, status)
         result = _truncate(payload)
@@ -152,7 +152,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         params: dict[str, Any] = {}
         if fields:
             params["fields"] = fields
-        status, payload = await core.get(f"/v1/items/{item_id}", **params)
+        status, payload, _ = await core.get(f"/v1/items/{item_id}", **params)
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -195,7 +195,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
                 "max_chars_allowed": MAX_BODY_CHARS,
             }
 
-        status, payload = await core.request("GET", f"/v1/items/{item_id}/body")
+        status, payload, _ = await core.request("GET", f"/v1/items/{item_id}/body")
         if status != 200:
             return _error_from(payload, status)
 
@@ -228,7 +228,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         params: dict[str, Any] = {"limit": min(limit, 100)}
         if cursor:
             params["cursor"] = cursor
-        status, payload = await core.get("/v1/jobs", **params)
+        status, payload, _ = await core.get("/v1/jobs", **params)
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -251,7 +251,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         params: dict[str, Any] = {"limit": min(limit, 100)}
         if cursor:
             params["cursor"] = cursor
-        status, payload = await core.get(f"/v1/jobs/{job_id}/runs", **params)
+        status, payload, _ = await core.get(f"/v1/jobs/{job_id}/runs", **params)
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -268,7 +268,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         params: dict[str, Any] = {}
         if status:
             params["status"] = status
-        http_status, payload = await core.get(
+        http_status, payload, _ = await core.get(
             f"/v1/sources/{source_id}/enrichments", **params
         )
         if http_status != 200:
@@ -283,7 +283,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         ),
     )
     async def list_plugins(limit: int = 20) -> dict[str, Any]:
-        status, payload = await core.get("/v1/plugins")
+        status, payload, _ = await core.get("/v1/plugins")
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
