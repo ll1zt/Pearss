@@ -64,7 +64,7 @@ def build_apps_extension(core: CoreAPIClient) -> Apps:
         ),
     )
     async def get_system_snapshot() -> dict[str, Any]:
-        status, payload = await core.get("/v1/system/snapshot")
+        status, payload, _ = await core.get("/v1/system/snapshot")
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
@@ -75,7 +75,7 @@ def build_apps_extension(core: CoreAPIClient) -> Apps:
         Dynamic by design: a host pulls the resource when it renders the App,
         so the counts are current at display, not at registration.
         """
-        status, payload = await core.get("/v1/system/snapshot")
+        status, payload, _ = await core.get("/v1/system/snapshot")
         if status != 200:
             error = _error_from(payload, status)
             return (
@@ -127,7 +127,7 @@ def register_item_resource(server: MCPServer, core: CoreAPIClient) -> None:
         `-32602` on the current protocol (`-32002` before it; clients still
         accept both).
         """
-        code, body = await core.request("GET", f"/v1/items/{item_id}/body")
+        code, body, _ = await core.request("GET", f"/v1/items/{item_id}/body")
         if code == 200:
             text = body.get("text", "")
             return text if isinstance(text, str) else ""

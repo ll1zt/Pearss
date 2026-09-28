@@ -52,7 +52,6 @@ class CoreAPIClient:
 
     def __init__(self, app: Any) -> None:
         self._app = app
-        self._last_audit_id: str | None = None
 
     def _token(self) -> str:
         return os.environ.get(CORE_API_AUTH_ENV, "")
@@ -65,7 +64,21 @@ class CoreAPIClient:
         json_body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> tuple[int, dict[str, Any], str | None]:
+        """Call the Core API, returning status, payload and this call's audit id.
+
+        The audit id travels in the return value rather than in an attribute on
+        this object. One client serves every request (`mcp_server.build_mcp_server`
+        builds it once), the tool bodies are `async def`, and the server handles
+        concurrent requests -- so an attribute here is shared mutable state that
+        a second caller overwrites before the first reads it. The failure is
+        silent and precise-looking: a caller reports an audit id that names
+        somebody else's operation (issue #64).
+
+        Returning it makes the correlation structural: the id cannot be
+        separated from the response it describes, so no future `await` in a
+        tool body can introduce the race again.
+        """
         headers = {"Authorization": f"Bearer {self._token()}"}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
@@ -80,23 +93,19 @@ class CoreAPIClient:
             payload: dict[str, Any] = response.json()
         except (json.JSONDecodeError, ValueError):
             payload = {"text": response.text}
-        self._last_audit_id = response.headers.get("x-audit-id")
-        return response.status_code, payload
+        # Read from the response header rather than the body: the audit row is
+        # written by the middleware after the response is sent, so the id can
+        # only travel out-of-band. None on a read, which is not audited.
+        return (
+            response.status_code,
+            payload,
+            response.headers.get("x-audit-id"),
+        )
 
-    async def get(self, path: str, **params: Any) -> tuple[int, dict[str, Any]]:
+    async def get(
+        self, path: str, **params: Any
+    ) -> tuple[int, dict[str, Any], str | None]:
         return await self.request("GET", path, params=params or None)
-
-    @property
-    def last_audit_id(self) -> str | None:
-        """The audit id of the most recent call, or None if the call was a read.
-
-        Read from the response header rather than the body: the audit row is
-        written by the middleware after the response is sent, so the id can only
-        travel out-of-band. It is per-call state on the client because every
-        tool call is a single request whose result is assembled immediately
-        afterwards; a concurrent caller would need its own client.
-        """
-        return self._last_audit_id
 
 
 def _infer_source_type(url: str) -> str:

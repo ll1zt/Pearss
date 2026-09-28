@@ -103,7 +103,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             "/v1/sources",
             json_body={
@@ -121,9 +121,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         if status not in (200, 201):
             return _error_from(payload, status)
         return _truncate(
-            _attributed(
-                {**payload, "audit": "recorded by the Core API"}, core.last_audit_id
-            )
+            _attributed({**payload, "audit": "recorded by the Core API"}, audit_id)
         )
 
     @server.tool(
@@ -158,7 +156,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "PATCH",
             f"/v1/sources/{source_id}",
             json_body={"schedule_policy": schedule_policy},
@@ -166,7 +164,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
@@ -199,7 +197,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        code, payload = await core.request(
+        code, payload, audit_id = await core.request(
             "PATCH",
             f"/v1/sources/{source_id}",
             json_body={"status": status},
@@ -207,7 +205,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if code != 200:
             return _error_from(payload, code)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
@@ -242,7 +240,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        code, payload = await core.request(
+        code, payload, audit_id = await core.request(
             "PATCH",
             f"/v1/sources/{source_id}",
             json_body={"folder": folder},
@@ -250,7 +248,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if code != 200:
             return _error_from(payload, code)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -284,14 +282,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "DELETE",
             f"/v1/sources/{source_id}",
             idempotency_key=_fresh_key(),
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -324,7 +322,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             "/v1/items:delete",
             json_body={"item_ids": item_ids},
@@ -332,7 +330,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
@@ -379,7 +377,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             body["since"] = since
         if until:
             body["until"] = until
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             f"/v1/sources/{source_id}/items:delete",
             json_body=body,
@@ -387,7 +385,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -418,14 +416,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         # A 502 here is a real outcome to report, not a transport failure: the
         # run happened and the source failed, with the error_class explaining
         # which. Returning it as an error would hide the diagnosis.
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             f"/v1/sources/{source_id}:trigger",
             idempotency_key=_fresh_key(),
         )
         if status not in (200, 502):
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -457,14 +455,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             f"/v1/sources/{source_id}:backfill-chain",
             idempotency_key=_fresh_key(),
         )
         if status not in (200, 201):
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -495,14 +493,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             f"/v1/sources/{source_id}:retry-enrichments",
             idempotency_key=_fresh_key(),
         )
         if status != 200:
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -536,16 +534,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "reason": "confirmed arguments differ from requested",
             }
         operation = ":enable" if status == "enabled" else ":disable"
-        core_status, payload = await core.request(
+        core_status, payload, audit_id = await core.request(
             "POST",
             f"/v1/plugins/{plugin_id}{operation}",
             idempotency_key=_fresh_key(),
         )
         if core_status not in (200, 409):
             return _error_from(payload, core_status)
-        return _truncate(
-            _attributed({**payload, "status_code": core_status}, core.last_audit_id)
-        )
+        return _truncate(_attributed({**payload, "status_code": core_status}, audit_id))
 
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
@@ -599,7 +595,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "aborted": True,
                 "reason": "confirmed arguments differ from requested",
             }
-        status, payload = await core.request(
+        status, payload, audit_id = await core.request(
             "POST",
             f"/v1/sources/{source_id}:ingest",
             json_body={"items": items},
@@ -607,4 +603,4 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
         if status not in (200, 201):
             return _error_from(payload, status)
-        return _truncate(_attributed(payload, core.last_audit_id))
+        return _truncate(_attributed(payload, audit_id))
