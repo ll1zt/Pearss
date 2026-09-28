@@ -44,7 +44,17 @@ def build_mcp_server(app: Any) -> MCPServer:
             "Pearss is a personal information feed system. Use these tools to "
             "manage sources, inspect collection runs, and search collected "
             "items. Article bodies are Resources, not tool results, so request "
-            "them only when needed. Writes ask the user to confirm first."
+            "them only when needed. Writes ask the user to confirm first.\n\n"
+            # The protocol fields every result may carry, stated once here
+            # rather than 22 times in per-tool schemas -- they are identical
+            # across tools, and the body fields a schema *could* declare change
+            # per call. See the guide's section on outputSchema (issue #74).
+            "Some fields appear in results rather than in any tool's schema: "
+            "`truncated_items` and `total_chars` mean part of the result was "
+            "cut to fit, and a narrower request would return the rest; "
+            "`audit_id` names the audit row of a write; `correlation_id` "
+            "identifies the request in the server's logs; `error` carries a "
+            "refusal's code, message and suggested next step."
         ),
         # The spec requires a freshness hint on every cacheable result
         # (tools/list, prompts/list, resources/list, resources/read,

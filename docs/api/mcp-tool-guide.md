@@ -164,6 +164,21 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 - 破坏性变更（删工具、改参数语义、改返回结构）必须写 ADR 并给迁移路径
 - 工具描述是契约的一部分：改名或改描述会让已适配的 agent 行为漂移
 
+### outputSchema：故意是宽松的（issue #74）
+
+每个工具的 `outputSchema` 都是 `{type: object, additionalProperties: true}` 加一个自动生成的
+title——**看起来像空壳，但它不是纯浪费**：SDK 只在存在 output model 时才产出
+`structuredContent`（`func_metadata.py`：`output_model is None` 时结果只剩文本块）。所以这个
+宽松 schema 是「结果带结构化内容」的**代价**，不是疏忽。
+
+为什么不声明真 schema：**主体字段随调用变化**（`fields=` 决定返回哪些字段，`_truncate` 决定
+哪些被裁剪），声明它们等于让 schema 撒谎。**协议性字段**（`truncated_items` / `total_chars` /
+`audit_id` / `correlation_id` / `error`）确实可以声明，但它们**每个工具都一样**，所以写在
+`server/discover` 的 `instructions` 里——一份，而不是 22 份。
+
+两条都由测试钉住：`tests/integration/test_mcp_conformance.py` 断言 instructions 点名了这些字段，
+`tests/unit/test_mcp_tool_guide.py` 断言本指南写了这个理由。
+
 ## 七、命名与描述
 
 - 工具名 `snake_case`，动词开头，与 `/v1` 的 `operationId` 语义对齐
@@ -171,6 +186,18 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 - 每个工具必须有：一句话说明、参数说明、返回结构说明、是否需要确认、失败时的
   `error_class` 取值范围
 - 描述里写清**副作用**：是否发起外部请求、是否改变状态、是否可逆
+
+### 工具名不带前缀（issue #75）
+
+工具名**不**加 `pearss_` 前缀，这是决定而非遗漏：命名空间是**宿主**的职责。实测本机的 host 会
+给每个 server 的工具加 server 名前缀（`forgejo_*`、`nixos_*`、`pearss_*`），而已带前缀的名字
+不会被叠加（anki 的 `anki_*` 原样透传）。
+
+重命名的收益只对「**不前缀**的客户端」存在，代价却是破坏性契约变更（工具名进 snapshot）**加上**
+常驻面多 7×22 = 154 字符——与本指南第二节要压的那笔税方向相反。
+
+**触发条件**（满足其一就重做这道题）：出现一个真实的不前缀客户端；或工具名在某个真实客户端上
+发生碰撞。届时走新 ADR + 迁移路径。
 
 ## 八、订阅归类（folder）
 
