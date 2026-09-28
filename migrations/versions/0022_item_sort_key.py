@@ -71,3 +71,8 @@ def downgrade() -> None:
     op.drop_index("ix_item_source_sort_key_id", table_name="item")
     op.drop_index("ix_item_sort_key_id", table_name="item")
     op.execute("ALTER TABLE item DROP COLUMN sort_key")
+    # `ANALYZE` creates SQLite's statistics table, so the upgrade leaves one
+    # behind and the downgrade has to take it with it -- otherwise "downgrade to
+    # base leaves an empty database" stops being true, and the migration test
+    # that asserts exactly that is right to fail.
+    op.execute("DROP TABLE IF EXISTS sqlite_stat1")

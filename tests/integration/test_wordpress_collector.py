@@ -96,8 +96,12 @@ def test_summary_feed_stores_full_text(
         rows = session.execute(
             sa.text("select title, content_ref from item where source_id = 's1'")
         ).fetchall()
-    titles = [row[0] for row in rows]
-    assert titles == ["視力検査と昼食", "引っ越し準備"]
+    # The query has no ORDER BY, so the order is the planner's business: it
+    # asserted insertion order until a source-scoped index made the planner
+    # return these in sort-key order instead. What this test is about is which
+    # items were stored, so it asks that question.
+    titles = {row[0] for row in rows}
+    assert titles == {"視力検査と昼食", "引っ越し準備"}
 
 
 @pytest.mark.integration

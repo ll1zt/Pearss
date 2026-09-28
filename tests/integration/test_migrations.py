@@ -41,7 +41,14 @@ API_TABLES = {"idempotency_record"}
 
 # The plugin table arrives with migration 0010 (P2 lifecycle, ADR 0017);
 # item_enrichment stays P3 and its absence is pinned separately below.
-EXPECTED_TABLES = P1_TABLES | READER_TABLES | API_TABLES | {"plugin", "item_enrichment"}
+# Migration 0022 runs ANALYZE, and ANALYZE creates SQLite's own statistics
+# table. It is a table the schema really contains after an upgrade, so it
+# belongs in the expected set -- and the migration's downgrade drops it, because
+# it created it.
+STATS_TABLE = "sqlite_stat1"
+EXPECTED_TABLES = (
+    P1_TABLES | READER_TABLES | API_TABLES | {"plugin", "item_enrichment", STATS_TABLE}
+)
 
 
 @pytest.fixture
