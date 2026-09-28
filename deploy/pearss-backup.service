@@ -9,13 +9,20 @@
 # period must stay well under 30 days: a longer gap loses forensic data inside
 # its own retention window. The timer runs daily.
 
+# `@CHECKOUT@` is substituted by `just install-unit` with the checkout this
+# repository actually lives in. It is a placeholder rather than `%h/dev/Pearss`
+# because that path was wrong for every deployment that is not this machine's
+# home directory -- a second host, a worktree, another user -- and the failure
+# surfaced as a Nix error rather than as "the unit points somewhere that does
+# not exist" (issue #88).
+
 [Unit]
 Description=Pearss daily backup (SQLite snapshot + file store)
-Documentation=file://%h/dev/Pearss/docs/operations/runbook.md
+Documentation=file://@CHECKOUT@/docs/operations/runbook.md
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/dev/Pearss
+WorkingDirectory=@CHECKOUT@
 ExecStart=/run/current-system/sw/bin/nix develop \
     --command /run/current-system/sw/bin/just backup
 Nice=10

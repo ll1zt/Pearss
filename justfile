@@ -240,8 +240,14 @@ install-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p ~/.config/systemd/user
-    cp deploy/pearss.service ~/.config/systemd/user/pearss.service
-    cp deploy/pearss-backup.service ~/.config/systemd/user/pearss-backup.service
+    # The checkout path is injected here rather than baked into the units: a
+    # unit naming this machine's home directory is wrong everywhere else, and
+    # wrong in a way that reads as a Nix problem (issue #88).
+    checkout="{{justfile_directory()}}"
+    for unit in pearss.service pearss-backup.service; do
+        sed "s|@CHECKOUT@|$checkout|g" "deploy/$unit" \
+            > "$HOME/.config/systemd/user/$unit"
+    done
     cp deploy/pearss-backup.timer ~/.config/systemd/user/pearss-backup.timer
     systemctl --user daemon-reload
     systemctl --user enable --now pearss.service

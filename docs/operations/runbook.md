@@ -23,6 +23,25 @@ journalctl --user -u pearss.service -f
 三个进程内组件共用一个进程：Core API、Reader API、MCP 工具面，外加 asyncio 调度任务。
 `PEARSS_SCHEDULER_ENABLED=0` 可只跑 API 不跑调度；`PEARSS_TICK_SECONDS` 控制轮询间隔。
 
+### 两条部署路径，规范的是哪一条（issue #88）
+
+| 路径 | 状态 |
+|---|---|
+| **systemd 用户服务**（`just install-unit`） | **规范**。它不需要 root，`.env` 由 `just serve` 读取，所以单元里没有主机名、端口与凭据 |
+| NixOS 模块（`nix/module.nix`，ADR 0020） | 备选。它从 `cfg.package.passthru.projectRoot` 取路径，本来就是参数化的 |
+
+单元里的 checkout 路径是**占位符** `@CHECKOUT@`，由 `just install-unit` 在安装时替换成
+**它自己所在的 checkout**：
+
+```bash
+just install-unit      # 从哪个 checkout 跑，单元就指向哪个
+```
+
+所以换了目录、换了机器、或用 worktree 部署，都不需要编辑单元文件。
+`WorkingDirectory=` 不是装饰：`nix develop` 从工作目录解析 flake，而 nix 2.34 既没有全局也
+没有子命令级的 `--directory`。渲染假设由 `tests/unit/test_structure_guards.py` 守住
+（它用一个**不是任何人的 home** 的路径来验装配，而不是验本机布局）。
+
 ## 调度器
 
 运行中的调度循环和 enrichment sweep 遇到 SQLAlchemy `OperationalError` 时会记录不含 SQL、

@@ -1421,6 +1421,46 @@ def test_every_entry_point_installs_the_header_timeout_protocol() -> None:
         )
 
 
+def test_deployment_units_take_the_checkout_path_as_a_parameter() -> None:
+    """Issue #88: a unit that names one machine's home directory is wrong elsewhere.
+
+    `%h/dev/Pearss` was in three places, so a checkout anywhere else -- a second
+    host, a worktree, another user -- needed the unit edited by hand, and the
+    failure surfaced as a Nix error rather than as "the path does not exist".
+
+    The assertion is on the *rendering*, with a path that is nobody's home: the
+    shipped units carry a placeholder and `just install-unit` substitutes the
+    checkout it is running from. Testing one machine's layout would pass here
+    and fail there, which is the thing being fixed.
+    """
+    units = sorted((REPO_ROOT / "deploy").glob("pearss*.service"))
+    assert units, "no deployment units found"
+    for unit in units:
+        text = unit.read_text(encoding="utf-8")
+        assert "@CHECKOUT@" in text, f"{unit.name} does not take a checkout path"
+        # Directives only: the comment explaining why the placeholder exists
+        # quotes the path it replaced, and a guard that reads prose would fail
+        # on its own explanation.
+        directives = [
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        ]
+        hardcoded = [line for line in directives if "/dev/Pearss" in line]
+        assert not hardcoded, f"{unit.name} hardcodes a checkout path: {hardcoded}"
+
+    installer = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+    assert "@CHECKOUT@" in installer, (
+        "install-unit does not substitute the checkout path, so the installed "
+        "units would contain the placeholder verbatim"
+    )
+
+    rendered = "\n".join(
+        unit.read_text(encoding="utf-8").replace("@CHECKOUT@", "/srv/checkout")
+        for unit in units
+    )
+    assert "@CHECKOUT@" not in rendered
+    assert "WorkingDirectory=/srv/checkout" in rendered, rendered
+
+
 def test_the_timeout_is_documented_where_an_operator_will_look() -> None:
     """A security knob nobody can find is a knob nobody sets.
 
