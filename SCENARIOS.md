@@ -35,7 +35,7 @@
 | AC-53..54 | #68 list_plugins 的 limit 与分页 | `docs/api/mcp-tool-guide.md` §2 | 已合并 | `tests/integration/test_list_plugins_limit.py` |
 | AC-55..57 | #69 guide 一致性与缺席的守卫（原声明 49..51） | `docs/api/mcp-tool-guide.md` §2 / §6 | 保留 | — |
 | AC-58..61 | #70 search_items 的 q 语义与边界（原声明 52..55） | issue #70 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（描述必须写明 q 只匹配标题、full_text 搜正文） |
-| AC-62..63 | #71 窄工具与 /v1 的形状差异（原声明 56..57） | issue #71 | 保留 | — |
+| AC-62..63 | #71 窄工具与 /v1 的形状差异（原声明 56..57） | issue #71 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（每个工具必须落在 OpenAPI 声明的端点上） |
 | AC-64..65 | #72 list_enrichments 的维度（原声明 58..59） | issue #72 | 保留 | — |
 | AC-66..68 | #73 工具面常驻上下文预算（原声明 60..62） | issue #73 | 保留 | — |
 | AC-69..71 | #74 outputSchema 空壳（原声明 63..65） | issue #74 | 保留 | — |

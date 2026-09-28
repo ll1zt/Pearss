@@ -158,8 +158,10 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     """
     invisible: list[str] = []
     tools = _write_tools()
-    assert len(tools) == 12, (
-        f"expected the twelve write tools, found {sorted(tools)} -- update the "
+    # The count is a claim, not a property: a new write tool has to change this
+    # line, which is where someone notices that the confirmation surface grew.
+    assert len(tools) == 13, (
+        f"expected the thirteen write tools, found {sorted(tools)} -- update the "
         "claim in this docstring if the surface really changed"
     )
 

@@ -370,6 +370,47 @@ def _submit_items_confirmation(
     )
 
 
+def _set_source_pipeline_chain_fields(
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> dict[str, Any]:
+    """What set_source_pipeline_chain confirms and executes, derived in one place.
+
+    The chain travels as its canonical JSON text because an elicitation field is
+    a primitive; an empty list is a real value here -- it clears the chain -- so
+    it is confirmed as `[]` rather than as an empty string.
+    """
+    return {
+        "source_id": source_id,
+        "pipeline_chain": _render(pipeline_chain),
+        "target_lang": target_lang,
+    }
+
+
+def _set_source_pipeline_chain_confirmation(
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> Elicit[Any]:
+    """The chain question: says what will run, because that is what it costs.
+
+    Unlike a status or a folder, this decides whether items are held at the gate
+    and whether a provider is called for each of them, so the message names the
+    chain rather than saying "update source X".
+    """
+    fields = _set_source_pipeline_chain_fields(source_id, pipeline_chain, target_lang)
+    chain = fields["pipeline_chain"]
+    return _confirm_resolver(
+        _summary=(
+            f"Set source {source_id} processing chain to {chain}"
+            f" (lang {fields['target_lang'] or 'none'})? New items are held "
+            "until it completes, and its processors can spend provider budget."
+        ),
+        _fields=fields,
+    )
+
+
 def _set_plugin_status_fields(plugin_id: str, status: str) -> dict[str, Any]:
     """What set_plugin_status confirms and executes, derived in one place."""
     return {"plugin_id": plugin_id, "status": status}

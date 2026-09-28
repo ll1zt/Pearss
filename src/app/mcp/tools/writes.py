@@ -42,6 +42,8 @@ from app.mcp.confirmation import (
     _set_plugin_status_fields,
     _set_source_folder_confirmation,
     _set_source_folder_fields,
+    _set_source_pipeline_chain_confirmation,
+    _set_source_pipeline_chain_fields,
     _set_source_status_confirmation,
     _set_source_status_fields,
     _submit_items_confirmation,
@@ -231,6 +233,51 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             method="PATCH",
             path=f"/v1/sources/{source_id}",
             body={"folder": folder},
+        )
+
+    @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
+        description=(
+            "Set a source's processing chain, and its target language with it. "
+            "Requires confirmation: items are held at the gate until the chain "
+            "completes, and its processors can make real outbound requests and "
+            "spend provider budget per item. Pass an empty list to clear the "
+            "chain, so items publish as soon as they are stored; passing no "
+            "target_lang sets it to none, which is what the confirmation says. "
+            "Run backfill_source afterwards to put already-stored items through "
+            "the chain. Use add_source to set a chain on a new source."
+        ),
+    )
+    async def set_source_pipeline_chain(
+        source_id: str,
+        pipeline_chain: list[dict[str, Any]],
+        ctx: Context,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_source_pipeline_chain_confirmation)
+        ],
+        target_lang: str = "",
+    ) -> dict[str, Any]:
+        """Give an existing source a chain, or take its chain away.
+
+        `add_source` sets a chain only at creation, and `backfill_source`
+        requires one to exist already -- so before this tool, translating the
+        items of a source that was subscribed without a chain meant deleting the
+        source and starting over, which throws away its history and its read
+        state (issue #71).
+        """
+        fields = _set_source_pipeline_chain_fields(
+            source_id, pipeline_chain, target_lang
+        )
+        # Both fields are always sent: the endpoint's three-state semantics mean
+        # an omitted `target_lang` would keep whatever was stored, and the
+        # confirmation says "none". Sending what was confirmed is the rule.
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="PATCH",
+            path=f"/v1/sources/{source_id}",
+            body={"pipeline_chain": pipeline_chain, "target_lang": target_lang},
         )
 
     @server.tool(
