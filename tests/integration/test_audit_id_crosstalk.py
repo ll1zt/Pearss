@@ -30,6 +30,15 @@ test exercises the real hazard instead of staying green until some future
 That latency is also why the assertion is the contract -- "each caller gets its
 own id" -- rather than today's call graph: the contract is what the next
 `await` must not break.
+
+The row behind the id is *not* on disk when the response returns: the
+middleware hands the write to a worker thread and returns immediately, which is
+its documented contract rather than a defect. So the last assertion drains that
+queue first. Reading the table straight away is a race that wins on an idle
+machine and loses on a loaded one -- measured by injecting a 0.5s delay into
+the audit worker, which made all four ids look unwritten, where CI's loaded
+runner made three of them. That is how this file first failed in CI, in a run
+whose diff touched nothing related.
 """
 
 from __future__ import annotations
@@ -46,6 +55,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters.repository import create_source, timestamp
 from app.main import create_app, create_engine_for
 from app.mcp.core_client import CoreAPIClient
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.integration
@@ -151,7 +161,15 @@ async def test_concurrent_writes_each_receive_their_own_audit_id(
         f"audit ids: {ids}"
     )
     # And they are real rows, not merely distinct strings: attributability is
-    # the entire point of returning one.
+    # the entire point of returning one. `drain_audit` first, because the
+    # middleware promises the id at response.start time and writes the row
+    # afterwards; asserting on the table before the worker drains is the race
+    # this assertion would otherwise be. A False return means the row count
+    # below proves nothing, so it fails here instead of looking like a
+    # cross-talk bug.
+    assert CorrelationAndAuditMiddleware.drain_audit(), (
+        "the audit worker did not finish, so an audit-row count would be a lie"
+    )
     stored = _stored_audit_ids(database_url)
     assert set(ids) <= stored, f"ids with no audit row: {set(ids) - stored}"
 
