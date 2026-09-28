@@ -16,6 +16,7 @@ future accident:
 from __future__ import annotations
 
 import ast
+import itertools
 import os
 import re
 import shlex
@@ -1356,4 +1357,179 @@ def test_the_timeout_is_documented_where_an_operator_will_look() -> None:
         "the header-timeout variable is absent from .env.example, which is "
         "where env-reference.md and operators both point (see the guard that "
         "requires every variable the code reads to be documented there)"
+    )
+
+
+# --------------------------------------------------------------------------
+# Acceptance-scenario numbers: one number, one owner
+#
+# "AC-N" is the unit of traceability between a planned scenario and the test
+# that holds it. That only means something if a number has one owner, and
+# numbers are claimed by separate issues worked in parallel -- which is how
+# AC-49..51 came to be claimed twice at once (by #64's tool-coverage file and
+# by #69's BDD list). Neither issue can see that collision: it only exists
+# across the repository, so it has to be a guard rather than a review step.
+# --------------------------------------------------------------------------
+
+SCENARIO_REGISTRY = REPO_ROOT / "SCENARIOS.md"
+
+
+def _registry_segments() -> list[tuple[int, int, str, str]]:
+    """The registry's segment table as (start, end, owner, declared_by) rows.
+
+    Only closed ranges parse. An open one ("AC-72..") is rejected outright by
+    `test_scenario_registry_ranges_are_closed` rather than skipped here: a row
+    that parses to nothing reads as "this segment does not exist", which is the
+    opposite of what it means.
+    """
+    segments: list[tuple[int, int, str, str]] = []
+    for line in SCENARIO_REGISTRY.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        match = re.fullmatch(r"AC-(\d+)(?:\.\.(?:AC-)?(\d+))?", cells[0])
+        if match is None or len(cells) < 3:
+            continue
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        segments.append((start, end, cells[1], cells[2]))
+    return segments
+
+
+def _scenario_numbers_in_use() -> dict[int, list[str]]:
+    """Every AC-N cited anywhere in the repository, with the citing files.
+
+    The registry is excluded: it names ranges rather than claims, so counting
+    its own text would make every number it mentions look used.
+    """
+    files = [
+        *sorted((REPO_ROOT / "tests").rglob("*.py")),
+        *sorted((REPO_ROOT / "src").rglob("*.py")),
+        *sorted((REPO_ROOT / "src").rglob("*.md")),
+        *sorted((REPO_ROOT / "docs").rglob("*.md")),
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "AGENTS.md",
+        REPO_ROOT / "architecture-spec.md",
+    ]
+    used: dict[int, list[str]] = {}
+    for path in files:
+        if path == SCENARIO_REGISTRY:
+            continue
+        for match in re.finditer(r"\bAC-(\d+)\b", path.read_text(encoding="utf-8")):
+            used.setdefault(int(match.group(1)), []).append(
+                str(path.relative_to(REPO_ROOT))
+            )
+    return used
+
+
+def test_scenario_registry_ranges_are_closed() -> None:
+    """An open range swallows every later number, including unclaimed ones.
+
+    This is not hygiene, it is the whole check: with `AC-72..` in the table, an
+    injected `AC-99` in a test file reported as *claimed by the retrieval
+    workflow* and the guard stayed silent -- precisely the case it exists for.
+    Found by injecting that number and watching nothing happen.
+    """
+    open_rows = [
+        line.strip()
+        for line in SCENARIO_REGISTRY.read_text(encoding="utf-8").splitlines()
+        if re.match(r"\|\s*AC-\d+\s*\.\.\s*\|", line)
+    ]
+    assert not open_rows, (
+        "SCENARIOS.md declares an open-ended range, which makes every later "
+        f"number nominally claimed and the registry unable to answer 'who owns "
+        f"AC-N?' for them: {open_rows}. Give the range a right edge; extend it "
+        "later if the workflow needs more."
+    )
+
+
+def test_scenario_number_segments_do_not_overlap() -> None:
+    """Two segments over one number is the collision this file exists to stop."""
+    segments = sorted(_registry_segments())
+    assert segments, f"{SCENARIO_REGISTRY.name} declares no parsable segment"
+
+    overlapping = [
+        f"{left[2]} {left[0]}..{left[1]} and {right[2]} {right[0]}..{right[1]}"
+        for left, right in itertools.pairwise(segments)
+        if left[1] >= right[0]
+    ]
+    assert not overlapping, (
+        "SCENARIOS.md assigns the same scenario number to two owners: "
+        f"{overlapping}. Numbers are claimed once; the later claimant "
+        "renumbers and says why in the commit message."
+    )
+
+
+def test_every_scenario_number_in_use_is_claimed_exactly_once() -> None:
+    """A number in a test file with no row in the registry is an unowned claim."""
+    segments = _registry_segments()
+    unclaimed: list[str] = []
+    ambiguous: list[str] = []
+
+    for number, files in sorted(_scenario_numbers_in_use().items()):
+        owners = [
+            f"{owner} ({start}..{end})"
+            for start, end, owner, _declared_by in segments
+            if start <= number <= end
+        ]
+        if not owners:
+            unclaimed.append(f"AC-{number} in {files[0]}")
+        elif len(owners) > 1:
+            ambiguous.append(f"AC-{number} claimed by {owners}")
+
+    assert not unclaimed, (
+        "scenario numbers used but claimed by no segment in SCENARIOS.md: "
+        f"{unclaimed}. Claim the range there first (rule 2), so the next "
+        "parallel branch can see it is taken."
+    )
+    assert not ambiguous, (
+        f"scenario numbers claimed by more than one segment: {ambiguous}"
+    )
+
+
+def test_each_register_start_matches_the_adr_that_declares_it() -> None:
+    """An ADR that assigns a starting number and the registry must agree.
+
+    ADR 0035 §9 said new scenarios start at AC-36 while the campaign issues had
+    already taken 36..54, so a reader following the ADR would number into
+    occupied space -- the drift #95 recorded. Two documents stating one number
+    is one document too many; this ties them together. A workflow's rows each
+    name the ADR, so the check is against the *earliest* of them: the ADR is
+    what declares where the range begins.
+    """
+    declared: dict[int, int] = {}
+    for adr in sorted((REPO_ROOT / "docs" / "adr").glob("[0-9]" * 4 + "-*.md")):
+        match = re.search(
+            r"新增场景从\s*\*\*AC-(\d+)\*\*\s*起",
+            adr.read_text(encoding="utf-8"),
+        )
+        if match is not None:
+            declared[int(adr.name.split("-")[0])] = int(match.group(1))
+
+    registered: dict[int, list[tuple[int, str]]] = {}
+    for start, _end, owner, declared_by in _registry_segments():
+        for number in re.findall(r"ADR\s*(\d{4})", declared_by):
+            registered.setdefault(int(number), []).append((start, owner))
+
+    mismatched = []
+    for number, start in sorted(declared.items()):
+        rows = registered.get(number)
+        if rows is None:
+            continue
+        earliest = min(rows)
+        if earliest[0] != start:
+            mismatched.append(
+                f"ADR {number:04d} says AC-{start}, SCENARIOS.md gives "
+                f"{earliest[1]} the range starting at AC-{earliest[0]}"
+            )
+
+    unregistered = sorted(number for number in declared if number not in registered)
+
+    assert not mismatched, (
+        "an ADR and the scenario registry disagree on where a range starts: "
+        f"{mismatched}"
+    )
+    assert not unregistered, (
+        "an ADR assigns a scenario range that SCENARIOS.md does not attribute "
+        f"to it: {[f'ADR {n:04d}' for n in unregistered]}"
     )
