@@ -26,6 +26,7 @@ from sqlalchemy import text
 
 from adapters.filestore import store_body
 from app.main import create_app, create_engine_for
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.integration.conftest import ServerInThread, free_port
 from tests.migrated_schema import migrated_database
 
@@ -654,6 +655,9 @@ async def test_refused_writes_reach_no_audit_row(
     """
 
     def _core_api_writes() -> list[str]:
+        # The row is written after the response is on the wire, so a count
+        # taken straight after a tool call is a race (issue #101).
+        CorrelationAndAuditMiddleware.drain_audit()
         engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
         try:
             with engine.connect() as conn:
@@ -710,6 +714,7 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
         },
         confirm=True,
     )
+    CorrelationAndAuditMiddleware.drain_audit()
     engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
     with engine.connect() as conn:
         rows = conn.execute(text("select actor, operation from audit_log")).fetchall()

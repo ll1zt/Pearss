@@ -535,6 +535,7 @@ async def test_reads_are_not_audited(app: FastAPI, client: httpx.AsyncClient) ->
     # AuditLog is a fact source kept forever, so routine reads would grow it
     # for no investigative benefit.
     await client.get("/v1/items")
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         after_read = session.execute(sa.text("select count(*) from audit_log")).scalar()
 
@@ -559,6 +560,9 @@ async def test_a_refused_write_is_not_audited_because_it_never_reaches_the_endpo
     the audit log is for: an operator asking what changed the corpus.
     """
     await ingest(anonymous_client)
+    # Without the drain this could pass because the refusal's audit row has not
+    # been considered yet, rather than because none was written.
+    CorrelationAndAuditMiddleware.drain_audit()
     with app.state.session_factory() as session:
         after_refusal = session.execute(
             sa.text("select count(*) from audit_log")

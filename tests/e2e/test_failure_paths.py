@@ -31,6 +31,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.e2e.conftest import API_TOKEN, READER_PASSWORD, READER_USERNAME
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
@@ -103,6 +104,11 @@ def _count(session_factory: sessionmaker[Session], table: str) -> int:
     """
     if table not in {"source", "item", "audit_log"}:
         raise ValueError(f"unexpected table {table!r}")
+    if table == "audit_log":
+        # Only the audit table has a writer behind a queue to wait for; a
+        # refused request is answered before that writer is even reached, so
+        # without the drain a "no row" assertion could pass on timing alone.
+        CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as db:
         return int(db.execute(sa.text(f"select count(*) from {table}")).scalar_one())  # noqa: S608
 
@@ -117,6 +123,7 @@ def _outcomes(
     the outcome: the attempt is recorded as rejected, and no row says a write
     succeeded.
     """
+    CorrelationAndAuditMiddleware.drain_audit()
     query = "select outcome from audit_log"
     params: dict[str, str] = {}
     if operation is not None:

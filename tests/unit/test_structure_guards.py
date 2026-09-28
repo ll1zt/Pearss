@@ -1533,3 +1533,143 @@ def test_each_register_start_matches_the_adr_that_declares_it() -> None:
         "an ADR assigns a scenario range that SCENARIOS.md does not attribute "
         f"to it: {[f'ADR {n:04d}' for n in unregistered]}"
     )
+
+
+# --------------------------------------------------------------------------
+# Reads of the audit table must wait for the worker that writes it
+#
+# The audit middleware hands the write to a worker thread and returns, so a
+# test that reads the table when a call returns is racing a thread it never
+# waits for: it wins on an idle machine and loses on a loaded one. That is how
+# CI run 87 failed a test whose diff touched nothing related to auditing, and a
+# sweep found eleven more functions with the same shape. `drain_audit` exists
+# for this; what does not scale is remembering to call it.
+# --------------------------------------------------------------------------
+
+# Spelled once, so this guard's own body never contains the literal (it would
+# otherwise flag itself, which is how the self-check was found to be working).
+AUDIT_TABLE = "audit_" + "log"
+
+# A mention of the table that is actually a query against it, as opposed to an
+# allowlist entry or a table name in a list of expected tables.
+AUDIT_SQL = re.compile(r"\b(from|into|update|delete)\b", re.IGNORECASE)
+
+# Functions that read the audit table without draining, and why each is right.
+# An exact set, so that an entry which stops being needed fails the guard.
+AUDIT_READ_EXEMPTIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # The instrument of the fire-and-forget contract itself: it is polled
+        # *while* the queue is expected to be busy, waiting for a row to
+        # appear, and is read after a deliberate drain elsewhere in the file.
+        # Draining inside it would erase the thing it measures.
+        ("tests/integration/test_audit_responsiveness.py", "audit_rows"),
+        # These three add their rows directly to the test's own session
+        # (`session.add` plus `prune_audit_log`), never through the middleware,
+        # so there is no queue and nothing to wait for.
+        (
+            "tests/integration/test_scheduler.py",
+            "test_audit_retention_prunes_only_old_rows",
+        ),
+        (
+            "tests/integration/test_scheduler_maintenance.py",
+            "test_a_tick_prunes_audit_rows_past_the_retention_window",
+        ),
+        (
+            "tests/integration/test_scheduler_maintenance.py",
+            "test_retention_of_zero_disables_pruning",
+        ),
+    }
+)
+
+
+def _table_mentions(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[int, str]]:
+    """(line, text) for each string in a function body naming the audit table.
+
+    The function's own docstring is skipped: prose about the table is not a
+    read of it, and counting it would flag a function that is already correct
+    -- the backfill test's docstring says it reads the table "rather than
+    trusting the response", while the query itself drains properly.
+    """
+    docstring = None
+    if node.body and isinstance(node.body[0], ast.Expr):
+        first = node.body[0].value
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            docstring = first
+    return [
+        (sub.lineno, sub.value)
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Constant)
+        and isinstance(sub.value, str)
+        and AUDIT_TABLE in sub.value
+        and sub is not docstring
+    ]
+
+
+def _drain_calls(node: ast.AST) -> list[int]:
+    """Lines where a function body calls `drain_audit`."""
+    lines: list[int] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if "drain_audit" in name:
+            lines.append(sub.lineno)
+    return sorted(lines)
+
+
+def test_every_audit_table_read_waits_for_the_audit_worker() -> None:
+    """A test that reads the audit table must drain the queue first.
+
+    The write is fire-and-forget by design, so the row is legitimately absent
+    when the response returns. Reading anyway makes the assertion a coin flip,
+    and its failure text ("ids with no audit row") points at the audit code
+    rather than at the race -- which is the expensive part.
+
+    Ordering is checked only against mentions that are queries. A helper that
+    picks its table from an allowlist names the table without querying it
+    there, and demanding the drain above that line would be asking for the
+    validation to move out of the way.
+    """
+    offenders: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        relative = str(path.relative_to(REPO_ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            mentions = _table_mentions(node)
+            if not mentions:
+                continue
+            seen.add((relative, node.name))
+            if (relative, node.name) in AUDIT_READ_EXEMPTIONS:
+                continue
+            queries = [line for line, text in mentions if AUDIT_SQL.search(text)]
+            drains = _drain_calls(node)
+            if not drains:
+                offenders.append(
+                    f"{relative}::{node.name} reads at line {mentions[0][0]}"
+                )
+            elif queries and drains[0] > queries[0]:
+                offenders.append(
+                    f"{relative}::{node.name} reads at line {queries[0]} but "
+                    f"drains only at line {drains[0]}"
+                )
+
+    assert not offenders, (
+        "these read the audit table without waiting for the worker that writes "
+        "it, so they race a thread they never join (issue #101):\n  "
+        + "\n  ".join(offenders)
+        + "\nCall CorrelationAndAuditMiddleware.drain_audit() before the read, "
+        "or add the function to AUDIT_READ_EXEMPTIONS with the reason it cannot."
+    )
+
+    stale = sorted(AUDIT_READ_EXEMPTIONS - seen)
+    assert not stale, (
+        "AUDIT_READ_EXEMPTIONS lists functions that no longer read the audit "
+        f"table, so the entry excuses nothing while hiding a future read: {stale}"
+    )
