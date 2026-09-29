@@ -1387,3 +1387,113 @@ def test_a_top_level_break_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None
     assert "<br" in product, product
     assert product.count("<p>") == 2, product
     assert len(seen) == 2, "the top-level break is not a translation unit"
+
+
+# --------------------------------------------------------------------------
+# The segment boundary of an oversized block (issue #151)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #151):
+#
+#   AC-148 超过 MAX_CHARS 的块的段间分隔不丢
+#   AC-149 不需要切分的块产物逐字节不变 (钉住现状)
+#
+# `_segment` splits a block on `\n\n`, consuming the separator; `_fill_unit`
+# then joined the per-segment replies with `""`, so the boundary disappeared
+# and the two halves welded together (`AAAA...BBBB` with no whitespace).
+# --------------------------------------------------------------------------
+
+
+def _echo_provider(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A provider that returns each request's text verbatim, recording inputs.
+
+    Verbatim (not the `[译]`-prefixed echo the other helpers use) so a test can
+    read the segment boundary straight out of the product.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    seen: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        body = kwargs.get("json")
+        user = body["messages"][1]["content"] if isinstance(body, dict) else ""
+        seen.append(str(user))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": str(user)}}]}
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return seen
+
+
+def test_a_paragraph_boundary_in_a_segmented_block_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-148: a block over MAX_CHARS keeps its paragraph boundary.
+
+    Measured on the deployed code: `_segment` split `A*15000\n\nB*15000` into
+    two requests, the provider echoed both, and the product was
+    `A*15000B*15000` -- the separator was consumed by the split and the replies
+    were joined with `""`, so the two halves welded into one run.
+    """
+    seen = _echo_provider(monkeypatch)
+    left = "A" * 15000
+    right = "B" * 15000
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    process(
+        {
+            "item_id": "i-151",
+            "title": "T",
+            "content": f"<p>{left}\n\n{right}</p>",
+            "url": "https://b.example/p",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+    product = stored[0]
+
+    assert len(seen) == 2, "the oversized block must have been split in two"
+    assert f"{left}\n\n{right}" in product, (
+        f"the paragraph boundary was dropped: {product[:80]!r}..."
+    )
+    assert f"{left}{right}" not in product, "the two segments were welded together"
+
+
+def test_a_block_that_is_not_split_is_byte_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-149: the single-segment path is untouched (pinned).
+
+    A short block produces exactly one reply, so the join is a no-op on it;
+    this holds that a fix for the multi-reply case cannot leak into the common
+    one-segment path.
+    """
+    seen = _echo_provider(monkeypatch)
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    process(
+        {
+            "item_id": "i-151b",
+            "title": "T",
+            "content": "<p>Short English prose here.</p>",
+            "url": "https://b.example/p",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+
+    assert len(seen) == 1, "a short block is one request"
+    assert stored[0] == "<p>Short English prose here.</p>", stored[0]

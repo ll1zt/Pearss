@@ -508,8 +508,15 @@ def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
     inside the translation. A block the provider did not answer for keeps its
     original text: that is the only outcome that cannot mislead, since a
     borrowed neighbour's translation reads as plausible output.
+
+    A unit's replies are one per segment `_segment` produced, and `_segment`
+    splits on `\n\n` (its contract is that the chunks rejoin with `\n\n`);
+    joining them with `""` consumed that separator and welded the halves of an
+    oversized block into one run (issue #151). Joining with the same `\n\n`
+    puts the boundary back -- it is re-inserted here rather than trusted to the
+    provider, which trims -- and a one-reply unit is unchanged.
     """
-    text = "".join(reply.strip() for reply in replies if reply.strip())
+    text = "\n\n".join(reply.strip() for reply in replies if reply.strip())
     if not text:
         # unreachable: `_parse_reply` rejects an empty completion, so a block's
         # replies are never all-blank. This is the guard for a provider whose

@@ -66,6 +66,7 @@
 | AC-131..132 | #133 假断档：page_sort_span 把模块内容 id 当页位置 | issue #133 | 已合并 | `src/plugins/collectors/twitter/test_walk.py`、`src/plugins/collectors/twitter/test_collector.py` |
 | AC-133..140 | #145 翻译模型链：任一 model 失败不中断，全部失败才终止（分类与 detail 聚合） | issue #145 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-141..147 | #150 翻译块内 void 元素（br/wbr/img/hr）：成对标记之外的自闭合还原 | issue #150 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
+| AC-148..149 | #151 翻译：超长块被 _segment 切段后段间分隔不丢（短块字节不变） | issue #151 | 保留 | `src/plugins/processors/translate/test_processor.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
