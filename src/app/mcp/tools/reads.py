@@ -53,12 +53,15 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=reads,
         description=(
             "Why a source is not updating, answered in one call: its status and "
-            "schedule, its job and the last few runs with their error classes, "
-            "how much is stuck behind its processing chain (and since when), and "
-            "whether the collection loop is alive at all. Use this instead of "
-            "assembling the answer from list_jobs, list_runs and "
-            "list_enrichments yourself -- their order matters, and stopping "
-            "early produces a confident answer from half the evidence."
+            "schedule, its job and the last few runs with their error classes "
+            "(the newest lifted to `last_run`), how much is stuck behind its "
+            "processing chain (and since when), the recent failed products with "
+            "their error class and the provider's own message "
+            "(`failed_enrichments`), and whether the collection loop is alive "
+            "at all. Use this instead of assembling the answer from list_jobs, "
+            "list_runs and list_enrichments yourself -- their order matters, "
+            "and stopping early produces a confident answer from half the "
+            "evidence."
         ),
     )
     async def diagnose_source(source_id: str) -> dict[str, Any]:

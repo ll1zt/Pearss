@@ -32,6 +32,7 @@ from adapters.repository.enrichment import (
     backlog_for_source,
     chain_for_source,
     enqueue_chain,
+    failed_enrichments_for_source,
     parse_chain,
     statuses_for_item,
 )
@@ -141,6 +142,7 @@ __all__ = [
     "ensure_collect_job",
     "escape_like",
     "existing_items_for_source",
+    "failed_enrichments_for_source",
     "find_by_content_hash",
     "find_by_identity",
     "find_idempotent",

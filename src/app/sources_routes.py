@@ -28,6 +28,7 @@ from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     backlog_for_source,
     create_source,
+    failed_enrichments_for_source,
     get_source,
     job_for_source,
     list_job_runs,
@@ -68,6 +69,11 @@ LOGGER = logging.getLogger(__name__)
 # streak, few enough that the answer stays one screen: the runs themselves have
 # their own paged endpoint.
 DIAGNOSE_RUNS = 5
+
+# How many failed chain rows the diagnostic view carries (issue #152). The
+# counts say how much is stuck; these rows say what is wrong, and five is
+# enough to see a class and its provider message without becoming a list.
+DIAGNOSE_FAILED_ENRICHMENTS = 5
 
 
 # How long a stored response is replayed. Long enough to cover a client that
@@ -360,6 +366,9 @@ def diagnose_source(
             else []
         )
         chain = backlog_for_source(session, source_id)
+        failed_enrichments = failed_enrichments_for_source(
+            session, source_id=source_id, limit=DIAGNOSE_FAILED_ENRICHMENTS
+        )
         source = {
             "id": row.id,
             "type": row.type,
@@ -402,7 +411,21 @@ def diagnose_source(
         "source": source,
         "job": job_summary,
         "runs": runs,
+        # The newest run's class, lifted to the top: "what did the last attempt
+        # fail with" is the first question, and `runs[0]` buries it (issue #152).
+        "last_run": (
+            None
+            if not runs
+            else {
+                "status": runs[0]["status"],
+                "error_class": runs[0]["error_class"],
+                "finished_at": runs[0]["finished_at"],
+            }
+        ),
         "chain": chain,
+        # Why the chain is stuck: the failure class and the provider's own
+        # message, newest first. Metadata only -- never the item body (issue #152).
+        "failed_enrichments": failed_enrichments,
         "collection": {"loop_alive": loop_alive, "loop_owner": loop_owner},
         "correlation_id": current_correlation_id(),
     }
