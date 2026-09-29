@@ -213,11 +213,16 @@ async def test_openapi_declares_the_sort_enum(
     if "$ref" in schema:
         name = schema["$ref"].rsplit("/", 1)[-1]
         schema = spec["components"]["schemas"][name]
-    # `relevance` is whitelisted but only meaningful with `full_text`: the route
-    # refuses it without one rather than quietly ranking nothing, so the
-    # whitelist and the runtime condition are two different statements and both
-    # belong here.
-    assert set(schema["enum"]) == {"-published_at", "published_at", "relevance"}
+    # `relevance` and `hybrid` are whitelisted but only meaningful with
+    # `full_text`: the route refuses each without one rather than quietly ranking
+    # nothing or quietly answering with one path, so the whitelist and the runtime
+    # conditions are different statements and both belong here.
+    assert set(schema["enum"]) == {
+        "-published_at",
+        "published_at",
+        "relevance",
+        "hybrid",
+    }
 
 
 # --------------------------------------------------------------------------

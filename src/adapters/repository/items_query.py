@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
 from adapters.repository._shared import EPOCH_FLOOR, row_to_item, visible_item_rows
+from adapters.repository.hybrid_search import fused_item_ids
 from adapters.repository.search_index import count_matches, search_rows
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.models import Item
@@ -62,6 +64,7 @@ def query_items(
     descending: bool,
     limit: int,
     cursor: tuple[str, str] | None = None,
+    query_vector: Sequence[float] | None = None,
 ) -> ItemPage:
     """Keyset-pagated item query.
 
@@ -76,6 +79,20 @@ def query_items(
     # The generated column, not the expression: an indexed expression is only
     # matched while its text is identical, and the sort key has to keep using
     # the index it is named for (see db_models.Item.sort_key).
+    if filter.full_text and query_vector is not None:
+        # Two paths, fused by rank (ADR 0035 decision 7). The order is neither
+        # the time order nor a single index's, so like the relevance branch it
+        # cannot be expressed as one more WHERE on the keyset query below.
+        return _fused_page(
+            session,
+            tenant_id=tenant_id,
+            filter=filter,
+            text=filter.full_text,
+            query_vector=query_vector,
+            limit=limit,
+            cursor=cursor,
+        )
+
     if filter.full_text:
         # A different query shape, not a different condition: the order is
         # relevance and the rows come from the index, so it cannot be expressed
@@ -137,6 +154,57 @@ def query_items(
         next_cursor = f"{_sort_value(last)}|{last.id}"
 
     return ItemPage(items=[row_to_item(row) for row in page], next_cursor=next_cursor)
+
+
+def _fused_page(
+    session: Session,
+    *,
+    tenant_id: str,
+    filter: ItemFilter,
+    text: str,
+    query_vector: Sequence[float],
+    limit: int,
+    cursor: tuple[str, str] | None,
+) -> ItemPage:
+    """One page of the fused order, plus the cursor for the next.
+
+    The cursor is `(score, id)` printed, the same shape the relevance branch uses
+    and for the same reason: an offset would walk a shifting window. Scores come
+    from the fusion of two deterministic paths, so they round-trip exactly.
+
+    `total` counts what the caller can enumerate -- the fused list, which is
+    bounded by the depth each path was asked for, not the number of items in the
+    corpus. A count that promised more than the list can produce is the kind of
+    number callers page to the end trying to reach.
+    """
+    fused = fused_item_ids(
+        session,
+        text=text,
+        query=query_vector,
+        tenant_id=tenant_id,
+    )
+    conditions = _filter_conditions(
+        tenant_id, replace(filter, full_text=None), ItemRow.sort_key
+    )
+    rows = {
+        row.id: row
+        for row in session.execute(select(ItemRow).where(*conditions)).scalars()
+    }
+    ordered = [(rows[item_id], score) for item_id, score in fused if item_id in rows]
+    if cursor is not None:
+        after_score, after_id = float(cursor[0]), cursor[1]
+        ordered = [
+            (row, score)
+            for row, score in ordered
+            if score < after_score or (score == after_score and row.id > after_id)
+        ]
+    page = ordered[:limit]
+    next_cursor = (
+        f"{page[-1][1]!r}|{page[-1][0].id}" if len(ordered) > len(page) else None
+    )
+    return ItemPage(
+        items=[row_to_item(row) for row, _score in page], next_cursor=next_cursor
+    )
 
 
 def _filter_conditions(

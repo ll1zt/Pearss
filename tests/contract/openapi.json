@@ -400,7 +400,8 @@
         "enum": [
           "-published_at",
           "published_at",
-          "relevance"
+          "relevance",
+          "hybrid"
         ],
         "title": "ItemSort",
         "type": "string"

@@ -56,7 +56,8 @@
 | AC-103..104 | #82 短/空文本不崩溃、失败归类到既有 taxonomy（原声明 97..98） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
 | AC-115..116 | #82 编码器：声明维度的单位向量、批内 padding 被 mask（短文本单独与批内同向量） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
 | AC-114 | #120/#82 选定的运行时在本环境真跑一次推理（384 维、两次同向量） | ADR 0040 | 已合并 | `tests/integration/test_embedding_runtime.py` |
-| AC-105..109 | #83 RRF 混合检索（原声明 99..103） | ADR 0035 §9 | 保留 | — |
+| AC-105..107 | #83 融合检索：语义召回不被字面封顶、精确命中居首、不注入词法噪声（原声明 99..101） | ADR 0035 §9 | 已合并 | `tests/integration/test_hybrid_search.py`、`tests/integration/test_search_surface.py` |
+| AC-108..109 | #83 相关文章与近重复提示（原声明 102..103） | ADR 0035 §9 | 保留 | — |
 | AC-110 | #89 单租户假设（第二个租户会被报出） | ADR 0038 | 已合并 | `tests/integration/test_tenancy.py` |
 | AC-111..113 | #61 告警的两个未实现条件（卡死链、循环不存活）与循环互看 | ADR 0034 / ADR 0039 | 已合并 | `tests/integration/test_alerting.py` |
 

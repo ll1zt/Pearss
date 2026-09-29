@@ -43,7 +43,10 @@ issues #80 and #70).
 
 from __future__ import annotations
 
+import base64
+import json
 import pathlib
+import struct
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -51,6 +54,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.repository import create_source, timestamp
@@ -318,3 +322,161 @@ async def test_a_pending_item_is_not_found_by_searching_its_body(
         )
 
     assert await _titles(client, full_text="未发布的独有词") == set()
+
+
+# --------------------------------------------------------------------------
+# AC-105..107: the fused order, from the same entry point
+#
+# The stand-in model is enough for these: what is under test is the *wiring* --
+# that the route encodes the query, hands it to both paths and returns the fused
+# order -- not the model's semantics, which `test_vector_search.py` checks against
+# the real weights.
+# --------------------------------------------------------------------------
+
+
+def _chained_source(session: Session) -> str:
+    source = create_source(
+        session,
+        source_type="rss",
+        url="https://example.test/hybrid-surface",
+        canonical_url="https://example.test/hybrid-surface",
+        schedule_policy="{}",
+        pipeline_chain=json.dumps([{"plugin_id": "embed", "kind": "embedding"}]),
+        tenant_id="default",
+        at="2026-01-01T00:00:00.000000Z",
+    )
+    session.commit()
+    return source.id
+
+
+def _with_vector(
+    session: Session,
+    *,
+    source_id: str,
+    external_id: str,
+    title: str,
+    content: str,
+    vector: list[float],
+) -> None:
+    from adapters.db_models import ItemEnrichment
+    from adapters.filestore import store_body
+    from adapters.repository.enrichment import chain_for_source
+    from app.enrichment_worker import _open_gate_if_complete
+
+    item = normalise_and_store(
+        session,
+        [
+            ItemDraft(
+                source_id=source_id,
+                external_id=external_id,
+                title=title,
+                canonical_url=f"https://example.test/{external_id}",
+                published_at=None,
+                content=content,
+            )
+        ],
+        chain=chain_for_source(session, source_id=source_id),
+    )[0].result.item
+    session.commit()
+    session.execute(
+        sa.update(ItemEnrichment)
+        .where(ItemEnrichment.item_id == item.id)
+        .values(
+            status="succeeded",
+            payload_ref=store_body(
+                base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode(
+                    "ascii"
+                )
+            ),
+        )
+    )
+    session.commit()
+    _open_gate_if_complete(session, item_id=item.id, content_hash=item.content_hash)
+    session.commit()
+
+
+def _basis(axis: int, *, width: int = 384) -> list[float]:
+    vector = [0.0] * width
+    vector[axis] = 1.0
+    return vector
+
+
+@pytest.mark.asyncio
+async def test_hybrid_without_a_query_is_refused(
+    client: httpx.AsyncClient,
+) -> None:
+    """The same rule as relevance, and for one more reason: nothing to encode."""
+    response = await client.get("/v1/items", params={"sort": "hybrid"})
+
+    assert response.status_code == 422, response.text
+    assert "hybrid_without_query" in response.text
+
+
+@pytest.mark.asyncio
+async def test_hybrid_returns_the_fused_order(
+    client: httpx.AsyncClient,
+    factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-105 at the entry point: both paths contribute to one answer."""
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(_EMBED_FIXTURES))
+    # The vectors come from the same encoder the route will use, rather than from
+    # a guessed direction: the stand-in's weights are random, so "this text points
+    # along axis 0" is not a fact about it. The semantic item is handed the
+    # query's own vector, which makes it the nearest by construction.
+    from plugins.processors.embed.encoder import Encoder
+
+    encoder = Encoder(_EMBED_FIXTURES)
+    query_vector = encoder.encode("内核调度器", as_query=True)
+    with factory() as session:
+        source_id = _chained_source(session)
+        _with_vector(
+            session,
+            source_id=source_id,
+            external_id="keyword",
+            title="内核调度器如何工作",
+            content="内核调度器如何工作",
+            vector=encoder.encode("something else entirely"),
+        )
+        _with_vector(
+            session,
+            source_id=source_id,
+            external_id="semantic-only",
+            title="Linux scheduler internals",
+            content="Linux scheduler internals",
+            vector=query_vector,
+        )
+
+    titles = await _titles(client, full_text="内核调度器", sort="hybrid")
+
+    assert titles == {"内核调度器如何工作", "Linux scheduler internals"}, titles
+
+
+@pytest.mark.asyncio
+async def test_hybrid_without_a_usable_model_says_so(
+    client: httpx.AsyncClient, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing model is a 503 with a command, not a silent lexical answer.
+
+    A caller who asked for hybrid and got keyword-only results would read them as
+    fused, and the recall they were asking for is exactly the difference.
+    """
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(tmp_path / "absent"))
+
+    response = await client.get(
+        "/v1/items", params={"full_text": "kernel", "sort": "hybrid"}
+    )
+
+    assert response.status_code == 503, response.text
+    assert "embedding_model_unavailable" in response.text
+    assert "just fetch-model" in response.text, "the suggestion has to be the fix"
+
+
+_EMBED_FIXTURES = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "src"
+    / "plugins"
+    / "processors"
+    / "embed"
+    / "fixtures"
+)

@@ -95,6 +95,10 @@ class ItemSort(StrEnum):
     # silent fall back to the time order, because the caller would otherwise
     # read the results as ranked when they are not.
     RELEVANCE = "relevance"
+    # Both paths in full, fused by rank (ADR 0035 decision 7). It needs a query
+    # for the same reason `relevance` does, and a second one: the semantic path
+    # has to encode the text, so without one there is nothing to be similar to.
+    HYBRID = "hybrid"
 
 
 class ItemSummary(BaseModel):
@@ -226,9 +230,24 @@ def read_items(
                 "published_at orders."
             ),
         )
+    if sort is ItemSort.HYBRID and not full_text:
+        raise api_error(
+            status_code=422,
+            code="hybrid_without_query",
+            message="sort=hybrid needs full_text: it is the query both paths use.",
+            suggestion=(
+                "Pass full_text=<what to search for>. The lexical path matches it "
+                "and the semantic path encodes it, so the two answer one question."
+            ),
+        )
     descending = sort is ItemSort.PUBLISHED_DESC
 
     parsed_cursor = _parse_cursor(cursor)
+    # `and full_text` is what narrows the type for the checker; the 422 above has
+    # already refused the case where it is absent.
+    query_vector = (
+        _embed_query(full_text) if sort is ItemSort.HYBRID and full_text else None
+    )
 
     with request.app.state.session_factory() as session:
         filter_spec = ItemFilter(
@@ -248,6 +267,7 @@ def read_items(
             descending=descending,
             limit=limit,
             cursor=parsed_cursor,
+            query_vector=query_vector,
         )
         # How many rows the filter selects in total, not how many this page
         # returned. The sources list already answers this way, and it matters
@@ -269,6 +289,32 @@ def read_items(
         "total": total,
         "correlation_id": current_correlation_id(),
     }
+
+
+def _embed_query(text: str) -> list[float]:
+    """The query vector for a hybrid search, or a 503 the caller can act on.
+
+    Not a silent fall back to the lexical path: a caller who asked for hybrid and
+    got keyword-only results would read them as fused, and the difference is
+    exactly the recall they were asking for. The model is fetched by
+    `just fetch-model`, so the suggestion is the command that fixes it.
+    """
+    from adapters.embedding_model import model_directory
+    from core.plugins.hooks import ProcessorError
+    from plugins.processors.embed.encoder import Encoder
+
+    try:
+        return Encoder(model_directory()).encode(text, as_query=True)
+    except ProcessorError as exc:
+        raise api_error(
+            status_code=503,
+            code="embedding_model_unavailable",
+            message=f"the embedding model is not usable: {exc.detail}",
+            suggestion=(
+                "Run `just fetch-model` to install it, or use sort=relevance for "
+                "the lexical path alone."
+            ),
+        ) from exc
 
 
 def _parse_cursor(cursor: str | None) -> tuple[str, str] | None:
