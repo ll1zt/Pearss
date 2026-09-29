@@ -1194,10 +1194,14 @@ def test_the_previously_uncovered_transient_paths_fall_back(
 
     Zero tests set a model chain before this issue, so these branches had no
     test at all. They were correct; this holds them while the loop is rewritten.
+    The 501 is the default for any status outside the named set: it classifies
+    `network`, so an unlisted provider answer stays retryable rather than
+    silently permanent.
     """
     for first in (
         httpx.Response(429, json={"error": {"message": "rate limited"}}),
         httpx.Response(503, json={"error": {"message": "overloaded"}}),
+        httpx.Response(501, json={"error": {"message": "not implemented"}}),
         httpx.ConnectError("connection refused"),
     ):
         asked = _chain_provider(monkeypatch, {"m1": first})
