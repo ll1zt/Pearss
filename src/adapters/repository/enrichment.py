@@ -24,6 +24,7 @@ from core.enrichment import (
     EnrichmentSpec,
     EnrichmentStatus,
     chain_complete,
+    input_identity,
     upstream_for,
 )
 from core.tenancy import SINGLE_TENANT
@@ -101,13 +102,17 @@ def enqueue_chain(
     stamp = timestamp(now or datetime.now(UTC))
     queued = 0
     for spec in chain:
+        # Per spec, not one value: a spec whose model identity is part of what
+        # its artifact *is* is stored under a different input_hash than one whose
+        # output is a function of the content alone (ADR 0035 decision 6).
+        identity = input_identity(content_hash, spec)
         existing = session.execute(
             select(ItemEnrichment).where(
                 ItemEnrichment.item_id == item_id,
                 ItemEnrichment.plugin_id == spec.plugin_id,
                 ItemEnrichment.kind == spec.kind.value,
                 ItemEnrichment.lang == spec.lang,
-                ItemEnrichment.input_hash == content_hash,
+                ItemEnrichment.input_hash == identity,
             )
         ).scalar_one_or_none()
         if existing is not None:
@@ -124,7 +129,10 @@ def enqueue_chain(
                 plugin_version=plugin_version,
                 kind=spec.kind.value,
                 lang=spec.lang,
-                input_hash=content_hash,
+                input_hash=identity,
+                # The model that will produce it, so the row says which one and
+                # a later reader does not have to infer it from the digest.
+                model=str(spec.model) if spec.model is not None else None,
                 status=EnrichmentStatus.QUEUED.value,
                 tenant_id=tenant_id,
                 created_at=stamp,
@@ -169,18 +177,31 @@ def backlog_for_source(session: Session, source_id: str) -> dict[str, Any]:
 
 
 def statuses_for_item(
-    session: Session, *, item_id: str, content_hash: str
+    session: Session,
+    *,
+    item_id: str,
+    content_hash: str,
+    chain: tuple[EnrichmentSpec, ...],
 ) -> dict[tuple[str, str, str | None], EnrichmentStatus]:
-    """Product statuses for one item at one content version."""
+    """Product statuses for one item, at the identity each spec asks for.
+
+    The identities are per spec, not one value: an embedding is stored under a
+    digest that includes its model, while a content-only product is stored under
+    the content hash. Filtering on the content hash alone would miss the vector
+    row and leave the gate shut on a chain that had actually finished -- a silent
+    stall in place of the silent reuse this replaces.
+    """
+    wanted = {
+        (spec.plugin_id, spec.kind.value, spec.lang): input_identity(content_hash, spec)
+        for spec in chain
+    }
     rows = session.execute(
-        select(ItemEnrichment).where(
-            ItemEnrichment.item_id == item_id,
-            ItemEnrichment.input_hash == content_hash,
-        )
+        select(ItemEnrichment).where(ItemEnrichment.item_id == item_id)
     ).scalars()
     return {
         (row.plugin_id, row.kind, row.lang): EnrichmentStatus(row.status)
         for row in rows
+        if row.input_hash == wanted.get((row.plugin_id, row.kind, row.lang))
     }
 
 
@@ -212,7 +233,9 @@ def upstream_for_spec(
         select(ItemEnrichment.payload_ref)
         .where(
             ItemEnrichment.item_id == item_id,
-            ItemEnrichment.input_hash == content_hash,
+            # The upstream spec's identity, not the item's: if the upstream is an
+            # embedding, its row lives under a digest that includes its model.
+            ItemEnrichment.input_hash == input_identity(content_hash, upstream),
             ItemEnrichment.plugin_id == upstream.plugin_id,
             ItemEnrichment.status == EnrichmentStatus.SUCCEEDED.value,
         )
@@ -232,7 +255,10 @@ def is_source_chain_complete(
     if not chain:
         return True
     return chain_complete(
-        chain, statuses_for_item(session, item_id=item_id, content_hash=content_hash)
+        chain,
+        statuses_for_item(
+            session, item_id=item_id, content_hash=content_hash, chain=chain
+        ),
     )
 
 
@@ -284,13 +310,14 @@ def backfill_chain(
         for spec in chain:
             if limit is not None and queued >= limit:
                 break
+            identity = input_identity(item.content_hash, spec)
             exists = session.execute(
                 select(ItemEnrichment).where(
                     ItemEnrichment.item_id == item.id,
                     ItemEnrichment.plugin_id == spec.plugin_id,
                     ItemEnrichment.kind == spec.kind.value,
                     ItemEnrichment.lang == spec.lang,
-                    ItemEnrichment.input_hash == item.content_hash,
+                    ItemEnrichment.input_hash == identity,
                 )
             ).scalar_one_or_none()
             if exists is not None:
@@ -303,7 +330,8 @@ def backfill_chain(
                     plugin_version="0.1.0",
                     kind=spec.kind.value,
                     lang=spec.lang,
-                    input_hash=item.content_hash,
+                    input_hash=identity,
+                    model=str(spec.model) if spec.model is not None else None,
                     status=EnrichmentStatus.QUEUED.value,
                     tenant_id=tenant_id,
                     created_at=stamp,

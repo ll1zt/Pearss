@@ -45,7 +45,9 @@
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
 | AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
-| AC-99..104 | #82 本地 embedding（原声明 93..98） | ADR 0035 §9 | 保留 | — |
+| AC-99..100 | #82 本地 embedding：语义与跨语言召回（原声明 93..94） | ADR 0035 §9 | 保留 | — |
+| AC-101 | #82 换模型不复用旧向量（原声明 95，前置缺陷） | ADR 0035 §9 | 已合并 | `tests/integration/test_content_revision_gate.py` |
+| AC-102..104 | #82 本地 embedding：内容变更重算、短/空文本、失败归类（原声明 96..98） | ADR 0035 §9 | 保留 | — |
 | AC-105..109 | #83 RRF 混合检索（原声明 99..103） | ADR 0035 §9 | 保留 | — |
 | AC-110 | #89 单租户假设（第二个租户会被报出） | ADR 0038 | 已合并 | `tests/integration/test_tenancy.py` |
 | AC-111..113 | #61 告警的两个未实现条件（卡死链、循环不存活）与循环互看 | ADR 0034 / ADR 0039 | 已合并 | `tests/integration/test_alerting.py` |

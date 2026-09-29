@@ -19,6 +19,7 @@ No I/O here: the worker and the repository execute what this module decides.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -34,6 +35,10 @@ class EnrichmentKind(StrEnum):
     # URL by the fulltext processor (issue #28). A product like any other:
     # pinned to input_hash, never rewriting the item.
     FULLTEXT = "fulltext"
+    # A vector of the item's text (ADR 0035 decision 5). Deliberately *not* in
+    # CONSUMABLE_KINDS: a later spec must not read a float array as if it were
+    # the item's prose.
+    EMBEDDING = "embedding"
 
 
 class EnrichmentStatus(StrEnum):
@@ -63,6 +68,25 @@ CONSUMABLE_KINDS: Final[frozenset[EnrichmentKind]] = frozenset(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ModelIdentity:
+    """Which model produced an artifact, and what makes two of them different.
+
+    A name is not an identity: the same name re-exported can change dimensions or
+    weights, and for a vector either one makes the stored row *wrong* rather than
+    merely stale -- a 384-wide row consumed as 768-wide, or a vector from a
+    different semantic space ranked as if it belonged. So the identity is the
+    triple, and the triple is what the product is keyed by.
+    """
+
+    name: str
+    dimensions: int
+    revision: str
+
+    def __str__(self) -> str:
+        return f"{self.name}:{self.dimensions}:{self.revision}"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EnrichmentSpec:
     """One required product: a kind, the processor, its output language.
@@ -77,6 +101,29 @@ class EnrichmentSpec:
     kind: EnrichmentKind
     lang: str | None = None
     required: bool = True
+    # The model that will produce this artifact, when its identity is part of
+    # what the artifact *is* (ADR 0035 decision 6). None for processors whose
+    # output is a function of the content alone, where the item's version already
+    # identifies it.
+    model: ModelIdentity | None = None
+
+
+def input_identity(content_hash: str, spec: EnrichmentSpec) -> str:
+    """The `input_hash` a product of this spec is stored and looked up under.
+
+    The item's content version, plus the model identity when the artifact's
+    meaning depends on which model produced it.
+
+    Folded into `input_hash` rather than added as a column of the unique
+    constraint on purpose: that constraint already includes `input_hash`, and a
+    *nullable* column in a UNIQUE constraint constrains nothing -- NULL never
+    equals NULL, so every legacy row would stay free to collide. That is the same
+    trap that makes `source.canonical_url` NOT NULL, and it would have re-opened
+    the silent reuse this function exists to close.
+    """
+    if spec.model is None:
+        return content_hash
+    return hashlib.sha256(f"{content_hash}|{spec.model}".encode()).hexdigest()
 
 
 def chain_complete(
