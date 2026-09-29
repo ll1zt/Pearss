@@ -1,6 +1,6 @@
 """Integration tests for authenticated paging: state, and failing closed.
 
-Scenario register (normative source: SCENARIOS.md; issue #130; AC-117..119).
+Scenario register (normative source: SCENARIOS.md; issues #130, #131; AC-117..121).
 
 The HTTP layer is replaced with a MockTransport serving recorded-shaped
 payloads, so these exercise the real repository writes and the real walk
@@ -906,6 +906,119 @@ def test_a_repeat_catch_up_neither_duplicates_nor_moves_the_frontier_back(
     assert second.inserted == 0
     assert len(_stored_titles(session)) == 2
     assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 530
+
+
+@pytest.mark.integration
+def test_a_mid_walk_failure_keeps_the_pages_it_already_fetched(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page that fails after earlier ones arrived must not discard them.
+
+    The walk keeps its partial pages by contract; the host was dropping them
+    *and* moving the frontier past them, so the fetched tweets were lost for
+    good (AC-120).
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=100, floor_candidate="OLDEST"
+    )
+    session.commit()
+
+    def route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["300", "200"], "C1"))
+        # The second page fails after the first one already arrived.
+        return httpx.Response(500)
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    result = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    assert result.succeeded is False
+    stored = _stored_titles(session)
+    assert any("body of 300" in t for t in stored), (
+        f"the fetched first page was discarded after a later failure: {stored}"
+    )
+    assert any("body of 200" in t for t in stored), (
+        f"the fetched first page was discarded after a later failure: {stored}"
+    )
+
+
+@pytest.mark.integration
+def test_a_partial_failure_does_not_skip_the_unfetched_page(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frontier must not move past content that was never fetched.
+
+    If it does, the next round starts at the top, meets the moved frontier and
+    stops -- the tweet on the page that failed is skipped for good (AC-121).
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    save_paging_state(
+        session, source_id=SOURCE_ID, newest_id=100, floor_candidate="OLDEST"
+    )
+    session.commit()
+
+    def failing_route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["300", "200"], "C1"))
+        return httpx.Response(500)
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(failing_route))
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    # The frontier still names the last id the store actually knows about.
+    assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 100
+
+    def recovered_route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["300", "200"], "C1"))
+        if cursor == "C1":
+            return httpx.Response(200, content=timeline(["150", "50"], None))
+        raise AssertionError(f"walk went past the origin bottom: {cursor}")
+
+    collector_registry.set_http_transport(
+        "twitter", httpx.MockTransport(recovered_route)
+    )
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    stored = _stored_titles(session)
+    assert any("body of 150" in t for t in stored), (
+        f"a newer tweet below a failed page was skipped for good: {stored}"
+    )
+    assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 300
 
 
 @pytest.mark.integration
