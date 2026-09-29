@@ -44,7 +44,6 @@ from core.plugins.hooks import ProcessorError
 
 LOGGER = logging.getLogger(__name__)
 
-TENANT: Final = "default"
 # Poll cadence: queued rows appear at collection time, so a minute of lag is
 # invisible next to the fetch interval that produced them.
 DEFAULT_SWEEP_SECONDS: Final = 60.0

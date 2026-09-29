@@ -52,6 +52,7 @@ from app.reader_routes import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
 from app.system_routes import router as system_router
+from app.tenancy_check import report_other_tenants
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,7 +80,6 @@ def configure_logging() -> None:
 
 
 DEFAULT_DATABASE_URL = "sqlite+pysqlite:///./data/pearss.db"
-TENANT = "default"
 
 
 def database_url() -> str:
@@ -229,6 +229,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             # Restore approved installations before egress wiring or starting jobs.
             restore_installed_plugins(app.state.session_factory)
+            # Names the assumption and checks it against the data (issue
+            # #89): the column exists on every table, so a second tenant is
+            # representable, and every read would silently stop returning it.
+            report_other_tenants(app.state.session_factory)
 
             # The sandboxed collectors' egress is host-proxied (ADR 0017): the
             # child's reverse http calls ride back here and run through the same

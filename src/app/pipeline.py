@@ -49,10 +49,9 @@ from core.normalize import (
     normalize,
     with_content_ref,
 )
+from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
-
-TENANT = "default"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -102,7 +101,7 @@ def normalise_and_store(
     session: Session,
     drafts: list[ItemDraft],
     *,
-    tenant_id: str = TENANT,
+    tenant_id: str = SINGLE_TENANT,
     now: datetime | None = None,
     chain: tuple[EnrichmentSpec, ...] = (),
 ) -> list[Ingested]:
@@ -217,7 +216,7 @@ def collect_source(
     *,
     source: SourceRow,
     client: httpx.Client,
-    tenant_id: str = TENANT,
+    tenant_id: str = SINGLE_TENANT,
     max_pages: int = 1,
 ) -> CollectionResult:
     """Fetch, parse, normalise and store one source.
@@ -503,7 +502,7 @@ def collect_paged(
     source: SourceRow,
     registration: CollectorRegistration,
     client: httpx.Client,
-    tenant_id: str = TENANT,
+    tenant_id: str = SINGLE_TENANT,
     max_pages: int = 20,
 ) -> CollectionResult:
     """Collect a source whose origin is walked a page at a time.

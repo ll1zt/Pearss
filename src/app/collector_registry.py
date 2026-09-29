@@ -28,6 +28,7 @@ from core.models import ItemDraft
 from core.plugins.hooks import CollectorError as SpecCollectorError
 from core.plugins.hooks import CollectorSpec as spec
 from core.plugins.hooks import Manifest
+from core.tenancy import SINGLE_TENANT
 
 __all__ = [
     "Manifest",
@@ -386,7 +387,7 @@ _INSTALLED_PLUGINS: dict[str, dict[str, Any]] = {}
 
 
 def restore_installed_plugins(
-    session_factory: Any, *, tenant_id: str = "default"
+    session_factory: Any, *, tenant_id: str = SINGLE_TENANT
 ) -> None:
     """Recover explicit installations before startup wires egress or starts jobs.
 
@@ -675,7 +676,7 @@ def matchers() -> tuple[tuple[str, Callable[[str], bool]], ...]:
     )
 
 
-def sync_plugin_table(session_factory: Any, *, tenant_id: str = "default") -> None:
+def sync_plugin_table(session_factory: Any, *, tenant_id: str = SINGLE_TENANT) -> None:
     """Record every verified manifest in the plugin table at startup.
 
     Startup discovers; it does not decide. A collector the operator disabled

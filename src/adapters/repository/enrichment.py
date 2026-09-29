@@ -26,8 +26,7 @@ from core.enrichment import (
     chain_complete,
     upstream_for,
 )
-
-TENANT = "default"
+from core.tenancy import SINGLE_TENANT
 
 
 def parse_chain(
@@ -88,7 +87,7 @@ def enqueue_chain(
     content_hash: str,
     chain: tuple[EnrichmentSpec, ...],
     plugin_version: str = "0.1.0",
-    tenant_id: str = TENANT,
+    tenant_id: str = SINGLE_TENANT,
     now: datetime | None = None,
 ) -> int:
     """Queue one row per spec for a freshly stored item.
@@ -241,7 +240,7 @@ def backfill_chain(
     session: Session,
     *,
     source_id: str,
-    tenant_id: str = TENANT,
+    tenant_id: str = SINGLE_TENANT,
     limit: int | None = None,
 ) -> int:
     """Queue translations for a source's already-stored items.

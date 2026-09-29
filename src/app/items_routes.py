@@ -49,10 +49,10 @@ from app.api_conventions import (
 from app.auth import Principal, read_required, write_required
 from core.enums import PublishStatus
 from core.models import Item
+from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
 
-TENANT = "default"
 
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
@@ -243,7 +243,7 @@ def read_items(
         )
         page = query_items(
             session,
-            tenant_id=TENANT,
+            tenant_id=SINGLE_TENANT,
             filter=filter_spec,
             descending=descending,
             limit=limit,
@@ -254,7 +254,7 @@ def read_items(
         # most for callers deciding on a destructive action: "clear this
         # source" is a different decision at 3 items than at 3000, and paging
         # to the end to find out is a request per page.
-        total = count_matching(session, tenant_id=TENANT, filter=filter_spec)
+        total = count_matching(session, tenant_id=SINGLE_TENANT, filter=filter_spec)
 
     return {
         "data": [

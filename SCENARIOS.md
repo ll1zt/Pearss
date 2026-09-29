@@ -47,6 +47,7 @@
 | AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
 | AC-99..104 | #82 本地 embedding（原声明 93..98） | ADR 0035 §9 | 保留 | — |
 | AC-105..109 | #83 RRF 混合检索（原声明 99..103） | ADR 0035 §9 | 保留 | — |
+| AC-110 | #89 单租户假设（第二个租户会被报出） | ADR 0038 | 已合并 | `tests/integration/test_tenancy.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
