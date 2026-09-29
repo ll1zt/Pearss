@@ -41,6 +41,7 @@ from app.api_conventions import (
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import by_name, plugins_for_surface
 from core.enums import PluginStatus
+from core.tenancy import SINGLE_TENANT
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -84,7 +85,8 @@ def read_plugins(
     offset = decode_cursor(cursor)
     with request.app.state.session_factory() as session:
         statuses = {
-            row.id: row.status for row in list_plugin_rows(session, tenant_id="default")
+            row.id: row.status
+            for row in list_plugin_rows(session, tenant_id=SINGLE_TENANT)
         }
     plugins = [
         {**manifest, "status": statuses.get(str(manifest["id"]), "enabled")}
@@ -114,7 +116,7 @@ def read_plugin(
             suggestion="List plugins to see what is registered.",
         )
     with request.app.state.session_factory() as session:
-        status = plugin_status(session, plugin_id, tenant_id="default")
+        status = plugin_status(session, plugin_id, tenant_id=SINGLE_TENANT)
     return _plugin_representation(manifest, status)
 
 
@@ -175,7 +177,7 @@ def _set_status(
             ),
             current_checksum=registration.checksum,
             trust=registration.trust,
-            tenant_id="default",
+            tenant_id=SINGLE_TENANT,
             at=timestamp(_now()),
         )
         session.commit()
@@ -276,7 +278,7 @@ def import_plugin(
             manifest_json=json.dumps(manifest, sort_keys=True, ensure_ascii=False),
             checksum=on_disk.checksum,
             trust="third-party",
-            tenant_id="default",
+            tenant_id=SINGLE_TENANT,
             at=timestamp(_now()),
         )
         session.commit()

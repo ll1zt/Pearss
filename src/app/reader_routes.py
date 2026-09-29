@@ -38,12 +38,13 @@ from core.reader_state import (
     merge_state,
     verify_password,
 )
+from core.tenancy import SINGLE_TENANT
 
 CallableT = TypeVar("CallableT", bound=Callable[..., Any])
 
 LOGGER = logging.getLogger(__name__)
 
-TENANT = "default"
+
 DEFAULT_USERNAME = "reader"
 
 router = APIRouter(prefix="/api/greader.php", tags=["reader-api"])
@@ -285,10 +286,10 @@ def get_token(
 @reader_read(router, "/reader/api/0/user-info")
 def user_info(_: str = Depends(authenticate_any)) -> dict[str, str]:
     return {
-        "userId": TENANT,
-        "userName": TENANT,
-        "userProfileId": TENANT,
-        "userEmail": TENANT,
+        "userId": SINGLE_TENANT,
+        "userName": SINGLE_TENANT,
+        "userProfileId": SINGLE_TENANT,
+        "userEmail": SINGLE_TENANT,
     }
 
 
@@ -304,7 +305,7 @@ def subscription_list(
         rows = (
             session.query(Source)
             .filter(
-                Source.tenant_id == TENANT,
+                Source.tenant_id == SINGLE_TENANT,
                 # A disabled source is not a subscription the operator wants
                 # collected; listing it would put it back into the client's
                 # sidebar on every refresh. Paused stays listed — the operator
@@ -363,7 +364,7 @@ def tag_list(request: Request, _: str = Depends(authenticate_any)) -> dict[str, 
     with request.app.state.session_factory() as session:
         folders = (
             session.query(distinct(Source.folder))
-            .filter(Source.tenant_id == TENANT)
+            .filter(Source.tenant_id == SINGLE_TENANT)
             .order_by(Source.folder)
             .all()
         )
@@ -448,7 +449,7 @@ def subscription_quickadd(
             url=target,
             canonical_url=canonical,
             schedule_policy=policy,
-            tenant_id=TENANT,
+            tenant_id=SINGLE_TENANT,
             folder=DEFAULT_FOLDER,
             at=timestamp(datetime.now(UTC)),
         )
@@ -516,7 +517,7 @@ def rename_tag(
         rows = (
             session.query(SourceRow)
             .filter(
-                SourceRow.tenant_id == TENANT,
+                SourceRow.tenant_id == SINGLE_TENANT,
                 SourceRow.folder == origin,
             )
             .all()
@@ -570,7 +571,7 @@ def disable_tag(
     with request.app.state.session_factory() as session:
         rows = (
             session.query(SourceRow)
-            .filter(SourceRow.tenant_id == TENANT, SourceRow.folder == origin)
+            .filter(SourceRow.tenant_id == SINGLE_TENANT, SourceRow.folder == origin)
             .all()
         )
         for row in rows:
@@ -658,7 +659,7 @@ def stream_items_ids(
         rows = visible_ids_for_stream(
             session,
             stream_id=s,
-            tenant_id=TENANT,
+            tenant_id=SINGLE_TENANT,
             limit=limit + 1,
             offset=offset,
             after_published_at=boundary.published_at if boundary else None,
@@ -798,7 +799,9 @@ def stream_items_contents(
         # The gate: a pending item is not served to any client, including this
         # one. netnewswire.md acceptance criterion 7.
         rows = [row for row in rows if row.publish_status != "pending"]
-        states = read_states_for(session, [row.id for row in rows], tenant_id=TENANT)
+        states = read_states_for(
+            session, [row.id for row in rows], tenant_id=SINGLE_TENANT
+        )
         bodies = bodies_for(session, [row_to_item(row) for row in rows])
         # P3 processor chain: successful products merge above the original —
         # fulltext replaces the unreadable summary stub (ADR 0028), and a
@@ -957,7 +960,7 @@ def _contents_payload(items: list[dict[str, object]]) -> dict[str, object]:
         "title": "Reading List",
         "self": [{"href": "/api/greader.php/reader/api/0/stream/items/contents"}],
         "updated": int(datetime.now(UTC).timestamp()),
-        "author": TENANT,
+        "author": SINGLE_TENANT,
         "items": items,
     }
 
@@ -1010,7 +1013,7 @@ def edit_tag(
         # ids for items that were withdrawn.
         rows = session.query(ItemRow).filter(ItemRow.id.in_(item_ids)).all()
         known = {row.id for row in rows}
-        states = read_states_for(session, list(known), tenant_id=TENANT)
+        states = read_states_for(session, list(known), tenant_id=SINGLE_TENANT)
 
         for item_id in sorted(known):
             merged = merge_state(
@@ -1019,7 +1022,7 @@ def edit_tag(
                 change=TagChange(is_read=is_read, is_starred=is_starred),
                 at=now,
             )
-            upsert_read_state(session, merged, tenant_id=TENANT)
+            upsert_read_state(session, merged, tenant_id=SINGLE_TENANT)
         session.commit()
 
     LOGGER.info(
@@ -1098,7 +1101,7 @@ def subscription_edit(
                 session.query(SourceRow)
                 .filter(
                     SourceRow.id.in_(feed_ids),
-                    SourceRow.tenant_id == TENANT,
+                    SourceRow.tenant_id == SINGLE_TENANT,
                     SourceRow.status != SourceStatus.DISABLED.value,
                 )
                 .all()
@@ -1146,7 +1149,7 @@ def subscription_edit(
             session.query(SourceRow)
             .filter(
                 SourceRow.id.in_(feed_ids),
-                SourceRow.tenant_id == TENANT,
+                SourceRow.tenant_id == SINGLE_TENANT,
                 # Re-filing a source the operator has taken out of service
                 # would move it back into the sidebar on the client's next
                 # subscription/list. Deleted rows need no clause: deletion
@@ -1227,7 +1230,11 @@ def mark_all_as_read(
         raise HTTPException(status_code=400, detail=f"unsupported stream {s!r}")
     with request.app.state.session_factory() as session:
         changed = mark_all_read(
-            session, tenant_id=TENANT, before=when, source_id=source_id, folder=folder
+            session,
+            tenant_id=SINGLE_TENANT,
+            before=when,
+            source_id=source_id,
+            folder=folder,
         )
         session.commit()
     LOGGER.info("reader mark-all-as-read: %d item(s)", changed)

@@ -60,6 +60,7 @@ from core.enums import SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
+from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +69,6 @@ LOGGER = logging.getLogger(__name__)
 # their own paged endpoint.
 DIAGNOSE_RUNS = 5
 
-TENANT = "default"
 
 # How long a stored response is replayed. Long enough to cover a client that
 # retries after a timeout and then again a few seconds later; short enough that
@@ -313,7 +313,9 @@ def read_sources(
     with request.app.state.session_factory() as session:
         # One beyond the page: the extra row tells us whether to offer a cursor
         # without a second count query.
-        rows = list_sources(session, tenant_id=TENANT, limit=limit, offset=offset)
+        rows = list_sources(
+            session, tenant_id=SINGLE_TENANT, limit=limit, offset=offset
+        )
 
     has_more = len(rows) > limit
     page = rows[:limit]
@@ -495,7 +497,7 @@ def add_source(
             url=body.url,
             canonical_url=canonical,
             schedule_policy=policy_json,
-            tenant_id=TENANT,
+            tenant_id=SINGLE_TENANT,
             trust_level=body.trust_level.value,
             parser_plugin_id=body.parser_plugin_id,
             pipeline_chain=(

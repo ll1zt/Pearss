@@ -15,6 +15,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import DeclarativeBase
 
 from adapters.timestamps import EPOCH_FLOOR
+from core.tenancy import SINGLE_TENANT
 
 # P1 targets SQLite and P3 may move to Postgres, so column types stay within
 # the subset both support: no JSON-specific operators, no native enums.
@@ -133,7 +134,7 @@ class Source(Base):
     # sits in a folder the client can show, and two spellings of "none" would
     # make every reader of this column handle both.
     folder: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.Text, nullable=False, server_default="default"
+        sa.Text, nullable=False, server_default=SINGLE_TENANT
     )
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.String(ENUM_LENGTHS["source_status"]), nullable=False

@@ -25,8 +25,7 @@ from app.api_conventions import (
     encode_keyset_cursor,
 )
 from app.auth import Principal, read_required
-
-TENANT = "default"
+from core.tenancy import SINGLE_TENANT
 
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
@@ -131,4 +130,4 @@ def read_snapshot(
     """
     del _
     with request.app.state.session_factory() as session:
-        return system_snapshot(session, tenant_id=TENANT)
+        return system_snapshot(session, tenant_id=SINGLE_TENANT)

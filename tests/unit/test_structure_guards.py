@@ -20,6 +20,7 @@ import itertools
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import time
@@ -1419,6 +1420,75 @@ def test_every_entry_point_installs_the_header_timeout_protocol() -> None:
             "It is wired through uvicorn's --http seam because ASGI middleware "
             "cannot see a request whose header never completed."
         )
+
+
+def test_the_tenant_table_list_matches_the_schema(tmp_path: Path) -> None:
+    """Issue #89: a new table with `tenant_id` must not slip past the check.
+
+    `app.tenancy_check.TENANT_TABLES` is what the startup check reads, so a table
+    missing from it means tenants hiding in that table go unreported -- which is
+    exactly the silence the check exists to remove. Read from the schema rather
+    than restated, so the two cannot drift; the first version of the list named
+    `audit_log`, which does not have the column at all.
+    """
+    from app.tenancy_check import TENANT_TABLES
+
+    db_path = tmp_path / "tenancy.db"
+    migrated_database(tmp_path, db_path.name)
+    connection = sqlite3.connect(db_path)
+    try:
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "select name from sqlite_master where type='table'"
+                " and name not like 'sqlite_%' and name not like 'item_fts%'"
+            )
+        ]
+        carriers = sorted(
+            table
+            for table in tables
+            if any(
+                column[1] == "tenant_id"
+                for column in connection.execute(f"pragma table_info({table})")
+            )
+        )
+    finally:
+        connection.close()
+
+    assert sorted(TENANT_TABLES) == carriers, (
+        "the startup tenant check and the schema disagree about which tables "
+        f"carry a tenant: listed {sorted(TENANT_TABLES)}, schema {carriers}"
+    )
+
+
+def test_the_single_tenant_assumption_is_named_once() -> None:
+    """Issue #89: eight local copies read as eight coincidences.
+
+    `tenant_id` is on every table and exactly one value is ever written. That is
+    a decision -- and a decision repeated in eight modules is one nobody can find
+    when it becomes wrong, which is what happened here. The constant has one
+    home now, and this is what keeps it there.
+    """
+    home = REPO_ROOT / "src/core/tenancy.py"
+    assert "SINGLE_TENANT" in home.read_text(encoding="utf-8")
+
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        if path == home:
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if re.search(r'tenant_id\s*[:=]\s*"default"', line) or re.search(
+                r'\bTENANT\b\s*(?::\s*\w+)?\s*=\s*"default"', line
+            ):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{number}")
+
+    assert not offenders, (
+        f"the tenant value is hardcoded outside {home.relative_to(REPO_ROOT)}: "
+        f"{offenders}. Import SINGLE_TENANT: one home is what makes the "
+        "assumption findable, and what the startup check can enforce."
+    )
 
 
 def test_deployment_units_take_the_checkout_path_as_a_parameter() -> None:

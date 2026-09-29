@@ -60,6 +60,7 @@ from core.enums import ErrorClass, JobRunStatus
 from core.job_state import JobRunEvent
 from core.models import schedule_policy_from_json
 from core.scheduling import ScheduleDecision, decide_schedule
+from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +78,6 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-TENANT = "default"
 DEFAULT_TICK_SECONDS = 60.0
 # How many due sources one tick collects in parallel. Each source runs
 # collect_now with its own session and its own active-run claim, so sources
@@ -141,7 +141,7 @@ def evaluate_source(
 ) -> ScheduleDecision:
     """Derive whether one source is due, from stored facts only."""
     job_id = ensure_collect_job(
-        session, source_id=source_id, tenant_id=TENANT, at=_iso(now)
+        session, source_id=source_id, tenant_id=SINGLE_TENANT, at=_iso(now)
     )
     policy = schedule_policy_from_json(policy_json)
     return decide_schedule(
@@ -179,7 +179,7 @@ def collect_now(
     """
     moment = now or datetime.now(UTC)
     job_id = ensure_collect_job(
-        session, source_id=source_id, tenant_id=TENANT, at=_iso(moment)
+        session, source_id=source_id, tenant_id=SINGLE_TENANT, at=_iso(moment)
     )
     run_id = f"run-{secrets.token_hex(8)}"
     correlation_id = secrets.token_hex(8)
@@ -225,7 +225,9 @@ def collect_now(
         return JobRunStatus.FAILED, None
 
     try:
-        result = collect_source(session, source=source, client=client, tenant_id=TENANT)
+        result = collect_source(
+            session, source=source, client=client, tenant_id=SINGLE_TENANT
+        )
     except Exception as exc:
         # Failures are normally values, but an exception can still escape the
         # collection path (a plugin child answering unintelligibly, a bug in
@@ -321,7 +323,7 @@ def run_tick(
     concurrency = max(1, concurrency)
 
     with session_factory() as session:
-        sources = collectable_sources(session, tenant_id=TENANT)
+        sources = collectable_sources(session, tenant_id=SINGLE_TENANT)
 
     collected: list[str] = []
     failed: list[str] = []
@@ -573,7 +575,7 @@ class Scheduler:
         from core.alerting import ALERT_DEFAULTS, alert_body, decide_health
 
         with self._session_factory() as session:
-            snapshot = system_snapshot(session, tenant_id=TENANT)
+            snapshot = system_snapshot(session, tenant_id=SINGLE_TENANT)
         verdict = decide_health(
             snapshot,
             success_rate_threshold=float(
