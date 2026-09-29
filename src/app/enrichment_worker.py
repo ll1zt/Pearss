@@ -67,8 +67,17 @@ TRANSIENT_CLASSES: Final[frozenset[str]] = frozenset({"network", "blocked"})
 BACKOFF_BASE_SECONDS: Final = 120.0
 
 
-def _open_gate_if_complete(session: Session, *, item_id: str, input_hash: str) -> bool:
-    """Whether the item's whole chain succeeded — and if so, open the gate."""
+def _open_gate_if_complete(
+    session: Session, *, item_id: str, content_hash: str
+) -> bool:
+    """Whether the item's whole chain succeeded — and if so, open the gate.
+
+    `content_hash` is the *item's*, not a row's `input_hash`. Each spec derives
+    its own identity from it (a vector's includes the model, ADR 0035 decision 6),
+    so handing this a row's identity would derive a second time and match
+    nothing -- which for an embedding chain means the gate never opens and the
+    item stays pending, invisible to every read, with nothing logged.
+    """
     from adapters.repository.enrichment import (
         chain_for_source,
         is_source_chain_complete,
@@ -80,7 +89,7 @@ def _open_gate_if_complete(session: Session, *, item_id: str, input_hash: str) -
     if not is_source_chain_complete(
         session,
         item_id=item_id,
-        content_hash=input_hash,
+        content_hash=content_hash,
         chain=chain_for_source(session, source_id=item.source_id),
     ):
         return False
@@ -463,7 +472,7 @@ def _execute_row(
             )
             if _fence_holds(session, row_id=row_id, owner_token=owner_token):
                 _open_gate_if_complete(
-                    session, item_id=item.id, input_hash=row.input_hash
+                    session, item_id=item.id, content_hash=item.content_hash
                 )
                 session.commit()
                 LOGGER.info("enrichment %s succeeded", row.id)

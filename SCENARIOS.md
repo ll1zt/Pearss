@@ -45,12 +45,14 @@
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
 | AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
-| AC-99 | #82 向量检索按语义相似召回（原声明 93；检索面随后） | ADR 0035 §9 | 保留 | — |
+| AC-99 | #82 向量检索按语义相似召回（原声明 93；真模型，无关键词也能召回） | ADR 0035 §9 | 已合并 | `tests/integration/test_vector_search.py` |
 | AC-100 | #82 模型确实是多语言的（原声明 94；跨语言余弦，需真模型） | ADR 0035 §9 | 已合并 | `tests/integration/test_embedding_semantics.py` |
 | AC-117 | #82 真模型：单位向量与声明维度、改写近于无关、query/passage 前缀生效 | ADR 0035 §9 | 已合并 | `tests/integration/test_embedding_semantics.py` |
 | AC-118 | #82 模型下载：哈希钉住、镜像只换来源不换产物、被篡改不留残骸 | ADR 0040 | 已合并 | `tests/integration/test_fetch_model.py` |
+| AC-119 | #82 闸门拿到的是**条目的内容哈希**而非行里的派生标识（双重摘要 = 闸门永不开，条目永远 pending） | ADR 0035 §9 | 已合并 | `tests/integration/test_gate_with_model_identities.py` |
+| AC-120 | #82 向量检索：按接近度排序、pending 不是候选、自身可排除、坏载荷与错宽度跳过而不致命 | ADR 0035 §9 | 已合并 | `tests/integration/test_vector_search.py` |
 | AC-101 | #82 换模型不复用旧向量（原声明 95，前置缺陷） | ADR 0035 §9 | 已合并 | `tests/integration/test_content_revision_gate.py` |
-| AC-102 | #82 内容变更后向量重算（原声明 96） | ADR 0035 §9 | 保留 | — |
+| AC-102 | #82 内容变更后向量重算（原声明 96） | ADR 0035 §9 | 已合并 | `tests/integration/test_gate_with_model_identities.py` |
 | AC-103..104 | #82 短/空文本不崩溃、失败归类到既有 taxonomy（原声明 97..98） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
 | AC-115..116 | #82 编码器：声明维度的单位向量、批内 padding 被 mask（短文本单独与批内同向量） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
 | AC-114 | #120/#82 选定的运行时在本环境真跑一次推理（384 维、两次同向量） | ADR 0040 | 已合并 | `tests/integration/test_embedding_runtime.py` |

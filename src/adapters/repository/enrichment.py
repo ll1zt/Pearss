@@ -197,6 +197,10 @@ def statuses_for_item(
 ) -> dict[tuple[str, str, str | None], EnrichmentStatus]:
     """Product statuses for one item, at the identity each spec asks for.
 
+    `content_hash` is the item's content hash -- the value each spec's identity is
+    derived *from* -- and not a row's own `input_hash`. Passing the latter would
+    derive a second time and match nothing.
+
     The identities are per spec, not one value: an embedding is stored under a
     digest that includes its model, while a content-only product is stored under
     the content hash. Filtering on the content hash alone would miss the vector
