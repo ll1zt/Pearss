@@ -24,7 +24,12 @@ from adapters.db_models import Item, ItemEnrichment
 from adapters.filestore import store_body
 from adapters.repository import create_source
 from adapters.repository.enrichment import chain_for_source
-from adapters.repository.vector_search import decode_vector, nearest
+from adapters.repository.vector_search import (
+    decode_vector,
+    duplicates_of,
+    nearest,
+    related_items,
+)
 from app.enrichment_worker import _open_gate_if_complete
 from app.pipeline import normalise_and_store
 from core.models import ItemDraft
@@ -451,3 +456,206 @@ def test_a_semantic_query_recalls_an_item_that_shares_no_words_with_it(
         f" 'unrelated': {unrelated}}}"
     )
     assert order[-1] == unrelated
+
+
+# --------------------------------------------------------------------------
+# AC-108..109: neighbours, and copies that are only ever a hint
+#
+# The floors are measured (see `vector_search`), so these pin the mechanics with
+# synthetic vectors at known cosines; the tests against the real model below pin
+# the values themselves.
+# --------------------------------------------------------------------------
+
+
+def test_related_items_are_the_ones_above_the_floor(
+    session_factory: sessionmaker[Session], chained_source: str
+) -> None:
+    """AC-108: a neighbour comes back, an unrelated item does not, and neither
+    does the item itself -- a vector search always has a nearest neighbour, so the
+    floor is what makes the list mean something."""
+    with session_factory() as session:
+        this_one = _seed(
+            session,
+            source_id=chained_source,
+            external_id="this-one",
+            content="the item asked about",
+            vector=_basis(0),
+        )
+        neighbour = _seed(
+            session,
+            source_id=chained_source,
+            external_id="neighbour",
+            content="a neighbour",
+            vector=_close(0.9, 0.1),
+        )
+        _seed(
+            session,
+            source_id=chained_source,
+            external_id="unrelated",
+            content="nothing to do with it",
+            vector=_basis(1),
+        )
+
+        found = related_items(session, item_id=this_one, tenant_id="default", limit=10)
+
+    assert found is not None
+    assert [item.id for item, _score in found] == [neighbour]
+
+
+def test_related_items_of_an_item_without_a_vector_is_none(
+    session_factory: sessionmaker[Session], plain_source: str
+) -> None:
+    """ "No product" and "no neighbours" are different facts, so this says which."""
+    with session_factory() as session:
+        unembedded = _seed(
+            session,
+            source_id=plain_source,
+            external_id="unembedded",
+            content="no vector here",
+            vector=None,
+        )
+
+        found = related_items(
+            session, item_id=unembedded, tenant_id="default", limit=10
+        )
+
+    assert found is None
+
+
+def test_duplicates_are_only_the_ones_above_the_higher_threshold(
+    session_factory: sessionmaker[Session], chained_source: str
+) -> None:
+    """AC-109's first half: a copy is reported, a paraphrase is not.
+
+    0.99 is a copy and 0.98 is a paraphrase, and the threshold sits between them
+    at 0.985 -- the measured 0.014-wide gap. The second half is the assertion
+    below: nothing was merged, deleted or rewritten to produce the hint.
+    """
+    with session_factory() as session:
+        original = _seed(
+            session,
+            source_id=chained_source,
+            external_id="original",
+            content="the original text",
+            vector=_basis(0),
+        )
+        copy = _seed(
+            session,
+            source_id=chained_source,
+            external_id="copy",
+            content="the same text, republished",
+            vector=_close(0.99, 0.141),
+        )
+        paraphrase = _seed(
+            session,
+            source_id=chained_source,
+            external_id="paraphrase",
+            content="the same meaning, different words",
+            vector=_close(0.98, 0.199),
+        )
+
+        found = duplicates_of(session, item_id=original, tenant_id="default", limit=10)
+        still_there = session.scalars(sa.select(Item.id)).all()
+
+    assert found is not None
+    assert [item.id for item, _score in found] == [copy]
+    assert paraphrase not in [item.id for item, _score in found]
+    assert set(still_there) == {original, copy, paraphrase}, (
+        "a hint must not have changed anything: ADR 0021 leaves deletion to the user"
+    )
+
+
+def test_a_copy_is_found_and_a_paraphrase_is_not(
+    session_factory: sessionmaker[Session],
+    chained_source: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-109 with the real model: the measured gap is what the threshold sits in."""
+    directory = _real_model_or_skip()
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(directory))
+    encoder = Encoder(directory)
+    base = (
+        "Linux 内核的调度器是怎么工作的:本文从 CFS 的红黑树讲起,"
+        "说明 vruntime 如何决定下一个被调度的任务."
+    )
+    with session_factory() as session:
+        original = _seed(
+            session,
+            source_id=chained_source,
+            external_id="original",
+            content=base,
+            vector=encoder.encode(base),
+        )
+        copy = _seed(
+            session,
+            source_id=chained_source,
+            external_id="copy",
+            content=base.replace("是怎么工作的", "如何工作"),
+            vector=encoder.encode(base.replace("是怎么工作的", "如何工作")),
+        )
+        paraphrase = _seed(
+            session,
+            source_id=chained_source,
+            external_id="paraphrase",
+            content=(
+                "本文讲解 Linux 内核调度器的工作原理,从 CFS 的红黑树数据结构出发,"
+                "解释 vruntime 怎样选出下一个运行的任务."
+            ),
+            vector=encoder.encode(
+                "本文讲解 Linux 内核调度器的工作原理,从 CFS 的红黑树数据结构出发,"
+                "解释 vruntime 怎样选出下一个运行的任务."
+            ),
+        )
+
+        found = duplicates_of(session, item_id=original, tenant_id="default", limit=10)
+
+    assert found is not None
+    assert [item.id for item, _score in found] == [copy], (
+        f"a light edit is a copy and a paraphrase is not; got "
+        f"{[(item.id, round(score, 4)) for item, score in found]} against "
+        f"paraphrase {paraphrase}"
+    )
+
+
+def test_a_semantic_neighbour_is_related_and_an_unrelated_item_is_not(
+    session_factory: sessionmaker[Session],
+    chained_source: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-108 with the real model, where "related" is a fact about meaning."""
+    directory = _real_model_or_skip()
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(directory))
+    encoder = Encoder(directory)
+    with session_factory() as session:
+        this_one = _seed(
+            session,
+            source_id=chained_source,
+            external_id="scheduler",
+            content="Linux 内核的调度器是怎么工作的",
+            vector=encoder.encode("Linux 内核的调度器是怎么工作的"),
+        )
+        neighbour = _seed(
+            session,
+            source_id=chained_source,
+            external_id="scheduler-paraphrase",
+            content="内核调度器的负载均衡与 NUMA 亲和性",
+            vector=encoder.encode("内核调度器的负载均衡与 NUMA 亲和性"),
+        )
+        unrelated = _seed(
+            session,
+            source_id=chained_source,
+            external_id="recipe",
+            content="红烧肉的家常做法",
+            vector=encoder.encode("红烧肉的家常做法"),
+        )
+
+        found = related_items(session, item_id=this_one, tenant_id="default", limit=10)
+
+    assert found is not None
+    ids = [item.id for item, _score in found]
+    assert neighbour in ids, (
+        f"a passage on the same topic must be a neighbour; got "
+        f"{[(item.id, round(score, 4)) for item, score in found]}"
+    )
+    assert unrelated not in ids, "0.847 is not related, and the floor says so"
+    assert this_one not in ids, "an item is not its own neighbour"

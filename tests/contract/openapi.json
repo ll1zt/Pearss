@@ -1780,6 +1780,86 @@
         ]
       }
     },
+    "/v1/items/{item_id}/duplicates": {
+      "get": {
+        "description": "Items that look like another copy of this one (AC-109).\n\nA hint, and only a hint. The measurement behind the threshold puts a copy and\na genuine paraphrase 0.014 apart, so no threshold can be right about that gap;\nwhat this endpoint can honestly say is \"these two are close\", and what to do\nabout it is the caller's decision (ADR 0021: deletion belongs to the user).\nNothing here merges, deletes, rewrites or re-keys anything.",
+        "operationId": "listDuplicateItems",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fields"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listduplicateitems",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List Duplicate Items",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
     "/v1/items/{item_id}/enrichments": {
       "get": {
         "description": "Why *this* item is being held: its processor-chain rows, and nothing else.\n\nThe dimension the source-scoped route lacks. An agent that already has an\nitem id (from search_items) had to list its whole source's chain rows and\nfilter them in context -- the shape the guide's \"filter on the server\" rule\nexists to avoid -- and it needed a title search first, which can come back\nempty for the very item it is holding (issue #72).\n\nA *pending* item is answered, unlike every other item read. The gate hides\ncontent, and these rows are the reason the content is held -- answering 404\nhere would make the route useless for exactly the question it exists for (a\nchain that failed and left an item stuck). The source-scoped route already\nreturned these rows for a source's pending items, so this is the consistent\nchoice rather than a new exception; `detail` carries the processor's own\nerror text, which is metadata about the attempt rather than the item.\n\nAn id that names nothing is still 404.",
@@ -1871,6 +1951,86 @@
           }
         ],
         "summary": "List Item Enrichments",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/items/{item_id}/related": {
+      "get": {
+        "description": "Items most like this one, by meaning rather than by words (AC-108).\n\n\"Like\" here is a vector neighbourhood, which is a different question from\nsearch: there is no query, so nothing is asked to match, and the answer is\nwhatever is nearest above a measured floor. Without the floor this would be\nthe whole corpus in similarity order -- a vector search always has a nearest\nneighbour, however unrelated -- and a list that always returns something\nteaches its caller to ignore it.",
+        "operationId": "listRelatedItems",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fields",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Fields"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listrelateditems",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "List Related Items",
         "tags": [
           "core-api"
         ]

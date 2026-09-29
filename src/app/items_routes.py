@@ -38,6 +38,8 @@ from adapters.repository import (
 from adapters.repository import (
     delete_items as repository_delete_items,
 )
+from adapters.repository._shared import row_to_item
+from adapters.repository.vector_search import duplicates_of, related_items
 from app.api_conventions import (
     api_error,
     decode_cursor,
@@ -432,6 +434,126 @@ def list_item_enrichments(
 
     return enrichment_page(
         rows, limit=limit, offset=offset, correlation_id=current_correlation_id()
+    )
+
+
+def _neighbours(
+    request: Request,
+    item_id: str,
+    *,
+    limit: int,
+    fields: str | None,
+    finder: Any,
+    absent: tuple[str, str, str],
+) -> dict[str, Any]:
+    """The shared body of the two neighbour endpoints.
+
+    They ask the same question of the same index and differ in the floor and in
+    what they say when there is nothing: one returns an empty list, the other
+    refuses when the item has no vector at all. Sharing the lookup keeps the
+    visibility rule -- a pending item is absent, never "forbidden" -- in one place.
+    """
+    selected = _select(fields)
+    with request.app.state.session_factory() as session:
+        item = get_item(session, item_id)
+        if item is None or item.publish_status is PublishStatus.PENDING:
+            # Absent rather than forbidden, exactly as the body endpoint reports
+            # it: "this exists but you may not see it" would leak the gate.
+            raise api_error(
+                status_code=404,
+                code="item_not_found",
+                message=f"No item with id {item_id!r}.",
+                suggestion="Search items to find the intended id.",
+            )
+        found = finder(session, item_id=item_id, tenant_id=SINGLE_TENANT, limit=limit)
+        if found is None:
+            code, message, suggestion = absent
+            raise api_error(
+                status_code=409, code=code, message=message, suggestion=suggestion
+            )
+    return {
+        "data": [
+            # `row_to_item` first: `_field_map` speaks the domain Item, whose
+            # `publish_status` is an enum, while the row carries the raw string.
+            {
+                name: value
+                for name, value in _field_map(row_to_item(row)).items()
+                if name in selected
+            }
+            for row, _score in found
+        ],
+        "correlation_id": current_correlation_id(),
+    }
+
+
+@router.get("/items/{item_id}/related", operation_id="listRelatedItems")
+def list_related_items(
+    request: Request,
+    item_id: str = Path(min_length=1, max_length=64),
+    limit: int = Query(default=50, ge=1, le=50),
+    fields: str | None = Query(default=None),
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """Items most like this one, by meaning rather than by words (AC-108).
+
+    "Like" here is a vector neighbourhood, which is a different question from
+    search: there is no query, so nothing is asked to match, and the answer is
+    whatever is nearest above a measured floor. Without the floor this would be
+    the whole corpus in similarity order -- a vector search always has a nearest
+    neighbour, however unrelated -- and a list that always returns something
+    teaches its caller to ignore it.
+    """
+    del _
+    return _neighbours(
+        request,
+        item_id,
+        limit=limit,
+        fields=fields,
+        finder=related_items,
+        absent=(
+            "item_has_no_embedding",
+            "This item has no vector, so it has no neighbours.",
+            (
+                "Add the embed processor to the source's chain so the worker "
+                "produces one, or run the enrichment backfill for items stored "
+                "before the chain existed."
+            ),
+        ),
+    )
+
+
+@router.get("/items/{item_id}/duplicates", operation_id="listDuplicateItems")
+def list_duplicate_items(
+    request: Request,
+    item_id: str = Path(min_length=1, max_length=64),
+    limit: int = Query(default=50, ge=1, le=50),
+    fields: str | None = Query(default=None),
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """Items that look like another copy of this one (AC-109).
+
+    A hint, and only a hint. The measurement behind the threshold puts a copy and
+    a genuine paraphrase 0.014 apart, so no threshold can be right about that gap;
+    what this endpoint can honestly say is "these two are close", and what to do
+    about it is the caller's decision (ADR 0021: deletion belongs to the user).
+    Nothing here merges, deletes, rewrites or re-keys anything.
+    """
+    del _
+    return _neighbours(
+        request,
+        item_id,
+        limit=limit,
+        fields=fields,
+        finder=duplicates_of,
+        absent=(
+            "item_has_no_embedding",
+            "This item has no vector, so it cannot be compared with anything.",
+            (
+                "Add the embed processor to the source's chain so the worker "
+                "produces one, or run the enrichment backfill for items stored "
+                "before the chain existed."
+            ),
+        ),
     )
 
 

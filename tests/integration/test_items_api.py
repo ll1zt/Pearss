@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -17,7 +18,9 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.db_models import Item
 from app.main import create_app, create_engine_for
+from app.pipeline import normalise_and_store
 from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -784,3 +787,153 @@ async def test_the_source_scoped_listing_is_unchanged(
     # The same rows, and the same shape: the two routes differ only in which
     # rows they select.
     assert by_item.json()["data"] == by_source.json()["data"]
+
+
+# --------------------------------------------------------------------------
+# AC-108..109 from the entry point
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_related_items_of_an_unknown_item_is_a_404(
+    client: httpx.AsyncClient,
+) -> None:
+    response = await client.get("/v1/items/no-such-item/related")
+
+    assert response.status_code == 404, response.text
+    assert "item_not_found" in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_related_items_without_a_vector_says_so(
+    client: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """409 rather than an empty list: "no product" is not "no neighbours"."""
+    with session_factory() as session:
+        (item_id,) = seed(session, 1)
+
+    response = await client.get(f"/v1/items/{item_id}/related")
+
+    assert response.status_code == 409, response.text
+    assert "item_has_no_embedding" in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_pending_item_is_absent_from_the_neighbour_endpoints(
+    client: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """The gate holds on these reads too, and reports absent rather than forbidden."""
+    with session_factory() as session:
+        (item_id,) = seed(session, 1)
+        session.execute(
+            sa.update(Item).where(Item.id == item_id).values(publish_status="pending")
+        )
+        session.commit()
+
+    for path in ("related", "duplicates"):
+        response = await client.get(f"/v1/items/{item_id}/{path}")
+        assert response.status_code == 404, response.text
+        assert "item_not_found" in response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_duplicates_are_listed_and_nothing_is_changed(
+    client: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-109 from the entry point, including the half that matters: both survive."""
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(_EMBED_FIXTURES))
+    from plugins.processors.embed.encoder import Encoder
+
+    encoder = Encoder(_EMBED_FIXTURES)
+    with session_factory() as session:
+        original, copy = _seed_pair_with_vectors(session, encoder)
+
+    response = await client.get(f"/v1/items/{original}/duplicates")
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["data"]] == [copy]
+
+    with session_factory() as session:
+        survivors = set(session.scalars(sa.select(Item.id)).all())
+    assert {original, copy} <= survivors, "a hint must not have deleted anything"
+
+
+_EMBED_FIXTURES = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "plugins"
+    / "processors"
+    / "embed"
+    / "fixtures"
+)
+
+
+def _seed_pair_with_vectors(session: Session, encoder: Any) -> tuple[str, str]:
+    """An item and a near copy of it, each with the vector the worker would store."""
+    import base64
+    import json as _json
+    import struct
+
+    from adapters.db_models import ItemEnrichment
+    from adapters.filestore import store_body
+    from adapters.repository import create_source
+    from adapters.repository.enrichment import chain_for_source
+    from app.enrichment_worker import _open_gate_if_complete
+    from core.models import ItemDraft
+
+    source = create_source(
+        session,
+        source_type="rss",
+        url="https://example.test/neighbours",
+        canonical_url="https://example.test/neighbours",
+        schedule_policy="{}",
+        pipeline_chain=_json.dumps([{"plugin_id": "embed", "kind": "embedding"}]),
+        tenant_id="default",
+        at="2026-01-01T00:00:00.000000Z",
+    )
+    session.commit()
+    made: list[str] = []
+    for external_id, text in (
+        ("original", "Linux 内核的调度器是怎么工作的"),
+        ("copy", "Linux 内核的调度器如何工作"),
+    ):
+        item = normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source.id,
+                    external_id=external_id,
+                    title=text,
+                    canonical_url=f"https://example.test/{external_id}",
+                    published_at=None,
+                    content=text,
+                )
+            ],
+            chain=chain_for_source(session, source_id=source.id),
+        )[0].result.item
+        session.commit()
+        vector = encoder.encode(text)
+        session.execute(
+            sa.update(ItemEnrichment)
+            .where(ItemEnrichment.item_id == item.id)
+            .values(
+                status="succeeded",
+                payload_ref=store_body(
+                    base64.b64encode(struct.pack(f"<{len(vector)}f", *vector)).decode(
+                        "ascii"
+                    )
+                ),
+            )
+        )
+        session.commit()
+        _open_gate_if_complete(session, item_id=item.id, content_hash=item.content_hash)
+        session.commit()
+        made.append(item.id)
+    return made[0], made[1]
