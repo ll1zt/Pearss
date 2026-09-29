@@ -1,4 +1,5 @@
-"""The translate processor: input shaping and the title-only fallback."""
+"""The translate processor: input shaping, the title-only fallback, and the
+model fallback chain."""
 
 from __future__ import annotations
 
@@ -948,3 +949,272 @@ def test_sanitising_an_empty_product_yields_an_empty_artifact() -> None:
     assert _sanitise("") == ""
     assert _sanitise("<script>evil()</script>") == ""
     assert _sanitise("<p>kept</p>") == "<p>kept</p>"
+
+
+# --------------------------------------------------------------------------
+# The model fallback chain (issue #145)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #145):
+#
+#   AC-133 model #0 回空正文时由下一个 model 完成翻译
+#   AC-134 model #0 回 401 时链不中断
+#   AC-135 model #0 回地域 400 时链不中断
+#   AC-136 model #0 的 200 回复不是 JSON 时同样回退
+#   AC-137 全部 model 失败且都非瞬时 → parse, detail 汇总每个 model 的原因
+#   AC-138 全部 model 失败但至少一个瞬时 → 取最后一个瞬时失败的分类
+#   AC-139 单 model 回空正文仍是可见失败 (AC-22 不变, 钉住现状)
+#   AC-140 此前零覆盖的 429/5xx 与「连不上」回退 (钉住现状)
+#
+# The chain is the provider client's, not the item's: a model that says no for
+# any reason (401, a region-blocked 400, an empty completion, a non-JSON body)
+# is a reason to ask the next model, not to fail the item. Only when every
+# model has failed does the item fail.
+# --------------------------------------------------------------------------
+
+
+def _chain_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    responses: dict[str, httpx.Response | Exception],
+    *,
+    models: tuple[str, ...] = ("m1", "m2"),
+) -> list[str]:
+    """Configure a model chain and answer each request by its `model` field.
+
+    Returns the model ids in the order they were asked. `responses` maps a
+    model id to the response it should give (or an exception it should raise);
+    a model id in `models` but not in `responses` answers 200 with a canned
+    translation.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", ",".join(models))
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    asked: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        body = kwargs.get("json")
+        model = str(body["model"]) if isinstance(body, dict) else ""
+        asked.append(model)
+        answer = responses.get(model)
+        if isinstance(answer, Exception):
+            raise answer
+        if answer is not None:
+            return answer
+        return httpx.Response(200, json={"choices": [{"message": {"content": "译文"}}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return asked
+
+
+_ENGLISH_BODY = "<p>This is an English sentence long enough to translate.</p>"
+
+
+def _translate_body(
+    monkeypatch: pytest.MonkeyPatch, body: str
+) -> tuple[str | None, list[str]]:
+    """Translate one body with a chain already configured.
+
+    Returns (product or None when process raised, stored products). The caller
+    configures the chain with `_chain_provider` first.
+    """
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    try:
+        process(
+            {
+                "item_id": "i-145",
+                "title": "T",
+                "content": body,
+                "url": "https://b.example/p",
+            },
+            target_lang="zh",
+            store=fake_store,
+        )
+    except ProcessorError:
+        return None, stored
+    return (stored[0] if stored else None), stored
+
+
+def test_a_model_that_answers_with_no_content_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-133: an empty completion is the next model's turn, not the item's end.
+
+    Empty content is exactly the failure most likely to be provider-side and
+    transient: measured live, three such rows all succeeded on retry in 1.0s.
+    Treating it as terminal is what left `hy3` never called.
+    """
+    asked = _chain_provider(
+        monkeypatch,
+        {"m1": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})},
+    )
+    product, stored = _translate_body(monkeypatch, _ENGLISH_BODY)
+
+    assert asked == ["m1", "m2"], "the chain must continue past an empty reply"
+    assert product is not None, "the second model should have completed the item"
+    assert "译文" in product
+    assert stored and stored[0] == product
+
+
+def test_a_rejected_key_does_not_end_the_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-134: a 401 on model #0 is not a 401 on the item.
+
+    The acceptance cost, recorded in issue #145: a mis-keyed model no longer
+    surfaces immediately; it surfaces only when every model fails and the
+    aggregate classifies as `auth`.
+    """
+    asked = _chain_provider(
+        monkeypatch,
+        {"m1": httpx.Response(401, json={"error": {"message": "invalid api key"}})},
+    )
+    product, _ = _translate_body(monkeypatch, _ENGLISH_BODY)
+
+    assert asked == ["m1", "m2"], "401 must fall back like any other refusal"
+    assert product is not None and "译文" in product
+
+
+def test_a_region_blocked_request_still_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-135: the live failure was a 400, and it must not stop the chain.
+
+    `User location is not supported for the API use.` is per-request and
+    region-dependent, not a defect of the text being translated; the fallback
+    chain is precisely what makes such an outage survivable.
+    """
+    asked = _chain_provider(
+        monkeypatch,
+        {
+            "m1": httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": ("User location is not supported for the API use.")
+                    }
+                },
+            )
+        },
+    )
+    product, _ = _translate_body(monkeypatch, _ENGLISH_BODY)
+
+    assert asked == ["m1", "m2"]
+    assert product is not None and "译文" in product
+
+
+def test_a_non_json_200_also_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-136: a 200 whose body is not JSON is a per-model failure too."""
+    asked = _chain_provider(
+        monkeypatch, {"m1": httpx.Response(200, text="<html>relay error</html>")}
+    )
+    product, _ = _translate_body(monkeypatch, _ENGLISH_BODY)
+
+    assert asked == ["m1", "m2"]
+    assert product is not None and "译文" in product
+
+
+def test_all_models_failing_non_transiently_is_parse_with_every_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-137: the item fails only when the whole chain did, and the detail says so.
+
+    Aggregating every model's reason is the point: the operator sees which
+    models were tried and what each said, rather than only the last one.
+    """
+    _chain_provider(
+        monkeypatch,
+        {
+            "m1": httpx.Response(400, json={"error": {"message": "bad model"}}),
+            "m2": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}),
+        },
+    )
+    with pytest.raises(ProcessorError) as excinfo:
+        _run_chain(monkeypatch)
+
+    exc = excinfo.value
+    assert exc.error_class is ErrorClass.PARSE
+    assert "m1:" in exc.detail, exc.detail
+    assert "m2:" in exc.detail, exc.detail
+    assert "bad model" in exc.detail, exc.detail
+    assert "empty completion content" in exc.detail, exc.detail
+
+
+def test_all_models_failing_with_a_transient_takes_the_last_transient_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-138: a rate limit anywhere in the chain keeps the row retryable.
+
+    If the last failure alone decided, a 429 followed by a 400 would classify
+    `parse` and the worker would never retry a row that only needed waiting.
+    """
+    _chain_provider(
+        monkeypatch,
+        {
+            "m1": httpx.Response(429, json={"error": {"message": "rate limited"}}),
+            "m2": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}),
+        },
+    )
+    with pytest.raises(ProcessorError) as excinfo:
+        _run_chain(monkeypatch)
+
+    assert excinfo.value.error_class is ErrorClass.BLOCKED
+
+
+def test_a_single_model_answering_nothing_is_still_a_visible_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-139: AC-22 is unchanged -- an empty reply is a parse failure, not silence.
+
+    Already correct before this change; pinned so the new loop cannot turn the
+    single-model case into an empty artifact that opens the gate on nothing.
+    """
+    _chain_provider(
+        monkeypatch,
+        {"m1": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})},
+        models=("m1",),
+    )
+    with pytest.raises(ProcessorError) as excinfo:
+        _run_chain(monkeypatch)
+
+    assert excinfo.value.error_class is ErrorClass.PARSE
+
+
+def test_the_previously_uncovered_transient_paths_fall_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-140: 429/5xx and an unreachable model were already handled; pinned.
+
+    Zero tests set a model chain before this issue, so these branches had no
+    test at all. They were correct; this holds them while the loop is rewritten.
+    """
+    for first in (
+        httpx.Response(429, json={"error": {"message": "rate limited"}}),
+        httpx.Response(503, json={"error": {"message": "overloaded"}}),
+        httpx.ConnectError("connection refused"),
+    ):
+        asked = _chain_provider(monkeypatch, {"m1": first})
+        product, _ = _translate_body(monkeypatch, _ENGLISH_BODY)
+        assert asked == ["m1", "m2"], f"{first!r} should fall back"
+        assert product is not None and "译文" in product
+
+
+def _run_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Translate one English body, letting a ProcessorError propagate."""
+    process(
+        {
+            "item_id": "i-145",
+            "title": "T",
+            "content": _ENGLISH_BODY,
+            "url": "https://b.example/p",
+        },
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
