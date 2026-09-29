@@ -394,12 +394,18 @@ _INLINE: Final[frozenset[str]] = frozenset(
 def _flatten_inline(
     element: lxml_html.HtmlElement, shells: list[tuple[str, str]]
 ) -> str:
-    """An element's text with inline children replaced by paired markers.
+    """An element's text with inline children replaced by markers.
 
     `[[0]]inner[[/0]]` marks the region that belongs inside the element whose
     shell is `shells[0]`. Paired rather than one-sided so the *translated*
     inner text can be recovered and put back inside the original tag: a
     one-sided marker would leave the shell with nothing to hold.
+
+    A void element (`br`/`wbr`/`img`/`hr`) is the exception: it has no text, so
+    its marker is one-sided (`[[n]]`) and its shell is the serialized element
+    itself (issue #150). Before this branch existed the walk fell through to
+    "keep the text, drop the tag" and the element vanished -- a `<br/>` welded
+    two lines, a block-internal `<img>` was deleted.
     """
     parts: list[str] = [element.text or ""]
     for child in element.iterchildren():
@@ -412,6 +418,14 @@ def _flatten_inline(
             continue
         index = len(shells)
         tag = child.tag.lower()
+        if tag in _VOID_ELEMENTS:
+            # The empty close tag is what the restore pass uses to tell this
+            # from a paired marker whose close the provider dropped, so no new
+            # marker syntax is needed for the second kind.
+            shells.append((_serialize(child, with_tail=False), ""))
+            parts.append(f"[[{index}]]")
+            parts.append(child.tail or "")
+            continue
         if tag not in _INLINE or tag in _PRESERVED:
             # Inline code, or anything not worth a shell: keep the text, drop
             # the tag. `code` is here because its content is not prose.
@@ -446,9 +460,14 @@ def _is_element(node: Any) -> bool:
     return isinstance(getattr(node, "tag", None), str)
 
 
-def _serialize(element: lxml_html.HtmlElement) -> str:
-    """An element's subtree as HTML (the tag shell the product is rebuilt in)."""
-    return str(lxml_html.tostring(element, encoding="unicode"))
+def _serialize(element: lxml_html.HtmlElement, *, with_tail: bool = True) -> str:
+    """An element's subtree as HTML (the tag shell the product is rebuilt in).
+
+    `with_tail` is off for a void element's shell: `tostring` appends the
+    element's tail text by default, which the caller already emits separately,
+    so leaving it on duplicated the text after the element (issue #150).
+    """
+    return str(lxml_html.tostring(element, encoding="unicode", with_tail=with_tail))
 
 
 def _rebuild(
@@ -503,6 +522,14 @@ def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
     _replace_content(element, restored)
 
 
+# Void elements that carry meaning but no text. Their marker is one-sided
+# (`[[n]]`), and their shell is the element's own serialization with an empty
+# close tag -- that empty close is what the restore pass uses to tell them from
+# a paired marker whose close the provider dropped (#150). `hr` is not inline,
+# but it is void and can sit inside a block.
+_VOID_ELEMENTS: Final[frozenset[str]] = frozenset({"br", "wbr", "img", "hr"})
+
+
 # Innermost-only: the inner group refuses a `[` so a nested pair (`<a><strong>`
 # is `[[0]][[1]]text[[/1]][[/0]]`) cannot be paired with its outer neighbour. A
 # non-greedy "first close wins" pattern cross-pairs them -- open 0 with close 1
@@ -510,22 +537,35 @@ def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
 # silently dropped. The backreference keeps open and close the same index.
 _MARKER = re.compile(r"\[\[(?P<index>\d+)\]\](?P<inner>[^\[\]]*)\[\[/(?P=index)\]\]")
 
+# A void element's white marker, one-sided by construction. It also matches the
+# opening of a paired marker, which is why `_sub_void` only replaces an index
+# whose shell has an empty close tag and leaves the rest for the paired pass.
+_VOID_MARKER = re.compile(r"\[\[(\d+)\]\]")
+
 
 def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
-    """Wrap each marked span in its original tag.
+    """Wrap each marked span in its original tag, and re-place void elements.
 
     A marker the provider dropped, duplicated or unbalanced is dropped from the
     output rather than guessed at: the translated *text* is the part that
     matters, and a misplaced link is worse than a missing tag. The prose
     survives either way, and this is the only failure mode here -- it cannot
     corrupt the text.
+
+    Void elements (`br`/`wbr`/`img`/`hr`) are restored from the same `shells`
+    table as paired markers; the empty close tag is the only thing telling the
+    two kinds apart, so a marker the provider dropped cannot be mistaken for a
+    `<br/>` (issue #150).
     """
     if not shells:
         return text
     result = text
     # Each pass resolves the innermost markers only, so a nested pair
     # (`<a><strong>x</strong></a>`) needs one pass per level; 8 levels of
-    # inline nesting is far past anything a feed produces.
+    # inline nesting is far past anything a feed produces. The void pass runs
+    # inside the same loop because resolving a void marker can expose a paired
+    # marker that wrapped it: `<a><img></a>` is `[[0]][[1]][[/0]]`, which the
+    # paired pass cannot match until `[[1]]` has become the `<img>` element.
     for _ in range(8):
         replaced = False
 
@@ -541,6 +581,18 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
             return f"{open_tag}{inner}{close_tag}"
 
         result = _MARKER.sub(_sub, result)
+
+        def _sub_void(match: re.Match[str]) -> str:
+            nonlocal replaced
+            index = int(match.group(1))
+            if index < len(shells) and shells[index][1] == "":
+                replaced = True
+                return shells[index][0]
+            # A paired marker's opening (close tag non-empty): leave it for
+            # the paired pass, or for the final strip when its close never came.
+            return match.group(0)
+
+        result = _VOID_MARKER.sub(_sub_void, result)
         if not replaced:
             break
     # Any marker left over (unbalanced, or an index the provider invented) is

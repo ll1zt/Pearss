@@ -1222,3 +1222,168 @@ def _run_chain(monkeypatch: pytest.MonkeyPatch) -> None:
         target_lang="zh",
         store=lambda content: "cas://product",
     )
+
+
+# --------------------------------------------------------------------------
+# Void elements inside a block (issue #150)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #150):
+#
+#   AC-141 块内 <br> 在译文里保留 (p)
+#   AC-142 li / blockquote / td 内的 <br> 同样保留
+#   AC-143 块内 <wbr> 保留
+#   AC-144 块内 <img> 不被删除: src 绝对化, alt 不变
+#   AC-145 被引推文 blockquote 内的 <a><img></a> 图片保留, 不出现空 <a></a>
+#   AC-146 模型丢掉 void 标记时降级安全 (正文完整, 无字面 [[n]])
+#   AC-147 顶层 <br> 不受影响 (钉住现状)
+#
+# `_flatten_inline` only had two branches: a paired marker for `_INLINE`, and
+# "keep the text, drop the tag" for everything else. A void element has no
+# text, so `br`/`wbr`/`img`/`hr` fell into the second branch and vanished --
+# a line break welded two lines into one, and a block-internal image was
+# deleted outright. These pin the third branch: a one-sided marker whose shell
+# is the element itself.
+# --------------------------------------------------------------------------
+
+
+def test_a_line_break_inside_a_paragraph_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-141: the X shape -- `\n` became `<br/>` inside one `<p>` -- survives.
+
+    Measured on the deployed code: the break was gone from the product, so a
+    multi-line tweet read as one welded line. This is the collector's own
+    output shape (`collector.py` turns `\n` into `<br/>`), not a corner case.
+    """
+    product, _ = _translate(monkeypatch, "<p>line1<br/>line2</p>")
+
+    assert "<br" in product, product
+    assert "line1line2" not in product, f"the lines were welded: {product}"
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        "<ul><li>line1<br/>line2</li></ul>",
+        "<blockquote>line1<br/>line2</blockquote>",
+        "<table><tr><td>line1<br/>line2</td></tr></table>",
+    ],
+    ids=["li", "blockquote", "td"],
+)
+def test_a_line_break_inside_a_list_quote_or_cell_survives(
+    monkeypatch: pytest.MonkeyPatch, markup: str
+) -> None:
+    """AC-142: the break is kept wherever the block sits, not only in `p`."""
+    product, _ = _translate(monkeypatch, markup)
+
+    assert "<br" in product, product
+    assert "line1line2" not in product, f"the two lines were welded: {product}"
+
+
+def test_a_word_break_opportunity_survives(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-143: `wbr` carries no text either, and is preserved for the same reason."""
+    product, _ = _translate(monkeypatch, "<p>very<wbr/>longword</p>")
+
+    assert "<wbr" in product, product
+    assert "very" in product and "longword" in product, product
+
+
+def test_an_image_inside_a_paragraph_is_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-144: a block-internal image survives, absolute and with its alt.
+
+    The old walk deleted it: `img` is in `_PRESERVED`, but that protection
+    only applied at top level, so an image inside a `<p>` was flattened away
+    as "a tag not worth a shell". A reader lost the picture with no trace.
+    """
+    product, _ = _translate(
+        monkeypatch,
+        '<p>see <img src="/i.png" alt="pic"/> here</p>',
+        url="https://blog.example/post",
+    )
+
+    assert "<img" in product, product
+    assert 'alt="pic"' in product, product
+    assert 'src="https://blog.example/i.png"' in product, product
+
+
+def test_a_quoted_tweets_image_survives(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-145: the shape `_quoted_html` produces -- `<a><img></a>` in a quote.
+
+    Measured on the deployed code, the product kept an empty `<a>` where the
+    image had been: the anchor got its marker, the void image inside it did
+    not, and the image was gone while its link stayed.
+    """
+    body = (
+        "<blockquote>Quoted Guy · @qg a quoted preview text "
+        '<a href="https://pbs.twimg.com/media/abc.jpg">'
+        '<img src="https://pbs.twimg.com/media/abc.jpg" alt="photo"/></a> '
+        '<a href="https://x.com/i/status/1">查看被引推文</a></blockquote>'
+    )
+    product, _ = _translate(monkeypatch, body)
+
+    assert "<img" in product, product
+    assert "abc.jpg" in product, product
+    assert '<a href="https://pbs.twimg.com/media/abc.jpg"></a>' not in product, (
+        f"the image is gone but its link remains: {product}"
+    )
+
+
+def test_a_dropped_void_marker_degrades_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-146: a provider that drops `[[n]]` loses the break, never the text.
+
+    Already correct before this change (the marker did not exist); pinned so
+    the new one-sided marker cannot leak as literal `[[n]]` or corrupt the
+    block when the model omits it.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda url, **kw: httpx.Response(
+            200, json={"choices": [{"message": {"content": "line1line2"}}]}
+        ),
+    )
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    process(
+        {
+            "item_id": "i-150",
+            "title": "T",
+            "content": "<p>line1<br/>line2</p>",
+            "url": "https://b.example/p",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+    product = stored[0]
+
+    assert "<br" not in product, product
+    assert "line1line2" in product, f"the text must survive: {product}"
+    assert "[[" not in product, f"a literal marker leaked: {product}"
+
+
+def test_a_top_level_break_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-147: a `<br>` *between* blocks was never affected; pinned as-is.
+
+    It is not inside any unit, so it stays in the tree and is serialized by
+    the rebuild untouched. The fix must not start treating it as a unit.
+    """
+    product, seen = _translate(monkeypatch, "<p>a</p><br/><p>b</p>")
+
+    assert "<br" in product, product
+    assert product.count("<p>") == 2, product
+    assert len(seen) == 2, "the top-level break is not a translation unit"
