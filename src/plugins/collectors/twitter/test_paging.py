@@ -1,6 +1,6 @@
 """Tests for timeline paging: frontier, gap detection, budget, partial results.
 
-Scenario register (normative source: SCENARIOS.md; issue #130; AC-117..119).
+Scenario register (normative source: SCENARIOS.md; issue #130; AC-125..127).
 
 `fetch_page` is a scripted stand-in, so every case is deterministic and no
 sleep is involved -- pacing belongs to the caller and is not tested here.
@@ -72,7 +72,7 @@ def test_ids_above_the_frontier_are_kept_regardless_of_page_order() -> None:
 
     A page is not globally descending: a conversation module lists its parent
     (older) before its replies (newer), so a prefix scan stops at the first
-    seen id and silently drops the newer ids that follow it (AC-118).
+    seen id and silently drops the newer ids that follow it (AC-126).
     """
     ids = ["300", "200", "250", "100"]
     # 250 > 200 but sits after it: the prefix scan this replaced returned ["300"].
@@ -88,7 +88,7 @@ def test_a_catch_up_ends_on_a_page_that_contributes_nothing_new() -> None:
 
     It is *not* "this page contained a seen id": a conversation module puts an
     already-seen parent above its newer replies, so stopping at the first seen
-    id ends the round while newer content is still below it (AC-118).
+    id ends the round while newer content is still below it (AC-126).
     """
     script = Script(
         [

@@ -47,6 +47,18 @@ jobs:
       # The instance, named once. It used to be written into two clone URLs,
       # which is how a host rename took CI down (bf8e3ba).
       CI_REPOSITORY: https://git.example.com:3000/lllzt/Pearss.git
+      # Job level, not step level. The first `uv run` of a job is in the
+      # model-fetch step, and it syncs the whole environment; while this lived
+      # on the gate step alone, the model step talked to pypi.org directly.
+      # The host's route there is slow and unstable (a HEAD took 4.8s and one
+      # run's downloads burned ~40 of the 60 budget minutes, getting the job
+      # killed -- host-config#12 has the measurements), so a cold cache spent
+      # ~21 of a 29-minute run downloading (issue #146). TUNA answers in ~0.3s
+      # from the same host. Declared here rather than trusted from the runner
+      # environment so the repo's CI needs no particular runner-side setup; the
+      # runner-level default (host-config#12) still covers repos that don't
+      # declare it.
+      UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
     steps:
       # A full clone, not --depth 1: the coverage gate diffs the pushed commit
       # against origin/main, which a single-branch shallow checkout does not
@@ -149,12 +161,4 @@ jobs:
           NIX_CONFIG: |
             max-jobs = 1
             cores = 2
-          # The host's route to pypi.org is slow and unstable (a HEAD took
-          # 4.8s and one run's downloads burned ~40 of the 60 budget minutes,
-          # getting the job killed -- host-config#12 has the measurements).
-          # TUNA answers in ~0.3s from the same host. Declared here rather
-          # than trusted from the runner environment so the repo's CI needs
-          # no particular runner-side setup; the runner-level default
-          # (host-config#12) still covers repos that don't declare it.
-          UV_DEFAULT_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
         run: nix develop --command just --verbose ci

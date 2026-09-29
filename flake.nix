@@ -83,10 +83,10 @@
               # from a gitignored .env or the deploy platform.
               env = {
                 PEARSS_ENV = "development";
-                # Point uv at the Nix interpreter and a project-local cache so
-                # the venv is reproducible from uv.lock alone.
+                # Point uv at the Nix interpreter, so the venv is reproducible
+                # from uv.lock alone. Where uv keeps its cache is set in the
+                # shellHook below, because it has to be an absolute path.
                 UV_PYTHON = "${python}/bin/python3";
-                UV_CACHE_DIR = ".cache/uv";
                 # onnxruntime (ADR 0035 decision 5) arrives as a manylinux
                 # wheel, whose shared objects reference libstdc++ and libz by
                 # soname. Nix puts neither on the default loader path, so the
@@ -100,6 +100,24 @@
               };
 
               shellHook = ''
+                # uv's cache is not workspace state: it lives in the user's cache
+                # directory, not under whatever directory the shell was entered
+                # from.
+                #
+                # It used to be `env.UV_CACHE_DIR = ".cache/uv"` -- a relative
+                # path. In CI the working directory is `source/`, a fresh
+                # `git clone` of the pushed commit, so every run re-downloaded
+                # every wheel: about 21 of a 29-minute run (issue #146). The
+                # embedding model fetched two steps earlier persisted only
+                # because it is an absolute path under $HOME. Absolute here, so
+                # one cache serves every worktree, every local run and every CI
+                # run; `nix/package.nix` already sets an absolute path for the
+                # same reason.
+                #
+                # `shellHook` rather than `env`, because a Nix `env` value is a
+                # literal: "$HOME/..." would not be expanded there, and uv would
+                # treat it as a relative path.
+                export UV_CACHE_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/uv"
                 echo "pearss:${name} — python $(python3 --version | cut -d' ' -f2), uv $(uv --version | cut -d' ' -f2)"
                 echo "${greeting}"
               '';

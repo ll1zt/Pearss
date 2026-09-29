@@ -1,6 +1,6 @@
 """Integration tests for authenticated paging: state, and failing closed.
 
-Scenario register (normative source: SCENARIOS.md; issues #130..#132; AC-117..122).
+Scenario register (normative source: SCENARIOS.md; issues #130..#132; AC-125..130).
 
 The HTTP layer is replaced with a MockTransport serving recorded-shaped
 payloads, so these exercise the real repository writes and the real walk
@@ -809,7 +809,7 @@ def test_a_new_reply_is_not_dropped_when_its_parent_is_already_seen(
     every newer tweet after it -- then ends the round, so they are lost for
     good: the frontier is then advanced past them. This drives the whole
     pipeline and reads the corpus back, which is the only place that answers
-    "is the reply in my reader?" (AC-117).
+    "is the reply in my reader?" (AC-125).
     """
     from plugins.collectors.twitter import client as x_client
 
@@ -867,7 +867,7 @@ def test_a_repeat_catch_up_neither_duplicates_nor_moves_the_frontier_back(
     session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A second catch-up over the same page inserts nothing and keeps the
-    frontier (AC-119): the fix must not introduce duplicates or drag the anchor
+    frontier (AC-127): the fix must not introduce duplicates or drag the anchor
     backwards."""
     from plugins.collectors.twitter import client as x_client
 
@@ -916,7 +916,7 @@ def test_a_mid_walk_failure_keeps_the_pages_it_already_fetched(
 
     The walk keeps its partial pages by contract; the host was dropping them
     *and* moving the frontier past them, so the fetched tweets were lost for
-    good (AC-120).
+    good (AC-128).
     """
     from plugins.collectors.twitter import client as x_client
 
@@ -963,7 +963,7 @@ def test_a_partial_failure_does_not_skip_the_unfetched_page(
     """The frontier must not move past content that was never fetched.
 
     If it does, the next round starts at the top, meets the moved frontier and
-    stops -- the tweet on the page that failed is skipped for good (AC-121).
+    stops -- the tweet on the page that failed is skipped for good (AC-129).
     """
     from plugins.collectors.twitter import client as x_client
 
@@ -1028,7 +1028,7 @@ def test_a_mid_walk_network_failure_is_reported_as_network(
     """A partial failure keeps its own class, not a blanket `blocked`.
 
     `blocked` means "the origin refused us, wait"; reporting it for a timeout
-    sends the operator to the wrong remedy (AC-122).
+    sends the operator to the wrong remedy (AC-130).
     """
     from plugins.collectors.twitter import client as x_client
 

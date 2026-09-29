@@ -1,7 +1,7 @@
 """Direct tests for the paged-walk entry point.
 
 Scenario register (normative source: SCENARIOS.md; issues #132, #133;
-AC-122..124).
+AC-130..132).
 
 `collect_pages` normally runs in the sandboxed child process, whose code the
 parent's coverage cannot see. These call it in-process -- with the origin
@@ -201,7 +201,7 @@ def test_a_module_with_an_old_root_does_not_look_like_a_gap(
 
     A conversation module's root can be months old while the module sits near
     the top of the page. Counting that root as the page's floor made the next
-    page's top look above it -- a gap reported on every page (AC-123).
+    page's top look above it -- a gap reported on every page (AC-131).
     """
     page1 = _page(
         [
@@ -224,7 +224,7 @@ def test_a_module_with_an_old_root_does_not_look_like_a_gap(
 def test_a_real_insertion_gap_is_still_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The false-positive fix must not blind the detector to a real gap (AC-124)."""
+    """The false-positive fix must not blind the detector to a real gap (AC-132)."""
     page1 = _page(
         [_tweet_entry(1000, "1000", "a"), _tweet_entry(998, "998", "b")], "C1"
     )

@@ -60,10 +60,10 @@
 | AC-108..109 | #83 相关文章（有下限的邻居）与近重复提示（只提示、不合并）（原声明 102..103） | ADR 0035 §9 | 已合并 | `tests/integration/test_vector_search.py`、`tests/integration/test_items_api.py` |
 | AC-110 | #89 单租户假设（第二个租户会被报出） | ADR 0038 | 已合并 | `tests/integration/test_tenancy.py` |
 | AC-111..113 | #61 告警的两个未实现条件（卡死链、循环不存活）与循环互看 | ADR 0034 / ADR 0039 | 已合并 | `tests/integration/test_alerting.py` |
-| AC-117..119 | #130 X Following frontier 截断丢推文（会话模块破坏页内降序假设） | issue #130 | 已合并 | `src/plugins/collectors/twitter/test_paging.py`、`tests/integration/test_twitter_paging.py` |
-| AC-120..121 | #131 分页半途失败先推进 frontier 再丢弃已抓到的 drafts | issue #131 | 已合并 | `tests/integration/test_twitter_paging.py` |
-| AC-122 | #132 分页中途失败一律归类为 blocked（真实 ErrorClass 丢失） | issue #132 | 已合并 | `src/plugins/collectors/twitter/test_walk.py`、`tests/integration/test_twitter_paging.py` |
-| AC-123..124 | #133 假断档：page_sort_span 把模块内容 id 当页位置 | issue #133 | 已合并 | `src/plugins/collectors/twitter/test_walk.py`、`src/plugins/collectors/twitter/test_collector.py` |
+| AC-125..127 | #130 X Following frontier 截断丢推文（会话模块破坏页内降序假设） | issue #130 | 已合并 | `src/plugins/collectors/twitter/test_paging.py`、`tests/integration/test_twitter_paging.py` |
+| AC-128..129 | #131 分页半途失败先推进 frontier 再丢弃已抓到的 drafts | issue #131 | 已合并 | `tests/integration/test_twitter_paging.py` |
+| AC-130 | #132 分页中途失败一律归类为 blocked（真实 ErrorClass 丢失） | issue #132 | 已合并 | `src/plugins/collectors/twitter/test_walk.py`、`tests/integration/test_twitter_paging.py` |
+| AC-131..132 | #133 假断档：page_sort_span 把模块内容 id 当页位置 | issue #133 | 已合并 | `src/plugins/collectors/twitter/test_walk.py`、`src/plugins/collectors/twitter/test_collector.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
