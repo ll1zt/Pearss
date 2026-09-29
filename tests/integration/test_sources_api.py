@@ -1694,6 +1694,10 @@ async def test_diagnose_answers_the_question_in_one_call(
         "oldest_queued_at": None,
     }
     assert body["runs"] == []
+    # The two issue-#152 additions, stated rather than omitted: an absent key
+    # would be indistinguishable from "the question was not asked".
+    assert body["last_run"] is None
+    assert body["failed_enrichments"] == []
     assert body["collection"]["loop_alive"] is True
     assert body["correlation_id"]
 
@@ -1704,3 +1708,109 @@ async def test_diagnose_refuses_an_unknown_source(writer: httpx.AsyncClient) -> 
     """A diagnostic that invents an answer is worse than one that says 404."""
     response = await writer.get("/v1/sources/nope:diagnose")
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_diagnose_answers_why_the_chain_is_stuck(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-153..155: the failure class, the provider message, the newest run's.
+
+    Measured live (issue #152): `get_source` -> `diagnose_source` ->
+    `list_enrichments` was three calls to learn what one call promised
+    (ADR 0036), and the reason still needed reading the processor source to act
+    on. The body is never part of the answer -- metadata and error text only.
+    """
+    from datetime import UTC, datetime
+
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+    from adapters.repository.jobs import (
+        claim_job_run,
+        create_job_run,
+        ensure_collect_job,
+        finish_job_run,
+    )
+    from app.pipeline import normalise_and_store
+    from core.enums import ErrorClass
+    from core.job_state import JobRunEvent
+    from core.models import ItemDraft
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "diagnose-stuck-1"},
+        json={"url": "https://stuck.example/feed", "schedule_policy": policy()},
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+
+    with session_factory() as session:
+        item_id = normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source_id,
+                    external_id="one",
+                    title="An item",
+                    canonical_url="https://stuck.example/1",
+                    published_at=datetime.now(UTC),
+                    content="<p>ITEM-SECRET-MARKER</p>",
+                )
+            ],
+            tenant_id="default",
+        )[0].result.item.id
+        now = timestamp(datetime.now(UTC))
+        for index in range(7):
+            session.add(
+                ItemEnrichment(
+                    id=f"stuck-enr-{index}",
+                    item_id=item_id,
+                    plugin_id="translate",
+                    plugin_version="0.1.0",
+                    kind="translation",
+                    lang="zh",
+                    input_hash=f"hash-{index}",
+                    status="failed",
+                    error_class="parse",
+                    detail=(
+                        f"provider rejected the request: HTTP 400 (variant {index})"
+                    ),
+                    attempt_count=3,
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=f"2026-01-{index + 1:02d}T00:00:00.000000Z",
+                )
+            )
+        session.flush()
+        job_id = ensure_collect_job(
+            session, source_id=source_id, tenant_id="default", at=now
+        )
+        create_job_run(
+            session, run_id="stuck-run", job_id=job_id, correlation_id="c", at=now
+        )
+        session.commit()
+        assert claim_job_run(session, run_id="stuck-run", at=now) is True
+        finish_job_run(
+            session,
+            run_id="stuck-run",
+            event=JobRunEvent.FAIL,
+            correlation_id="c",
+            error_class=ErrorClass.PARSE,
+            at=now,
+        )
+        session.commit()
+
+    response = await writer.get(f"/v1/sources/{source_id}:diagnose")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["last_run"]["error_class"] == "parse"
+    failed = body["failed_enrichments"]
+    assert len(failed) == 5, "at most N=5 failed products"
+    assert failed[0]["updated_at"] == "2026-01-07T00:00:00.000000Z", "newest first"
+    assert failed[0]["error_class"] == "parse"
+    assert "HTTP 400" in failed[0]["detail"]
+    assert failed[0]["attempt_count"] == 3
+    # Metadata and error text only: never the item body (AGENTS.md, ADR 0042).
+    assert "ITEM-SECRET-MARKER" not in response.text

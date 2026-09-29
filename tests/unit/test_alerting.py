@@ -49,6 +49,7 @@ import pytest
 from core.alerting import (
     ALERT_DEFAULTS,
     AlertState,
+    ExhaustedSource,
     HealthVerdict,
     alert_body,
     decide_health,
@@ -561,10 +562,17 @@ def test_a_stuck_chain_degrades_an_otherwise_healthy_state() -> None:
     healthy = _HEALTHY
     assert decide_health(healthy).degraded is False
 
-    verdict = decide_health(healthy, exhausted_sources=("src-a",))
+    source = ExhaustedSource(
+        source_id="src-a",
+        title="A Feed",
+        failed_count=3,
+        error_class="parse",
+        detail_excerpt="bad model",
+    )
+    verdict = decide_health(healthy, exhausted_sources=(source,))
     assert verdict.degraded is True
-    assert verdict.exhausted_sources == ("src-a",)
-    assert "src-a" in verdict.reason
+    assert verdict.exhausted_sources == (source,)
+    assert "src-a" in alert_body(verdict)
 
 
 @pytest.mark.unit
@@ -583,3 +591,152 @@ def test_recovery_is_still_a_recovery_when_the_new_conditions_clear() -> None:
     healthy = _HEALTHY
     assert decide_health(healthy, exhausted_sources=()).degraded is False
     assert decide_health(healthy, dead_loops=()).degraded is False
+
+
+# --------------------------------------------------------------------------
+# Alert attribution (issue #152)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #152):
+#
+#   AC-150 exhausted_enrichment_sources 带回归因 (title/class/count/excerpt)
+#   AC-151 卡链告警体带上归因, 且 <= 4093 字符
+#   AC-152 dominant error class 明确标注全库累计, 归因段只报本次告警的分类
+#   AC-153 :diagnose 返回 failed_enrichments (<=N, 按 updated_at 降序)
+#   AC-154 :diagnose 返回 last_run.error_class
+#   AC-155 隐私负向: 告警体与 failed_enrichments 都不含条目正文
+#   AC-156 多源时每源一行
+# --------------------------------------------------------------------------
+
+
+def _stuck(
+    source_id: str = "76b6b942cd69370315b1ab3c7b42ae44",
+    *,
+    title: str = "X Following",
+    failed_count: int = 24,
+    error_class: str | None = "parse",
+    detail_excerpt: str | None = (
+        "provider rejected the request: HTTP 400 (User location is not supported…)"
+    ),
+) -> ExhaustedSource:
+    return ExhaustedSource(
+        source_id=source_id,
+        title=title,
+        failed_count=failed_count,
+        error_class=error_class,
+        detail_excerpt=detail_excerpt,
+    )
+
+
+def test_the_alert_body_attributes_a_stuck_chain() -> None:
+    """AC-151: the notification says which source and why, not just an id.
+
+    Measured live: the alert carried only a source id, and the reason (a
+    region-blocked 400) was in rows the alert query had already read -- so the
+    operator read files and logs to learn what the message could have said.
+    """
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="1 source(s) with a chain that cannot finish",
+        exhausted_sources=(_stuck(),),
+    )
+    body = alert_body(verdict)
+
+    assert "X Following" in body
+    assert "76b6b942" in body, "the id prefix names the source unambiguously"
+    assert "parse" in body
+    assert "24" in body, "the failed-item count must appear"
+    assert "User location is not supported" in body
+    assert len(body) <= 4093
+
+
+def test_the_alert_body_is_bounded_with_many_stuck_sources() -> None:
+    """AC-156: three stuck sources are one line each, not an unbounded list.
+
+    The gateway rejects a body past 4093 characters, and the alert is the one
+    place a rejection is invisible; so the body stays short by construction.
+    """
+    sources = tuple(
+        _stuck(f"src-{i}", title=f"Feed {i}", failed_count=i + 3) for i in range(3)
+    )
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="3 source(s) with a chain that cannot finish",
+        exhausted_sources=sources,
+    )
+    body = alert_body(verdict)
+
+    for i in range(3):
+        assert f"Feed {i}" in body
+    assert len(body) <= 4093
+
+
+def test_the_dominant_error_line_is_labelled_all_time() -> None:
+    """AC-152: the global statistic must not masquerade as this alert's cause.
+
+    In the motivating incident the line read `dominant error class: network
+    (781 runs)` and sent the operator to the network, while the real cause was
+    24 `parse` rows on one source. The number is a whole-database, whole-time
+    tally; saying so is the whole fix.
+    """
+    verdict = decide_health(
+        _snapshot(
+            success_rate=0.0, considered=50, error_class="network", error_count=781
+        ),
+        exhausted_sources=(_stuck(),),
+    )
+    body = alert_body(verdict)
+
+    assert "dominant error class (all-time): network (781 runs)" in body, body
+    # The attribution section reports the alert's own class, not the global one.
+    assert "parse (24)" in body, body
+    assert "network (24)" not in body, body
+
+
+def test_the_attribution_section_reports_the_alerts_own_class() -> None:
+    """AC-152 (the other half): the stuck-chain bullet is per-source."""
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="1 source(s) with a chain that cannot finish",
+        exhausted_sources=(_stuck(),),
+    )
+    body = alert_body(verdict)
+
+    assert "parse (24)" in body, body
+
+
+def test_more_than_five_stuck_sources_are_summarised_not_dropped() -> None:
+    """AC-156 (the cap): the list is bounded and the remainder is still counted.
+
+    A hundred stuck sources must not become a hundred-line body the gateway
+    rejects, and must not become five lines that imply five sources.
+    """
+    sources = tuple(_stuck(f"src-{i}", title=f"Feed {i}") for i in range(7))
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="7 source(s) with a chain that cannot finish",
+        exhausted_sources=sources,
+    )
+    body = alert_body(verdict)
+
+    assert "Feed 0" in body
+    assert "Feed 4" in body
+    assert "Feed 5" not in body, "only MAX_ATTRIBUTED_SOURCES are listed"
+    assert "and 2 more source(s)" in body
+    assert len(body) <= 4093
+
+
+def test_a_source_without_an_error_class_still_renders() -> None:
+    """A failed row with no class must not render as `None (24)`.
+
+    `error_class` is nullable in the row; the fallback body counts the failures
+    without inventing a class, because a made-up class is worse than none.
+    """
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="1 source(s) with a chain that cannot finish",
+        exhausted_sources=(_stuck(error_class=None, detail_excerpt=None),),
+    )
+    body = alert_body(verdict)
+
+    assert "24 failed" in body, body
+    assert "None" not in body, body

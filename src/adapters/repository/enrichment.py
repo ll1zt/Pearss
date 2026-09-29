@@ -188,6 +188,46 @@ def backlog_for_source(session: Session, source_id: str) -> dict[str, Any]:
     }
 
 
+def failed_enrichments_for_source(
+    session: Session, *, source_id: str, limit: int = 5
+) -> list[dict[str, Any]]:
+    """The most recent failed chain rows for one source, newest first.
+
+    The `:diagnose` answer to "why" (issue #152): `backlog_for_source` says how
+    much is stuck, not what is wrong, and the failure class and the provider's
+    own message live on these rows. Metadata and error text only -- never the
+    item body, which is why this returns selected columns rather than the rows.
+    """
+    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    rows = (
+        session.execute(
+            select(ItemEnrichment)
+            .where(
+                ItemEnrichment.item_id.in_(item_ids),
+                ItemEnrichment.status == EnrichmentStatus.FAILED.value,
+            )
+            .order_by(ItemEnrichment.updated_at.desc(), ItemEnrichment.id.desc())
+            .limit(limit)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "enrichment_id": row.id,
+            "item_id": row.item_id,
+            "plugin_id": row.plugin_id,
+            "kind": row.kind,
+            "lang": row.lang,
+            "error_class": row.error_class,
+            "detail": row.detail,
+            "attempt_count": row.attempt_count,
+            "updated_at": row.updated_at,
+        }
+        for row in rows
+    ]
+
+
 def statuses_for_item(
     session: Session,
     *,

@@ -580,7 +580,13 @@ def test_a_supplied_client_is_used_for_the_post(
     assert payload["text"] == "body"
 
 
-def _source_with_chain(session: Session, *, source_id: str, statuses: list[str]) -> str:
+def _source_with_chain(
+    session: Session,
+    *,
+    source_id: str,
+    statuses: list[str],
+    content: str = "<p>body</p>",
+) -> str:
     """A source with one item and one chain row per status given.
 
     Seeded through the repository, then the rows are moved to their statuses
@@ -599,7 +605,7 @@ def _source_with_chain(session: Session, *, source_id: str, statuses: list[str])
         tenant_id="default",
         at=timestamp(datetime.now(UTC)),
     )
-    item = _store_one_item(session, source.id)
+    item = _store_one_item(session, source.id, content=content)
     enqueue_chain(
         session,
         item_id=item,
@@ -629,7 +635,9 @@ def _source_with_chain(session: Session, *, source_id: str, statuses: list[str])
     return source.id
 
 
-def _store_one_item(session: Session, source_id: str) -> str:
+def _store_one_item(
+    session: Session, source_id: str, *, content: str = "<p>body</p>"
+) -> str:
     """One item through the production write path."""
     from app.pipeline import normalise_and_store
     from core.models import ItemDraft
@@ -643,7 +651,7 @@ def _store_one_item(session: Session, source_id: str) -> str:
                 title="An item",
                 canonical_url="https://x.example/one",
                 published_at=datetime.now(UTC),
-                content="<p>body</p>",
+                content=content,
             )
         ],
         tenant_id="default",
@@ -655,11 +663,13 @@ def _store_one_item(session: Session, source_id: str) -> str:
 def test_a_source_whose_chain_all_failed_is_reported(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """AC: the stuck-chain condition, read from the rows that make it true.
+    """AC-150: the stuck-chain condition, and its attribution, from the rows.
 
     Three boundaries, because each is a way to make the channel noise: two rows
     is below ADR 0034's sample floor, one queued row means the chain can still
-    finish, and a succeeded row is not pending at all.
+    finish, and a succeeded row is not pending at all. The attribution (title,
+    class, count, excerpt) rides along because issue #152 made the alert name
+    the source and the reason rather than only its id.
     """
     from adapters.repository.inspection import exhausted_enrichment_sources
 
@@ -672,15 +682,211 @@ def test_a_source_whose_chain_all_failed_is_reported(
         done = _source_with_chain(
             session, source_id="done", statuses=["failed", "failed", "succeeded"]
         )
+        session.execute(
+            sa.text("update source set title = :t where id = :i"),
+            {"t": "X Following", "i": stuck},
+        )
+        session.execute(
+            sa.text(
+                "update item_enrichment set error_class = :c, detail = :d "
+                "where item_id in (select id from item where source_id = :s)"
+            ),
+            {
+                "c": "parse",
+                "d": "provider rejected the request: HTTP 400 (region)",
+                "s": stuck,
+            },
+        )
         session.commit()
 
         reported = exhausted_enrichment_sources(session, tenant_id="default")
 
-    assert reported == [stuck], (
-        f"reported {reported}; expected only the source whose every pending row "
-        f"failed ({stuck}). Below the sample floor: {too_few}. Still able to "
-        f"finish: {still_working}. Nothing pending: {done}."
+    assert len(reported) == 1, (
+        f"reported {[source.source_id for source in reported]}; expected only "
+        f"the source whose every pending row failed ({stuck}). Below the sample "
+        f"floor: {too_few}. Still able to finish: {still_working}. Nothing "
+        f"pending: {done}."
     )
+    (source,) = reported
+    assert source.source_id == stuck
+    assert source.title == "X Following"
+    assert source.failed_count == 3
+    assert source.error_class == "parse"
+    assert source.detail_excerpt == "provider rejected the request: HTTP 400 (region)"
+
+
+@pytest.mark.integration
+def test_the_representative_failure_is_the_newest(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-150: the class and message are the *newest* failure.
+
+    "What is it failing on now" is the actionable reading; an older class would
+    send the operator at a failure the source has already moved past.
+    """
+    from adapters.repository.inspection import exhausted_enrichment_sources
+
+    with session_factory() as session:
+        stuck = _source_with_chain(session, source_id="stuck", statuses=["failed"] * 3)
+        session.execute(
+            sa.text("update source set title = 'T' where id = :i"), {"i": stuck}
+        )
+        row_ids = (
+            session.execute(
+                sa.text(
+                    "select id from item_enrichment where item_id in "
+                    "(select id from item where source_id = :s) order by id"
+                ),
+                {"s": stuck},
+            )
+            .scalars()
+            .all()
+        )
+        for row_id, (cls, detail, at) in zip(
+            row_ids,
+            [
+                ("network", "oldest", "2026-01-01T00:00:00.000000Z"),
+                ("parse", "middle", "2026-01-02T00:00:00.000000Z"),
+                ("auth", "newest", "2026-01-03T00:00:00.000000Z"),
+            ],
+            strict=True,
+        ):
+            session.execute(
+                sa.text(
+                    "update item_enrichment set error_class = :c, detail = :d, "
+                    "updated_at = :u where id = :i"
+                ),
+                {"c": cls, "d": detail, "u": at, "i": row_id},
+            )
+        session.commit()
+
+        (source,) = exhausted_enrichment_sources(session, tenant_id="default")
+
+    assert source.error_class == "auth", source
+    assert source.detail_excerpt == "newest", source
+    assert source.failed_count == 3
+
+
+@pytest.mark.integration
+def test_the_alert_attributes_a_stuck_chain(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-151: the notification names the source, the class and the reason.
+
+    The live complaint behind issue #152: the alert carried only a source id,
+    and every follow-up question (which source? what error?) was a file read
+    away from a message that already had the answer.
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    with session_factory() as session:
+        stuck = _source_with_chain(session, source_id="stuck", statuses=["failed"] * 3)
+        session.execute(
+            sa.text("update source set title = 'X Following' where id = :i"),
+            {"i": stuck},
+        )
+        session.execute(
+            sa.text(
+                "update item_enrichment set error_class = 'parse', detail = :d "
+                "where item_id in (select id from item where source_id = :s)"
+            ),
+            {
+                "d": (
+                    "provider rejected the request: HTTP 400 "
+                    "(User location is not supported for the API use.)"
+                ),
+                "s": stuck,
+            },
+        )
+        session.commit()
+    # A healthy rate: only the stuck-chain condition can degrade the verdict.
+    _finish_runs(session_factory, succeeded=40, failed=0)
+
+    assert _alerts(session_factory, tick=1) == 1
+    (body,) = sink.bodies()
+    text = body["text"]
+    assert "X Following" in text
+    assert stuck[:8] in text
+    assert "parse" in text
+    assert "User location is not supported" in text
+    assert len(text) <= 4093
+
+
+@pytest.mark.integration
+def test_three_stuck_sources_are_each_named(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-156: one line per stuck source, and the body stays within the limit."""
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    with session_factory() as session:
+        for index in range(3):
+            stuck = _source_with_chain(
+                session, source_id=f"stuck{index}", statuses=["failed"] * 3
+            )
+            session.execute(
+                sa.text("update source set title = :t where id = :i"),
+                {"t": f"Feed {index}", "i": stuck},
+            )
+            session.execute(
+                sa.text(
+                    "update item_enrichment set error_class = 'parse', "
+                    "detail = 'provider said no' where item_id in "
+                    "(select id from item where source_id = :s)"
+                ),
+                {"s": stuck},
+            )
+        session.commit()
+    _finish_runs(session_factory, succeeded=40, failed=0)
+
+    assert _alerts(session_factory, tick=1) == 1
+    (body,) = sink.bodies()
+    for index in range(3):
+        assert f"Feed {index}" in body["text"], body["text"]
+    assert len(body["text"]) <= 4093
+
+
+@pytest.mark.integration
+def test_the_alert_never_carries_item_content(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-155: the alert carries the provider's message, never the item body.
+
+    ADR 0042 draws the line: attribution fields (source id/title, class, count,
+    provider error text) may leave the host; item content may not. The provider
+    message is the reason a person needs; the body is the thing they are not
+    supposed to be reading in a notification.
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    with session_factory() as session:
+        stuck = _source_with_chain(
+            session,
+            source_id="stuck",
+            statuses=["failed"] * 3,
+            content="<p>ITEM-SECRET-MARKER</p>",
+        )
+        session.execute(
+            sa.text("update source set title = 'T' where id = :i"), {"i": stuck}
+        )
+        session.execute(
+            sa.text(
+                "update item_enrichment set error_class = 'parse', "
+                "detail = 'provider said no' where item_id in "
+                "(select id from item where source_id = :s)"
+            ),
+            {"s": stuck},
+        )
+        session.commit()
+    _finish_runs(session_factory, succeeded=40, failed=0)
+
+    assert _alerts(session_factory, tick=1) == 1
+    (body,) = sink.bodies()
+    assert "provider said no" in body["text"]
+    assert "ITEM-SECRET-MARKER" not in body["text"], body["text"]
 
 
 # --------------------------------------------------------------------------

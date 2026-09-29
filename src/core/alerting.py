@@ -56,6 +56,42 @@ ALERT_DEFAULTS: Final = AlertDefaults()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ExhaustedSource:
+    """A source whose pending chain cannot finish, with its attribution.
+
+    The alert has to say *which* source and *why* (issue #152): an id alone sent
+    an operator through files and logs to find the cause, and the cause was
+    already in the rows the alert query had read. `error_class` and
+    `detail_excerpt` are the most recent failed row's (the newest failure is the
+    one being hit now); `failed_count` is every failed row for the source.
+
+    `detail_excerpt` is the provider's own message, already truncated to
+    `DETAIL_EXCERPT_CHARS` by the query that built this value. It is allowed to
+    leave the host under ADR 0042 (it is not item content); item bodies are not.
+    """
+
+    source_id: str
+    title: str = ""
+    failed_count: int = 0
+    error_class: str | None = None
+    detail_excerpt: str | None = None
+
+
+#: The excerpt bound carried into a notification. The provider message is
+#: already capped at 500 when stored; this is the shorter notification form.
+DETAIL_EXCERPT_CHARS: Final = 120
+
+#: How many stuck sources a notification lists individually. Beyond this the
+#: body says how many more there are: the notification names the direction, and
+#: the full list is a `:diagnose` call away.
+MAX_ATTRIBUTED_SOURCES: Final = 5
+
+#: The source-title bound in a notification line, so a pathological title cannot
+#: push the body past the gateway's own limit.
+ATTRIBUTED_TITLE_CHARS: Final = 60
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HealthVerdict:
     """Core's answer to "does someone need to act, and why".
 
@@ -79,7 +115,7 @@ class HealthVerdict:
     # rows in the database, a loop's task object -- and this module only decides
     # what to say about them. A loop cannot report its own death, so the liveness
     # fact comes from whichever *other* loop is still running.
-    exhausted_sources: tuple[str, ...] = ()
+    exhausted_sources: tuple[ExhaustedSource, ...] = ()
     dead_loops: tuple[str, ...] = ()
     # What this verdict is about, so the message can name the right thing and the
     # right next step. A dead loop is not a collection-rate problem: its recovery
@@ -95,7 +131,7 @@ def decide_health(
     success_rate_threshold: float = SUCCESS_RATE_THRESHOLD,
     min_runs: int = MIN_RUNS,
     min_interval_seconds: float = MIN_INTERVAL_SECONDS,
-    exhausted_sources: Sequence[str] = (),
+    exhausted_sources: Sequence[ExhaustedSource] = (),
     dead_loops: Sequence[str] = (),
     subject: str = "collection",
 ) -> HealthVerdict:
@@ -127,11 +163,11 @@ def decide_health(
     # fact whether or not there are runs to average, and a dead loop means there
     # may be no runs to average precisely because it stopped.
     extra: list[str] = []
-    if exhausted_sources:
-        extra.append(
-            f"{len(exhausted_sources)} source(s) with a chain that cannot "
-            f"finish: {', '.join(sorted(exhausted_sources))}"
-        )
+    # Sorted by id for a stable message; the per-source detail is rendered by
+    # `alert_body` from these values, so the header line names only the count.
+    exhausted = tuple(sorted(exhausted_sources, key=lambda source: source.source_id))
+    if exhausted:
+        extra.append(f"{len(exhausted)} source(s) with a chain that cannot finish")
     if dead_loops:
         extra.append(f"background loop(s) not running: {', '.join(dead_loops)}")
 
@@ -146,7 +182,7 @@ def decide_health(
             degraded=bool(extra),
             reason="; ".join(extra),
             runs_considered=considered,
-            exhausted_sources=tuple(sorted(exhausted_sources)),
+            exhausted_sources=exhausted,
             dead_loops=tuple(sorted(dead_loops)),
             subject=subject,
         )
@@ -160,7 +196,7 @@ def decide_health(
             runs_considered=considered,
             dominant_error_class=dominant_class,
             dominant_error_count=dominant_count,
-            exhausted_sources=tuple(sorted(exhausted_sources)),
+            exhausted_sources=exhausted,
             dead_loops=tuple(sorted(dead_loops)),
             subject=subject,
         )
@@ -172,7 +208,7 @@ def decide_health(
             runs_considered=considered,
             dominant_error_class=dominant_class,
             dominant_error_count=dominant_count,
-            exhausted_sources=tuple(sorted(exhausted_sources)),
+            exhausted_sources=exhausted,
             dead_loops=tuple(sorted(dead_loops)),
             subject=subject,
         )
@@ -193,7 +229,7 @@ def decide_health(
         runs_considered=considered,
         dominant_error_class=dominant_class,
         dominant_error_count=dominant_count,
-        exhausted_sources=tuple(sorted(exhausted_sources)),
+        exhausted_sources=exhausted,
         dead_loops=tuple(sorted(dead_loops)),
     )
 
@@ -235,14 +271,19 @@ def alert_body(verdict: HealthVerdict) -> str:
             return "collection recovered: runs are succeeding again"
         return f"{verdict.subject} recovered: it is running again"
     lines = [verdict.reason or f"{verdict.subject} needs attention"]
+    lines.extend(_attribution_lines(verdict.exhausted_sources))
     if verdict.success_rate is not None:
         lines.append(
             f"success rate {verdict.success_rate:.0%} "
             f"over {verdict.runs_considered} runs"
         )
     if verdict.dominant_error_class:
+        # Labelled `(all-time)` on purpose: this is the whole-database tally, and
+        # in the incident behind #152 it read as the cause of *this* alert
+        # (`network`, 781 runs) while the real cause was 24 `parse` rows on one
+        # source. The attribution lines above carry this alert's own classes.
         lines.append(
-            f"dominant error class: {verdict.dominant_error_class} "
+            f"dominant error class (all-time): {verdict.dominant_error_class} "
             f"({verdict.dominant_error_count} runs)"
         )
     # The next step has to match the condition: a rate collapse points at a
@@ -261,6 +302,32 @@ def alert_body(verdict: HealthVerdict) -> str:
             "action: check the shared dependency (proxy, credentials, network)"
         )
     return "\n".join(lines)
+
+
+def _attribution_lines(sources: Sequence[ExhaustedSource]) -> list[str]:
+    """One indented line per stuck source, plus its truncated reason.
+
+    Bounded in two directions so a pathological set cannot push the body past
+    the gateway's 4093-character limit, where the rejection would be invisible
+    (issue #152, AC-156): at most `MAX_ATTRIBUTED_SOURCES` sources are listed,
+    and a title is trimmed. The remainder is announced rather than dropped.
+    """
+    lines: list[str] = []
+    for source in sources[:MAX_ATTRIBUTED_SOURCES]:
+        title = (source.title.strip() or source.source_id)[:ATTRIBUTED_TITLE_CHARS]
+        short_id = source.source_id[:8]
+        tail = (
+            f"{source.error_class} ({source.failed_count})"
+            if source.error_class
+            else f"{source.failed_count} failed"
+        )
+        lines.append(f"  - {title} ({short_id}…): {tail}")
+        if source.detail_excerpt:
+            lines.append(f"    {source.detail_excerpt}")
+    remaining = len(sources) - MAX_ATTRIBUTED_SOURCES
+    if remaining > 0:
+        lines.append(f"  - …and {remaining} more source(s)")
+    return lines
 
 
 @dataclass(slots=True)
