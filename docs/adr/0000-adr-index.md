@@ -94,3 +94,4 @@ docs/adr/
 | [0040](0040-embedding-runtime-and-its-cross-layer-dependency.md) | embedding 运行时的跨层依赖：Python 依赖进 `uv.lock`（`uv add onnxruntime`）、`libstdc++`/`zlib` 由环境给 loader 路径、一条真跑推理的测试持有这个决定 | accepted（**执行 flake.nix 的「Nix 管系统库 / uv 管 Python 图」分工**） | 2026-09-29 |
 | [0039](0039-loop-liveness-and-its-residual-risk.md) | 循环互看：两个后台循环各自把对方的 `liveness` 送进同一条告警通道（循环无法报告自己的死亡）；**写明并接受残余风险**——两个循环同时死时静默，被动面 `/healthz` 兜底 | accepted（**补充 ADR 0034 决策 3 的第二个条件**） | 2026-09-29 |
 | [0038](0038-single-tenant-scope.md) | 单租户是范围决定：假设命名一处、启动时校验、**不做**端到端隔离（写明触发条件） | accepted | 2026-09-29 |
+| [0041](0041-deferred-scope-and-its-triggers.md) | 范围裁决：A6 OPML 与 P3 剩余项（音频 feed / TTS / MCP 拆分 / Gateway / 按需数据存储）**有意不做**，每项附触发条件；**同时更正 spec 三处陈旧标记** | accepted（**修正 architecture-spec §5/§6 的未完成项口径**） | 2026-09-29 |

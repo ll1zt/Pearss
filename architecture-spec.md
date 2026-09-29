@@ -173,7 +173,7 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
   - 读：`list_sources`、`get_source`、`search_items`、`get_item`、`get_item_body`（截断取正文，ADR 0013）、`get_system_snapshot`、`list_jobs` / `list_runs`、`list_enrichments`、`list_plugins`
   - 写⚠：`add_source`、`update_schedule_policy`、`set_source_status`（暂停/恢复）、`set_source_folder`、`remove_source`、`delete_items`、`delete_source_items`、`trigger_job`、`backfill_source`、`retry_enrichments`、`set_plugin_status`、`submit_items`
   - 正文优先走 `item://{item_id}` Resource
-- **暂缓，尚无对应 Core API**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6）、`create_feed`⚠（FeedOut 尚无 CRUD）
+- **暂缓，尚无对应 Core API**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6，**有意不做**，见 ADR 0041）、`create_feed`⚠（FeedOut 随 ADR 0016 移除公开 RSS 输出而失去对象）
 - ⚠ = 需 elicitation 用户确认。工具经 `/v1` 调用而非直调仓储，理由见 ADR 0010
 - **P2**：`diagnose_source`、`diagnose_plugin`、`get_logs(correlation_id)`、插件管理组（⚠：import/enable/disable）
 - **P3**：`run_processor`、`list_pending_items` / `retry_enrichment` / `force_publish`⚠、ingest token 管理
@@ -212,9 +212,9 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ ~~RSS feed（最近 200 条窗口）~~（公开 RSS 输出已由 ADR 0016 移除，`rss_out` 模块保留供 P3 复用）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6）、`create_feed`/FeedOut CRUD | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；备份/恢复与首轮演练已落地（`just backup` / `just restore`，见 runbook）；`nix develop --command just ci` 通过。未达成：「发现」环节与 OPML 迁移 |
+| P1 MVP | **已交付**：FastAPI + SQLite + RSS 采集 + schedule_policy（fixed/adaptive）+ **推导式调度器**（非 APScheduler，见 ADR 0009）+ **5 个准插件采集器**（RSS、Telegram 公开页、X 登录型时间线、知乎用户内容、知识星球群组，见 ADR 0011/0012/0014/0015）+ MCP 控制平面（官方 `mcp` SDK + elicitation，见 ADR 0010）+ ~~RSS feed（最近 200 条窗口）~~（公开 RSS 输出已由 ADR 0016 移除，`rss_out` 模块保留供 P3 复用）+ Reader API（C4 提前，见 ADR 0004）+ 发布闸门 + 错误分类法 + 审计中间件 + Core API token 鉴权 + **MCP 端点独立鉴权** + Swagger 兜底 + **Nix Flake/direnv + uv + Alembic + AGENTS.md + CI + systemd 服务**<br>**未完成**：`discover_feed`（A5 暂缓）、OPML（A6，**有意不做**，见 ADR 0041）、`create_feed`/FeedOut CRUD（随 ADR 0016 失去对象） | 已达成：agent 完成「加源→抓取→出 feed→已读同步」；五类错误落库并强制 CHECK；备份/恢复与首轮演练已落地（`just backup` / `just restore`，见 runbook）；`nix develop --command just ci` 通过。未达成：「发现」环节（A5 暂缓）与 OPML 迁移（A6 有意不做，ADR 0041） |
 | P2 可观测+插件化 | structlog + **correlation_id（已在 P1 完成）** + `diagnose_source` 等诊断工具 + **hookspec 冻结 + pluggy 注册表 + manifest/生命周期（已落地，ADR 0017）** + **子进程沙箱（已落地，ADR 0017）** + 审计查询 + agent eval 集 | 第三个爬虫接入未改前两个；agent 独立诊断失败源 |
-| P3 完整形态 | Ingest API（**已交付，ADR 0022**）+ 处理器插件框架（翻译→摘要→TTS，**翻译与 fulltext 已交付，降级链与结构见 ADR 0018/0030/0031**）+ 发布闸门联动（**已交付**）+ 第三方插件装载器（**已交付，ADR 0023/0025**）+ 检索能力（**已交付，ADR 0035**）+ enclosure 音频 feed + TTS + MCP 拆分 + Gateway + 按需 PostgreSQL/Dramatiq/MinIO | 翻译链路跑通（已达成）；音频 feed 可订阅（未做） |
+| P3 完整形态 | Ingest API（**已交付，ADR 0022**）+ 处理器插件框架（翻译→摘要→TTS，**翻译与 fulltext 已交付，降级链与结构见 ADR 0018/0030/0031**）+ 发布闸门联动（**已交付**）+ 第三方插件装载器（**已交付，ADR 0023/0025**）+ 检索能力（**已交付，ADR 0035**）+ ~~enclosure 音频 feed~~ + ~~TTS~~ + ~~MCP 拆分~~ + ~~Gateway~~ + ~~按需 PostgreSQL/Dramatiq/MinIO~~（**均有意延后，见 ADR 0041**） | 翻译链路跑通（已达成）；音频 feed 可订阅（**有意不做**，ADR 0041） |
 | P4 规模化 | code execution 模式；Extism WASM 沙箱观望 | token 消耗显著下降 |
 
 ## 6. 需求追踪矩阵
@@ -230,13 +230,13 @@ adaptive 算法（P1 内建）：按**条目的发布时间间隔**计算源的�
 | B1 分层存储 | DB + CAS 文件存储 | P1 ✅ | 正文存内容寻址存储，DB 只存 `content_ref` |
 | B2 关系建模 | Item.content_hash + 身份 | P1 ✅ | 同文多源去重生效；身份（id/guid）优先于内容匹配，否则改写正文会撞冻结的 GUID（ADR 0008 相关） |
 | B3 处理管道 | app/pipeline + Job/JobRun | P1 ✅ | Job=声明、JobRun=执行；采集幂等可重放；处理器链挂载留 P3 |
-| B4 处理插件 | Processor hookspec | P3 | 翻译插件跑通 enrich |
+| B4 处理插件 | Processor hookspec | P3 ✅ | 翻译（ADR 0018/0030/0031）、fulltext、embedding（ADR 0035/0040，issue #82）均已交付 |
 | B5 错误分类法 | JobRun.error_class（enum 单源） | P1 ✅ | 五分类落库且 DB CHECK 强制；分类优先级与重试表同源 |
 | C1 RSS 输出 | ~~发布服务~~ | P1 → 公网化移除（ADR 0016） | 无鉴权 feed 不能上公网；内容消费收敛到 C4 Reader API，`rss_out` 模块保留供 P3 复用 |
 | C2 查询 API | /v1/items + item://{id} | P1 ✅ → 检索增强见 ADR 0035 | 紧凑摘要 + keyset 分页 + 字段选择；正文独立端点；检索（全文/语义/混合）与向量为 P3 之后新增能力 |
-| C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅 |
+| C3 富媒体输出 | enclosure | P3 | 音频 feed 可订阅——**有意不做**（ADR 0041；触发条件：出现真实订阅者） |
 | C4 Reader API | /api/greader.php | P1 ✅（原 P3） | NNW FreshRSS 登录 + 已读/星标同步，实测通过；ADR 0004 提前 |
-| C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 Reader API 与 MCP 工具两条路径均不可见（公开 RSS 渲染已移除，ADR 0016）；P3 处理器链联动待做。**注意**：`ready` → `published` 由可观察的首次输出触发，**每条输出路径都会写 `first_publish`**（Reader API contents 与 `/v1/items/{id}/body`；公开 RSS 渲染已移除，ADR 0016） |
+| C5 发布闸门 | Item.publish_status | P1 ✅ | pending 对 Reader API 与 MCP 工具两条路径均不可见（公开 RSS 渲染已移除，ADR 0016）；处理器链联动**已交付**（issue #82 的 `_open_gate_if_complete`，由 `tests/integration/test_gate_with_model_identities.py` 钉住）。**注意**：`ready` → `published` 由可观察的首次输出触发，**每条输出路径都会写 `first_publish`**（Reader API contents 与 `/v1/items/{id}/body`；公开 RSS 渲染已移除，ADR 0016） |
 | D1-D6 操作面 | MCP 工具组（22 工具） | P1 ✅ | 见 §2.3 与 `tests/contract/mcp_tools.json`；D1 诊断类工具（diagnose_source 等）属 P2 |
 | E1-E6 插件系统 | Plugin Runtime | P2/P3 | 见 §3 |
 | F1 可复现环境 | Nix Flake + direnv + uv | P1 ✅ | clean slate 下 `nix develop --command just ci` 通过 |
