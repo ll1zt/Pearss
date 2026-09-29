@@ -1,6 +1,6 @@
 """Integration tests for authenticated paging: state, and failing closed.
 
-Scenario register (normative source: SCENARIOS.md; issues #130, #131; AC-117..121).
+Scenario register (normative source: SCENARIOS.md; issues #130..#132; AC-117..122).
 
 The HTTP layer is replaced with a MockTransport serving recorded-shaped
 payloads, so these exercise the real repository writes and the real walk
@@ -1019,6 +1019,70 @@ def test_a_partial_failure_does_not_skip_the_unfetched_page(
         f"a newer tweet below a failed page was skipped for good: {stored}"
     )
     assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 300
+
+
+@pytest.mark.integration
+def test_a_mid_walk_network_failure_is_reported_as_network(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial failure keeps its own class, not a blanket `blocked`.
+
+    `blocked` means "the origin refused us, wait"; reporting it for a timeout
+    sends the operator to the wrong remedy (AC-122).
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    def route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["300", "200"], "C1"))
+        raise httpx.ConnectError("connection dropped")
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    result = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+
+    assert result.succeeded is False
+    assert result.error_class == ErrorClass.NETWORK.value
+
+
+@pytest.mark.integration
+def test_a_mid_walk_credential_failure_is_reported_as_auth(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that dies mid-walk is `auth`, not `blocked` or `network`."""
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    def route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=timeline(["300", "200"], "C1"))
+        return httpx.Response(401)
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    result = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+
+    assert result.succeeded is False
+    assert result.error_class == ErrorClass.AUTH.value
 
 
 @pytest.mark.integration

@@ -103,11 +103,27 @@ class WalkResult:
     # The newest id seen, for persisting the frontier even when nothing was kept.
     newest_id: int | None = None
     failed: str | None = None
+    # The failing exception's own ErrorClass value, when it carries one. paging
+    # stays free of the domain enum; the caller maps the value back and chooses
+    # a fallback for a failure that named none (issue #132).
+    failed_class: str | None = None
 
     @property
     def ok(self) -> bool:
         """Whether at least one page was retrieved."""
         return bool(self.pages)
+
+
+def _class_of(exc: BaseException) -> str | None:
+    """The failure's own ErrorClass value, when it carries one.
+
+    paging stays free of the domain enum: the exception carries the value and
+    the caller maps it back. A failure with no class of its own (a bug rather
+    than an origin response) leaves this None so the caller can pick a
+    fallback instead of inventing a class here.
+    """
+    value = getattr(exc, "error_class", None)
+    return str(value) if value is not None else None
 
 
 def walk(
@@ -169,6 +185,7 @@ def walk(
                     pages_used=pages_used,
                     newest_id=newest,
                     failed=str(exc),
+                    failed_class=_class_of(exc),
                 )
             raise
 
