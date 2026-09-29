@@ -269,6 +269,21 @@ def test_unusable_bodies_raise_rather_than_returning_empty(
     fetch_raises(lambda r: httpx.Response(200, text=body), config())
 
 
+@pytest.mark.unit
+def test_an_oversized_response_is_refused_by_size() -> None:
+    """Issue #85: this fetch is capped like every other one.
+
+    CookieCloud answers with a small JSON document, so anything larger is a
+    mistake or a bomb -- and the message has to say which, because "too big" is
+    a different fix from "rejected the password".
+    """
+    message = fetch_raises(
+        lambda r: httpx.Response(200, content=b"x" * (cc.MAX_COOKIE_BYTES + 1)),
+        config(),
+    )
+    assert "exceeded" in message
+
+
 # --------------------------------------------------------------------------
 # Status classification
 # --------------------------------------------------------------------------

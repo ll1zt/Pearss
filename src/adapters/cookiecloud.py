@@ -36,7 +36,13 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from adapters.http import FetchError, read_capped
+
 LOGGER = logging.getLogger(__name__)
+
+# A CookieCloud response is a small JSON document; anything larger is a mistake
+# or a bomb (issue #85).
+MAX_COOKIE_BYTES = 256 * 1024
 
 # These are environment variable *names*, not values: the secret lives in the
 # environment and never in the repository. S105 matches on an identifier
@@ -213,7 +219,13 @@ def fetch_cookie_header(
     if response.status_code != 200:
         raise CookieCloudError(f"CookieCloud returned HTTP {response.status_code}")
 
-    cookie = _normalise(response.text)
+    try:
+        body = read_capped(response, MAX_COOKIE_BYTES, str(response.url))
+    except FetchError as exc:
+        # The module's own error type, so callers keep one thing to catch; the
+        # message says it was the size, because that is a different fix.
+        raise CookieCloudError(str(exc)) from exc
+    cookie = _normalise(body.decode("utf-8", errors="replace"))
     _cache_put(config.cache_key, cookie, config.cache_seconds)
     return cookie
 

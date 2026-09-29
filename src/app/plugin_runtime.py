@@ -454,6 +454,11 @@ class PluginChild:
         """
         import base64
 
+        # Same local import as `handle_request` below: the host's cap is the one
+        # that applies to a child's reply, so both proxy paths read it the same
+        # way (issue #85).
+        from adapters.http import DEFAULT_MAX_BYTES, read_capped
+
         params = call.params
         if self._http_transport is None:
             error = protocol.error_result(
@@ -485,9 +490,15 @@ class PluginChild:
                             [k.decode(), v.decode()]
                             for k, v in http_response.headers.raw
                         ],
-                        "body_b64": base64.b64encode(http_response.content).decode(
-                            "ascii"
-                        ),
+                        # Capped like the other read in this module: a plugin
+                        # request can reach any host the policy allows, and a
+                        # few KB of gzip decodes to whatever the origin likes
+                        # (issue #85).
+                        "body_b64": base64.b64encode(
+                            read_capped(
+                                http_response, DEFAULT_MAX_BYTES, str(request.url)
+                            )
+                        ).decode("ascii"),
                     }
                     outcome["result"] = body
                 except Exception as exc:  # transport-level failure
