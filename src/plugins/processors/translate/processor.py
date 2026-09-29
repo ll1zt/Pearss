@@ -55,8 +55,10 @@ LOGGER = logging.getLogger(__name__)
 BASE_URL_ENV: Final = "PEARSS_TRANSLATE_BASE_URL"
 API_KEY_ENV: Final = "PEARSS_TRANSLATE_API_KEY"
 MODEL_ENV: Final = "PEARSS_TRANSLATE_MODEL"
-# Optional comma-separated fallback chain, tried in order when a model hits
-# a rate limit or a server error: PEARSS_TRANSLATE_MODELS="m1,m2,m3".
+# Optional comma-separated fallback chain, tried in order on *any* failure of
+# a model -- unreachable, a non-2xx, or a 200 whose body is empty/not JSON --
+# not only a rate limit or a server error (issue #145).
+# PEARSS_TRANSLATE_MODELS="m1,m2,m3".
 MODELS_ENV: Final = "PEARSS_TRANSLATE_MODELS"
 MAX_CHARS: Final = 24_000
 
@@ -642,6 +644,127 @@ def _segment(text_to_split: str) -> list[str]:
     return chunks
 
 
+def _request_one(
+    source_text: str, *, language: str, base: str, key: str, model: str
+) -> str:
+    """One chat completion for one model; every failure is a ProcessorError.
+
+    Turning each failure into a value rather than an exception is what lets the
+    caller's loop treat "this model said no" and "the network was down" the
+    same way (issue #145): both mean *try the next model*.
+    """
+    body = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"Translate the user's text into {language}. Reply with "
+                    "the translation only: no preamble, no notes, keep the "
+                    "original paragraph breaks."
+                ),
+            },
+            {"role": "user", "content": source_text},
+        ],
+        "temperature": 0,
+    }
+    try:
+        response = httpx.post(
+            f"{base}/chat/completions",
+            headers={"authorization": f"Bearer {key}"},
+            json=body,
+            # LLM completions through a relayed endpoint regularly take
+            # minutes: the read bound is what bounds a slow generation,
+            # and cutting it at 120s killed real requests (observed: a
+            # gemini-flash reply took 126s end to end).
+            timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
+        )
+    except httpx.HTTPError as exc:
+        raise ProcessorError(
+            ErrorClass.NETWORK, f"translation provider unreachable: {exc!r}"
+        ) from exc
+
+    if response.status_code == 401:
+        # Its own class because the remedy is a new key -- but still just this
+        # model failing, so the chain moves on (issue #145).
+        raise ProcessorError(ErrorClass.AUTH, "provider rejected the API key")
+    if response.status_code in (429, 500, 502, 503, 504):
+        # Rate limit / server error: transient, so the aggregate keeps the
+        # worker's retry when one of these is anywhere in the chain.
+        raise ProcessorError(
+            ErrorClass.BLOCKED if response.status_code == 429 else ErrorClass.NETWORK,
+            f"provider returned HTTP {response.status_code}",
+        )
+    if response.status_code != 200:
+        # A 4xx that is not 401/429 is the request's fault, not the
+        # network's: an unknown model name, a malformed body, an endpoint
+        # that does not exist. Classifying those as `network` made the
+        # worker retry them to exhaustion -- three identical 400s, each
+        # after a backoff, while the real problem was a configuration
+        # string that only surfaced once the attempts ran out.
+        #
+        # `parse` is the taxonomy's home for "this cannot be processed as
+        # things stand": not retried automatically, and not `auth` either
+        # (the key was accepted; the request was refused).
+        if 400 <= response.status_code < 500:
+            raise ProcessorError(
+                ErrorClass.PARSE,
+                f"provider rejected the request: HTTP {response.status_code}"
+                f" ({_provider_reason(response)})",
+            )
+        raise ProcessorError(
+            ErrorClass.NETWORK, f"provider returned HTTP {response.status_code}"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ProcessorError(
+            ErrorClass.PARSE, f"provider reply was not JSON: {exc}"
+        ) from exc
+    return _parse_reply(payload)
+
+
+# Failure classes the worker retries on its own. A chain that contains one of
+# them keeps that retry even when a later, permanent failure is also present:
+# the row only needed waiting, and the unrelated refusal must not pin it.
+_TRANSIENT_CHAIN_CLASSES: Final[frozenset[ErrorClass]] = frozenset(
+    {ErrorClass.NETWORK, ErrorClass.BLOCKED}
+)
+
+# One reason per model, trimmed so the first model's long reason cannot crowd
+# the later ones out of the worker's own `detail[:500]` bound.
+_CHAIN_DETAIL_PER_MODEL: Final = 120
+_CHAIN_DETAIL_LIMIT: Final = 500
+
+
+def _aggregate_failure(
+    failures: list[tuple[str, ProcessorError]],
+) -> ProcessorError:
+    """The chain's failure once every model has said no.
+
+    Classification (issue #145): if any model's failure was transient
+    (`network`/`blocked`), the chain takes the *last* transient failure's class,
+    so a row where one model was merely rate-limited keeps the worker's retry
+    instead of being pinned permanent by a later unrelated 400. With no
+    transient failure it takes the last failure's class.
+
+    The detail names every model and its reason, in the order they were tried:
+    "which models did this run actually ask, and what did each say?" is the
+    question an operator has, and the last model's reason alone answers half.
+    """
+    transient = [
+        failure
+        for _, failure in failures
+        if failure.error_class in _TRANSIENT_CHAIN_CLASSES
+    ]
+    chosen = transient[-1] if transient else failures[-1][1]
+    detail = "; ".join(
+        f"{model}: {failure.detail}"[:_CHAIN_DETAIL_PER_MODEL]
+        for model, failure in failures
+    )
+    return ProcessorError(chosen.error_class, detail[:_CHAIN_DETAIL_LIMIT])
+
+
 def _translate_one(
     source_text: str,
     *,
@@ -650,94 +773,36 @@ def _translate_one(
     key: str,
     models: list[str],
 ) -> str:
-    """One chat completion through the model fallback chain."""
+    """One chat completion through the model fallback chain.
+
+    Every model is tried before the item is allowed to fail (issue #145): a
+    failure of one model -- unreachable, any non-2xx, a 200 whose body is empty
+    or not JSON -- is a reason to ask the next, never a reason to end the
+    chain. The chain therefore has exactly one terminal path, the aggregate
+    raised after the loop; the fallback is not a special case of a rate limit.
+
+    The two accepted costs, recorded in issue #145: a configuration-class error
+    (a wrong key, a bad model name) is paid on every model rather than once,
+    and a mis-keyed model surfaces only when every model fails and the
+    aggregate classifies as `auth`.
+    """
+    failures: list[tuple[str, ProcessorError]] = []
     for index, model in enumerate(models):
-        body = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Translate the user's text into {language}. Reply with "
-                        "the translation only: no preamble, no notes, keep the "
-                        "original paragraph breaks."
-                    ),
-                },
-                {"role": "user", "content": source_text},
-            ],
-            "temperature": 0,
-        }
         try:
-            response = httpx.post(
-                f"{base}/chat/completions",
-                headers={"authorization": f"Bearer {key}"},
-                json=body,
-                # LLM completions through a relayed endpoint regularly take
-                # minutes: the read bound is what bounds a slow generation,
-                # and cutting it at 120s killed real requests (observed: a
-                # gemini-flash reply took 126s end to end).
-                timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
+            return _request_one(
+                source_text, language=language, base=base, key=key, model=model
             )
-        except httpx.HTTPError as exc:
+        except ProcessorError as exc:
+            failures.append((model, exc))
             if index + 1 < len(models):
                 LOGGER.warning(
-                    "model %s unreachable (%r); falling back to %s",
+                    "translate model %s failed (%s): %s; falling back to %s",
                     model,
-                    exc,
+                    exc.error_class.value,
+                    exc.detail,
                     models[index + 1],
                 )
-                continue
-            raise ProcessorError(
-                ErrorClass.NETWORK, f"translation provider unreachable: {exc!r}"
-            ) from exc
-
-        if response.status_code == 401:
-            raise ProcessorError(ErrorClass.AUTH, "provider rejected the API key")
-        if response.status_code in (429, 500, 502, 503, 504):
-            # Rate limit / server error: the fallback chain exists exactly
-            # for this. The last model re-raises as blocked/network.
-            if index + 1 < len(models):
-                LOGGER.warning(
-                    "model %s returned %d; falling back to %s",
-                    model,
-                    response.status_code,
-                    models[index + 1],
-                )
-                continue
-            raise ProcessorError(
-                ErrorClass.BLOCKED
-                if response.status_code == 429
-                else ErrorClass.NETWORK,
-                f"all models exhausted; last HTTP {response.status_code}",
-            )
-        if response.status_code != 200:
-            # A 4xx that is not 401/429 is the request's fault, not the
-            # network's: an unknown model name, a malformed body, an endpoint
-            # that does not exist. Classifying those as `network` made the
-            # worker retry them to exhaustion -- three identical 400s, each
-            # after a backoff, while the real problem was a configuration
-            # string that only surfaced once the attempts ran out.
-            #
-            # `parse` is the taxonomy's home for "this cannot be processed as
-            # things stand": not retried automatically, and not `auth` either
-            # (the key was accepted; the request was refused).
-            if 400 <= response.status_code < 500:
-                raise ProcessorError(
-                    ErrorClass.PARSE,
-                    f"provider rejected the request: HTTP {response.status_code}"
-                    f" ({_provider_reason(response)})",
-                )
-            raise ProcessorError(
-                ErrorClass.NETWORK, f"provider returned HTTP {response.status_code}"
-            )
-        try:
-            reply = _parse_reply(response.json())
-        except ValueError as exc:
-            raise ProcessorError(
-                ErrorClass.PARSE, f"provider reply was not JSON: {exc}"
-            ) from exc
-
-        return reply
-    raise ProcessorError(
-        ErrorClass.NETWORK, "model chain exhausted"
-    )  # pragma: no cover
+            continue
+    # `models` is non-empty by construction (`_configured` raises otherwise),
+    # so reaching here means every model contributed a failure.
+    raise _aggregate_failure(failures)
