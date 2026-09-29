@@ -1,5 +1,7 @@
 """Integration tests for authenticated paging: state, and failing closed.
 
+Scenario register (normative source: SCENARIOS.md; issue #130; AC-117..119).
+
 The HTTP layer is replaced with a MockTransport serving recorded-shaped
 payloads, so these exercise the real repository writes and the real walk
 without a network or a credential.
@@ -558,8 +560,14 @@ def test_a_busy_catch_up_walks_past_the_first_walk_page_count(
         if cursor == "N1":
             return httpx.Response(200, content=timeline(["700", "600"], "N2"))
         if cursor == "N2":
-            # This page carries the frontier id, so the walk stops here.
+            # This page carries the frontier id, but it still contributes 500,
+            # so the walk needs one more page to prove it has passed 100: a
+            # seen id alone is not an ending (a module can carry a seen parent
+            # above newer replies, issue #130).
             return httpx.Response(200, content=timeline(["500", "100"], "N3"))
+        if cursor == "N3":
+            # Nothing above the frontier: the catch-up ends here.
+            return httpx.Response(200, content=timeline(["50", "40"], None))
         raise AssertionError(f"walk went past the frontier: {cursor}")
 
     registration = collector_registry.by_name("twitter")
@@ -577,9 +585,10 @@ def test_a_busy_catch_up_walks_past_the_first_walk_page_count(
     )
     session.commit()
 
-    assert requested == ["NEWEST", "N1", "N2"], requested
-    # 900/800/700/600/500 are new; the page holding the frontier contributes
-    # nothing from 100 onwards.
+    assert requested == ["NEWEST", "N1", "N2", "N3"], requested
+    # 900/800/700/600/500 are new; the page carrying the frontier id still
+    # contributes 500, so the walk confirms with one more page that nothing is
+    # left above it.
     assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 900
 
 
@@ -714,6 +723,189 @@ def test_tweets_inside_a_module_are_stored_by_the_full_walk(
         f"the module's parent was lost: {stored}"
     )
     assert any("a reply" in t for t in stored), f"the module's reply was lost: {stored}"
+
+
+def _tweet_result(rid: str, text: str) -> dict[str, object]:
+    return {
+        "__typename": "Tweet",
+        "rest_id": rid,
+        "core": {
+            "user_results": {
+                "result": {"core": {"name": "Tester", "screen_name": "tester"}}
+            }
+        },
+        "legacy": {
+            "full_text": text,
+            "created_at": "Sun Aug 09 16:00:00 +0000 2026",
+            "entities": {"urls": [], "media": []},
+        },
+    }
+
+
+def _top_level_entry(rid: str, text: str) -> dict[str, object]:
+    return {
+        "entryId": f"tweet-{rid}",
+        "sortIndex": rid,
+        "content": {
+            "itemContent": {"tweet_results": {"result": _tweet_result(rid, text)}}
+        },
+    }
+
+
+def _module_entry(module_id: str, items: list[tuple[str, str]]) -> dict[str, object]:
+    """A conversation module whose items are laid out parent-then-replies."""
+    return {
+        "entryId": f"home-conversation-{module_id}",
+        "sortIndex": module_id,
+        "content": {
+            "__typename": "TimelineTimelineModule",
+            "items": [
+                {
+                    "entryId": f"tweet-{rid}",
+                    "item": {
+                        "itemContent": {
+                            "tweet_results": {"result": _tweet_result(rid, text)}
+                        }
+                    },
+                }
+                for rid, text in items
+            ],
+        },
+    }
+
+
+def _page(entries: list[dict[str, object]], next_cursor: str | None) -> bytes:
+    if next_cursor:
+        entries = [
+            *entries,
+            {
+                "entryId": f"cursor-bottom-{next_cursor}",
+                "content": {"value": next_cursor},
+            },
+        ]
+    return json.dumps(
+        {
+            "data": {
+                "home": {
+                    "home_timeline_urt": {
+                        "instructions": [
+                            {"type": "TimelineAddEntries", "entries": entries}
+                        ]
+                    }
+                }
+            }
+        }
+    ).encode()
+
+
+@pytest.mark.integration
+def test_a_new_reply_is_not_dropped_when_its_parent_is_already_seen(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The frontier truncation must not drop a reply that follows its parent.
+
+    A conversation module lists the parent (older, already ingested) before the
+    reply (newer). A prefix scan stops at the parent, drops the reply -- and
+    every newer tweet after it -- then ends the round, so they are lost for
+    good: the frontier is then advanced past them. This drives the whole
+    pipeline and reads the corpus back, which is the only place that answers
+    "is the reply in my reader?" (AC-117).
+    """
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    # 510 is the newest id already ingested; the module's parent (500) is below
+    # it, its reply (520) is above it -- newer content, placed after a seen id.
+    row = session.get(Source, SOURCE_ID)
+    assert row is not None
+    row.seen_frontier = 510
+    session.commit()
+
+    page1 = _page(
+        [
+            _top_level_entry("530", "a new top-level post"),
+            _module_entry("510", [("500", "the old parent"), ("520", "a new reply")]),
+        ],
+        "C1",
+    )
+    page2 = _page(
+        [_top_level_entry("400", "old"), _top_level_entry("300", "older")], None
+    )
+
+    def route(request: httpx.Request) -> httpx.Response:
+        cursor = json.loads(request.content)["variables"].get("cursor")
+        if cursor is None:
+            return httpx.Response(200, content=page1)
+        if cursor == "C1":
+            return httpx.Response(200, content=page2)
+        raise AssertionError(f"walk went past the frontier: {cursor}")
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+    collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+
+    stored = _stored_titles(session)
+    assert any("a new reply" in t for t in stored), (
+        f"the newer reply was dropped by the frontier scan: {stored}"
+    )
+    assert any("a new top-level post" in t for t in stored), (
+        f"the newer top-level post was dropped: {stored}"
+    )
+
+
+@pytest.mark.integration
+def test_a_repeat_catch_up_neither_duplicates_nor_moves_the_frontier_back(
+    session: Session, storage: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second catch-up over the same page inserts nothing and keeps the
+    frontier (AC-119): the fix must not introduce duplicates or drag the anchor
+    backwards."""
+    from plugins.collectors.twitter import client as x_client
+
+    monkeypatch.setenv(x_client.AUTH_TOKEN_ENV, "synthetic-auth")
+    monkeypatch.setenv(x_client.CT0_ENV, "synthetic-ct0")
+
+    page = _page(
+        [_top_level_entry("530", "first"), _top_level_entry("520", "second")], None
+    )
+
+    def route(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=page)
+
+    registration = collector_registry.by_name("twitter")
+    assert registration is not None
+    collector_registry.set_http_transport("twitter", httpx.MockTransport(route))
+
+    first = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+    assert first.inserted == 2
+    assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 530
+
+    second = collect_paged(
+        session,
+        source=source_row(session),
+        registration=registration,
+        client=httpx.Client(),
+    )
+    session.commit()
+    assert second.drafts == 0
+    assert second.inserted == 0
+    assert len(_stored_titles(session)) == 2
+    assert paging_state(session, source_id=SOURCE_ID).seen_frontier == 530
 
 
 @pytest.mark.integration
