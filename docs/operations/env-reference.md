@@ -173,7 +173,11 @@ PEARSS_DOCS_ENABLED=0
 # PEARSS_TRANSLATE_API_KEY=
 # 主模型。**只放一个模型名**，与 MODELS 二选一，后者优先。
 # PEARSS_TRANSLATE_MODEL=gpt-4o-mini
-# 备选链，逗号分隔。主模型遇到 429/5xx/不可达时依次降级。
+# 备选链，逗号分隔。任一 model 失败（429/5xx/不可达、401、其他 4xx、
+# 200 但正文为空或不是 JSON）都换下一个 model，只有全部 model 都失败才终止；
+# 终止时的分类取最后一个瞬时类失败（network/blocked），否则取最后一个失败。
+# detail 汇总每个 model 的原因。实测踩过：主模型回地域 400 时链直接中断，
+# 备选模型从未被调用。
 # PEARSS_TRANSLATE_MODELS=gpt-4o-mini,gpt-4o,deepseek-chat
 # ⚠️ 把逗号分隔的多模型写进**单数**变量会让 provider 直接 400
 #    （`unknown provider for model "a,b"`）——它被当成了一个模型名。
