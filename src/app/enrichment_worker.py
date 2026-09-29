@@ -36,6 +36,7 @@ from adapters.db_models import ItemEnrichment
 from adapters.repository import timestamp
 from adapters.repository.enrichment import upstream_for_spec
 from app.fetch_pacing import PACED_PROCESSORS, host_of, pacer
+from app.liveness_watch import LoopWatch, always_alive
 from app.processor_runtime import LEASE_GRACE_SECONDS, run_processor
 from core.enrichment import EnrichmentStatus
 from core.enums import ErrorClass, ItemEvent, PublishStatus
@@ -664,6 +665,7 @@ class EnrichmentWorker:
         processors: dict[str, Any],
         sweep_seconds: float = DEFAULT_SWEEP_SECONDS,
         concurrency: int | None = None,
+        watch: Callable[[], tuple[bool, str]] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._processors = processors
@@ -679,6 +681,9 @@ class EnrichmentWorker:
             self._concurrency = concurrency or DEFAULT_CONCURRENCY
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
+        # Watches the scheduler when one is handed in: a worker with nothing to
+        # watch reports on nothing, rather than on a name it guessed.
+        self._watch = LoopWatch(name="enrichment-worker", watch=watch or always_alive)
         self._cancel_event = threading.Event()
         self._inflight: asyncio.Task[dict[str, int]] | None = None
 
@@ -732,6 +737,29 @@ class EnrichmentWorker:
                 LOGGER.warning(
                     "enrichment storage operation failed; retrying next sweep"
                 )
+            # The reverse of the scheduler's watch (issue #61). This loop is the
+            # only thing still ticking that can notice the scheduler stopping,
+            # and the scheduler is the one whose death stops collection
+            # entirely -- so leaving this direction out would silence the
+            # failure that matters most. Failures here must not kill the sweep
+            # loop: an alert that cannot be sent is not a reason to stop working.
+            try:
+                self._watch.check()
+            except Exception:
+                LOGGER.exception("liveness watch failed; continuing to sweep")
+
+    def check_loops(self) -> bool:
+        """Report a stopped scheduler, if this is the loop that noticed (#61).
+
+        Split out of `_loop` so the alert pass can be driven without running the
+        sweep forever, and so its failure boundary is visible: an alert that
+        cannot be sent is not a reason to stop processing items.
+        """
+        try:
+            return self._watch.check()
+        except Exception:
+            LOGGER.exception("liveness watch failed; continuing to sweep")
+            return False
 
     async def sweep_once(self) -> dict[str, int]:
         async with self._lock:

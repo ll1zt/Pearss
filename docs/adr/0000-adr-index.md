@@ -91,4 +91,5 @@ docs/adr/
 | [0035](0035-retrieval-capability.md) | 检索能力：FTS5 中日文全文（重叠 bigram+unigram 预分词、短语查询）、本地多语言向量（384 维）、RRF 混合（非级联）；**修订架构 §1.3 的“全文搜索引擎”非目标** | accepted（**修订 architecture-spec §1.3 非目标边界**） | 2026-09-27 |
 | [0036](0036-tool-face-is-a-semantic-projection.md) | 工具面是 /v1 的语义投影：一 endpoint 可对多工具、聚合放端点里 | accepted（**修订 ADR 0010 的「工具与 endpoint 一一对应」一句**） | 2026-09-28 |
 | [0037](0037-cancellation-semantics.md) | 取消是执行语义：所有者写意图、协作式检查点、`cancelled` 终态（**只定义，不实现**） | accepted | 2026-09-29 |
+| [0039](0039-loop-liveness-and-its-residual-risk.md) | 循环互看：两个后台循环各自把对方的 `liveness` 送进同一条告警通道（循环无法报告自己的死亡）；**写明并接受残余风险**——两个循环同时死时静默，被动面 `/healthz` 兜底 | accepted（**补充 ADR 0034 决策 3 的第二个条件**） | 2026-09-29 |
 | [0038](0038-single-tenant-scope.md) | 单租户是范围决定：假设命名一处、启动时校验、**不做**端到端隔离（写明触发条件） | accepted | 2026-09-29 |

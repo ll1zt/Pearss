@@ -214,7 +214,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.enrichment_worker import EnrichmentWorker, default_processors
 
     worker = EnrichmentWorker(
-        app.state.session_factory, processors=default_processors()
+        app.state.session_factory,
+        processors=default_processors(),
+        watch=scheduler.liveness,
     )
     app.state.enrichment_worker = worker
     # Each loop watches the other: a loop cannot report its own death, so

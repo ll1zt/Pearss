@@ -81,6 +81,12 @@ class HealthVerdict:
     # fact comes from whichever *other* loop is still running.
     exhausted_sources: tuple[str, ...] = ()
     dead_loops: tuple[str, ...] = ()
+    # What this verdict is about, so the message can name the right thing and the
+    # right next step. A dead loop is not a collection-rate problem: its recovery
+    # is not "runs are succeeding again" (there may be no runs to judge -- often
+    # *why* the death went unnoticed), and its remedy is not the shared
+    # dependency a rate collapse points at.
+    subject: str = "collection"
 
 
 def decide_health(
@@ -91,6 +97,7 @@ def decide_health(
     min_interval_seconds: float = MIN_INTERVAL_SECONDS,
     exhausted_sources: Sequence[str] = (),
     dead_loops: Sequence[str] = (),
+    subject: str = "collection",
 ) -> HealthVerdict:
     """Whether the aggregate state needs intervention (ADR 0034).
 
@@ -110,19 +117,15 @@ def decide_health(
     # a plain dict crossing from the adapter layer, so the type guard is the
     # honest way to narrow it.
     considered = raw_considered if isinstance(raw_considered, int) else 0
-    if not isinstance(rate, (int, float)):
-        # No finished runs yet (`None`), or a shape we do not understand: there
-        # is nothing to conclude, and concluding "fine" from a missing number
-        # would be the same silence this module exists to end. Reporting
-        # "degraded" on unreadable input would be worse still -- it would fire
-        # on every fresh deployment.
-        return HealthVerdict(degraded=False, runs_considered=considered)
-    rate = float(rate)
-    dominant_class, dominant_count = _dominant_error(snapshot)
+
     # Conditions that are true regardless of the rate: a chain that can never
     # finish, and a loop that stopped. Both are worse than a low rate -- a
     # source whose every queued product failed is not "slow", it is stuck, and
-    # nothing will retry it without a person.
+    # nothing will retry it without a person. Computed *before* the rate is read,
+    # because the early return below is the case where a rate cannot be judged at
+    # all and it must not take these facts down with it: a loop that stopped is a
+    # fact whether or not there are runs to average, and a dead loop means there
+    # may be no runs to average precisely because it stopped.
     extra: list[str] = []
     if exhausted_sources:
         extra.append(
@@ -131,6 +134,24 @@ def decide_health(
         )
     if dead_loops:
         extra.append(f"background loop(s) not running: {', '.join(dead_loops)}")
+
+    if not isinstance(rate, (int, float)):
+        # No finished runs yet (`None`), or a shape we do not understand: there
+        # is nothing to conclude about the rate, and concluding "fine" from a
+        # missing number would be the same silence this module exists to end.
+        # Reporting "degraded" on unreadable input would be worse still -- it
+        # would fire on every fresh deployment -- so only the facts above get a
+        # say here.
+        return HealthVerdict(
+            degraded=bool(extra),
+            reason="; ".join(extra),
+            runs_considered=considered,
+            exhausted_sources=tuple(sorted(exhausted_sources)),
+            dead_loops=tuple(sorted(dead_loops)),
+            subject=subject,
+        )
+    rate = float(rate)
+    dominant_class, dominant_count = _dominant_error(snapshot)
     if considered < min_runs:
         return HealthVerdict(
             degraded=bool(extra),
@@ -141,6 +162,7 @@ def decide_health(
             dominant_error_count=dominant_count,
             exhausted_sources=tuple(sorted(exhausted_sources)),
             dead_loops=tuple(sorted(dead_loops)),
+            subject=subject,
         )
     if rate >= success_rate_threshold:
         return HealthVerdict(
@@ -152,6 +174,7 @@ def decide_health(
             dominant_error_count=dominant_count,
             exhausted_sources=tuple(sorted(exhausted_sources)),
             dead_loops=tuple(sorted(dead_loops)),
+            subject=subject,
         )
 
     dominant_class, dominant_count = _dominant_error(snapshot)
@@ -208,8 +231,10 @@ def alert_body(verdict: HealthVerdict) -> str:
     promise enforceable.
     """
     if not verdict.degraded:
-        return "collection recovered: runs are succeeding again"
-    lines = [verdict.reason or "collection needs attention"]
+        if verdict.subject == "collection":
+            return "collection recovered: runs are succeeding again"
+        return f"{verdict.subject} recovered: it is running again"
+    lines = [verdict.reason or f"{verdict.subject} needs attention"]
     if verdict.success_rate is not None:
         lines.append(
             f"success rate {verdict.success_rate:.0%} "
@@ -220,11 +245,21 @@ def alert_body(verdict: HealthVerdict) -> str:
             f"dominant error class: {verdict.dominant_error_class} "
             f"({verdict.dominant_error_count} runs)"
         )
-    for source in verdict.exhausted_sources:
-        lines.append(f"stuck chain: source {source}")
-    for loop in verdict.dead_loops:
-        lines.append(f"not running: {loop}")
-    lines.append("action: check the shared dependency (proxy, credentials, network)")
+    # The next step has to match the condition: a rate collapse points at a
+    # shared dependency, a stuck chain needs the retry entry point, and a stopped
+    # loop is not something an operator inspects the network for.
+    if verdict.exhausted_sources:
+        lines.append(
+            "action: fix the cause, then retry the chain (just retry-enrichments)"
+        )
+    elif verdict.dead_loops:
+        lines.append(
+            "action: check the process logs; the loop restarts with the service"
+        )
+    else:
+        lines.append(
+            "action: check the shared dependency (proxy, credentials, network)"
+        )
     return "\n".join(lines)
 
 

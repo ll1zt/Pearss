@@ -54,6 +54,7 @@ from adapters.repository import (
 # alias keeps the call sites in this module short.
 from adapters.repository import timestamp as _iso
 from adapters.repository.search_index import index_missing
+from app.liveness_watch import LoopWatch, always_alive
 from app.pipeline import CollectionResult, collect_source
 from core.alerting import AlertState
 from core.enums import ErrorClass, JobRunStatus
@@ -464,9 +465,10 @@ class Scheduler:
         # process's alerting, not a fact worth coupling to the database whose
         # failure is one of the things worth alerting about.
         self._alert_state = AlertState()
-        # None until `watch` is called: a scheduler that was never handed
-        # another loop reports on no loop, rather than on a name it guessed.
-        self._watched: Callable[[], tuple[bool, str]] | None = None
+        # Watches nothing until `watch` is called: a scheduler that was never
+        # handed another loop reports on no loop, rather than on a name it
+        # guessed.
+        self._watch = LoopWatch(name="scheduler", watch=always_alive)
         # Guards against a slow tick overlapping the next one. Without it a
         # fetch longer than the interval would stack up runs indefinitely.
         self._lock = asyncio.Lock()
@@ -546,9 +548,10 @@ class Scheduler:
 
         Set after construction because the two are built in order, and a loop
         cannot report its own death: whichever loop is still ticking is the one
-        that can say the other stopped.
+        that can say the other stopped. `LoopWatch` is shared with the worker's
+        direction so the two cannot drift apart in what they say.
         """
-        self._watched = liveness
+        self._watch = LoopWatch(name="scheduler", watch=liveness)
 
     async def _check_health_and_alert(self) -> None:
         """Speak up when collection needs a person (ADR 0034, issue #4).
@@ -592,9 +595,10 @@ class Scheduler:
         with self._session_factory() as session:
             snapshot = system_snapshot(session, tenant_id=SINGLE_TENANT)
             exhausted = exhausted_enrichment_sources(session, tenant_id=SINGLE_TENANT)
-        watched_alive, watched_name = (
-            self._watched() if self._watched is not None else (True, "")
-        )
+        # The other loop's liveness travels through its own watch rather than
+        # through this verdict: two conditions, two edges, so a stuck chain
+        # clearing cannot suppress the recovery notice for a loop that came back.
+        self._watch.check()
         verdict = decide_health(
             snapshot,
             success_rate_threshold=float(
@@ -608,7 +612,6 @@ class Scheduler:
             ),
             min_interval_seconds=ALERT_DEFAULTS.min_interval_seconds,
             exhausted_sources=exhausted,
-            dead_loops=() if watched_alive else (watched_name or "unnamed loop",),
         )
         min_interval = float(
             os.environ.get(

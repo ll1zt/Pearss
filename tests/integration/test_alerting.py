@@ -17,6 +17,8 @@ Nothing here talks to the real notify gateway.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import threading
 import time
@@ -679,3 +681,88 @@ def test_a_source_whose_chain_all_failed_is_reported(
         f"failed ({stuck}). Below the sample floor: {too_few}. Still able to "
         f"finish: {still_working}. Nothing pending: {done}."
     )
+
+
+# --------------------------------------------------------------------------
+# Issue #61 B: a loop that stops, reported by the loop that is still running
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_the_worker_reports_a_scheduler_that_stopped(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The direction that matters most, because this is the one that goes silent.
+
+    A dead scheduler stops collection entirely -- the shape of issue #4 -- and it
+    cannot report itself: the code that would notice is the code that stopped. So
+    the enrichment worker, which is still ticking, has to be the one that says
+    so. One alert on the edge, and a recovery when the loop comes back, both
+    naming the loop rather than the watcher.
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    # Long, not zero: the interval is what suppresses a repeat of a *continuing*
+    # condition, so zeroing it here would assert away the thing being asserted.
+    # An edge and a recovery both ignore the interval, which is the other half.
+    monkeypatch.setenv("PEARSS_ALERT_MIN_INTERVAL_SECONDS", "3600")
+
+    from app.enrichment_worker import EnrichmentWorker
+    from app.scheduler import Scheduler
+
+    scheduler = Scheduler(session_factory, client=None, tick_seconds=3600)  # type: ignore[arg-type]
+    worker = EnrichmentWorker(session_factory, processors={}, watch=scheduler.liveness)
+
+    async def scenario() -> list[bool]:
+        await scheduler.start()
+        assert scheduler.liveness()[0] is True
+        quiet = worker.check_loops()
+
+        # Kill it the way an escaped error would: the task ends, the object
+        # stays -- exactly the state the health endpoint reads as not alive.
+        assert scheduler._task is not None
+        scheduler._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await scheduler._task
+
+        stopped = worker.check_loops()
+        repeated = worker.check_loops()
+
+        await scheduler.start()
+        recovered = worker.check_loops()
+        return [quiet, stopped, repeated, recovered]
+
+    quiet, stopped, repeated, recovered = asyncio.run(scenario())
+    assert quiet is False, "a live scheduler is not news"
+    assert stopped is True, "the worker must not let a dead scheduler go unsaid"
+    assert repeated is False, "one edge, not one per sweep"
+    assert recovered is True, "recovery is reported immediately"
+
+    stopped_body, recovered_body = sink.bodies()
+    assert stopped_body["title"] == "Pearss loop stopped"
+    assert stopped_body["text"] == (
+        "background loop(s) not running: scheduler\n"
+        "action: check the process logs; the loop restarts with the service"
+    ), stopped_body
+    assert recovered_body["title"] == "Pearss loop recovered"
+    assert recovered_body["text"] == (
+        "background processing recovered: it is running again"
+    ), recovered_body
+
+
+@pytest.mark.integration
+def test_a_watch_that_was_never_handed_a_loop_reports_nothing(
+    sink: _AlertSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A loop with nothing to watch must not name one.
+
+    Reporting a guessed name would be worse than silence: it would send an
+    operator to look at a component nobody checked.
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+
+    from app.liveness_watch import LoopWatch
+
+    assert LoopWatch(name="scheduler", watch=lambda: (True, "")).check() is False
+    assert sink.bodies() == []
