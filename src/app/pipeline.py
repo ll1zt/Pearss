@@ -510,7 +510,10 @@ def collect_paged(
     The walk itself is collector knowledge — credentials, page shape, origin
     recovery quirks — and lives in the collector (`collect_pages`). The host
     owns everything durable: it reads the paging state, hands it in, stores
-    the resulting drafts and writes the frontier back. A collector never
+    the resulting drafts and writes the frontier back. A mid-walk failure
+    keeps the pages that did arrive and leaves the frontier where it was:
+    moving it past content that was never fetched would skip that content for
+    good (issue #131). A collector never
     touches SQLAlchemy, and this module never imports a collector module.
     """
     from adapters.repository import PagingState
@@ -533,23 +536,39 @@ def collect_paged(
     set_source_title_if_absent(
         session, source_id=source.id, title=_paged_source_title(registration)
     )
-    # Only a budget-limited walk yields a floor candidate, and the walk says
-    # so itself -- cursors are opaque, so no comparison here could tell a
-    # floor from a gap position or a frontier stop.
-    save_paging_state(
-        session,
-        source_id=source.id,
-        newest_id=walk.newest_id,
-        floor_candidate=walk.floor_candidate,
-    )
 
     if walk.error_class is not None:
+        # A partial walk: a page failed after earlier ones arrived. The walk
+        # kept those pages by contract, so store them -- and deliberately do
+        # not move the frontier. Advancing it past content that was never
+        # fetched (the page that failed, and everything below it) would make
+        # the next round start at the top, meet the moved frontier and stop,
+        # skipping that content for good (issue #131).
+        if walk.drafts:
+            normalise_and_store(
+                session,
+                walk.drafts,
+                tenant_id=tenant_id,
+                chain=chain_for_source(session, source_id=source.id),
+            )
         # The walk classifies itself; the host just carries it onto the run.
         return CollectionResult(
             succeeded=False,
             error_class=walk.error_class.value,
             detail=walk.detail,
         )
+
+    # Only a budget-limited walk yields a floor candidate, and the walk says
+    # so itself -- cursors are opaque, so no comparison here could tell a
+    # floor from a gap position or a frontier stop. Written only on a clean
+    # end: a frontier moved by a partial walk would strand the unfetched
+    # pages below it.
+    save_paging_state(
+        session,
+        source_id=source.id,
+        newest_id=walk.newest_id,
+        floor_candidate=walk.floor_candidate,
+    )
 
     ingested = normalise_and_store(
         session,

@@ -1,5 +1,7 @@
 """Tests for timeline paging: frontier, gap detection, budget, partial results.
 
+Scenario register (normative source: SCENARIOS.md; issue #130; AC-117..119).
+
 `fetch_page` is a scripted stand-in, so every case is deterministic and no
 sleep is involved -- pacing belongs to the caller and is not tested here.
 """
@@ -11,8 +13,8 @@ import pytest
 from plugins.collectors.twitter.paging import (
     Page,
     WalkResult,
+    ids_above_frontier,
     to_int,
-    truncate_at_seen,
     walk,
 )
 
@@ -65,21 +67,49 @@ def test_ids_parse_from_both_str_and_int() -> None:
 
 
 @pytest.mark.unit
-def test_truncation_stops_at_the_first_id_already_ingested() -> None:
-    ids = ["300", "200", "100"]
-    assert truncate_at_seen(ids, 250) == ["300"]
-    assert truncate_at_seen(ids, 350) == []
-    assert truncate_at_seen(ids, 50) == ids
-    assert truncate_at_seen(ids, None) == ids
+def test_ids_above_the_frontier_are_kept_regardless_of_page_order() -> None:
+    """An id above the frontier can appear *after* one at or below it.
+
+    A page is not globally descending: a conversation module lists its parent
+    (older) before its replies (newer), so a prefix scan stops at the first
+    seen id and silently drops the newer ids that follow it (AC-118).
+    """
+    ids = ["300", "200", "250", "100"]
+    # 250 > 200 but sits after it: the prefix scan this replaced returned ["300"].
+    assert ids_above_frontier(ids, 200) == ["300", "250"]
+    assert ids_above_frontier(ids, 350) == []
+    assert ids_above_frontier(ids, 50) == ids
+    assert ids_above_frontier(ids, None) == ids
 
 
 @pytest.mark.unit
-def test_the_walk_stops_at_the_frontier_without_reading_deeper() -> None:
-    """Reaching already-seen ids means there is nothing left to ingest.
+def test_a_catch_up_ends_on_a_page_that_contributes_nothing_new() -> None:
+    """Termination is "this page had no id above the frontier".
 
-    Continuing would spend requests on content the store already has, and on a
-    live timeline the newest page can be entirely seen while deeper pages are
-    not, so the stop has to be per-page.
+    It is *not* "this page contained a seen id": a conversation module puts an
+    already-seen parent above its newer replies, so stopping at the first seen
+    id ends the round while newer content is still below it (AC-118).
+    """
+    script = Script(
+        [
+            page(["300", "200", "250"], next_cursor="C1"),
+            page(["150", "100"], next_cursor="C2"),
+        ]
+    )
+    result = walk(fetch_page=script, max_pages=5, seen_frontier=200)
+    assert list(result.keep_ids) == ["300", "250"]
+    assert result.pages_used == 2
+    assert result.floor_candidate is None
+    assert script.requested == [None, "C1"]
+
+
+@pytest.mark.unit
+def test_the_walk_stops_once_a_page_is_entirely_at_or_below_the_frontier() -> None:
+    """A whole seen page is the terminator; one seen id is not enough.
+
+    The extra page is deliberate: a page above the frontier can still carry a
+    seen id (a module's old parent) while newer ids remain below it, so only a
+    page with nothing new proves the frontier has been passed.
     """
     script = Script(
         [
@@ -88,10 +118,10 @@ def test_the_walk_stops_at_the_frontier_without_reading_deeper() -> None:
         ]
     )
     result = walk(fetch_page=script, max_pages=5, seen_frontier=260)
-    assert result.pages_used == 1
     assert list(result.keep_ids) == ["300"]
+    assert result.pages_used == 2
     assert result.floor_candidate is None
-    assert len(script.requested) == 1
+    assert script.requested == [None, "C1"]
 
 
 @pytest.mark.unit
@@ -272,10 +302,16 @@ def test_a_budget_limited_walk_offers_its_bottom_as_the_floor() -> None:
 @pytest.mark.unit
 def test_crossing_the_frontier_is_not_a_floor_candidate() -> None:
     """The common catch-up ending must leave the stored floor alone."""
-    script = Script([page(["900", "400"], next_cursor="C1")])
+    script = Script(
+        [
+            page(["900", "400"], next_cursor="C1"),
+            page(["300", "200"], next_cursor=None),
+        ]
+    )
     result = walk(fetch_page=script, max_pages=10, seen_frontier=500)
     assert result.floor_candidate is None
     assert result.ok
+    assert result.failed is None
 
 
 @pytest.mark.unit

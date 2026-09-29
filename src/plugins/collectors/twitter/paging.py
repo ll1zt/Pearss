@@ -6,10 +6,11 @@ be tested against recorded payloads with no network and no waiting.
 
 Three ideas, each of which exists because the naive version loses data:
 
-**The seen frontier.** The newest tweet id already ingested. Paging stops at
-the first page that reaches it, rather than running to the budget every time.
-X tweet ids grow with time, so a single integer is enough: no set of seen ids,
-and nothing sent to the origin that would change what it returns.
+**The seen frontier.** The newest tweet id already ingested. A catch-up stops
+once a whole page contributes nothing above it, rather than running to the
+budget every time. X tweet ids grow with time, so a single integer is enough:
+no set of seen ids, and nothing sent to the origin that would change what it
+returns.
 
 **Gap detection.** The timeline is live. A tweet can be inserted between two
 page requests, and then the next page starts *above* where the previous one
@@ -41,19 +42,28 @@ def to_int(value: object) -> int | None:
     return None
 
 
-def truncate_at_seen(ids: Sequence[object], seen_frontier: int | None) -> list[object]:
-    """Ids up to (not including) the first one already ingested.
+def ids_above_frontier(
+    ids: Sequence[object], seen_frontier: int | None
+) -> list[object]:
+    """Ids strictly newer than the newest already-ingested id.
 
-    The frontier is the newest ingested id, and pages arrive newest-first, so
-    everything from the first id at-or-below it onwards is already stored.
+    A *filter*, not a prefix cut. A page is not globally descending: a
+    conversation module lists its parent (older) before its replies (newer), so
+    an id above the frontier can follow one at or below it. Cutting at the first
+    seen id dropped those newer ids -- and, because the walk read that cut as
+    "the frontier was crossed", ended the round on the same page. That is how a
+    catch-up silently lost tweets (issue #130).
+
+    An id that does not parse is kept: it cannot be compared to the frontier,
+    and dropping it on that basis would be the same silent loss in a new place.
     """
     if seen_frontier is None:
         return list(ids)
-    for index, value in enumerate(ids):
-        numeric = to_int(value)
-        if numeric is not None and numeric <= seen_frontier:
-            return list(ids[:index])
-    return list(ids)
+    return [
+        value
+        for value in ids
+        if (numeric := to_int(value)) is None or numeric > seen_frontier
+    ]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -93,11 +103,27 @@ class WalkResult:
     # The newest id seen, for persisting the frontier even when nothing was kept.
     newest_id: int | None = None
     failed: str | None = None
+    # The failing exception's own ErrorClass value, when it carries one. paging
+    # stays free of the domain enum; the caller maps the value back and chooses
+    # a fallback for a failure that named none (issue #132).
+    failed_class: str | None = None
 
     @property
     def ok(self) -> bool:
         """Whether at least one page was retrieved."""
         return bool(self.pages)
+
+
+def _class_of(exc: BaseException) -> str | None:
+    """The failure's own ErrorClass value, when it carries one.
+
+    paging stays free of the domain enum: the exception carries the value and
+    the caller maps it back. A failure with no class of its own (a bug rather
+    than an origin response) leaves this None so the caller can pick a
+    fallback instead of inventing a class here.
+    """
+    value = getattr(exc, "error_class", None)
+    return str(value) if value is not None else None
 
 
 def walk(
@@ -115,10 +141,13 @@ def walk(
 
     Termination, in the order the loop reaches them:
 
-    * **frontier** -- the first id at or below the newest ingested tweet. The
-      normal end of a catch-up walk, reached after roughly as many pages as
-      there are pages of new content, so request count tracks the origin's
-      actual output rather than a policy number.
+    * **frontier** -- a page that contributes nothing above the newest ingested
+      tweet. The normal end of a catch-up walk: content is ordered
+      newest-first, so once a whole page is at or below the frontier nothing
+      newer can follow. (This is one page later than "the page that contains a
+      seen id", because a conversation module can carry a seen parent above its
+      newer replies.) Request count still tracks the origin's actual output
+      rather than a policy number.
     * **floor** -- the interval's lower end, a cursor marking the oldest tweet
       the source ever walked. A stop sign, never a starting cursor. Best
       effort by nature: cursors are opaque and a later walk's chain may not
@@ -156,6 +185,7 @@ def walk(
                     pages_used=pages_used,
                     newest_id=newest,
                     failed=str(exc),
+                    failed_class=_class_of(exc),
                 )
             raise
 
@@ -165,7 +195,7 @@ def walk(
             if numeric is not None and (newest is None or numeric > newest):
                 newest = numeric
 
-        kept_here = truncate_at_seen(page.ids, frontier)
+        kept_here = ids_above_frontier(page.ids, frontier)
         bodies.append(page.body)
         keep.extend(kept_here)
 
@@ -183,7 +213,15 @@ def walk(
                 gap_cursor = cursor
             previous_min_sort = current_min
 
-        crossed_frontier = len(kept_here) < len(page.ids)
+        # A catch-up ends once a whole page contributes nothing above the
+        # frontier. "This page contained a seen id" is not enough: a
+        # conversation module puts an already-seen parent above its newer
+        # replies, so that test ended the round while newer content was still
+        # below it (issue #130). A page with no new ids proves the walk has
+        # passed the frontier -- content is ordered newest-first, so nothing
+        # newer can follow. A cursor-only page carries no ids and is not an
+        # ending.
+        crossed_frontier = frontier is not None and bool(page.ids) and not kept_here
         at_floor = floor is not None and page.next_cursor == floor
         if crossed_frontier or page.next_cursor is None or at_floor:
             # Caught up, reached the interval's floor, or the origin has
@@ -231,7 +269,7 @@ def walk(
 __all__ = [
     "Page",
     "WalkResult",
+    "ids_above_frontier",
     "to_int",
-    "truncate_at_seen",
     "walk",
 ]

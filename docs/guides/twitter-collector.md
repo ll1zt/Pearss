@@ -33,7 +33,7 @@ walk.py        238 行  三者粘合 + 沙箱 RPC 入口（注册表 `paged=True
 |---|---|---|
 | `collector.py` | `parse`、`match_url`、`source_config`、`collector_id`、`backfill`、`collect_pages`（`HOOKIMPL`）；`page_ids`、`page_cursor`、`page_sort_span`（解析助手） | 注册表（经 `HOOKIMPL`）、`walk.py` |
 | `client.py` | `fetch_page`、`Credentials`、`QueryIdRejected`、`CredentialError`、配置读取函数 | 只被 `walk.py` 调用 |
-| `paging.py` | `walk`、`Page`、`WalkResult`、`to_int`、`truncate_at_seen` | 只被 `walk.py` 调用 |
+| `paging.py` | `walk`、`Page`、`WalkResult`、`to_int`、`ids_above_frontier` | 只被 `walk.py` 调用 |
 | `walk.py` | `collect_pages`、`PagedWalkResult` | 注册表经 `plugin_runtime` 的 RPC 代理 |
 
 `collector.py` 里的 `collect_pages` 是一个**薄转发**（`collector.py:1049`，转发体 6 行），
@@ -118,7 +118,7 @@ X 文档说 `indices` 是码点偏移，上游某处注释说 UTF-16 而代码�
 ```text
 seen_frontier ──────────────────────────► 顶部（每轮从这里开始）
       │                                       ▲
-      │  每轮抓取的范围                        │ 抓到 frontier 即停
+      │  每轮抓取的范围                        │ 整页 ≤ frontier 即停
       ▼                                       │
 floor_cursor（该源走过的**最深**位置）       每轮的起点
 ```
@@ -143,6 +143,13 @@ floor_cursor（该源走过的**最深**位置）       每轮的起点
 溢出的部分会在下一 tick 之前沉到顶部页以下。回归测试：
 `test_a_busy_catch_up_walks_past_the_first_walk_page_count`。
 
+**终止判据是「整页都没有新推文」，不是「页里出现了已见 id」**（issue #130）：会话
+模块把已入库的父推排在新回复之前，所以「出现已见 id」会在新内容仍在下方时提前结束
+本轮，并把其后所有更新的推文丢掉（frontier 随后推进，它们永久留在下面）。代价是
+每轮可能多请求一页——用它换「不漏」是划算的。回归测试：
+`test_a_catch_up_ends_on_a_page_that_contributes_nothing_new`、
+`test_a_new_reply_is_not_dropped_when_its_parent_is_already_seen`。
+
 ### `floor_candidate` 只在一种结局下产生
 
 `WalkResult.floor_candidate` 仅当**预算耗尽且未穿过 frontier**时设置。其余结局
@@ -157,7 +164,8 @@ floor_cursor（该源走过的**最深**位置）       每轮的起点
 时间线是活的：两条请求之间可能插入推文，导致下一页起点**高于**上一页终点，
 被跳过的内容**不在任何一页里**。去重无能为力——它只防重复存储，不知道"漏了"。
 
-连续性靠每页 `sortIndex` 区间判定：**下一页的 max 必须低于本页的 min**。
+连续性靠每页的**条目位置**（非游标条目的 `sortIndex`，实测是页内逐条 -1 的局部
+序列）判定：**下一页的 max 必须低于本页的 min**。
 只记录**第一处**断裂（分页从新到旧，那是最新的缺失区），作为 `gap_cursor` 返回。
 
 断档**不会被追**：检测与追讨是两件事，追断档等于开出第二个爬取方向。
@@ -178,6 +186,18 @@ floor_cursor（该源走过的**最深**位置）       每轮的起点
 > （假断档）或漏掉保留的推文（漏报）。回归测试：
 > `test_pages_without_sort_index_cannot_prove_continuity` 及 fixtures
 > `valid.json` / `no_posts.json`（量纲已与真实载荷对齐）。
+
+> ✅ **已修（2026-09-29，issue #133）**：上面那次改动把**模块**对区间的贡献从
+> 「模块自身的 `sortIndex`」改成了「模块内推文的 `rest_id`」——这是错的。
+> **条目级 `sortIndex` 才是页位置**（页内逐条 -1 的局部序列，实测如此）；
+> 模块内推文的 id 是**内容**，会话根的 id 可能是数月前的推文。把旧根当成页的
+> 下沿，下一页的 max 几乎必然 ≥ 它，于是**每一对相邻页都报假断档**（实测 3 轮
+> 各自重现，page0 的 min 被拉到数月前）。
+>
+> 现 `page_sort_span()` 一律用**非游标条目的 `sortIndex`**：模块贡献它自己的位置，
+> 不再贡献其 item 的 id；推广条目仍排除（不是本源内容）。回归测试：
+> `test_a_module_with_an_old_root_does_not_look_like_a_gap`（假断档不再报）、
+> `test_a_real_insertion_gap_is_still_reported`（真断档仍报）。
 
 ## 凭据解析
 

@@ -64,6 +64,20 @@ class PagedWalkResult:
         return self.error_class is None
 
 
+def _classification(value: str | None) -> ErrorClass | None:
+    """The ErrorClass a failure named, or None when it named none.
+
+    The value comes from the exception (see `paging._class_of`); anything that
+    is not a member of the enum counts as unnamed rather than being invented.
+    """
+    if not value:
+        return None
+    try:
+        return ErrorClass(value)
+    except ValueError:
+        return None
+
+
 def collect_pages(
     source_id: str,
     source_url: str,
@@ -227,10 +241,18 @@ def collect_pages(
         )
 
     walk_failed = result.failed is not None or not result.ok
+    failure_class: ErrorClass | None = None
+    if walk_failed:
+        # Carry the classification the failing fetch gave itself. Mapping every
+        # partial failure to `blocked` told the operator to wait out a cooldown
+        # when the real problem was a timeout, a stale queryId or a dead
+        # session (issue #132). Only a failure with no class of its own falls
+        # back to `network`.
+        failure_class = _classification(result.failed_class) or ErrorClass.NETWORK
     return PagedWalkResult(
         drafts=drafts,
         newest_id=result.newest_id,
-        error_class=ErrorClass.BLOCKED if walk_failed else None,
+        error_class=failure_class,
         detail=result.failed
         or ("no page could be retrieved" if not result.ok else None),
         floor_candidate=result.floor_candidate,

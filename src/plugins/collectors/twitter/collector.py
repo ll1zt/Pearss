@@ -314,7 +314,7 @@ def page_cursor(body: bytes | str) -> str | None:
 
 
 def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
-    """`(max, min)` sortIndex over the page's *tweets*, or None when none carry one.
+    """`(max, min)` page-position span, or None when no entry carries one.
 
     The client uses it to detect a gap between pages: X's timeline is live, so
     a tweet can be inserted after a page is taken and the next page can then
@@ -322,40 +322,37 @@ def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
     no page at all. Continuity means the next page's max is below this page's
     min.
 
-    Only tweets may bound the interval. Cursors carry a `sortIndex` too, and on
-    a real page `cursor-top` sits exactly one above the newest tweet while
-    `cursor-bottom` sits exactly one below the oldest -- so including them would
-    widen the span by two and report a floor below the true one, which is the
-    value gap detection compares against. A page with no sortable tweet returns
-    None: continuity cannot be *proven* from it, which is a different claim from
-    proving it holds.
+    The span comes from each content entry's own `sortIndex`, which is its
+    *position on the page* -- a page-local sequence that decreases by one per
+    entry, measured on real pages. It is deliberately not built from the ids of
+    the tweets a module contains: those are content, not position, and a
+    conversation thread's root can be months old. Counting that root dragged
+    the span's bottom below the page, so the next page's top looked above it and
+    every consecutive pair was reported as a gap (issue #133).
 
-    Entries are classified the same way `_tweets` classifies them -- by
-    structure -- so the span describes exactly the tweets that function
-    returns. Dispatching on the entryId prefix here as well would let the two
-    disagree, and a span that includes a tweet `_tweets` dropped (or omits one
-    it kept) is a false gap or a missed one.
+    Cursors are excluded: their `sortIndex` hugs the range rather than bounding
+    the content (cursor-top sits one above the newest entry, cursor-bottom one
+    below the oldest), so including them would widen the span by one at each end
+    and shift the floor gap detection compares against. Promoted entries are
+    excluded because they are not this source's content. A page with no content
+    entry returns None: continuity cannot be *proven* from it, which is a
+    different claim from proving it holds.
     """
     sorts: list[int] = []
     for entry in _entries(body):
         entry_id = str(entry.get("entryId", ""))
         content = entry.get("content")
         if _is_cursor(entry_id):
-            # Cursors hug the tweet range rather than bounding it.
+            # Cursors hug the entry range rather than bounding it.
             continue
         if "promoted" in entry_id:
-            # Advertised ids come from the advertiser's own timeline, so they
-            # are unrelated in magnitude to the page's own tweets.
             continue
         if _is_module(content):
-            # The module's own sortIndex is a layout position, not the items'
-            # range; each tweet inside carries its own id as its order.
-            for item in _module_items(content):
-                if _is_promoted(item):
-                    continue
-                numeric = _id_sort_index(item)
-                if numeric is not None:
-                    sorts.append(numeric)
+            # The module's own sortIndex *is* its position on the page; the
+            # ids of the tweets inside it are content, not position.
+            numeric = _sort_index(entry.get("sortIndex"))
+            if numeric is not None:
+                sorts.append(numeric)
             continue
         item_content = (content or {}).get("itemContent")
         if _is_promoted(item_content):
@@ -371,19 +368,6 @@ def page_sort_span(body: bytes | str) -> tuple[int, int] | None:
 def _sort_index(raw: object) -> int | None:
     if isinstance(raw, str) and raw.strip().isdigit():
         return int(raw)
-    return None
-
-
-def _id_sort_index(item_content: object) -> int | None:
-    """A module item's own `rest_id`, which is its position in the timeline.
-
-    Module items carry no `sortIndex` of their own, so the id is the order --
-    tweet ids grow with time, which is the same property the paging frontier
-    already relies on.
-    """
-    result = _result_of(item_content)
-    if isinstance(result, dict):
-        return _sort_index(_text(_get(_unwrap_visibility(result), "rest_id")))
     return None
 
 
