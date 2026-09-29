@@ -18,7 +18,7 @@ Two rules drive most of the design:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 
 from core.enums import ErrorClass, JobRunStatus
@@ -86,7 +86,7 @@ def transition(
     """
     ctx = context or JobRunContext()
 
-    if current in TERMINAL_STATUSES:
+    if is_terminal(current):
         raise InvalidJobRunTransitionError(
             current,
             event,
@@ -141,40 +141,12 @@ def _running(status: JobRunStatus, error_class: ErrorClass | None) -> JobRunTran
     return JobRunTransition(
         status=status,
         error_class=error_class,
-        terminal=status in TERMINAL_STATUSES,
+        terminal=is_terminal(status),
     )
 
 
 def is_terminal(status: JobRunStatus) -> bool:
     return status in TERMINAL_STATUSES
-
-
-def next_run_status(
-    current: JobRunStatus,
-    event: JobRunEvent,
-    context: JobRunContext | None = None,
-) -> JobRunStatus:
-    """Just the resulting status, for callers that do not need the evidence."""
-    return transition(current, event, context).status
-
-
-def with_status(
-    run: JobRunView,
-    event: JobRunEvent,
-    context: JobRunContext | None = None,
-) -> JobRunView:
-    """Apply a transition to a run view, returning the updated copy.
-
-    Exists so callers go through the machine rather than assigning the status
-    field, which is the difference between the rules being enforced and being
-    documented.
-    """
-    result = transition(run.status, event, context)
-    return replace(
-        run,
-        status=result.status,
-        error_class=result.error_class,
-    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

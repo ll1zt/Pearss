@@ -1422,6 +1422,61 @@ def test_every_entry_point_installs_the_header_timeout_protocol() -> None:
         )
 
 
+# Helpers in core/ that production does not call, and why each is allowed to
+# exist anyway. Empty on purpose: the honest options are "wire it" or "delete
+# it", and an entry here has to argue for a third (issue #87).
+CORE_PUBLIC_EXEMPTIONS: frozenset[str] = frozenset()
+
+
+def test_every_core_helper_has_a_production_caller() -> None:
+    """Issue #87: an authoritative-looking helper nobody calls is a trap.
+
+    `is_duplicate_of` compared `content_hash` and was used nowhere, while the
+    repository's dedupe invariant is identity-over-content -- so a maintainer
+    could have updated it, and its passing tests, without changing behaviour.
+    Twelve such helpers were found by hand; this is the mechanical version, so
+    the thirteenth is found by a test rather than by a review.
+
+    "Used" means referenced anywhere in `src/`, including the defining module: a
+    public helper a module uses internally is reachable, and this guard is about
+    reachability rather than about API surface.
+    """
+    defined: dict[str, str] = {}
+    for path in sorted((REPO_ROOT / "src/core").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in tree.body:
+            # One `if`, so mypy keeps the narrowing the `isinstance` gives.
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not (
+                node.name.startswith("_")
+            ):
+                defined[node.name] = str(path.relative_to(REPO_ROOT))
+
+    referenced: set[str] = set()
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for inner in ast.walk(tree):
+            if isinstance(inner, ast.Name):
+                referenced.add(inner.id)
+            elif isinstance(inner, ast.Attribute):
+                referenced.add(inner.attr)
+
+    uncalled = sorted(
+        f"core::{name} ({where})"
+        for name, where in defined.items()
+        if name not in referenced and name not in CORE_PUBLIC_EXEMPTIONS
+    )
+    assert not uncalled, (
+        "these core helpers have passing tests and no production caller, so "
+        "changing them changes nothing that runs (issue #87): "
+        f"{uncalled}. Wire it into the path that enforces the rule, delete it, "
+        "or add it to CORE_PUBLIC_EXEMPTIONS with the reason it is a library "
+        "function rather than a rule."
+    )
+
+    stale = sorted(CORE_PUBLIC_EXEMPTIONS - set(defined))
+    assert not stale, f"exemptions for helpers that no longer exist: {stale}"
+
+
 def test_the_tenant_table_list_matches_the_schema(tmp_path: Path) -> None:
     """Issue #89: a new table with `tenant_id` must not slip past the check.
 
