@@ -702,3 +702,41 @@ def test_the_attribution_section_reports_the_alerts_own_class() -> None:
     body = alert_body(verdict)
 
     assert "parse (24)" in body, body
+
+
+def test_more_than_five_stuck_sources_are_summarised_not_dropped() -> None:
+    """AC-156 (the cap): the list is bounded and the remainder is still counted.
+
+    A hundred stuck sources must not become a hundred-line body the gateway
+    rejects, and must not become five lines that imply five sources.
+    """
+    sources = tuple(_stuck(f"src-{i}", title=f"Feed {i}") for i in range(7))
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="7 source(s) with a chain that cannot finish",
+        exhausted_sources=sources,
+    )
+    body = alert_body(verdict)
+
+    assert "Feed 0" in body
+    assert "Feed 4" in body
+    assert "Feed 5" not in body, "only MAX_ATTRIBUTED_SOURCES are listed"
+    assert "and 2 more source(s)" in body
+    assert len(body) <= 4093
+
+
+def test_a_source_without_an_error_class_still_renders() -> None:
+    """A failed row with no class must not render as `None (24)`.
+
+    `error_class` is nullable in the row; the fallback body counts the failures
+    without inventing a class, because a made-up class is worse than none.
+    """
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="1 source(s) with a chain that cannot finish",
+        exhausted_sources=(_stuck(error_class=None, detail_excerpt=None),),
+    )
+    body = alert_body(verdict)
+
+    assert "24 failed" in body, body
+    assert "None" not in body, body
