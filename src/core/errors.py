@@ -27,20 +27,21 @@ def classify(
     `structure_changed` from a successful-but-empty page, and it is why HTTP
     200 alone is never enough to conclude a fetch succeeded.
     """
+    # Signals, then precedence -- rather than an if-chain whose *order* is the
+    # precedence. The order was a second copy of a rule `ErrorClass.precedence`
+    # already states, and `merge` is the one that reads it (issue #87).
+    signals: list[ErrorClass] = []
     if http_status is not None:
-        # Blocked before auth: a 403 can accompany an expired session, but
-        # retrying an explicit refusal is wrong under either reading.
         if http_status in (403, 429):
-            return ErrorClass.BLOCKED
+            signals.append(ErrorClass.BLOCKED)
         if http_status == 401:
-            return ErrorClass.AUTH
+            signals.append(ErrorClass.AUTH)
         if http_status >= 500:
-            return ErrorClass.NETWORK
-
+            signals.append(ErrorClass.NETWORK)
     if not matched_expected_structure:
-        return ErrorClass.STRUCTURE_CHANGED
+        signals.append(ErrorClass.STRUCTURE_CHANGED)
 
-    return None
+    return merge(*signals)
 
 
 def merge(*candidates: ErrorClass | None) -> ErrorClass | None:

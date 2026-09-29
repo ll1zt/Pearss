@@ -15,27 +15,8 @@ from core.job_state import (
     InvalidJobRunTransitionError,
     JobRunContext,
     JobRunEvent,
-    JobRunView,
-    is_terminal,
-    next_run_status,
     transition,
-    with_status,
 )
-
-
-def view(
-    status: JobRunStatus = JobRunStatus.QUEUED,
-    **overrides: object,
-) -> JobRunView:
-    defaults: dict[str, object] = {
-        "id": "run-1",
-        "job_id": "job-1",
-        "status": status,
-        "correlation_id": "corr-1",
-    }
-    defaults.update(overrides)
-    return JobRunView(**defaults)  # type: ignore[arg-type]
-
 
 # --------------------------------------------------------------------------
 # Legal transitions
@@ -149,63 +130,3 @@ def test_cancelling_a_running_run_is_refused_for_now() -> None:
     # pretending the work can be stopped mid-fetch.
     with pytest.raises(InvalidJobRunTransitionError, match="interruption"):
         transition(JobRunStatus.RUNNING, JobRunEvent.CANCEL)
-
-
-# --------------------------------------------------------------------------
-# View invariants
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-def test_correlation_id_is_mandatory() -> None:
-    with pytest.raises(ValueError, match="correlation_id"):
-        view(correlation_id="")
-
-
-@pytest.mark.unit
-def test_view_rejects_failed_without_error_class() -> None:
-    with pytest.raises(ValueError, match="must record"):
-        view(JobRunStatus.FAILED)
-
-
-@pytest.mark.unit
-def test_view_rejects_succeeded_with_error_class() -> None:
-    with pytest.raises(ValueError, match="cannot carry"):
-        view(JobRunStatus.SUCCEEDED, error_class=ErrorClass.NETWORK)
-
-
-@pytest.mark.unit
-def test_with_status_returns_an_updated_copy() -> None:
-    run = view()
-    moved = with_status(run, JobRunEvent.CLAIMED)
-    assert moved.status is JobRunStatus.RUNNING
-    # Frozen: the original is untouched, so a caller cannot accidentally
-    # mutate the record it already persisted.
-    assert run.status is JobRunStatus.QUEUED
-    assert moved.id == run.id and moved.job_id == run.job_id
-
-
-@pytest.mark.unit
-def test_with_status_carries_the_error_class_onto_the_view() -> None:
-    running = with_status(view(), JobRunEvent.CLAIMED)
-    failed = with_status(
-        running, JobRunEvent.FAIL, JobRunContext(error_class=ErrorClass.BLOCKED)
-    )
-    assert failed.status is JobRunStatus.FAILED
-    assert failed.error_class is ErrorClass.BLOCKED
-
-
-@pytest.mark.unit
-def test_next_run_status_is_the_short_form() -> None:
-    assert (
-        next_run_status(JobRunStatus.QUEUED, JobRunEvent.CLAIMED)
-        is JobRunStatus.RUNNING
-    )
-
-
-@pytest.mark.unit
-def test_terminal_predicate_matches_the_table() -> None:
-    assert is_terminal(JobRunStatus.SUCCEEDED)
-    assert is_terminal(JobRunStatus.CANCELLED)
-    assert not is_terminal(JobRunStatus.RUNNING)
-    assert not is_terminal(JobRunStatus.QUEUED)

@@ -13,7 +13,7 @@ import pytest
 
 from core.enums import PublishStatus
 from core.models import Item
-from core.normalize import DedupeAction, decide_dedupe, is_duplicate_of
+from core.normalize import DedupeAction, decide_dedupe
 
 TENANT = "default"
 
@@ -168,33 +168,14 @@ def test_every_decision_carries_a_reason() -> None:
 
 
 @pytest.mark.unit
-def test_duplicate_means_same_content_hash() -> None:
-    assert is_duplicate_of(item(content_hash="same"), item(content_hash="same"))
-
-
-@pytest.mark.unit
 def test_same_url_with_different_content_is_not_a_duplicate() -> None:
     # The URL is not the dedupe key: a corrected or updated body is a new
-    # article at the same address.
+    # article at the same address. Asserted on the decision rather than on a
+    # predicate, because the decision is the thing that runs (issue #87).
     one = item(content_hash="hash-a")
     other = item(item_id="i2", content_hash="hash-b")
     assert one.url == other.url
-    assert not is_duplicate_of(one, other)
-
-
-@pytest.mark.unit
-def test_different_content_is_not_a_duplicate() -> None:
-    assert not is_duplicate_of(item(content_hash="a"), item(content_hash="b"))
-
-
-# --------------------------------------------------------------------------
-# The same entry re-published with different content
-# --------------------------------------------------------------------------
-#
-# Identity and content can disagree: id and guid derive from
-# (tenant, source, external_id), while content_hash derives from the body. A
-# feed that rewords an article changes one and not the other, and content-only
-# matching turned that into an INSERT colliding on the unique guid.
+    assert decide_dedupe(other, [one]).matched_id is None
 
 
 @pytest.mark.unit

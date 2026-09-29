@@ -21,6 +21,7 @@ from enum import StrEnum
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from core.enums import PublishStatus
+from core.item_state import is_content_frozen
 from core.models import Item, ItemDraft
 
 # --------------------------------------------------------------------------
@@ -536,7 +537,7 @@ def decide_dedupe(
                 matched_id=known.id,
                 reason="same entry and same content already stored",
             )
-        if known.publish_status is PublishStatus.PUBLISHED:
+        if is_content_frozen(known.publish_status):
             return DedupeDecision(
                 action=DedupeAction.SKIP_PUBLISHED_CONTENT_CHANGED,
                 matched_id=known.id,
@@ -574,10 +575,10 @@ def decide_dedupe(
     # not become a second one. Picking matches[0] would make the decision
     # depend on the database's row order, which is not a decision at all.
     cross_source = next(
-        (match for match in matches if match.publish_status is PublishStatus.PUBLISHED),
+        (match for match in matches if is_content_frozen(match.publish_status)),
         matches[0],
     )
-    if cross_source.publish_status is PublishStatus.PUBLISHED:
+    if is_content_frozen(cross_source.publish_status):
         # The reader has already been shown this article. Publishing our copy
         # under a different GUID is exactly the silent duplicate the model
         # forbids, so it is suppressed and the relationship recorded instead.
@@ -592,12 +593,3 @@ def decide_dedupe(
         matched_id=cross_source.id,
         reason="same content from another source; stored and related",
     )
-
-
-def is_duplicate_of(a: Item, b: Item) -> bool:
-    """Whether two items represent the same article.
-
-    Compares `content_hash` only. Two items about the same URL with different
-    bodies are not duplicates — the URL is not the dedupe key.
-    """
-    return a.content_hash == b.content_hash
