@@ -513,28 +513,6 @@ def _entry_ids(body: bytes | str) -> list[str]:
     return found
 
 
-def _top_level_sort_min(body: bytes | str) -> int:
-    return min(
-        int(e["sortIndex"])
-        for e in _entries_of(body)
-        if e["entryId"].startswith("tweet-")
-    )
-
-
-def _tweet_sorts(body: bytes | str) -> list[int]:
-    """Every tweet's position on the page, modules included.
-
-    A module's own sortIndex is a layout position rather than the id range of
-    the tweets inside it, so an item contributes its own id here.
-    """
-    tops = [
-        int(e["sortIndex"])
-        for e in _entries_of(body)
-        if e["entryId"].startswith("tweet-")
-    ]
-    return tops + _module_sort_sorts(body)
-
-
 def _module_sort_sorts(body: bytes | str) -> list[int]:
     return [
         int(item["entryId"].split("-", 1)[1])
@@ -621,13 +599,12 @@ def test_a_promoted_item_inside_a_module_drops_only_itself() -> None:
 
 
 @pytest.mark.unit
-def test_the_span_ignores_a_promoted_item_inside_a_module() -> None:
-    """The span must describe the same tweets `_tweets` returns.
+def test_the_span_uses_a_module_position_not_its_item_ids() -> None:
+    """A module contributes its own sortIndex; the ids of its tweets do not.
 
-    A promoted tweet's id comes from the advertiser's own timeline, so it is
-    unrelated in magnitude to the surrounding ids. Counting it would report a
-    floor far below the real one -- and that floor is what gap detection
-    compares the next page against.
+    A promoted item's id comes from the advertiser's own timeline and a thread
+    root can be months old, so neither is a page position. Counting either as
+    the floor made the next page look discontinuous (issue #133).
     """
     entry = {
         "entryId": "home-conversation-90",
@@ -654,9 +631,9 @@ def test_the_span_ignores_a_promoted_item_inside_a_module() -> None:
     span = page_sort_span(body)
     assert span is not None
     high, low = span
-    assert low == 95, f"the ad's id reached the span: {span}"
     assert high == 100
-    # And the two views agree about what is on the page.
+    assert low == 90, f"an item id reached the span: {span}"
+    # And the parser still sees only the real tweet on the page.
     assert set(page_ids(body)) == {"100", "95"}
 
 
@@ -758,34 +735,37 @@ def test_a_promoted_slot_is_excluded_even_when_its_id_looks_like_a_tweet() -> No
 
 
 @pytest.mark.unit
-def test_page_sort_span_ignores_cursor_entries() -> None:
-    """Only tweets bound the interval; a cursor's sortIndex is not a tweet's.
+def test_page_sort_span_is_the_entry_positions_without_cursors() -> None:
+    """The span bounds the page's own positions; cursors hug the range instead.
 
-    Measured on real pages: `cursor-top` sits exactly one above the newest
-    tweet and `cursor-bottom` one below the oldest, so including them widens
-    the span by two units and shifts `previous_min_sort` below the true tweet
-    floor. Gap detection compares against that value, so the interval must be
-    built from tweets alone.
+    Measured on real pages: `cursor-top` sits one above the newest entry and
+    `cursor-bottom` one below the oldest, so including them would widen the
+    span by one at each end and shift the floor gap detection compares against.
     """
     body = payload("conversation.json").body
     span = page_sort_span(body)
     assert span is not None
     high, low = span
-    tweets = _tweet_sorts(body)
-    assert high == max(tweets), "the newest tweet bounds the top"
-    assert low == min(tweets), "the oldest tweet bounds the bottom"
+
+    positions = [
+        int(entry["sortIndex"])
+        for entry in _entries_of(body)
+        if not entry["entryId"].startswith("cursor")
+        and "promoted" not in entry["entryId"]
+    ]
+    assert high == max(positions)
+    assert low == min(positions)
 
     cursors = _cursor_sorts(body)
     assert cursors, "the fixture has cursors, or this proves nothing"
     assert low > min(cursors), "a cursor must not set the bottom of the span"
     assert high < max(cursors), "a cursor must not set the top of the span"
 
-    # The fixture puts the conversation module's oldest reply *below* every
-    # top-level tweet, as a real page does when a thread sits at the bottom.
-    # Without that, dropping module items from the span would be undetectable
-    # -- they would all fall inside the top-level range and change neither end.
-    assert low < _top_level_sort_min(body), "a module tweet must set the bottom"
-    assert min(_module_sort_sorts(body)) == low, "the module reply is the oldest"
+    # The module's *items* are content, not positions: the fixture's oldest
+    # reply id (086) is far below the module's own position (095), and the
+    # floor is the latter. Building the span from item ids was the false-gap
+    # bug (issue #133).
+    assert min(_module_sort_sorts(body)) < low, "an item id must not set the floor"
 
 
 @pytest.mark.unit
