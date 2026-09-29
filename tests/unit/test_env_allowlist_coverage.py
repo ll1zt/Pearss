@@ -92,6 +92,7 @@ COLLECTOR_PREFIXES: tuple[str, ...] = (
     "PEARSS_ZSXQ_",
     "PEARSS_COOKIECLOUD_",
     "PEARSS_TRANSLATE_",
+    "PEARSS_EMBEDDING_",
 )
 
 # Test plumbing that deliberately reaches a sandboxed child. It is neither

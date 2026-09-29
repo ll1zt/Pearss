@@ -28,6 +28,7 @@ dependencies = [
   "pluggy>=1.6.0",
   "python-multipart>=0.0.32",
   "sqlalchemy>=2.0",
+  "tokenizers>=0.23.2",
   "uvicorn>=0.52.4",
 ]
 

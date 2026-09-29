@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
+from adapters.embedding_model import load_manifest, model_directory
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enrichment import (
     EnrichmentKind,
@@ -60,12 +61,23 @@ def parse_chain(
                 f"pipeline_chain names unregistered processor {plugin_id!r}; "
                 f"registered: {sorted(known_plugins)}"
             )
+        kind = EnrichmentKind(str(entry["kind"]))
         specs.append(
             EnrichmentSpec(
                 plugin_id=plugin_id,
-                kind=EnrichmentKind(str(entry["kind"])),
+                kind=kind,
                 lang=entry.get("lang") or target_lang,
                 required=bool(entry.get("required", True)),
+                # An embedding's identity is part of what the artifact *is*, so
+                # it is fixed here -- when the row is enqueued -- rather than
+                # discovered by the processor that later runs it. A row keyed
+                # without it is reusable by a different model, which is the
+                # silent reuse ADR 0035 decision 6 exists to prevent.
+                model=(
+                    load_manifest(model_directory()).identity
+                    if kind is EnrichmentKind.EMBEDDING
+                    else None
+                ),
             )
         )
     return tuple(specs)

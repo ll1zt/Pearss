@@ -42,11 +42,15 @@ def test_the_onnx_runtime_runs_a_real_graph_under_the_pinned_environment() -> No
     import onnxruntime as ort
 
     session = ort.InferenceSession(str(FIXTURE), providers=["CPUExecutionProvider"])
-    row = np.ones((1, 8), dtype=np.float32)
+    # The fixture is shaped like the real export (ids and a mask in, one hidden
+    # state per token out), so this exercises the runtime on the interface the
+    # encoder actually uses rather than on a convenient stand-in.
+    ids = np.array([[2, 4, 5, 6, 3]], dtype=np.int64)
+    mask = np.ones_like(ids)
 
-    first = session.run(None, {"text_features": row})[0]
-    second = session.run(None, {"text_features": row})[0]
+    first = session.run(None, {"input_ids": ids, "attention_mask": mask})[0]
+    second = session.run(None, {"input_ids": ids, "attention_mask": mask})[0]
 
-    assert first.shape == (1, 384), first.shape
+    assert first.shape == (1, 5, 384), first.shape
     assert first.dtype == np.float32, first.dtype
     assert (first == second).all(), "the same input must produce the same vector"

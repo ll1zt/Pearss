@@ -118,6 +118,12 @@ _COLLECTOR_ENV_PREFIXES: Final[dict[str, tuple[str, ...]]] = {
     # The translate processor (P3) may run in a child; its provider config
     # arrives the same way collectors' credentials do.
     "translate": ("PEARSS_TRANSLATE_",),
+    # The embed processor runs in a child too, and the model directory is the
+    # one thing it cannot work without. Not a credential, but the allowlist is
+    # by prefix rather than by sensitivity: a child that reads an empty value
+    # here falls back to the default path, which works on the machine that never
+    # set the variable and silently reads the wrong model on the one that did.
+    "embed": ("PEARSS_EMBEDDING_",),
 }
 
 

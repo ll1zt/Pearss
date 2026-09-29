@@ -1,0 +1,9 @@
+{
+  "name": "pearss-test-fixture",
+  "dimensions": 384,
+  "revision": "tiny-1",
+  "model_file": "tiny-encoder.onnx",
+  "tokenizer_file": "tiny-tokenizer.json",
+  "passage_prefix": "",
+  "query_prefix": ""
+}

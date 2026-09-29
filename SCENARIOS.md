@@ -47,7 +47,9 @@
 | AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
 | AC-99..100 | #82 本地 embedding：语义与跨语言召回（原声明 93..94） | ADR 0035 §9 | 保留 | — |
 | AC-101 | #82 换模型不复用旧向量（原声明 95，前置缺陷） | ADR 0035 §9 | 已合并 | `tests/integration/test_content_revision_gate.py` |
-| AC-102..104 | #82 本地 embedding：内容变更重算、短/空文本、失败归类（原声明 96..98） | ADR 0035 §9 | 保留 | — |
+| AC-102 | #82 内容变更后向量重算（原声明 96） | ADR 0035 §9 | 保留 | — |
+| AC-103..104 | #82 短/空文本不崩溃、失败归类到既有 taxonomy（原声明 97..98） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
+| AC-115..116 | #82 编码器：声明维度的单位向量、批内 padding 被 mask（短文本单独与批内同向量） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |
 | AC-114 | #120/#82 选定的运行时在本环境真跑一次推理（384 维、两次同向量） | ADR 0040 | 已合并 | `tests/integration/test_embedding_runtime.py` |
 | AC-105..109 | #83 RRF 混合检索（原声明 99..103） | ADR 0035 §9 | 保留 | — |
 | AC-110 | #89 单租户假设（第二个租户会被报出） | ADR 0038 | 已合并 | `tests/integration/test_tenancy.py` |
