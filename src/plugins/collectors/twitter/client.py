@@ -32,6 +32,7 @@ import httpx
 
 from adapters.http import FetchError, FetchPolicy, fetch, post_json
 from adapters.raw_payload import RawPayload
+from core.enums import ErrorClass
 
 LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +105,10 @@ _BUNDLE_RE = re.compile(r'src="([^"]*?/main\.[0-9a-f]+\.js)"')
 
 class CredentialError(Exception):
     """No usable login credentials. Reported as `auth`, never worked around."""
+
+    # Carried so a failure in the middle of a walk keeps its class instead of
+    # being reported as a generic `blocked` (issue #132).
+    error_class = ErrorClass.AUTH
 
 
 def _from_cookie_cloud(
@@ -309,6 +314,11 @@ def fetch_page(
 
 class QueryIdRejected(Exception):
     """X answered 400, which for this endpoint means the queryId is stale."""
+
+    # A stale queryId is the private API's shape moving under us: classify it as
+    # a structure change so a mid-walk failure does not surface as `network`
+    # (issue #132).
+    error_class = ErrorClass.STRUCTURE_CHANGED
 
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
