@@ -45,7 +45,10 @@
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
 | AC-93..98 | #80 检索面 full_text 与 bm25（原声明 87..92） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_surface.py` |
-| AC-99..100 | #82 本地 embedding：语义与跨语言召回（原声明 93..94） | ADR 0035 §9 | 保留 | — |
+| AC-99 | #82 向量检索按语义相似召回（原声明 93；检索面随后） | ADR 0035 §9 | 保留 | — |
+| AC-100 | #82 模型确实是多语言的（原声明 94；跨语言余弦，需真模型） | ADR 0035 §9 | 已合并 | `tests/integration/test_embedding_semantics.py` |
+| AC-117 | #82 真模型：单位向量与声明维度、改写近于无关、query/passage 前缀生效 | ADR 0035 §9 | 已合并 | `tests/integration/test_embedding_semantics.py` |
+| AC-118 | #82 模型下载：哈希钉住、镜像只换来源不换产物、被篡改不留残骸 | ADR 0040 | 已合并 | `tests/integration/test_fetch_model.py` |
 | AC-101 | #82 换模型不复用旧向量（原声明 95，前置缺陷） | ADR 0035 §9 | 已合并 | `tests/integration/test_content_revision_gate.py` |
 | AC-102 | #82 内容变更后向量重算（原声明 96） | ADR 0035 §9 | 保留 | — |
 | AC-103..104 | #82 短/空文本不崩溃、失败归类到既有 taxonomy（原声明 97..98） | ADR 0035 §9 | 已合并 | `src/plugins/processors/embed/test_encoder.py` |

@@ -38,6 +38,12 @@ lint:
     uv run mypy
     uv run lint-imports
 
+# Download and verify the local embedding model (~135MB; hashes and the pinned
+# upstream revision live in src/app/fetch_model.py). Idempotent by content, so
+# re-running costs nothing once the bytes match.
+fetch-model:
+    uv run python -m app.fetch_model
+
 # Apply fixes for what can be fixed automatically.
 fix:
     uv run ruff format .

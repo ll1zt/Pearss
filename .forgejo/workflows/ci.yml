@@ -96,6 +96,19 @@ jobs:
           test -n "$CI_TOKEN"
           ! grep -qF "$CI_TOKEN" source/.git/config
 
+      # The embedding model is ~135 MB and pinned by hash, and the runner keeps
+      # it between runs, so the download is paid once and every later run checks
+      # the bytes it already has (the fetch is idempotent by content).
+      #
+      # It runs before the gates rather than inside them because it is not a
+      # gate: the tests that need real weights skip without them, and a skip is
+      # visible. What this step turns into a failure is a pinned artifact that
+      # changed upstream, which is the one thing the hash exists to notice.
+      #
+      # The directory is exported through the job environment rather than set on
+      # the fetch alone, so the later `just ci` sees the same path -- and through
+      # GITHUB_ENV rather than a heredoc, so a future step added in between
+      # inherits it too.
       # The first gate, and by far the cheapest (~2s): it evaluates the flake
       # and builds the dev shells' derivations, so a flake that cannot evaluate
       # fails here instead of forty minutes into the suite. §7.6 of the
@@ -113,6 +126,23 @@ jobs:
       # without it the log jumps from the last lint line to pytest's progress
       # dots and a killed job never says which phase it was in (issue #49).
       # With it each phase announces itself as `===> running recipe ...`.
+      - name: Fetch the embedding model
+        working-directory: source
+        env:
+          # The same reasoning as UV_DEFAULT_INDEX below, one layer out: the
+          # route to the international host is slow and periodically unusable
+          # from this machine. Measured for this artifact, huggingface.co is
+          # 1.48MB/s against 1.34MB/s for the mirror -- comparable today, which
+          # is the point: a mirror is the hedge for the day it is not, and the
+          # pinned hash means the mirror cannot substitute different weights.
+          HF_ENDPOINT: https://hf-mirror.com
+        run: |
+          set -eu
+          cache="${PEARSS_MODEL_CACHE:-$HOME/.cache/pearss-models}"
+          mkdir -p "$cache/multilingual-e5-small"
+          echo "PEARSS_EMBEDDING_MODEL_DIR=$cache/multilingual-e5-small" >> "$GITHUB_ENV"
+          PEARSS_EMBEDDING_MODEL_DIR="$cache/multilingual-e5-small" nix develop --command just fetch-model
+
       - name: Run quality gates
         working-directory: source
         env:

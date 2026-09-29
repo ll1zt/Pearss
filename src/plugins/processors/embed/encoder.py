@@ -68,6 +68,7 @@ class Encoder:
         self._max_tokens = max_tokens
         self._session: Any = None
         self._tokenizer: Any = None
+        self._inputs: frozenset[str] = frozenset()
 
     @property
     def identity(self) -> ModelIdentity:
@@ -106,8 +107,29 @@ class Encoder:
             ids[row, :length] = encoding.ids[:length]
             mask[row, :length] = 1
 
-        hidden = session.run(None, {"input_ids": ids, "attention_mask": mask})[0]
+        try:
+            hidden = session.run(None, self._feed(ids, mask))[0]
+        except Exception as exc:
+            raise ProcessorError(
+                ErrorClass.STRUCTURE_CHANGED,
+                f"model {self._manifest.identity} could not run: {exc}",
+            ) from exc
         return [self._pool(hidden[row], mask[row]) for row in range(len(encodings))]
+
+    def _feed(self, ids: Any, mask: Any) -> dict[str, Any]:
+        """The tensors this graph asks for, built from the two it always needs.
+
+        Some exports also declare `token_type_ids` -- BERT-shaped graphs, which
+        is what the real e5 export is. e5 does not use them, and every reference
+        pipeline feeds zeros, so zeros is what an export that asks for them gets.
+        The fixture declares two inputs and so never exercised this: the third
+        one only appeared at the first inference against real weights, which is
+        the argument for running one in CI rather than trusting the stand-in.
+        """
+        feed: dict[str, Any] = {"input_ids": ids, "attention_mask": mask}
+        if "token_type_ids" in self._inputs:
+            feed["token_type_ids"] = np.zeros_like(ids)
+        return feed
 
     def _pool(self, hidden: Any, mask: Any) -> list[float]:
         """Masked mean over the tokens, then L2 normalisation."""
@@ -175,6 +197,7 @@ class Encoder:
             ) from exc
 
         available = {item.name for item in session.get_inputs()}
+        self._inputs = frozenset(available)
         missing = [name for name in REQUIRED_INPUTS if name not in available]
         if missing:
             raise ProcessorError(

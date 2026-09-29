@@ -56,3 +56,8 @@ PY
 
 `onnx` is only needed to *build* the model fixture; running it needs `onnxruntime`
 alone.
+
+The fixture declares **two** inputs and the real export declares three (it also
+wants `token_type_ids`, which e5 ignores). That gap is why the encoder builds its
+feed from the session's own declared inputs, and why there is a test against the
+real weights: the fixture passed while the real model could not run at all.

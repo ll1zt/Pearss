@@ -433,6 +433,27 @@ just restore backups/pearss-backup-<stamp>.tar.gz /tmp/restore-drill
 「疑似 bug」都是测量伪影（httpx data 传参形式、归档内 db 命名），真实
 curl 复核后端点行为正确——这正是 runbook 强调「用真实客户端复核」的原因。
 
+## 本地 embedding 模型（ADR 0035 / 0040）
+
+向量能力需要模型文件（约 135MB），不在仓库里：
+
+```bash
+just fetch-model     # 装到 PEARSS_EMBEDDING_MODEL_DIR（默认 /var/lib/pearss/models/multilingual-e5-small）
+```
+
+每个字节都对着源码里钉住的 sha256 校验 ✓，所以重复执行只做一次比对 ✓（内容一致
+就不重下 ✓）；被篡改或缺一个文件都会失败且**不留残骸** ✓。
+
+到国际站点线路慢或不稳时设 `HF_ENDPOINT`（例如 `https://hf-mirror.com`）✓ ——
+镜像只能改变「字节从哪来」✓：产物是按哈希钉住的 ✓，供错字节会被拒绝、什么都装不上 ✓。
+CI 在跑门禁前先用镜像装一次 ✓，所以那份模型也在被持续验证 ✓。
+
+源的链里出现 `embed` 处理器之前必须先装好 ✓，否则**配置期**就会拒绝 ✓（一行永远
+无人认领、每轮 sweep 静默跳过，比早失败更糟 ✓）。
+
+需要**真模型**的测试（多语言与语义，见 `tests/integration/test_embedding_semantics.py`）
+在没有模型时**跳过** ✓，跳过是看得见的 ✓；CI 里它们是真跑的 ✓。
+
 ## 循环存活与告警（ADR 0034 / 0039）
 
 两个后台循环（scheduler、enrichment worker）**互相**通过告警通道报告对方的死亡：
