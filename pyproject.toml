@@ -23,6 +23,8 @@ dependencies = [
   "lxml>=6.1.3",
   "mcp>=2.1",
   "nh3>=0.3.7",
+  "numpy>=2.5.3",
+  "onnxruntime>=1.30.0",
   "pluggy>=1.6.0",
   "python-multipart>=0.0.32",
   "sqlalchemy>=2.0",
@@ -169,6 +171,15 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 # untyped dependency elsewhere still gets flagged.
 [[tool.mypy.overrides]]
 module = "feedparser"
+ignore_missing_imports = true
+
+# onnxruntime ships compiled bindings with neither stubs nor a py.typed marker,
+# so its import cannot be checked. Scoped to this one module for the same reason
+# as feedparser above: an untyped dependency anywhere else still gets flagged.
+# The runtime itself is pinned by uv.lock and proven by
+# tests/integration/test_embedding_runtime.py (ADR 0040, issue #82).
+[[tool.mypy.overrides]]
+module = "onnxruntime"
 ignore_missing_imports = true
 
 # --------------------------------------------------------------------------

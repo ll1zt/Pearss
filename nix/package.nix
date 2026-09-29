@@ -32,6 +32,7 @@
   stdenv,
   cacert,
   git,
+  zlib,
   writeShellApplication,
 }:
 
@@ -120,6 +121,14 @@ let
       # above is what makes the venv reproducible, and this is the other half
       # of that trade -- without it the app package would not be importable.
       export PYTHONPATH="${projectRoot}/src''${PYTHONPATH:+:$PYTHONPATH}"
+
+      # The system half of the onnxruntime wheel (ADR 0035 decision 5): its
+      # shared objects reference libstdc++ and libz by soname and Nix puts
+      # neither on the default loader path. The NixOS module starts this
+      # launcher directly rather than through `nix develop`, so the devShell's
+      # copy does not reach it -- the pair has to be here too. Appended, not
+      # replaced: a deployment that already set one keeps it.
+      export LD_LIBRARY_PATH="${stdenv.cc.cc.lib}/lib:${zlib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
       # The venv's interpreter, not the system one: that is what makes the
       # dependency set the one uv.lock pinned.

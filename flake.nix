@@ -87,6 +87,14 @@
                 # the venv is reproducible from uv.lock alone.
                 UV_PYTHON = "${python}/bin/python3";
                 UV_CACHE_DIR = ".cache/uv";
+                # onnxruntime (ADR 0035 decision 5) arrives as a manylinux
+                # wheel, whose shared objects reference libstdc++ and libz by
+                # soname. Nix puts neither on the default loader path, so the
+                # two entries come from here -- the same division section 10.1
+                # draws above: Nix owns the system libraries, uv owns the Python
+                # dependency graph. The systemd unit runs the service through
+                # `nix develop`, so this covers development, CI and deployment.
+                LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zlib}/lib";
                 PYTHONDONTWRITEBYTECODE = "1";
                 PYTHONUNBUFFERED = "1";
               };
