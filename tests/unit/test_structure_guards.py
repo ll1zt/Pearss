@@ -448,6 +448,36 @@ def test_no_test_asserts_on_mock_call_counts() -> None:
     )
 
 
+def test_only_the_registry_reads_the_registry_s_private_names() -> None:
+    """A leading underscore is a promise not to depend on it.
+
+    `collector_registry` publishes its callable surface in `__all__`. The plugin
+    `:import` route needed one fact from it -- whether an id collides with a
+    collector that ships -- and read `_DECLARATIONS` to get it: a tuple whose
+    shape (id, sandboxed, capability set) is an implementation detail, unpacked
+    at the call site, so any change to it breaks a caller the registry never
+    promised anything to. `shipped_collector_ids()` is the fact; this guard keeps
+    the next caller from reaching past it (issue #84).
+    """
+    owner = Path("src/app/collector_registry.py").resolve()
+    reach_in = re.compile(
+        r"collector_registry\._[A-Za-z_]"
+        r"|from\s+(?:app\.)?collector_registry\s+import\s+[^\n]*\b_[a-zA-Z]"
+    )
+    offenders = [
+        f"{path}:{lineno}: {line.strip()}"
+        for path in Path("src").rglob("*.py")
+        if path.resolve() != owner and "__pycache__" not in path.parts
+        for lineno, line in _code_lines(path)
+        if reach_in.search(line)
+    ]
+
+    assert not offenders, (
+        "these modules read collector_registry's private names; use its "
+        "published surface instead:\n" + "\n".join(offenders)
+    )
+
+
 def test_no_test_mocks_a_module_in_this_repository() -> None:
     """`unittest.mock` is for external systems that cannot be run for real.
 

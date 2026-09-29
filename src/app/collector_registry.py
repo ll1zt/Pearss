@@ -37,6 +37,7 @@ __all__ = [
     "plugins_for_surface",
     "select",
     "select_for",
+    "shipped_collector_ids",
     "sync_plugin_table",
 ]
 from plugins.collectors.rss import collector as rss
@@ -156,6 +157,19 @@ _DECLARATIONS: tuple[tuple[str, bool, frozenset[str]], ...] = (
     # text via the origin's REST API, falling back to the plain payload.
     ("rss", False, frozenset({"fetches"})),
 )
+
+
+def shipped_collector_ids() -> frozenset[str]:
+    """The collector ids this deployment ships.
+
+    The one fact a caller outside this module needs from the declaration
+    records, published so it does not have to unpack them: the tuple's shape
+    (id, sandboxed, capability set) is an implementation detail, and a caller
+    that unpacks it freezes that shape in place. The plugin `:import` route
+    refuses an id colliding with a shipped collector, and `plugin_loader`
+    refuses one on disk; both ask this rather than reading `_DECLARATIONS`.
+    """
+    return frozenset(name for name, _, _ in _DECLARATIONS)
 
 
 def _build_registry(

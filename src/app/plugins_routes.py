@@ -240,7 +240,7 @@ def import_plugin(
 
     from app import collector_registry, plugin_loader
 
-    if plugin_id in {name for name, _, _ in collector_registry._DECLARATIONS}:
+    if plugin_id in collector_registry.shipped_collector_ids():
         raise api_error(
             status_code=409,
             code="plugin_id_taken",
