@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 from sqlalchemy.orm import Session
 
 from adapters.correlation import current
@@ -23,6 +23,50 @@ from core.enums import (
     PublishStatus,
     SourceStatus,
 )
+
+# ADR 0034's minimum-sample rule, applied to a chain instead of a rate: one
+# failed product is a normal per-item failure the worker retries, and alerting
+# on it would make the channel noise.
+EXHAUSTED_MIN_ROWS = 3
+
+
+def exhausted_enrichment_sources(
+    session: Session, *, tenant_id: str, min_rows: int = EXHAUSTED_MIN_ROWS
+) -> list[str]:
+    """Sources whose pending chain is entirely failed (ADR 0034, issue #61).
+
+    "Entirely" and "at least `min_rows`" are both load-bearing. A source whose
+    every queued product has failed will never open its gate again without
+    someone looking -- that is a different failure from a slow success rate, and
+    it is invisible to one: the rate counts *runs*, and this is rows that no
+    future run will fix on its own.
+    """
+    rows = session.execute(
+        select(ItemRow.source_id)
+        .join(ItemEnrichment, ItemEnrichment.item_id == ItemRow.id)
+        .where(
+            ItemRow.tenant_id == tenant_id,
+            ItemEnrichment.status.in_(
+                (
+                    EnrichmentStatus.QUEUED.value,
+                    EnrichmentStatus.RUNNING.value,
+                    EnrichmentStatus.FAILED.value,
+                )
+            ),
+        )
+        .group_by(ItemRow.source_id)
+        .having(
+            func.count() >= min_rows,
+            func.sum(
+                case(
+                    (ItemEnrichment.status == EnrichmentStatus.FAILED.value, 1),
+                    else_=0,
+                )
+            )
+            == func.count(),
+        )
+    ).scalars()
+    return sorted(rows)
 
 
 def list_jobs(session: Session) -> list[dict[str, object]]:

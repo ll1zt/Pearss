@@ -535,3 +535,51 @@ def test_a_healthy_verdict_on_a_healthy_state_sends_nothing() -> None:
         state.should_send(_verdict_with(False), now=10_000.0, min_interval_seconds=3600)
         is False
     )
+
+
+# --------------------------------------------------------------------------
+# The two conditions ADR 0034 named and left unimplemented (issue #61)
+# --------------------------------------------------------------------------
+
+# A state the *other* criterion is happy with, so the new conditions have to
+# degrade it on their own rather than riding on a rate that was already bad.
+_HEALTHY: dict[str, object] = {
+    "recent_run_success_rate": 1.0,
+    "recent_runs_considered": 50,
+}
+
+
+@pytest.mark.unit
+def test_a_stuck_chain_degrades_an_otherwise_healthy_state() -> None:
+    """Issue #61: a chain that cannot finish is not a slow success rate.
+
+    The rate counts *runs*, and these are rows no future run clears on its own --
+    so a perfectly healthy rate with a stuck chain is exactly the case the rate
+    alone reports as fine. The condition has to be able to degrade a state the
+    other criterion is happy with.
+    """
+    healthy = _HEALTHY
+    assert decide_health(healthy).degraded is False
+
+    verdict = decide_health(healthy, exhausted_sources=("src-a",))
+    assert verdict.degraded is True
+    assert verdict.exhausted_sources == ("src-a",)
+    assert "src-a" in verdict.reason
+
+
+@pytest.mark.unit
+def test_a_dead_loop_degrades_and_is_named_in_the_message() -> None:
+    """A loop cannot report its own death; whoever is still running says so."""
+    healthy = _HEALTHY
+    verdict = decide_health(healthy, dead_loops=("enrichment",))
+    assert verdict.degraded is True
+    assert verdict.dead_loops == ("enrichment",)
+    assert "enrichment" in alert_body(verdict)
+
+
+@pytest.mark.unit
+def test_recovery_is_still_a_recovery_when_the_new_conditions_clear() -> None:
+    """The edge the alert state reads must not be pinned degraded by a stale fact."""
+    healthy = _HEALTHY
+    assert decide_health(healthy, exhausted_sources=()).degraded is False
+    assert decide_health(healthy, dead_loops=()).degraded is False

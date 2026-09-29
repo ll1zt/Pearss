@@ -23,6 +23,7 @@ Two rules shape everything here:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -73,6 +74,13 @@ class HealthVerdict:
     runs_considered: int = 0
     dominant_error_class: str | None = None
     dominant_error_count: int = 0
+    # The two conditions ADR 0034 named and left unimplemented (issue #61).
+    # Both arrive as *inputs*: each fact is detected where it lives -- a chain's
+    # rows in the database, a loop's task object -- and this module only decides
+    # what to say about them. A loop cannot report its own death, so the liveness
+    # fact comes from whichever *other* loop is still running.
+    exhausted_sources: tuple[str, ...] = ()
+    dead_loops: tuple[str, ...] = ()
 
 
 def decide_health(
@@ -81,6 +89,8 @@ def decide_health(
     success_rate_threshold: float = SUCCESS_RATE_THRESHOLD,
     min_runs: int = MIN_RUNS,
     min_interval_seconds: float = MIN_INTERVAL_SECONDS,
+    exhausted_sources: Sequence[str] = (),
+    dead_loops: Sequence[str] = (),
 ) -> HealthVerdict:
     """Whether the aggregate state needs intervention (ADR 0034).
 
@@ -109,21 +119,39 @@ def decide_health(
         return HealthVerdict(degraded=False, runs_considered=considered)
     rate = float(rate)
     dominant_class, dominant_count = _dominant_error(snapshot)
+    # Conditions that are true regardless of the rate: a chain that can never
+    # finish, and a loop that stopped. Both are worse than a low rate -- a
+    # source whose every queued product failed is not "slow", it is stuck, and
+    # nothing will retry it without a person.
+    extra: list[str] = []
+    if exhausted_sources:
+        extra.append(
+            f"{len(exhausted_sources)} source(s) with a chain that cannot "
+            f"finish: {', '.join(sorted(exhausted_sources))}"
+        )
+    if dead_loops:
+        extra.append(f"background loop(s) not running: {', '.join(dead_loops)}")
     if considered < min_runs:
         return HealthVerdict(
-            degraded=False,
+            degraded=bool(extra),
+            reason="; ".join(extra),
             success_rate=rate,
             runs_considered=considered,
             dominant_error_class=dominant_class,
             dominant_error_count=dominant_count,
+            exhausted_sources=tuple(sorted(exhausted_sources)),
+            dead_loops=tuple(sorted(dead_loops)),
         )
     if rate >= success_rate_threshold:
         return HealthVerdict(
-            degraded=False,
+            degraded=bool(extra),
+            reason="; ".join(extra),
             success_rate=rate,
             runs_considered=considered,
             dominant_error_class=dominant_class,
             dominant_error_count=dominant_count,
+            exhausted_sources=tuple(sorted(exhausted_sources)),
+            dead_loops=tuple(sorted(dead_loops)),
         )
 
     dominant_class, dominant_count = _dominant_error(snapshot)
@@ -133,6 +161,8 @@ def decide_health(
     )
     if dominant_class:
         reason += f"; dominant failure is {dominant_class} ({dominant_count} runs)"
+    if extra:
+        reason += "; " + "; ".join(extra)
     return HealthVerdict(
         degraded=True,
         reason=reason,
@@ -140,6 +170,8 @@ def decide_health(
         runs_considered=considered,
         dominant_error_class=dominant_class,
         dominant_error_count=dominant_count,
+        exhausted_sources=tuple(sorted(exhausted_sources)),
+        dead_loops=tuple(sorted(dead_loops)),
     )
 
 
@@ -188,6 +220,10 @@ def alert_body(verdict: HealthVerdict) -> str:
             f"dominant error class: {verdict.dominant_error_class} "
             f"({verdict.dominant_error_count} runs)"
         )
+    for source in verdict.exhausted_sources:
+        lines.append(f"stuck chain: source {source}")
+    for loop in verdict.dead_loops:
+        lines.append(f"not running: {loop}")
     lines.append("action: check the shared dependency (proxy, credentials, network)")
     return "\n".join(lines)
 

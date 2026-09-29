@@ -217,6 +217,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.session_factory, processors=default_processors()
     )
     app.state.enrichment_worker = worker
+    # Each loop watches the other: a loop cannot report its own death, so
+    # whichever is still ticking is the one that says the other stopped
+    # (issue #61).
+    scheduler.watch(worker.liveness)
 
     async with mcp_inner.router.lifespan_context(mcp_inner):
         from app.collector_registry import (

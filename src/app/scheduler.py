@@ -464,6 +464,9 @@ class Scheduler:
         # process's alerting, not a fact worth coupling to the database whose
         # failure is one of the things worth alerting about.
         self._alert_state = AlertState()
+        # None until `watch` is called: a scheduler that was never handed
+        # another loop reports on no loop, rather than on a name it guessed.
+        self._watched: Callable[[], tuple[bool, str]] | None = None
         # Guards against a slow tick overlapping the next one. Without it a
         # fetch longer than the interval would stack up runs indefinitely.
         self._lock = asyncio.Lock()
@@ -538,6 +541,15 @@ class Scheduler:
             except OperationalError:
                 LOGGER.warning("scheduler storage operation failed; retrying next poll")
 
+    def watch(self, liveness: Callable[[], tuple[bool, str]]) -> None:
+        """Register another loop whose death this one should report (issue #61).
+
+        Set after construction because the two are built in order, and a loop
+        cannot report its own death: whichever loop is still ticking is the one
+        that can say the other stopped.
+        """
+        self._watched = liveness
+
     async def _check_health_and_alert(self) -> None:
         """Speak up when collection needs a person (ADR 0034, issue #4).
 
@@ -571,11 +583,18 @@ class Scheduler:
         sender.
         """
         from adapters.alerting import send_alert
-        from adapters.repository.inspection import system_snapshot
+        from adapters.repository.inspection import (
+            exhausted_enrichment_sources,
+            system_snapshot,
+        )
         from core.alerting import ALERT_DEFAULTS, alert_body, decide_health
 
         with self._session_factory() as session:
             snapshot = system_snapshot(session, tenant_id=SINGLE_TENANT)
+            exhausted = exhausted_enrichment_sources(session, tenant_id=SINGLE_TENANT)
+        watched_alive, watched_name = (
+            self._watched() if self._watched is not None else (True, "")
+        )
         verdict = decide_health(
             snapshot,
             success_rate_threshold=float(
@@ -588,6 +607,8 @@ class Scheduler:
                 os.environ.get("PEARSS_ALERT_MIN_RUNS", str(ALERT_DEFAULTS.min_runs))
             ),
             min_interval_seconds=ALERT_DEFAULTS.min_interval_seconds,
+            exhausted_sources=exhausted,
+            dead_loops=() if watched_alive else (watched_name or "unnamed loop",),
         )
         min_interval = float(
             os.environ.get(

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as _SourceRow
@@ -575,3 +576,106 @@ def test_a_supplied_client_is_used_for_the_post(
 
     (payload,) = sink.bodies()
     assert payload["text"] == "body"
+
+
+def _source_with_chain(session: Session, *, source_id: str, statuses: list[str]) -> str:
+    """A source with one item and one chain row per status given.
+
+    Seeded through the repository, then the rows are moved to their statuses
+    directly: the worker owns those transitions, and this test is about what the
+    inspection query makes of the result rather than about how they got there.
+    """
+    from adapters.repository import create_source, enqueue_chain, timestamp
+    from core.enrichment import EnrichmentKind, EnrichmentSpec
+
+    source = create_source(
+        session,
+        source_type="rss",
+        url=f"https://{source_id}.example/feed",
+        canonical_url=f"https://{source_id}.example/feed",
+        schedule_policy="{}",
+        tenant_id="default",
+        at=timestamp(datetime.now(UTC)),
+    )
+    item = _store_one_item(session, source.id)
+    enqueue_chain(
+        session,
+        item_id=item,
+        content_hash="hash",
+        chain=tuple(
+            EnrichmentSpec(plugin_id=f"p{i}", kind=EnrichmentKind.SUMMARY)
+            for i in range(len(statuses))
+        ),
+        tenant_id="default",
+        now=None,
+    )
+    session.flush()
+    rows = (
+        session.execute(
+            sa.text("select id from item_enrichment where item_id = :item order by id"),
+            {"item": item},
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == len(statuses), (rows, statuses)
+    for row_id, status in zip(rows, statuses, strict=True):
+        session.execute(
+            sa.text("update item_enrichment set status = :s where id = :i"),
+            {"s": status, "i": row_id},
+        )
+    return source.id
+
+
+def _store_one_item(session: Session, source_id: str) -> str:
+    """One item through the production write path."""
+    from app.pipeline import normalise_and_store
+    from core.models import ItemDraft
+
+    ingested = normalise_and_store(
+        session,
+        [
+            ItemDraft(
+                source_id=source_id,
+                external_id="one",
+                title="An item",
+                canonical_url="https://x.example/one",
+                published_at=datetime.now(UTC),
+                content="<p>body</p>",
+            )
+        ],
+        tenant_id="default",
+    )
+    return ingested[0].result.item.id
+
+
+@pytest.mark.integration
+def test_a_source_whose_chain_all_failed_is_reported(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC: the stuck-chain condition, read from the rows that make it true.
+
+    Three boundaries, because each is a way to make the channel noise: two rows
+    is below ADR 0034's sample floor, one queued row means the chain can still
+    finish, and a succeeded row is not pending at all.
+    """
+    from adapters.repository.inspection import exhausted_enrichment_sources
+
+    with session_factory() as session:
+        stuck = _source_with_chain(session, source_id="stuck", statuses=["failed"] * 3)
+        too_few = _source_with_chain(session, source_id="few", statuses=["failed"] * 2)
+        still_working = _source_with_chain(
+            session, source_id="working", statuses=["failed", "failed", "queued"]
+        )
+        done = _source_with_chain(
+            session, source_id="done", statuses=["failed", "failed", "succeeded"]
+        )
+        session.commit()
+
+        reported = exhausted_enrichment_sources(session, tenant_id="default")
+
+    assert reported == [stuck], (
+        f"reported {reported}; expected only the source whose every pending row "
+        f"failed ({stuck}). Below the sample floor: {too_few}. Still able to "
+        f"finish: {still_working}. Nothing pending: {done}."
+    )
