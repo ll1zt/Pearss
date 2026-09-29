@@ -33,7 +33,7 @@ walk.py        238 行  三者粘合 + 沙箱 RPC 入口（注册表 `paged=True
 |---|---|---|
 | `collector.py` | `parse`、`match_url`、`source_config`、`collector_id`、`backfill`、`collect_pages`（`HOOKIMPL`）；`page_ids`、`page_cursor`、`page_sort_span`（解析助手） | 注册表（经 `HOOKIMPL`）、`walk.py` |
 | `client.py` | `fetch_page`、`Credentials`、`QueryIdRejected`、`CredentialError`、配置读取函数 | 只被 `walk.py` 调用 |
-| `paging.py` | `walk`、`Page`、`WalkResult`、`to_int`、`truncate_at_seen` | 只被 `walk.py` 调用 |
+| `paging.py` | `walk`、`Page`、`WalkResult`、`to_int`、`ids_above_frontier` | 只被 `walk.py` 调用 |
 | `walk.py` | `collect_pages`、`PagedWalkResult` | 注册表经 `plugin_runtime` 的 RPC 代理 |
 
 `collector.py` 里的 `collect_pages` 是一个**薄转发**（`collector.py:1049`，转发体 6 行），
@@ -118,7 +118,7 @@ X 文档说 `indices` 是码点偏移，上游某处注释说 UTF-16 而代码�
 ```text
 seen_frontier ──────────────────────────► 顶部（每轮从这里开始）
       │                                       ▲
-      │  每轮抓取的范围                        │ 抓到 frontier 即停
+      │  每轮抓取的范围                        │ 整页 ≤ frontier 即停
       ▼                                       │
 floor_cursor（该源走过的**最深**位置）       每轮的起点
 ```
@@ -142,6 +142,13 @@ floor_cursor（该源走过的**最深**位置）       每轮的起点
 而不是某个策略数字。在触及 frontier 前因预算耗尽而停下，正是跨轮丢内容的方式——
 溢出的部分会在下一 tick 之前沉到顶部页以下。回归测试：
 `test_a_busy_catch_up_walks_past_the_first_walk_page_count`。
+
+**终止判据是「整页都没有新推文」，不是「页里出现了已见 id」**（issue #130）：会话
+模块把已入库的父推排在新回复之前，所以「出现已见 id」会在新内容仍在下方时提前结束
+本轮，并把其后所有更新的推文丢掉（frontier 随后推进，它们永久留在下面）。代价是
+每轮可能多请求一页——用它换「不漏」是划算的。回归测试：
+`test_a_catch_up_ends_on_a_page_that_contributes_nothing_new`、
+`test_a_new_reply_is_not_dropped_when_its_parent_is_already_seen`。
 
 ### `floor_candidate` 只在一种结局下产生
 
