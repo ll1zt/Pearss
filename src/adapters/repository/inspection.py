@@ -16,6 +16,7 @@ from adapters.db_models import ItemEnrichment
 from adapters.db_models import Job as JobRow
 from adapters.db_models import JobRun as JobRunRow
 from adapters.db_models import Source as SourceRow
+from core.alerting import DETAIL_EXCERPT_CHARS, ExhaustedSource
 from core.enrichment import EnrichmentStatus
 from core.enums import (
     ErrorClass,
@@ -32,41 +33,83 @@ EXHAUSTED_MIN_ROWS = 3
 
 def exhausted_enrichment_sources(
     session: Session, *, tenant_id: str, min_rows: int = EXHAUSTED_MIN_ROWS
-) -> list[str]:
-    """Sources whose pending chain is entirely failed (ADR 0034, issue #61).
+) -> list[ExhaustedSource]:
+    """Sources whose pending chain is entirely failed, with their attribution.
 
     "Entirely" and "at least `min_rows`" are both load-bearing. A source whose
     every queued product has failed will never open its gate again without
     someone looking -- that is a different failure from a slow success rate, and
     it is invisible to one: the rate counts *runs*, and this is rows that no
     future run will fix on its own.
+
+    The title and the representative failure (issue #152) come from rows this
+    query already reads: the class and message are on the `item_enrichment` rows
+    the `having` clause just counted, and the title is on the source row in the
+    same join. The representative is the *newest* failed row -- the failure
+    being hit now -- and `failed_count` is every failed row for the source.
     """
+    source_ids = list(
+        session.execute(
+            select(ItemRow.source_id)
+            .join(ItemEnrichment, ItemEnrichment.item_id == ItemRow.id)
+            .where(
+                ItemRow.tenant_id == tenant_id,
+                ItemEnrichment.status.in_(
+                    (
+                        EnrichmentStatus.QUEUED.value,
+                        EnrichmentStatus.RUNNING.value,
+                        EnrichmentStatus.FAILED.value,
+                    )
+                ),
+            )
+            .group_by(ItemRow.source_id)
+            .having(
+                func.count() >= min_rows,
+                func.sum(
+                    case(
+                        (ItemEnrichment.status == EnrichmentStatus.FAILED.value, 1),
+                        else_=0,
+                    )
+                )
+                == func.count(),
+            )
+        ).scalars()
+    )
+    if not source_ids:
+        return []
     rows = session.execute(
-        select(ItemRow.source_id)
+        select(
+            ItemRow.source_id,
+            SourceRow.title,
+            ItemEnrichment.error_class,
+            ItemEnrichment.detail,
+        )
+        .join(SourceRow, SourceRow.id == ItemRow.source_id)
         .join(ItemEnrichment, ItemEnrichment.item_id == ItemRow.id)
         .where(
-            ItemRow.tenant_id == tenant_id,
-            ItemEnrichment.status.in_(
-                (
-                    EnrichmentStatus.QUEUED.value,
-                    EnrichmentStatus.RUNNING.value,
-                    EnrichmentStatus.FAILED.value,
-                )
-            ),
+            ItemRow.source_id.in_(source_ids),
+            ItemEnrichment.status == EnrichmentStatus.FAILED.value,
         )
-        .group_by(ItemRow.source_id)
-        .having(
-            func.count() >= min_rows,
-            func.sum(
-                case(
-                    (ItemEnrichment.status == EnrichmentStatus.FAILED.value, 1),
-                    else_=0,
-                )
+        .order_by(ItemEnrichment.updated_at.desc(), ItemEnrichment.id.desc())
+    ).all()
+    by_source: dict[str, list[Any]] = {}
+    for row in rows:
+        by_source.setdefault(str(row.source_id), []).append(row)
+    exhausted: list[ExhaustedSource] = []
+    for source_id in sorted(by_source):
+        failures = by_source[source_id]
+        latest = failures[0]  # newest first: the failure being hit now
+        excerpt = str(latest.detail or "")[:DETAIL_EXCERPT_CHARS]
+        exhausted.append(
+            ExhaustedSource(
+                source_id=source_id,
+                title=str(latest.title or ""),
+                failed_count=len(failures),
+                error_class=latest.error_class,
+                detail_excerpt=excerpt or None,
             )
-            == func.count(),
         )
-    ).scalars()
-    return sorted(rows)
+    return exhausted
 
 
 def list_jobs(session: Session) -> list[dict[str, object]]:
