@@ -607,8 +607,22 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
                 "schedule_policy": {"type": "fixed", "interval": "1h"},
             },
         ),
+        (
+            "add_sources",
+            {
+                "urls": ["https://x.example/feed", "https://y.example/feed"],
+                "schedule_policy": {"type": "fixed", "interval": "30m"},
+            },
+        ),
         ("set_source_status", {"source_id": "src-1", "status": "paused"}),
         ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}),
+        (
+            "set_source_pipeline_chain",
+            {
+                "source_id": "src-1",
+                "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
+            },
+        ),
         ("trigger_job", {"source_id": "src-1"}),
         ("retry_enrichments", {"source_id": "src-1"}),
         # Every write tool belongs here: a tool left out is a tool whose
@@ -622,6 +636,25 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         # A3 ingest (ADR 0022).
         ("submit_items", {"source_id": agent_id, "items": [_submitted_item()]}),
     ]
+
+    # The sweep is only as good as this list: a write tool that exists on the
+    # surface but is not named here would pass the test below without ever
+    # being asked to confirm anything. The registry is the source of truth, so
+    # the list is checked against it rather than trusted -- the hand-written
+    # version had already drifted (issue #125).
+    async with mcp_session(mcp_url) as session:
+        registered = {tool.name: tool for tool in (await session.list_tools()).tools}
+    writes = {
+        name
+        for name, tool in registered.items()
+        if tool.annotations is not None and tool.annotations.read_only_hint is False
+    }
+    swept = {tool for tool, _ in cases}
+    assert swept == writes, (
+        "the sweep must cover exactly the tools the server registers as writes: "
+        f"missing {sorted(writes - swept)}, not writes {sorted(swept - writes)}"
+    )
+
     for tool, args in cases:
         with pytest.raises(BaseException) as excinfo:
             await _call(mcp_url, tool, args)
@@ -1152,9 +1185,10 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
     (`app.mcp.tools.writes._guarded_write`). What this pins is a tool that stops
     doing so, which would let a tampered client execute something the user never
     saw. The tamper rewrites the first string field the tool asks about, so the
-    comparison for that tool is exercised; the twelve tools share one
-    implementation, so this is a sweep over the arguments rather than over
-    twelve copies of the code.
+    comparison for that tool is exercised; the tools share one implementation,
+    so this is a sweep over the arguments rather than over one copy per tool.
+    Like the refusal sweep, it checks its list against the live registry so a
+    new write tool cannot be left out (issue #125).
     """
     # (tool, args, field the tamper will flip)
     cases: list[tuple[str, dict[str, Any], str]] = [
@@ -1181,7 +1215,46 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
         ("backfill_source", {"source_id": "src-1"}, "source_id"),
         ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}, "status"),
         ("remove_source", {"source_id": "src-1"}, "source_id"),
+        (
+            "add_sources",
+            {
+                "urls": ["https://tamper-batch.example/feed"],
+                "schedule_policy": {"type": "fixed", "interval": "30m"},
+            },
+            "urls",
+        ),
+        (
+            "set_source_pipeline_chain",
+            {
+                "source_id": "src-1",
+                "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
+            },
+            "source_id",
+        ),
+        ("delete_items", {"item_ids": ["it-1"]}, "item_ids"),
+        ("delete_source_items", {"source_id": "src-1"}, "source_id"),
+        (
+            "submit_items",
+            {"source_id": "src-1", "items": [_submitted_item()]},
+            "source_id",
+        ),
     ]
+
+    # Same completeness check as the refusal sweep above: a write tool missing
+    # from this list would never be shown to abort under a tampered
+    # confirmation, and the hand-written list had already drifted (issue #125).
+    async with mcp_session(mcp_url) as session:
+        registered = {tool.name: tool for tool in (await session.list_tools()).tools}
+    writes = {
+        name
+        for name, tool in registered.items()
+        if tool.annotations is not None and tool.annotations.read_only_hint is False
+    }
+    swept = {tool for tool, _, _ in cases}
+    assert swept == writes, (
+        "the sweep must cover exactly the tools the server registers as writes: "
+        f"missing {sorted(writes - swept)}, not writes {sorted(swept - writes)}"
+    )
 
     def _tampering(field: str) -> Any:
         async def _cb(_ctx: Any, params: Any) -> Any:
