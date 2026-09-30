@@ -197,6 +197,7 @@ def handle(
             "has_match_url": bool(getattr(module, "match_url", None)),
             "has_source_config": bool(getattr(module, "source_config", None)),
             "has_collect_pages": bool(getattr(module, "collect_pages", None)),
+            "has_collect_item": bool(getattr(module, "collect_item", None)),
             "has_backfill": bool(getattr(module, "backfill", None)),
             "declared_features": sorted(declared.get("features") or []),
         }
@@ -272,6 +273,21 @@ def handle(
         except FetchError as exc:
             raise CollectorError(exc.error_class, exc.detail) from exc
         return {"raw": payload.as_rpc_dict()}
+
+    if method == "collect_item":
+        # The address is the caller's, not the source's: the collector fetches
+        # and parses it itself, so a fetch failure has to reach the host in
+        # the same classified form a CollectorError already takes (serve()
+        # turns it into the response's error object).
+        try:
+            drafts = module.collect_item(
+                source_id=str(params["source_id"]),
+                url=str(params["url"]),
+                client=child_client(host_http),
+            )
+        except FetchError as exc:
+            raise CollectorError(exc.error_class, exc.detail) from exc
+        return [draft.as_rpc_dict() for draft in drafts]
 
     if method == "collect_pages":
         from core.paging import WalkState

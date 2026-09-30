@@ -789,6 +789,35 @@ class SandboxedCollector:
             raise SpecCollectorError(ErrorClass.PARSE, f"plugin raised: {exc}") from exc
         return [ItemDraft.from_rpc_dict(d) for d in result]
 
+    def collect_item(
+        self,
+        *,
+        source_id: str,
+        url: str,
+        client: httpx.Client,
+    ) -> list[ItemDraft]:
+        """The item hook over RPC: the caller's address in, drafts out.
+
+        `client` is accepted for hook-signature uniformity and unused (the
+        child's egress is host-proxied). Failures keep their classification,
+        exactly as `parse` does: the child reports which of the five classes
+        fired, and an uncaught plugin exception is still a failure of this
+        source rather than a broken host.
+        """
+        del client
+        from core.models import ItemDraft
+
+        self._ensure_running()
+        try:
+            result = self._child.call(
+                "collect_item", {"source_id": source_id, "url": url}
+            )
+        except ClassifiedChildError as exc:
+            raise SpecCollectorError(ErrorClass(exc.code), exc.detail) from exc
+        except PluginChildError as exc:
+            raise SpecCollectorError(ErrorClass.PARSE, f"plugin raised: {exc}") from exc
+        return [ItemDraft.from_rpc_dict(d) for d in result]
+
     def collect_pages(
         self,
         *,

@@ -13,10 +13,11 @@ from here and the host consumes implementations through
 I/O, so the core purity rule (no framework, no I/O) holds.
 
 Failure contract: `fetch` implementations may only raise
-`FetchError(ErrorClass)`; `parse` implementations may only raise
-`CollectorError(ErrorClass)`. A hookimpl that leaks anything else is refused
-at registration (checked by the registry, not here — pluggy cannot express
-exception contracts).
+`FetchError(ErrorClass)`; `parse` and `collect_item` implementations may only
+raise `CollectorError(ErrorClass)` -- `collect_item` both fetches and parses
+one address, so it may raise either. A hookimpl that leaks anything else is
+refused at registration (checked by the registry, not here — pluggy cannot
+express exception contracts).
 """
 
 from __future__ import annotations
@@ -209,6 +210,26 @@ class CollectorSpec(Protocol):
 
         The host owns paging state end to end: it passes `state` in and
         persists the result's frontier/resume values.
+        """
+        ...
+
+    @HOOKSPEC
+    def collect_item(
+        self,
+        *,
+        source_id: str,
+        url: str,
+        client: Any,
+    ) -> list[ItemDraft]:
+        """Turn one already-known address into drafts (the item capability).
+
+        The caller supplies the address -- an article URL it discovered
+        outside the host -- instead of the source URL every other path starts
+        from, so the collector owns both the fetch and the parse of it. A
+        collector that can only read its own listing does not implement this,
+        and the registry's gate refuses the call rather than letting a
+        caller's address list become requests against an origin that never
+        agreed to them.
         """
         ...
 

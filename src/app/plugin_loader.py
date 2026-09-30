@@ -44,7 +44,7 @@ MODULE_NAME = "collector"
 
 MANIFEST_NAME = "manifest.json"
 FEATURES = frozenset(
-    {"fetch", "paged", "backfill", "signed", "cookie", "wordpress-upgrade"}
+    {"fetch", "paged", "backfill", "signed", "cookie", "wordpress-upgrade", "item"}
 )
 
 
@@ -220,6 +220,7 @@ def verify_declarations(plugin: PluginOnDisk, impls: dict[str, Any]) -> None:
     structural = {
         "fetch": impls["has_fetch"],
         "paged": impls["has_collect_pages"],
+        "item": impls["has_collect_item"],
         "backfill": impls["has_backfill"],
     }
     descriptive = {"signed", "cookie", "wordpress-upgrade"}
