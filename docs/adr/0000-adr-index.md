@@ -97,4 +97,4 @@ docs/adr/
 | [0041](0041-deferred-scope-and-its-triggers.md) | 范围裁决：A6 OPML 与 P3 剩余项（音频 feed / TTS / MCP 拆分 / Gateway / 按需数据存储）**有意不做**，每项附触发条件；**同时更正 spec 三处陈旧标记** | accepted（**修正 architecture-spec §5/§6 的未完成项口径**） | 2026-09-29 |
 | [0042](0042-alert-attribution-field-boundary.md) | 告警与诊断的归因字段边界：源标题/分类/计数/provider 错误文本（截断）允许出境，正文/凭据/PII/URL 仍禁止；`dominant error class` 标注全库累计 | accepted（**收窄 ADR 0034 决策 5 的「不发原文」与对应「已否决」一条**） | 2026-09-29 |
 | [0043](0043-host-constrained-video-in-feed-html.md) | 入库净化放行宿主受限的 `<video>`：只接受 `https://video.twimg.com/` 的 src，禁 autoplay/loop/muted，非白名单来源整个移除；采集器把「缩略图+外链」作为 fallback 内容 | accepted（**补充 ADR 0007 的媒体标签白名单，`iframe`/`object`/`embed` 禁令不变**） | 2026-09-29 |
-| [0044](0044-batch-source-addition.md) | 批量建源：一次确认覆盖一批（MCP `add_sources` + `/v1/sources:batch`）；修订 ADR 0041「批量形态本身也不缺」一句；OPML 仍不做 | **proposed（草案，待裁决）** | 2026-09-29 |
+| [0044](0044-batch-source-addition.md) | 批量建源：一次确认覆盖一批（MCP `add_sources` + `/v1/sources:batch`）；修订 ADR 0041「批量形态本身也不缺」一句；OPML 仍不做 | accepted（**修订 ADR 0041 决策 1 的一句话**） | 2026-09-29 |
