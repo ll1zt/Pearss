@@ -114,15 +114,13 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "Add a source. Requires user confirmation: this makes real "
             "outbound requests to a third party. schedule_policy is "
             "{type: fixed, interval: '30m'} or "
-            "{type: adaptive, min: '15m', max: '24h'}. source type is "
-            "'rss' (a feed URL), 'web' (a page a login-type collector "
-            "serves, e.g. zhihu/telegram), or 'auto' (default): the URL is "
-            "checked against the collectors and a non-rss match suggests "
-            "'web'. Pass type explicitly when auto would guess wrong. "
-            "pipeline_chain (a list of {plugin_id, kind, lang?, required?}) "
-            "plus target_lang gates items until the chain completes: e.g. "
-            "one translate/translation spec with target_lang 'en', or "
-            "one fulltext/fulltext spec to fetch missing article bodies."
+            "{type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed "
+            "URL), 'web' (a page a login-type collector serves, e.g. "
+            "zhihu/telegram) or 'auto' (default: inferred from the URL "
+            "against the collectors; pass it explicitly when auto would guess "
+            "wrong). pipeline_chain plus target_lang gate items until the "
+            "chain completes -- see set_source_pipeline_chain for the spec "
+            "shape."
         ),
     )
     async def add_source(
@@ -241,11 +239,11 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "Set a source's processing chain, and its target language with it. "
             "Requires confirmation: items are held at the gate until the chain "
             "completes, and its processors can make real outbound requests and "
-            "spend provider budget per item. Pass an empty list to clear the "
-            "chain, so items publish as soon as they are stored; passing no "
-            "target_lang sets it to none, which is what the confirmation says. "
-            "Run backfill_source afterwards to put already-stored items through "
-            "the chain. Use add_source to set a chain on a new source."
+            "spend provider budget per item. An empty list clears the chain, so "
+            "items publish as soon as they are stored; passing no target_lang "
+            "sets it to none, which is what the confirmation says. Run "
+            "backfill_source afterwards for already-stored items; use "
+            "add_source to set a chain on a new source."
         ),
     )
     async def set_source_pipeline_chain(
@@ -284,13 +282,12 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
             "Delete a source and everything it collected. Requires "
-            "confirmation. Permanent: the source row, its items, their stored "
-            "bodies, read state and translations are all removed, and "
-            "re-subscribing the same feed starts a new source with no history. "
-            "Check the size first with search_items (its `total` counts the "
-            "source's items). Use delete_source_items to clear a bad crawl and "
-            "keep the subscription, or set_source_status to disable it "
-            "instead."
+            "confirmation. Permanent: the source row, its items, stored bodies, "
+            "read state and translations are removed, and re-subscribing the "
+            "same feed starts a new source with no history. Check the size "
+            "first with search_items (its `total` counts the source's items). "
+            "Use delete_source_items to clear a bad crawl and keep the "
+            "subscription, or set_source_status to disable it instead."
         ),
     )
     async def remove_source(
@@ -477,16 +474,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Push items into an agent source (A3, ADR 0022): pass each item's "
-            "title, url, published_at and content, and Pearss stores it through "
-            "the same pipeline as collected items. The target must be a source "
-            "of type 'agent' — create one with add_source and a url like "
-            "'agent://newsletter-intake'; pushing into an rss or web source is "
-            "refused, because that would mix one origin's content into "
-            "another's provenance. Items are visible to readers as soon as they "
-            "are stored, unless the source has a processing chain. Requires "
-            "confirmation: this adds content to the corpus, where the chain can "
-            "make real outbound requests to the submitted URLs and spend "
-            "provider budget on it."
+            "title, url, published_at and content; Pearss stores it through the "
+            "same pipeline as collected items. The target must be a source of "
+            "type 'agent' — create one with add_source and a url like "
+            "'agent://newsletter-intake'. Pushing into an rss or web source is "
+            "refused: that would mix one origin's content into another's "
+            "provenance. Items are visible to readers as soon as stored, unless "
+            "the source has a chain. Requires confirmation: this adds content "
+            "to the corpus, and the chain can make real outbound requests to "
+            "the submitted URLs and spend provider budget on it."
         ),
     )
     async def submit_items(
