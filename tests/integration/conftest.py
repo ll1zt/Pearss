@@ -15,6 +15,7 @@ apart, which is the failure mode the fixtures exist to prevent.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -243,3 +244,27 @@ class ServerInThread:
         self._server.should_exit = True
         if getattr(self, "_thread", None) is not None:
             self._thread.join(timeout=15)
+
+
+@pytest.fixture
+def unreadable_model_dir(tmp_path: Path) -> Iterator[Path]:
+    """A model directory this process cannot look into.
+
+    The shape a multi-user host has: the weights are there, owned by another
+    account. `Path.is_file()` raises `PermissionError` inside it rather than
+    answering "no", which is what turned a documented skip into four failures
+    (issue #179). Skipped when the suite runs as root, where no directory is
+    unreadable and the case cannot be built.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root can read any directory; this case needs one it cannot")
+    root = tmp_path / "models"
+    model = root / "multilingual-e5-small"
+    model.mkdir(parents=True)
+    (model / "manifest.json").write_text('{"name": "multilingual-e5-small"}')
+    root.chmod(0o000)
+    try:
+        yield model
+    finally:
+        # tmp_path's cleanup has to be able to remove it.
+        root.chmod(0o700)
