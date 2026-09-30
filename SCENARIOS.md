@@ -33,14 +33,14 @@
 | AC-44..46 | #67 submit_items 确认指纹 | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_submit_items_confirmation.py` |
 | AC-47..52 | #64 工具体覆盖（追加号段） | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_mcp_tool_coverage.py` |
 | AC-53..54 | #68 list_plugins 的 limit 与分页 | `docs/api/mcp-tool-guide.md` §2 | 已合并 | `tests/integration/test_list_plugins_limit.py` |
-| AC-55..57 | #69 guide 一致性与缺席的守卫（原声明 49..51） | `docs/api/mcp-tool-guide.md` §2 / §6 | 保留 | — |
+| AC-55..57 | #69 guide 一致性与缺席的守卫（原声明 49..51） | `docs/api/mcp-tool-guide.md` §2 / §6 | 已合并 | `tests/unit/test_mcp_tool_guide.py` |
 | AC-58..61 | #70 search_items 的 q 语义与边界（原声明 52..55） | issue #70 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（描述必须写明 q 只匹配标题、full_text 搜正文） |
 | AC-62..63 | #71 窄工具与 /v1 的形状差异（原声明 56..57） | issue #71 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（每个工具必须落在 OpenAPI 声明的端点上） |
 | AC-64..65 | #72 list_enrichments 的维度（原声明 58..59） | issue #72 | 已合并 | `tests/integration/test_items_api.py`（`/v1/items/{id}/enrichments`） |
 | AC-66..68 | #73 工具面常驻上下文预算（原声明 60..62） | issue #73 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（预算守卫 + 任务级工具）、`tests/integration/test_sources_api.py`（`:diagnose`） |
-| AC-69..71 | #74 outputSchema 空壳（原声明 63..65） | issue #74 | 保留 | — |
-| AC-72..74 | #75 工具名命名空间（原声明 66..68） | issue #75 | 保留 | — |
-| AC-75..77 | #76 写工具守卫统一（原声明 69..71） | `docs/api/mcp-tool-guide.md` §3 | 保留 | — |
+| AC-69..71 | #74 outputSchema 空壳（原声明 63..65） | issue #74 | 已合并 | `tests/integration/test_mcp_conformance.py`（instructions 携带协议字段）、`tests/unit/test_mcp_tool_guide.py`（写明保留宽松 schema 的理由） |
+| AC-72..74 | #75 工具名命名空间（原声明 66..68） | issue #75 | 已明确不做 | `docs/api/mcp-tool-guide.md` §七（决定 + 重做触发条件）；`tests/unit/test_mcp_tool_guide.py::test_the_guide_records_the_naming_decision` |
+| AC-75..77 | #76 写工具守卫统一（原声明 69..71） | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/unit/test_write_guard.py` |
 | AC-78..80 | #77 列表查询全表扫与索引（原声明 72..74） | ADR 0035 §9 | 已合并 | `tests/integration/test_item_query_plan.py` |
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
@@ -71,6 +71,9 @@
 | AC-157..160 | #91 X 视频渲染为宿主受限的 `<video>`（非白名单宿主/自动播放/事件属性被剥离，降级存活） | issue #91 | 已合并 | `tests/unit/test_sanitize.py`、`tests/unit/test_properties_sanitize.py`、`src/plugins/collectors/twitter/test_collector.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
+
+「已明确不做」= 该号段的 issue 已裁决 declined：证据列写明决定与**重做触发条件**，
+不要求测试引用。把 declined 的号段留在「保留」是错的——「保留」读作「pending」（issue #125）。
 
 > **#87（core 助手的执行点）**：它的判据是机械属性而非场景，由
 > `tests/unit/test_structure_guards.py::test_every_core_helper_has_a_production_caller` 守住，

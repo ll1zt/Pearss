@@ -204,7 +204,11 @@ SURFACE_BUDGET_CHARS = 14_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:
-    """AC-66: the bound is the deliverable, so it is a test, not a paragraph."""
+    """AC-66: the bound is the deliverable, so it is a test, not a paragraph.
+
+    AC-71 (the #74 boundary): moving the protocol-field guidance into the
+    instructions kept the surface from growing; this is the measurement.
+    """
     snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
     sizes = {
         name: len(name)
@@ -268,7 +272,11 @@ def test_the_guide_section_numbers_are_unique_and_increasing() -> None:
 
 
 def test_the_guide_records_why_the_output_schema_is_permissive() -> None:
-    """Issue #74: the shell looks like waste, and deleting it costs something.
+    """AC-70 (issue #74): the shell looks like waste, and deleting it costs something.
+
+    The chosen route keeps the permissive schema (it is what makes the SDK emit
+    `structuredContent`) and puts the protocol fields in the instructions; the
+    guide has to state that reason, or the next reader removes the schema.
 
     A permissive outputSchema is what makes the SDK emit `structuredContent` at
     all, so "this schema carries no information" is an invitation to remove it
@@ -281,7 +289,8 @@ def test_the_guide_records_why_the_output_schema_is_permissive() -> None:
 
 
 def test_the_guide_records_the_naming_decision() -> None:
-    """Issue #75: not prefixing is a decision, and the trigger to revisit is named.
+    """AC-72..74 (issue #75): not prefixing is a decision, and the trigger to revisit
+    is named -- the disposition recorded in `SCENARIOS.md` is 已明确不做.
 
     "There is no prefix" reads as an oversight; the measurement that makes it
     deliberate -- the host namespaces by server, so the client sees

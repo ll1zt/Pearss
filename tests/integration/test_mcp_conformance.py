@@ -379,8 +379,9 @@ async def test_server_discover_answers(mcp_url: str) -> None:
     # pins body fields would lie about `fields=` and `_truncate`. They are
     # stated once, here, so a client can learn they exist at all.
     instructions = result["instructions"]
-    # AC-68: the guidance moved out of the tool descriptions is carried here,
-    # once, rather than repeated per tool.
+    # AC-68 / AC-69: the guidance moved out of the tool descriptions is carried
+    # here, once, rather than repeated per tool; #74 landed the protocol fields
+    # (`truncated_items`, `total_chars`, ...) here the same way.
     for field in (
         "truncated_items",
         "total_chars",
