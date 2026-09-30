@@ -1670,6 +1670,51 @@ def test_the_timeout_is_documented_where_an_operator_will_look() -> None:
 
 
 # --------------------------------------------------------------------------
+# The article extractor has one implementation
+#
+# The extractor was written for the fulltext processor, and the address-based
+# fetch path (issue #170) needs the same "page HTML -> the article" step. Two
+# copies would agree on the day they were written and diverge on the first fix
+# to either -- which is the shape AGENTS.md's "one thing, one implementation"
+# rule exists to prevent. The definition site is what duplicates, so it is what
+# the guard reads (issue #167).
+#
+# Scope: the extractor. `rss/wordpress.py` carries a regex-based `_plain_length`
+# of its own; unifying that is a behaviour change (the two count entities and
+# `<script>` bodies differently), so it is tracked separately as #174 rather
+# than folded into a move that promises no behaviour change.
+# --------------------------------------------------------------------------
+
+
+def test_the_article_extractor_is_defined_in_exactly_one_module() -> None:
+    """AC-167: the extractor lives in `adapters/article.py`, not per caller."""
+    defining = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if "__pycache__" not in path.parts
+        and re.search(
+            r"^def (extract_article_markup|_extract_article_markup)\b",
+            path.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+    )
+    assert defining == ["src/adapters/article.py"], (
+        "the article extractor must be defined exactly once, in "
+        f"src/adapters/article.py; found {defining}. A second definition is a "
+        "copy that drifts on the first fix to either (issue #167)."
+    )
+
+    processor = (REPO_ROOT / "src/plugins/processors/fulltext/processor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "extract_article_markup" in processor, (
+        "the fulltext processor no longer calls the shared extractor, so the "
+        "move is only half done: the implementation moved but the caller did "
+        "not follow (issue #167)."
+    )
+
+
+# --------------------------------------------------------------------------
 # Acceptance-scenario numbers: one number, one owner
 #
 # "AC-N" is the unit of traceability between a planned scenario and the test

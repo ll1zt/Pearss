@@ -296,42 +296,8 @@ def test_user_title_only_item_produces_an_empty_product_without_a_fetch(
 
 
 # --------------------------------------------------------------------------
-# Extraction quality: pinned behavior of the pure extractor
+# Registration
 # --------------------------------------------------------------------------
-
-
-def test_the_extractor_prefers_the_largest_text_block() -> None:
-    """Article detection: the dense text container wins over site chrome."""
-    html_text = (
-        "<html><body><nav>menu menu</nav>"
-        + "<article><p>"
-        + ("Long main article text. " * 30)
-        + "</p></article>"
-        + "<aside>sidebar note</aside></body></html>"
-    )
-    markup = processor._extract_article_markup(
-        html_text, base_url="https://example.test/"
-    )
-    assert "Long main article text" in markup
-    assert "menu" not in markup
-    assert "sidebar note" not in markup
-
-
-def test_the_extractor_drops_nav_aside_script_and_style() -> None:
-    html_text = (
-        "<html><head><style>.x{color:red}</style></head><body>"
-        "<script>var a=1;</script>"
-        "<article><p>" + ("Body prose. " * 30) + "</p></article>"
-        "<nav>nav links</nav><aside>aside text</aside></body></html>"
-    )
-    markup = processor._extract_article_markup(
-        html_text, base_url="https://example.test/"
-    )
-    assert "Body prose" in markup
-    assert "nav links" not in markup
-    assert "aside text" not in markup
-    assert "color:red" not in markup
-    assert "var a=1" not in markup
 
 
 def test_the_processor_id_is_stable() -> None:
@@ -474,73 +440,3 @@ def test_user_full_text_is_still_sanitised(origin: _Origin) -> None:
     # The legitimate structure is still there.
     assert "<h2" in product
     assert "Inline handler" in product
-
-
-# --------------------------------------------------------------------------
-# Parse-failure paths: each is reachable, so each gets a test
-# --------------------------------------------------------------------------
-#
-# The coverage gate asked for these lines, and the honest answer is to reach
-# them rather than declare them unreachable: all three were confirmed
-# reachable with real input before writing the tests. An XML declaration
-# carrying an encoding hint is the common real-world trigger — a page served
-# as text/xml without a byte-order mark parses fine from bytes and raises
-# "Unicode strings with encoding declaration are not supported" from str.
-
-
-def test_a_page_with_an_encoding_declaration_still_parses() -> None:
-    """lxml refuses a str with an encoding declaration; the retry strips it.
-
-    Reachable in production: some origins serve the document as XML, and
-    reporting such a page as unparseable would drop a perfectly good article.
-    """
-    page = (
-        '<?xml version="1.0" encoding="utf-8"?><html><body><article>'
-        "<h2>Title</h2><p>" + ("Long enough prose to keep. " * 20) + "</p>"
-        "</article></body></html>"
-    )
-    markup = processor._extract_article_markup(page, base_url="https://e.test/")
-
-    assert "<h2" in markup
-    assert "Long enough prose" in markup
-
-
-def test_a_page_that_cannot_be_parsed_at_all_is_a_parse_error() -> None:
-    """Both attempts fail -> ProcessorError(parse), never a silent empty body.
-
-    The unterminated declaration is the case without a `?>` to split on, so
-    the fallback's second branch (cut at `>`) is the one that runs.
-    """
-    from core.plugins.hooks import ProcessorError
-
-    with pytest.raises(ProcessorError) as excinfo:
-        processor._extract_article_markup(
-            '<?xml version="1.0" encoding="utf-8"', base_url="https://e.test/"
-        )
-    assert excinfo.value.error_class is ErrorClass.PARSE
-
-
-def test_an_empty_document_is_a_parse_error() -> None:
-    """A non-ValueError failure takes the outer handler, same classification.
-
-    An empty body (a JS shell, a truncated response) raises lxml's ParserError
-    rather than ValueError, and both must land in the taxonomy identically —
-    otherwise one of them escapes as an unclassified crash.
-    """
-    from core.plugins.hooks import ProcessorError
-
-    with pytest.raises(ProcessorError) as excinfo:
-        processor._extract_article_markup("", base_url="https://e.test/")
-    assert excinfo.value.error_class is ErrorClass.PARSE
-
-
-def test_measuring_unparseable_content_falls_back_to_word_count() -> None:
-    """The threshold measurement never raises on a fragment it cannot parse.
-
-    It runs before the fetch decision and on the stored body, so raising here
-    would turn a malformed summary into a failed row instead of a plain short
-    one — the measurement is allowed to be approximate, not fatal.
-    """
-    measured = processor._plain_length('<?xml version="1.0" encoding="utf-8"?>')
-
-    assert measured > 0
