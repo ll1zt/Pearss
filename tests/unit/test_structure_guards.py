@@ -478,6 +478,42 @@ def test_only_the_registry_reads_the_registry_s_private_names() -> None:
     )
 
 
+def test_no_reader_protocol_shapes_enter_core() -> None:
+    """AC② of issue #86: Google Reader shapes stop at the adapter.
+
+    `core/` is the domain: it knows what a read state or a folder *is*, not how
+    Google Reader encodes one. The stream ids (`user/-/label/...`,
+    `user/-/state/com.google/...`, `tag:google.com,2005:reader/item/...`) and
+    the `com.google` tag namespace belong in `adapters/reader_api.py`. Before
+    this guard the rule was convention only -- nothing failed when a protocol
+    shape appeared in core.
+
+    Scanning `_code_lines` (not the raw text) is deliberate: docstrings in core
+    legitimately *name* these shapes while explaining where the translation
+    happens, and a guard that forbade the explanation would push the boundary
+    documentation out of the module it describes. Injection-verified by adding a
+    stream id to a core module and watching this fail.
+    """
+    protocol = re.compile(
+        r"tag:google\.com"
+        r"|com\.google"
+        r"|user/-/state/"
+        r"|user/-/label/"
+        r"|reader/item/"
+    )
+    offenders = [
+        f"{path}:{lineno}: {line.strip()}"
+        for path in sorted((REPO_ROOT / "src/core").rglob("*.py"))
+        if "__pycache__" not in path.parts
+        for lineno, line in _code_lines(path)
+        if protocol.search(line)
+    ]
+    assert not offenders, (
+        "these core lines carry Google Reader protocol shapes; the translation "
+        "belongs in adapters/reader_api.py (issue #86):\n" + "\n".join(offenders)
+    )
+
+
 def test_no_test_mocks_a_module_in_this_repository() -> None:
     """`unittest.mock` is for external systems that cannot be run for real.
 

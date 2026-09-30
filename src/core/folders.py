@@ -32,8 +32,8 @@ def normalize_folder(value: str) -> str:
     `/` is refused because the name becomes a stream id
     (`user/-/label/<name>`), and a slash inside it produces a path no client
     can round-trip: the folder would appear under one name and answer under
-    none. The literal `user/-/label/` prefix is refused for the same reason --
-    it is the encoding, not a name.
+    none. That encoding is the adapter's concern, so the check here is only
+    about the slash; whatever prefix the adapter prepends contains one.
     """
     cleaned = value.strip()
     if not cleaned:
@@ -44,6 +44,4 @@ def normalize_folder(value: str) -> str:
         raise ValueError("a folder name must not contain control characters")
     if "/" in cleaned:
         raise ValueError("a folder name must not contain '/'")
-    if cleaned.startswith("user/-/label/"):
-        raise ValueError("a folder name must not repeat the stream-id prefix")
     return cleaned
