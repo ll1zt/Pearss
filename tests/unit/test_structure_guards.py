@@ -1686,32 +1686,45 @@ def test_the_timeout_is_documented_where_an_operator_will_look() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_article_extractor_is_defined_in_exactly_one_module() -> None:
-    """AC-167: the extractor lives in `adapters/article.py`, not per caller."""
+def test_the_article_extractor_and_its_measurement_live_in_one_module() -> None:
+    """AC-167 / AC-177: extraction and its measurement have one definition.
+
+    The extractor and `plain_length` are the two halves of "page HTML -> what
+    the reader sees", and both callers (the fulltext processor, the rss
+    collector's address path) need both halves. A second copy of either drifts
+    on the first fix to one of them: the regex copy of `plain_length` in
+    `rss/wordpress.py` counted `&#8230;` as seven characters where the shared
+    one counts one, which is a reader-visible decision made by markup weight
+    (issues #167, #174).
+    """
     defining = sorted(
         str(path.relative_to(REPO_ROOT))
         for path in (REPO_ROOT / "src").rglob("*.py")
         if "__pycache__" not in path.parts
         and re.search(
-            r"^def (extract_article_markup|_extract_article_markup)\b",
+            r"^def (extract_article_markup|_extract_article_markup"
+            r"|plain_length|_plain_length)\b",
             path.read_text(encoding="utf-8"),
             re.MULTILINE,
         )
     )
     assert defining == ["src/adapters/article.py"], (
-        "the article extractor must be defined exactly once, in "
-        f"src/adapters/article.py; found {defining}. A second definition is a "
-        "copy that drifts on the first fix to either (issue #167)."
+        "the article extractor and its measurement must be defined exactly "
+        f"once, in src/adapters/article.py; found {defining}. A second "
+        "definition is a copy that drifts on the first fix to either "
+        "(issues #167, #174)."
     )
 
-    processor = (REPO_ROOT / "src/plugins/processors/fulltext/processor.py").read_text(
-        encoding="utf-8"
-    )
-    assert "extract_article_markup" in processor, (
-        "the fulltext processor no longer calls the shared extractor, so the "
-        "move is only half done: the implementation moved but the caller did "
-        "not follow (issue #167)."
-    )
+    for caller in (
+        "src/plugins/processors/fulltext/processor.py",
+        "src/plugins/collectors/rss/wordpress.py",
+    ):
+        source = (REPO_ROOT / caller).read_text(encoding="utf-8")
+        assert "extract_article_markup" in source or "plain_length" in source, (
+            f"{caller} no longer calls the shared article helpers, so the move "
+            "is only half done: the implementation moved but a caller did not "
+            "follow (issues #167, #174)."
+        )
 
 
 # --------------------------------------------------------------------------

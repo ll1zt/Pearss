@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import httpx
 
+from adapters.article import plain_length
 from adapters.http import FetchError, FetchPolicy, fetch
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
@@ -233,9 +234,12 @@ def merge_fulltext(
             return match.group(0)
         # Only an upgrade counts: REST content shorter than (or equal to) the
         # summary means the API is truncated too, and swapping equals for
-        # equals adds a network dependency for nothing. Compare plain text so
-        # markup weight cannot fake a length win.
-        if _plain_length(post.content_html) <= _plain_length(description):
+        # equals adds a network dependency for nothing. The measurement is the
+        # repository's one notion of visible length (`adapters/article.py`),
+        # which decodes HTML entities -- a summary cut with `&#8230;` is seven
+        # characters of markup for one visible character, and markup weight
+        # must not fake a length win in either direction (issue #174).
+        if plain_length(post.content_html) <= plain_length(description):
             return match.group(0)
         replaced += 1
         return _cdata(post.content_html)
@@ -267,14 +271,6 @@ def merge_fulltext(
 # read-more anchor at the permalink, and the trailing "The post … first
 # appeared" block repeats it — either resolves the entry's identity.
 _PERMALINK_IN_DESCRIPTION = re.compile(r'<a[^>]+href="(https?://[^"]+)"')
-
-_TAGS = re.compile(r"<[^>]+>")
-_WS = re.compile(r"\s+")
-
-
-def _plain_length(html: str) -> int:
-    """The visible-text length of an HTML fragment."""
-    return len(_WS.sub(" ", _TAGS.sub("", html)).strip())
 
 
 def _post_for_description(
