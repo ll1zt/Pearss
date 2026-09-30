@@ -256,3 +256,153 @@ def test_a_class_on_any_other_tag_is_dropped() -> None:
     out = sanitize_html('<a href="https://e.com" class="pearss-avatar">x</a>')
     assert "class" not in out
     assert 'href="https://e.com"' in out
+
+
+# --------------------------------------------------------------------------
+# The host-constrained video (ADR 0043, issue #91)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #91):
+#
+#   AC-157 白名单宿主的视频以 <video controls> 出现, 无 autoplay/loop/muted
+#   AC-158 非白名单宿主 / javascript: / onerror 的 video 被剥离
+#   AC-159 降级: video 不被放行时 fallback 内容(缩略图+外链)仍存活
+#   AC-160 净化对 video 的其余边界(幂等, 非视频正文不受前置 pass 影响)
+# --------------------------------------------------------------------------
+
+_VIDEO_SRC = "https://video.twimg.com/amplify_video/1/vid/avc1/832x480/x.mp4"
+
+
+@pytest.mark.unit
+def test_a_whitelisted_video_survives_with_controls() -> None:
+    """AC-157: only a video from the enumerated host is admitted."""
+    out = sanitize_html(
+        f'<video src="{_VIDEO_SRC}" poster="https://pbs.twimg.com/t.jpg"'
+        " controls></video>"
+    )
+    assert "<video" in out
+    assert _VIDEO_SRC in out
+    assert "controls" in out
+    assert 'poster="https://pbs.twimg.com/t.jpg"' in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "attribute", ["autoplay", "loop", "muted", "onerror='alert(1)'"]
+)
+def test_a_whitelisted_video_drops_autoplay_and_handlers(attribute: str) -> None:
+    """AC-157: autoplay is harassment and bypasses traffic prefs; dropped."""
+    out = sanitize_html(
+        f'<video src="{_VIDEO_SRC}" {attribute} controls></video>'
+    ).lower()
+    assert "autoplay" not in out
+    assert "loop" not in out
+    assert "muted" not in out
+    assert "onerror" not in out
+    assert "alert(" not in out
+    assert _VIDEO_SRC in out
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "src",
+    [
+        "https://evil.example/x.mp4",
+        "https://video.twimg.com.evil.example/x.mp4",
+        "http://video.twimg.com/x.mp4",
+        "javascript:alert(1)",
+    ],
+)
+def test_a_video_from_an_untrusted_source_is_removed(src: str) -> None:
+    """AC-158: the allowlist admits a source, not the tag itself.
+
+    A scheme-only check would let any host serve the media; a host-suffix check
+    would let `video.twimg.com.evil.example` through. The element is removed
+    whole rather than left as an inert blank video.
+    """
+    out = sanitize_html(f'<video src="{src}" controls></video>')
+    assert "<video" not in out.lower()
+    assert "evil.example" not in out
+    assert "alert(" not in out
+    assert "javascript:" not in out.lower()
+
+
+@pytest.mark.unit
+def test_a_video_url_that_cannot_be_parsed_is_refused() -> None:
+    """AC-158: `urlparse` can raise (an invalid IPv6 host); that is not allowed.
+
+    The exception path is the difference between "refuse this URL" and "fail
+    the whole ingest".
+    """
+    out = sanitize_html('<video src="https://[bad" controls></video>')
+    assert "<video" not in out.lower()
+
+
+@pytest.mark.unit
+def test_a_video_url_with_no_host_is_refused() -> None:
+    """AC-158: a URL with no host cannot be on the allowlist.
+
+    `urlparse("https://").hostname` is None, and a naive check must not let a
+    hostless URL slip through.
+    """
+    out = sanitize_html('<video src="https://" controls></video>')
+    assert "<video" not in out.lower()
+
+
+@pytest.mark.unit
+def test_a_removed_video_keeps_the_text_around_it() -> None:
+    """AC-160: the pre-pass removes the element, not its neighbour's text."""
+    out = sanitize_html(
+        '<p>before</p><video src="https://evil.example/x.mp4"></video><p>after</p>'
+    )
+    assert "before" in out
+    assert "after" in out
+    assert "<video" not in out.lower()
+
+
+@pytest.mark.unit
+def test_the_video_fallback_content_is_kept_inside_the_video() -> None:
+    """AC-159: the collector's fallback link lives inside the allowed video."""
+    inner = (
+        '<a href="https://x.com/s/1">'
+        '<img src="https://pbs.twimg.com/t.jpg" alt="video"/></a>'
+    )
+    out = sanitize_html(f'<video src="{_VIDEO_SRC}" controls>{inner}</video>')
+    assert "<video" in out
+    assert 'href="https://x.com/s/1"' in out
+    assert "pbs.twimg.com/t.jpg" in out
+
+
+@pytest.mark.unit
+def test_the_video_fallback_survives_without_the_video_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-159 (the degradation): reverting the allowlist must not lose the video.
+
+    This is the hard constraint of ADR 0043: the collector puts the existing
+    thumbnail+link INSIDE the `<video>`, so when the tag is not allowed nh3
+    strips the tag and keeps the content. Simulated by dropping `video` from
+    the allowlist, which is exactly what a revert does.
+    """
+    from adapters import sanitize
+
+    monkeypatch.setattr(sanitize, "ALLOWED_TAGS", sanitize.ALLOWED_TAGS - {"video"})
+    out = sanitize.sanitize_html(
+        f'<video src="{_VIDEO_SRC}" controls>'
+        '<a href="https://x.com/s/1"><img src="https://pbs.twimg.com/t.jpg"'
+        ' alt="video"/></a></video>'
+    )
+
+    assert "<video" not in out.lower()
+    assert 'href="https://x.com/s/1"' in out, "the fallback link must survive"
+    assert "pbs.twimg.com/t.jpg" in out
+
+
+@pytest.mark.unit
+def test_sanitising_a_video_is_idempotent() -> None:
+    """AC-160: the pre-pass and the allowlist pass compose to a fixed point."""
+    html = (
+        f'<p>x</p><video src="{_VIDEO_SRC}" controls>'
+        '<a href="https://x.com/s/1">v</a></video>'
+    )
+    once = sanitize_html(html)
+    assert sanitize_html(once) == once
