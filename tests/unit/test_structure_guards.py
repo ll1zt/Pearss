@@ -1760,23 +1760,32 @@ def test_every_scenario_number_in_use_is_claimed_exactly_once() -> None:
     )
 
 
-def _merged_scenario_numbers() -> set[int]:
-    """Numbers the registry marks 已合并, as a set.
+def _registry_rows() -> list[tuple[int, int, str, str]]:
+    """(start, end, owner, status) for each parsable row of the register.
 
     Parsed separately from `_registry_segments` because the status column is
-    what this check reads and the other one does not carry it.
+    what these two checks read and the other one does not carry it.
     """
-    numbers: set[int] = set()
+    rows: list[tuple[int, int, str, str]] = []
     for line in SCENARIO_REGISTRY.read_text(encoding="utf-8").splitlines():
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         match = re.fullmatch(r"AC-(\d+)(?:\.\.(?:AC-)?(\d+))?", cells[0])
-        if match is None or len(cells) < 4 or cells[3] != "已合并":
+        if match is None or len(cells) < 4:
             continue
         start = int(match.group(1))
         end = int(match.group(2)) if match.group(2) else start
-        numbers.update(range(start, end + 1))
+        rows.append((start, end, cells[1], cells[3]))
+    return rows
+
+
+def _merged_scenario_numbers() -> set[int]:
+    """Numbers the registry marks 已合并, as a set."""
+    numbers: set[int] = set()
+    for start, end, _owner, status in _registry_rows():
+        if status == "已合并":
+            numbers.update(range(start, end + 1))
     return numbers
 
 
@@ -1803,6 +1812,30 @@ def test_every_ac_claimed_as_merged_is_cited_by_a_test() -> None:
         f"cites them, so nothing proves they were delivered: {missing}. Cite "
         "the test that holds each (a `# AC-N: ...` comment or a docstring), or "
         "correct the row's status."
+    )
+
+
+def test_a_cited_scenario_number_is_not_left_reserved() -> None:
+    """A 保留 row whose numbers are already cited is stale (issue #125).
+
+    `保留` means "the numbers are allocated and the tests are not merged yet".
+    Once a test cites them the work is on main, so the row describes a state
+    that no longer exists -- #69, #74 and #76 all sat like that after their PRs
+    merged, which is how "delivered" drifts from "recorded". A declined item is
+    `已明确不做`, not `保留`.
+    """
+    cited = set(_scenario_numbers_in_use())
+    stale: list[str] = []
+    for start, end, owner, status in _registry_rows():
+        if status != "保留":
+            continue
+        hit = sorted(number for number in range(start, end + 1) if number in cited)
+        if hit:
+            stale.append(f"{owner} ({start}..{end}) cites {hit}")
+    assert not stale, (
+        "SCENARIOS.md still marks these 保留 while their numbers are already "
+        f'cited by tests, so "pending" is stale: {stale}. Set the row to '
+        "已合并, or to 已明确不做 if it was declined."
     )
 
 
