@@ -1760,6 +1760,52 @@ def test_every_scenario_number_in_use_is_claimed_exactly_once() -> None:
     )
 
 
+def _merged_scenario_numbers() -> set[int]:
+    """Numbers the registry marks 已合并, as a set.
+
+    Parsed separately from `_registry_segments` because the status column is
+    what this check reads and the other one does not carry it.
+    """
+    numbers: set[int] = set()
+    for line in SCENARIO_REGISTRY.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        match = re.fullmatch(r"AC-(\d+)(?:\.\.(?:AC-)?(\d+))?", cells[0])
+        if match is None or len(cells) < 4 or cells[3] != "已合并":
+            continue
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else start
+        numbers.update(range(start, end + 1))
+    return numbers
+
+
+def test_every_ac_claimed_as_merged_is_cited_by_a_test() -> None:
+    """The reverse of the claimed-once check: a merged claim needs an artifact.
+
+    Issue #125, from #61's lesson: the checklist is the written prediction of the
+    path, and a segment marked 已合并 that no file cites is "declared done"
+    drifting from "done". `test_every_scenario_number_in_use_is_claimed_exactly_once`
+    catches a cited number with no owner; nothing caught the owner with no
+    citation, which is how seventeen ACs sat marked merged while appearing in no
+    test at all. The P1/P2 historical range is exempt: it is a reserved block,
+    and its module-local namespaces (fulltext AC-1..13, translate AC-19..24)
+    live in their own registers rather than in this sequence.
+    """
+    cited = set(_scenario_numbers_in_use())
+    missing = sorted(
+        number
+        for number in _merged_scenario_numbers()
+        if number not in cited and not 1 <= number <= 35
+    )
+    assert not missing, (
+        "SCENARIOS.md marks these scenario numbers 已合并, but no test or doc "
+        f"cites them, so nothing proves they were delivered: {missing}. Cite "
+        "the test that holds each (a `# AC-N: ...` comment or a docstring), or "
+        "correct the row's status."
+    )
+
+
 def test_each_register_start_matches_the_adr_that_declares_it() -> None:
     """An ADR that assigns a starting number and the registry must agree.
 

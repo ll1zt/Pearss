@@ -32,7 +32,7 @@ FIXTURE = (
 
 
 def test_the_onnx_runtime_runs_a_real_graph_under_the_pinned_environment() -> None:
-    """AC: a real inference, 384 float32 outputs, the same vector twice.
+    """AC-114: a real inference, 384 float32 outputs, the same vector twice.
 
     The shape and dtype are asserted exactly, not just "it returned something":
     the vector is stored as float32 and consumed by a dot product that assumes

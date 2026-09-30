@@ -94,7 +94,7 @@ def _files(origin: _Origin) -> tuple[PinnedFile, ...]:
 def test_a_matching_artifact_is_installed_and_described(
     origin: _Origin, tmp_path: Path
 ) -> None:
-    """AC: the bytes land, and the manifest says which model they are."""
+    """AC-118: the bytes land, and the manifest says which model they are."""
     manifest = fetch(
         tmp_path, files=_files(origin), client=httpx.Client(follow_redirects=True)
     )
@@ -109,7 +109,8 @@ def test_a_matching_artifact_is_installed_and_described(
 def test_a_tampered_artifact_is_refused_and_leaves_nothing(
     origin: _Origin, tmp_path: Path
 ) -> None:
-    """The hash is the only thing between a wrong model and a silently wrong key.
+    """AC-118 (the tamper half): the hash is the only thing between a wrong
+    model and a silently wrong key.
 
     And the refusal has to leave the directory as it was: a half-written or
     mismatched file that stayed would be picked up by the next run, which checks
@@ -173,7 +174,7 @@ def test_an_unreachable_origin_is_a_network_failure(tmp_path: Path) -> None:
 
 
 def test_a_mirror_changes_where_the_bytes_come_from_and_nothing_else() -> None:
-    """The endpoint is a knob; the pin is not.
+    """AC-118 (the mirror half): the endpoint is a knob; the pin is not.
 
     This is what makes pointing the fetch at a mirror safe: the same two
     artifacts are accepted, with the same hashes and sizes, whichever host

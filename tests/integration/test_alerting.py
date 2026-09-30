@@ -958,6 +958,52 @@ def test_the_worker_reports_a_scheduler_that_stopped(
 
 
 @pytest.mark.integration
+def test_the_scheduler_reports_a_worker_that_stopped(
+    session_factory: sessionmaker[Session],
+    sink: _AlertSink,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-113 (the other direction): the two loops watch *each other*.
+
+    The worker->scheduler direction is pinned above. This is the reverse, wired
+    in `main.py` as `scheduler.watch(worker.liveness)`: a dead enrichment worker
+    must be named, once, and its recovery reported. Without this half, "the
+    loops watch each other" rests on one tested direction and one that only its
+    wiring claims -- which is exactly the shape #61's audit found (#125).
+    """
+    monkeypatch.setenv("PEARSS_ALERT_URL", sink.url)
+    monkeypatch.setenv("PEARSS_ALERT_MIN_INTERVAL_SECONDS", "3600")
+    # A healthy rate, so only the loop watch has anything to say.
+    _finish_runs(session_factory, succeeded=40, failed=0)
+
+    from app.enrichment_worker import EnrichmentWorker
+    from app.scheduler import Scheduler
+
+    scheduler = Scheduler(session_factory, client=None, tick_seconds=3600)  # type: ignore[arg-type]
+    worker = EnrichmentWorker(session_factory, processors={}, watch=lambda: (True, ""))
+    scheduler.watch(worker.liveness)
+
+    async def scenario() -> None:
+        await worker.start()
+        scheduler._alert_if_needed()  # the worker is alive: no loop alert
+        assert worker._task is not None
+        worker._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker._task
+        scheduler._alert_if_needed()  # the worker stopped: one alert
+        scheduler._alert_if_needed()  # a repeat within the interval: suppressed
+
+    asyncio.run(scenario())
+
+    (body,) = sink.bodies()
+    assert body["title"] == "Pearss loop stopped"
+    assert body["text"] == (
+        "background loop(s) not running: enrichment\n"
+        "action: check the process logs; the loop restarts with the service"
+    ), body
+
+
+@pytest.mark.integration
 def test_a_watch_that_was_never_handed_a_loop_reports_nothing(
     sink: _AlertSink, monkeypatch: pytest.MonkeyPatch
 ) -> None:

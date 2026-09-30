@@ -45,7 +45,7 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 
 def test_the_real_model_produces_unit_vectors_of_the_declared_width() -> None:
-    """The contract the fixture pins, now against the weights it stands in for."""
+    """AC-117: the contract the fixture pins, now against the real weights."""
     vector = _encoder_or_skip().encode("内核调度器如何工作")
 
     assert len(vector) == DIMENSIONS

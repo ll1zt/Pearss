@@ -28,7 +28,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def test_a_passage_becomes_a_unit_vector_of_the_declared_width() -> None:
-    """AC: the width is the manifest's, and the norm is one.
+    """AC-115: the width is the manifest's, and the norm is one.
 
     The norm is asserted rather than assumed because the dot product downstream
     is only a cosine if it holds; a vector that is merely "384 floats" would
@@ -48,7 +48,7 @@ def test_the_same_text_twice_gives_the_same_vector() -> None:
 
 
 def test_a_batch_gives_a_text_the_vector_it_would_get_alone() -> None:
-    """Padding is masked, so a longer neighbour cannot change a text's vector.
+    """AC-116: padding is masked, so a longer neighbour cannot change a text's vector.
 
     Without the mask this is the kind of bug that never shows up in a test that
     only encodes one text at a time, and shows up in production as ranking that

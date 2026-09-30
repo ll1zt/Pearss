@@ -254,6 +254,8 @@ async def _call(
 
 
 @pytest.mark.asyncio
+# AC-63: the pipeline_chain gap #71 raised was closed by a tool (the
+# `set_source_pipeline_chain` entry below), not by documenting an invariant.
 async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
     async with mcp_session(mcp_url) as session:
         names = {tool.name for tool in (await session.list_tools()).tools}

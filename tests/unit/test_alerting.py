@@ -552,7 +552,7 @@ _HEALTHY: dict[str, object] = {
 
 @pytest.mark.unit
 def test_a_stuck_chain_degrades_an_otherwise_healthy_state() -> None:
-    """Issue #61: a chain that cannot finish is not a slow success rate.
+    """AC-111 (issue #61): a chain that cannot finish is not a slow success rate.
 
     The rate counts *runs*, and these are rows no future run clears on its own --
     so a perfectly healthy rate with a stuck chain is exactly the case the rate
@@ -577,7 +577,7 @@ def test_a_stuck_chain_degrades_an_otherwise_healthy_state() -> None:
 
 @pytest.mark.unit
 def test_a_dead_loop_degrades_and_is_named_in_the_message() -> None:
-    """A loop cannot report its own death; whoever is still running says so."""
+    """AC-112: a loop cannot report its own death; its peer says so."""
     healthy = _HEALTHY
     verdict = decide_health(healthy, dead_loops=("enrichment",))
     assert verdict.degraded is True
