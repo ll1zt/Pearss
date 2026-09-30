@@ -47,6 +47,7 @@ __all__ = [
     "Registration",
     "backfiller",
     "by_name",
+    "collect_item_with",
     "default_registry",
     "fetch_page_with",
     "for_each_sandboxed_collector",
@@ -134,6 +135,26 @@ class BackfillingCollector(Protocol):
     def oldest_cursor(self, drafts: list[ItemDraft]) -> str | None: ...
 
 
+class ItemCollectingCollector(Protocol):
+    """The optional item hook: one already-known address in, drafts out.
+
+    Separate from `Collector` because it is a capability rather than a
+    requirement: a collector that only knows how to read its own listing
+    cannot answer an address the caller found elsewhere. Declared via the
+    manifest's `item` feature, so the registry's gate -- not an attribute
+    probe on a module that may not have it -- decides whether a call is
+    allowed.
+    """
+
+    def collect_item(
+        self,
+        *,
+        source_id: str,
+        url: str,
+        client: httpx.Client,
+    ) -> list[ItemDraft]: ...
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Registration:
     """One registered collector and how the host reaches it.
@@ -152,6 +173,10 @@ class Registration:
     # The collector fetches its own pages (signed or cookie-authenticated
     # origins). Declared, not probed.
     fetches: bool = False
+    # The collector can turn one address the caller discovered into drafts
+    # (content-level discovery). Declared, not probed: an implementation the
+    # manifest does not name is inert on purpose.
+    item: bool = False
     # The verified manifest as its surface dict; `checksum` is the registry
     # computed sha256 of its canonical JSON (ADR 0017).
     manifest: dict[str, Any]
@@ -272,6 +297,7 @@ class CollectorRegistry:
             return {
                 "fetch": bool(getattr(executor, "fetch", None)),
                 "collect_pages": bool(getattr(executor, "collect_pages", None)),
+                "collect_item": bool(getattr(executor, "collect_item", None)),
                 "backfill": bool(getattr(executor, "backfill", None)),
             }
 
@@ -314,6 +340,7 @@ class CollectorRegistry:
             structural = {
                 "fetch": impls["fetch"],
                 "paged": impls["collect_pages"],
+                "item": impls["collect_item"],
                 "backfill": impls["backfill"],
             }
             descriptive = {"signed", "cookie", "wordpress-upgrade"}
@@ -342,6 +369,7 @@ class CollectorRegistry:
                     collector=cast("Collector", executor),
                     paged="paged" in declared,
                     fetches="fetches" in declared,
+                    item="item" in declared,
                     manifest=manifest_data,
                     checksum=checksum,
                     trust="third-party" if sandboxed else "builtin",
@@ -391,6 +419,7 @@ class CollectorRegistry:
             collector=cast("Collector", SandboxedCollector(child)),
             paged="paged" in features,
             fetches="fetch" in features,
+            item="item" in features,
             manifest=manifest,
             checksum=str(manifest.get("checksum", "")) or _installed_checksum(manifest),
             trust="third-party",
@@ -875,6 +904,33 @@ def fetch_page_with(
             url, client=client, source_id=source_id, conditional=conditional
         )
     return plain_fetch(url, client=client, source_id=source_id, conditional=conditional)
+
+
+def collect_item_with(
+    registration: Registration,
+    *,
+    source_id: str,
+    url: str,
+    client: httpx.Client,
+) -> list[ItemDraft]:
+    """One address of this source, or a clear refusal.
+
+    The capability is checked *here*, before the collector is called: a source
+    whose collector cannot read a single address must not have the caller's
+    address list turned into requests against it (AC-168). The refusal is
+    classified `structure_changed` -- this source cannot serve this shape of
+    request, which is what the class means elsewhere -- so the pipeline
+    records it like any other source-level failure and a route can answer
+    without inventing a second vocabulary.
+    """
+    if not registration.item:
+        raise CollectorError(
+            ErrorClass.STRUCTURE_CHANGED,
+            f"collector {registration.name!r} does not declare the item "
+            "capability, so it cannot fetch an address on its own",
+        )
+    collector = cast("ItemCollectingCollector", registration.collector)
+    return collector.collect_item(source_id=source_id, url=url, client=client)
 
 
 def backfiller(registration: Registration) -> BackfillingCollector | None:

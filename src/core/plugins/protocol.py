@@ -25,6 +25,7 @@ METHODS: Final[frozenset[str]] = frozenset(
         "fetch",
         "parse",
         "collect_pages",
+        "collect_item",
         "source_config",
         "backfill",
         "before_url",

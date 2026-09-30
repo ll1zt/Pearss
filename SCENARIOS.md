@@ -71,6 +71,7 @@
 | AC-157..160 | #91 X 视频渲染为宿主受限的 `<video>`（非白名单宿主/自动播放/事件属性被剥离，降级存活） | issue #91 | 已合并 | `tests/unit/test_sanitize.py`、`tests/unit/test_properties_sanitize.py`、`src/plugins/collectors/twitter/test_collector.py` |
 | AC-161..166 | #159 add_sources 批量建源：一次确认覆盖一批（ADR 0044） | issue #159 | 已合并 | `tests/integration/test_sources_batch.py`、`tests/integration/test_mcp_add_sources.py` |
 | AC-167 | #167 文章抽取器提为共享件 `adapters/article.py`：抽取输出逐字节不变，且仓库里只有一份实现 | issue #167 | 已合并 | `tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
+| AC-168 | #168 采集器新增可选能力 `collect_item`：未声明的源在调用采集器之前被拒绝 | issue #168 | 已合并 | `tests/unit/test_collect_item_capability.py`、`tests/integration/test_collect_item_rpc.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
