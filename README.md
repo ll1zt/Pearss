@@ -318,7 +318,7 @@ search_items(limit=5, fields=id,title, q=…)        796 字符
 `tests/integration/test_mcp_server.py::test_narrowing_fields_cuts_what_reaches_the_model`
 守住。而「`limit=100` 真的拿到 100 行」由 `tests/integration/test_mcp_list_truncation.py`
 守住——旧版本这里写的是 32,434 / 4,323（-87%），那组数字与代码行为**已经分叉**：当时
-`limit>20` 会被展示层的兜底砍到 20 行，数字的推导基础不成立（issue #65）。
+`limit>20` 会被展示层的兜底砍到 20 行，数字的推导基础不成立（issue #65 / AC-43）。
 
 ### 鉴权
 

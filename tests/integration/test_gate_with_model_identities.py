@@ -169,7 +169,7 @@ def test_a_product_from_another_model_does_not_open_the_gate(
 def test_a_row_identity_is_not_what_the_gate_wants(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The defect itself, pinned: a row's `input_hash` is a different argument.
+    """AC-119: the defect itself, pinned: a row's `input_hash` is a different argument.
 
     For an embedding the two strings differ, and passing the row's own identity
     derives a second time, matches nothing, and leaves the item pending with

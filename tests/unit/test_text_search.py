@@ -149,7 +149,7 @@ def _recalled(index: sqlite3.Connection, query: str) -> set[str]:
 def test_the_golden_queries_find_what_they_should(
     index: sqlite3.Connection, document: str, query: str, expected: bool, note: str
 ) -> None:
-    """Every row of the golden set, against a real index."""
+    """AC-60: every row of the golden set, against a real index."""
     found = _recalled(index, query)
     if expected:
         assert document in found, f"query {query!r} did not find {document!r}"

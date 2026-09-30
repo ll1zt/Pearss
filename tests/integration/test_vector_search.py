@@ -178,7 +178,7 @@ def plain_source(session_factory: sessionmaker[Session]) -> str:
 def test_the_closest_vector_comes_first(
     session_factory: sessionmaker[Session], chained_source: str
 ) -> None:
-    """The ranking is by closeness, and a distant candidate still comes back."""
+    """AC-120: the ranking is by closeness, and a distant candidate still comes back."""
     with session_factory() as session:
         near = _seed(
             session,
@@ -228,7 +228,7 @@ def test_limit_keeps_the_best(
 def test_a_pending_item_is_not_a_candidate(
     session_factory: sessionmaker[Session], chained_source: str
 ) -> None:
-    """The gate, in the one read path that had to be told about it.
+    """AC-120 (pending): the gate, in the one read path that had to be told about it.
 
     A search that filtered after fetching would put a pending row in memory where
     a later change could render it -- the shape `visible_item_rows` exists to
@@ -295,7 +295,7 @@ def test_an_item_without_a_product_is_not_a_candidate(
 def test_the_item_itself_can_be_excluded(
     session_factory: sessionmaker[Session], chained_source: str
 ) -> None:
-    """ "Articles like this one" must not return the article."""
+    """AC-120 (self-exclusion): "Articles like this one" must not return the article."""
     with session_factory() as session:
         this_one = _seed(
             session,
@@ -326,7 +326,7 @@ def test_the_item_itself_can_be_excluded(
 def test_a_payload_that_is_not_a_vector_is_skipped_not_fatal(
     session_factory: sessionmaker[Session], chained_source: str
 ) -> None:
-    """One unreadable product must not take down a search."""
+    """AC-120 (bad payload): one unreadable product must not take down a search."""
     with session_factory() as session:
         broken = _seed(
             session,
@@ -357,7 +357,8 @@ def test_a_payload_that_is_not_a_vector_is_skipped_not_fatal(
 def test_a_vector_of_the_wrong_width_is_skipped(
     session_factory: sessionmaker[Session], chained_source: str
 ) -> None:
-    """The identity mechanism should make this impossible; if it happens, say so."""
+    """AC-120 (wrong width): the identity mechanism should make this
+    impossible; if it happens, say so."""
     with session_factory() as session:
         _seed(
             session,

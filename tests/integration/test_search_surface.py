@@ -146,7 +146,7 @@ async def _titles(client: httpx.AsyncClient, **params: Any) -> set[str]:
 async def test_a_word_in_the_body_is_found(
     client: httpx.AsyncClient, factory: sessionmaker[Session]
 ) -> None:
-    """AC-93: the body match and the title match arrive in one answer."""
+    """AC-59 / AC-93: the body match and the title match arrive in one answer."""
     with factory() as session:
         source_id = _source(session)
         _store(
@@ -456,7 +456,7 @@ async def test_hybrid_returns_the_fused_order(
 async def test_hybrid_without_a_usable_model_says_so(
     client: httpx.AsyncClient, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A missing model is a 503 with a command, not a silent lexical answer.
+    """AC-61: a missing model is a 503 with a command, not a silent lexical answer.
 
     A caller who asked for hybrid and got keyword-only results would read them as
     fused, and the recall they were asking for is exactly the difference.
