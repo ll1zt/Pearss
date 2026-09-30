@@ -28,6 +28,8 @@ from app.mcp.confirmation import (
     Confirmation,
     _add_source_confirmation,
     _add_source_fields,
+    _add_sources_confirmation,
+    _add_sources_fields,
     _backfill_source_confirmation,
     _backfill_source_fields,
     _delete_items_confirmation,
@@ -153,6 +155,60 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 **({"folder": folder} if folder else {}),
             },
             ok=(200, 201),
+            extra=lambda _status: {"audit": "recorded by the Core API"},
+        )
+
+    @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
+        description=(
+            "Add several sources in one call. Requires user confirmation: this "
+            "makes real outbound requests to a third party for every URL. "
+            "Options apply to the whole batch, and `type` 'auto' is resolved per "
+            "URL exactly as add_source resolves it. Results are per item: a URL "
+            "that cannot be used fails alone and the rest are still created. "
+            "Use add_source for a single source, where the dialog names it "
+            "exactly."
+        ),
+    )
+    async def add_sources(
+        urls: list[str],
+        schedule_policy: dict[str, Any],
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_add_sources_confirmation)],
+        type: str = "auto",
+        folder: str = "",
+        pipeline_chain: list[dict[str, Any]] | None = None,
+        target_lang: str = "",
+        trust_level: str = "standard",
+        parser_plugin_id: str = "",
+    ) -> dict[str, Any]:
+        fields = _add_sources_fields(
+            urls,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            trust_level,
+            parser_plugin_id,
+        )
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path="/v1/sources:batch",
+            body={
+                "urls": urls,
+                "type": fields["type"],
+                "schedule_policy": schedule_policy,
+                "trust_level": trust_level,
+                "pipeline_chain": pipeline_chain,
+                "target_lang": target_lang or None,
+                "parser_plugin_id": parser_plugin_id or None,
+                # Empty means "the API's default folder", not "no folder".
+                **({"folder": folder} if folder else {}),
+            },
             extra=lambda _status: {"audit": "recorded by the Core API"},
         )
 

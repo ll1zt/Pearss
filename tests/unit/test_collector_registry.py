@@ -166,3 +166,38 @@ def test_fetching_registration_uses_its_own_hook(
     )
 
     assert payload.body == b"signed:src-9"
+
+
+@pytest.mark.unit
+def test_inference_picks_web_for_a_collector_match() -> None:
+    """A URL a sandboxed collector claims is not an rss feed (ADR 0044 reuses this)."""
+    assert (
+        collector_registry.infer_source_type("https://www.zhihu.com/people/x") == "web"
+    )
+    assert (
+        collector_registry.infer_source_type("https://example.test/feed.xml") == "rss"
+    )
+
+
+@pytest.mark.unit
+def test_inference_survives_a_matcher_that_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A matcher may raise on input it did not expect; that is "no match".
+
+    The batch endpoint resolves `auto` per URL, so a matcher that raised here
+    would turn one odd URL into a 500 for the whole request.
+    """
+
+    def boom(url: str) -> bool:
+        raise ValueError("matcher exploded")
+
+    monkeypatch.setattr(
+        collector_registry,
+        "matchers",
+        lambda: (("rss", lambda url: True), ("boom", boom)),
+    )
+
+    assert (
+        collector_registry.infer_source_type("https://example.test/feed.xml") == "rss"
+    )

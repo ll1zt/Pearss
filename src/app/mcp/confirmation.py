@@ -30,7 +30,7 @@ from typing import Any, cast
 from mcp.server.mcpserver.resolve import Elicit
 from pydantic import BaseModel, Field, create_model
 
-from app.mcp.core_client import _infer_source_type
+from app.collector_registry import infer_source_type
 from core.folders import DEFAULT_FOLDER
 
 LOGGER = logging.getLogger(__name__)
@@ -209,7 +209,7 @@ def _add_source_fields(
     asked about a concrete source rather than about the literal "auto".
     """
     requested = type.strip().lower()
-    source_type = _infer_source_type(url) if requested == "auto" else requested
+    source_type = infer_source_type(url) if requested == "auto" else requested
     return {
         "url": url,
         "type": source_type,
@@ -238,6 +238,82 @@ def _add_source_confirmation(
             f"{fields['schedule_policy']}, chain {fields['pipeline_chain']} "
             f"(lang {fields['target_lang'] or 'none'}) and folder "
             f"{fields['folder'] or DEFAULT_FOLDER}?"
+        ),
+        _fields=fields,
+    )
+
+
+def _urls_fingerprint(urls: list[str]) -> str:
+    """A stable digest of a batch's URL list, in order.
+
+    The list cannot travel through an elicitation form (a form carries
+    primitives), so the dialog shows a count and a preview and this covers the
+    rest. Order is significant: the response reports results in this order and
+    the preview was shown in it, so a permutation is a different request.
+    """
+    canonical = json.dumps(urls, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _add_sources_fields(
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> dict[str, Any]:
+    """What add_sources confirms and executes, derived in one place.
+
+    `type` stays as requested -- `auto` is resolved server-side per URL
+    (`/v1/sources:batch`), so the confirmed value is exactly the executed one.
+    The URL list travels as count + preview + fingerprint, the same
+    reconciliation `submit_items` uses for item bodies.
+    """
+    preview = "; ".join(urls[:5])
+    more = "" if len(urls) <= 5 else f" (+{len(urls) - 5} more)"
+    return {
+        "count": str(len(urls)),
+        "urls": f"{preview}{more}",
+        "urls_fingerprint": _urls_fingerprint(urls),
+        "type": type.strip().lower() or "auto",
+        "schedule_policy": _render(schedule_policy),
+        "pipeline_chain": _render(pipeline_chain),
+        "target_lang": target_lang,
+        "folder": folder,
+        "trust_level": trust_level,
+        "parser_plugin_id": parser_plugin_id,
+    }
+
+
+def _add_sources_confirmation(
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> Elicit[Any]:
+    """The add_sources question: one dialog for the whole batch."""
+    fields = _add_sources_fields(
+        urls,
+        schedule_policy,
+        type,
+        pipeline_chain,
+        target_lang,
+        folder,
+        trust_level,
+        parser_plugin_id,
+    )
+    return _confirm_resolver(
+        _summary=(
+            f"Add {fields['count']} source(s) as {fields['type']} with policy "
+            f"{fields['schedule_policy']} and folder "
+            f"{fields['folder'] or DEFAULT_FOLDER}? {fields['urls']}"
         ),
         _fields=fields,
     )

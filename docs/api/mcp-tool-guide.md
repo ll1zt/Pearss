@@ -98,9 +98,11 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | 工具 | 理由 |
 |---|---|
 | `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
+| `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，逐条报告 `created/existing/failed` |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
+| `set_source_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
 | `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆；确认文本说明会删掉什么） |
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文） |
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
@@ -110,7 +112,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `backfill_source` | 对历史条目一次性补跑处理器链 |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 
-只读工具不需要确认：`list_sources`、`get_source`、`search_items`、`get_item`、
+只读工具不需要确认：`list_sources`、`get_source`、`diagnose_source`、`search_items`、`get_item`、
 `get_item_body`、`list_jobs`、`list_runs`、`list_enrichments`、`list_plugins`、
 `get_system_snapshot`。
 

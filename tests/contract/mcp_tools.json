@@ -58,6 +58,78 @@
       "type": "object"
     }
   },
+  "add_sources": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": true,
+      "read_only_hint": false
+    },
+    "description": "Add several sources in one call. Requires user confirmation: this makes real outbound requests to a third party for every URL. Options apply to the whole batch, and `type` 'auto' is resolved per URL exactly as add_source resolves it. Results are per item: a URL that cannot be used fails alone and the rest are still created. Use add_source for a single source, where the dialog names it exactly.",
+    "input_schema": {
+      "properties": {
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        },
+        "parser_plugin_id": {
+          "default": "",
+          "title": "Parser Plugin Id",
+          "type": "string"
+        },
+        "pipeline_chain": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline Chain"
+        },
+        "schedule_policy": {
+          "additionalProperties": true,
+          "title": "Schedule Policy",
+          "type": "object"
+        },
+        "target_lang": {
+          "default": "",
+          "title": "Target Lang",
+          "type": "string"
+        },
+        "trust_level": {
+          "default": "standard",
+          "title": "Trust Level",
+          "type": "string"
+        },
+        "type": {
+          "default": "auto",
+          "title": "Type",
+          "type": "string"
+        },
+        "urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Urls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "urls",
+        "schedule_policy"
+      ],
+      "title": "add_sourcesArguments",
+      "type": "object"
+    }
+  },
   "backfill_source": {
     "annotations": {
       "destructive_hint": false,

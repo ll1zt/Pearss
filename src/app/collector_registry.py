@@ -690,6 +690,35 @@ def matchers() -> tuple[tuple[str, Callable[[str], bool]], ...]:
     )
 
 
+def infer_source_type(url: str) -> str:
+    """Suggest a source type from the URL, before the operator overrides it.
+
+    A URL a sandboxed collector claims (zhihu, telegram, x.com/home) cannot be
+    collected by the rss collector -- routing it as `rss` sends the rss
+    collector at an HTML page and the origin answers 403 (observed when
+    subscribing a Zhihu profile). So: a collector match means `web`; anything
+    else stays `rss`, the default for a feed URL. `parser_plugin_id` exists for
+    finer targeting; this inference only picks between rss and web.
+
+    Lives here rather than in the MCP layer because two callers need the same
+    answer: `add_source` resolves `auto` before it elicits, and
+    `/v1/sources:batch` resolves it per URL (ADR 0044). One implementation, so
+    the same list cannot be split two ways depending on the entry point.
+    """
+    for name, matcher in matchers():
+        if name != "rss" and _safe_match(matcher, url):
+            return "web"
+    return "rss"
+
+
+def _safe_match(matcher: Callable[[str], bool], url: str) -> bool:
+    """A matcher that raises (a malformed candidate URL) simply does not match."""
+    try:
+        return bool(matcher(url))
+    except Exception:
+        return False
+
+
 def sync_plugin_table(session_factory: Any, *, tenant_id: str = SINGLE_TENANT) -> None:
     """Record every verified manifest in the plugin table at startup.
 
