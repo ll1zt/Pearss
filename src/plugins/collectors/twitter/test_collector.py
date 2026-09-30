@@ -348,6 +348,175 @@ def test_only_positive_integer_dimensions_are_rendered() -> None:
     assert _dimensions({"original_info": "not a dict"}) == ""
 
 
+# --------------------------------------------------------------------------
+# Video rendering (ADR 0043, issue #91)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #91):
+#
+#   AC-157 白名单宿主的视频以 <video controls> 出现 (最高码率 mp4, poster, 无 autoplay)
+#   AC-158 非白名单宿主 / javascript: / onerror 的 video 被剥离
+#   AC-159 降级: 没有可放行 mp4 时退回缩略图+外链
+#   AC-160 边界: 畸形的 video_info 不破坏渲染
+# --------------------------------------------------------------------------
+
+_VIDEO_ITEM: dict[str, Any] = {
+    "type": "video",
+    "media_url_https": "https://pbs.twimg.com/thumb.jpg",
+    "expanded_url": "https://x.com/u/status/1/video/1",
+    "original_info": {"width": 832, "height": 480},
+    "video_info": {
+        "variants": [
+            {
+                "content_type": "application/x-mpegURL",
+                "url": "https://video.twimg.com/pl.m3u8",
+            },
+            {
+                "content_type": "video/mp4",
+                "bitrate": 256000,
+                "url": "https://video.twimg.com/256.mp4",
+            },
+            {
+                "content_type": "video/mp4",
+                "bitrate": 2176000,
+                "url": "https://video.twimg.com/2176.mp4",
+            },
+        ]
+    },
+}
+
+
+@pytest.mark.unit
+def test_a_video_tweet_renders_a_video_element() -> None:
+    """AC-157: the best mp4 variant becomes a <video>, with its fallback inside.
+
+    The fallback is not decoration: it is what a reader sees if the sanitiser
+    allowlist is ever reverted (ADR 0043 decision 3).
+    """
+    from plugins.collectors.twitter.collector import _media_html
+
+    out = _media_html([_VIDEO_ITEM])
+
+    assert out is not None
+    assert "<video" in out
+    assert 'src="https://video.twimg.com/2176.mp4"' in out, "highest bitrate mp4"
+    assert "256.mp4" not in out, "the lower variant is not also emitted"
+    assert "pl.m3u8" not in out, "the HLS playlist is not a src"
+    assert "controls" in out
+    assert 'poster="https://pbs.twimg.com/thumb.jpg"' in out
+    assert 'width="832" height="480"' in out
+    assert "autoplay" not in out
+    # The existing thumbnail + external link is the video's content.
+    assert 'href="https://x.com/u/status/1/video/1"' in out
+    assert "pbs.twimg.com/thumb.jpg" in out
+
+
+@pytest.mark.unit
+def test_a_video_without_a_whitelisted_variant_falls_back_to_the_link() -> None:
+    """AC-159: no admitted mp4 means the thumbnail+link form, not nothing."""
+    from plugins.collectors.twitter.collector import _media_html
+
+    item = {
+        **_VIDEO_ITEM,
+        "video_info": {
+            "variants": [
+                {
+                    "content_type": "video/mp4",
+                    "bitrate": 1000,
+                    "url": "https://evil.example/x.mp4",
+                }
+            ]
+        },
+    }
+    out = _media_html([item])
+
+    assert out is not None
+    assert "<video" not in out
+    assert "evil.example" not in out
+    assert 'href="https://x.com/u/status/1/video/1"' in out
+    assert "pbs.twimg.com/thumb.jpg" in out
+
+
+@pytest.mark.unit
+def test_video_variant_edges_are_ignored_not_crashed() -> None:
+    """AC-160: malformed variants are skipped, not a collection failure.
+
+    A non-dict variant, an empty URL, a missing bitrate and a boolean bitrate
+    are all shapes the payload can carry; each must be ignored rather than
+    raise or rank wrongly.
+    """
+    from plugins.collectors.twitter.collector import _video_src
+
+    assert (
+        _video_src(
+            {
+                "video_info": {
+                    "variants": [
+                        "nope",
+                        {},
+                        {"content_type": "video/mp4", "url": ""},
+                    ]
+                }
+            }
+        )
+        is None
+    )
+    # A bool bitrate must not win the comparison (bool is an int subclass);
+    # a missing bitrate ranks as zero, and the URL is still selected.
+    for bitrate in (True, 0):
+        assert (
+            _video_src(
+                {
+                    "video_info": {
+                        "variants": [
+                            {
+                                "content_type": "video/mp4",
+                                "bitrate": bitrate,
+                                "url": "https://video.twimg.com/a.mp4",
+                            }
+                        ]
+                    }
+                }
+            )
+            == "https://video.twimg.com/a.mp4"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "video_info",
+    [{"variants": "nope"}, {}, None],
+    ids=["variants-not-a-list", "no-variants", "no-video-info"],
+)
+def test_a_malformed_video_info_does_not_break_rendering(
+    video_info: object,
+) -> None:
+    """AC-160: a shape we do not understand falls back, it does not raise."""
+    from plugins.collectors.twitter.collector import _media_html
+
+    item = {**_VIDEO_ITEM, "video_info": video_info}
+    out = _media_html([item])
+
+    assert out is not None
+    assert "<video" not in out
+    assert "pbs.twimg.com/thumb.jpg" in out
+
+
+@pytest.mark.unit
+def test_the_rendered_video_survives_the_sanitiser() -> None:
+    """AC-157 (the real chain): collector output, sanitised, keeps the video."""
+    from adapters.sanitize import sanitize_html
+    from plugins.collectors.twitter.collector import _media_html
+
+    out = _media_html([_VIDEO_ITEM])
+    assert out is not None
+
+    cleaned = sanitize_html(out)
+    assert "<video" in cleaned
+    assert "controls" in cleaned
+    assert "video.twimg.com/2176.mp4" in cleaned
+    assert "autoplay" not in cleaned
+
+
 @pytest.mark.unit
 def test_a_quoted_tweet_names_its_author() -> None:
     """The quote block says whose post it is, in text.

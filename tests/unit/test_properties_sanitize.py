@@ -58,6 +58,9 @@ _PAYLOAD_PARTS = st.sampled_from(
         "<template><script>alert(1)</script></template>",
         "<textarea><script>alert(1)</script></textarea>",
         "<![CDATA[<script>alert(1)</script>]]>",
+        "<video src='javascript:alert(1)' autoplay onerror=alert(1)></video>",
+        "<video src='https://evil.example/x.mp4' autoplay loop muted></video>",
+        "<video autoplay controls poster='javascript:alert(1)'></video>",
     ]
 )
 _PAYLOAD = st.lists(_PAYLOAD_PARTS, max_size=6).map("".join)
@@ -112,3 +115,16 @@ def test_payload_built_from_known_vectors_is_inert(html: str) -> None:
     single-vector example tests structurally cannot.
     """
     _assert_inert(sanitize_html(html))
+
+
+@settings(max_examples=200)
+@given(st.one_of(_NASTY, _PAYLOAD, st.text(max_size=300)))
+def test_output_never_contains_autoplay(html: str) -> None:
+    """No input makes the sanitiser emit an autoplaying video (ADR 0043).
+
+    `autoplay` is absent from the video attribute allowlist, so this holds by
+    construction; the property is what keeps a future "add the attribute" edit
+    from turning every stored video into something that plays on open and
+    spends the reader's data without asking.
+    """
+    assert "autoplay" not in sanitize_html(html).lower(), repr(html)
