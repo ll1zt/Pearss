@@ -159,6 +159,21 @@ def test_measuring_unparseable_content_falls_back_to_word_count() -> None:
 # --------------------------------------------------------------------------
 
 
+def test_plain_length_counts_script_text_and_ignores_comments() -> None:
+    """What the shared measurement counts, pinned where it is defined.
+
+    Issue #174 assumed lxml's `text_content()` drops a `<script>`'s text while
+    the regex it replaced kept it. Measured, both count it: the two
+    implementations diverged on HTML entities only, and this test pins the
+    behaviour the upgrade decision now rests on, in both directions.
+    """
+    assert article.plain_length("<p>a</p><script>x</script>") == 2
+    assert article.plain_length("<p>a</p><!-- comment -->") == 1
+    # Entities are decoded: seven characters of markup, one visible character.
+    assert article.plain_length("<p>abc&#8230;</p>") == 4
+    assert article.plain_length("<p>a&nbsp;b</p>") == 3
+
+
 def test_page_metadata_prefers_open_graph_over_the_title_element() -> None:
     """A `<title>` carries the site name; `og:title` is the article's own."""
     page = (
