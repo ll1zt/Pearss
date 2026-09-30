@@ -47,8 +47,8 @@ from app.mcp_guard import (
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
 from app.plugins_routes import router as plugins_router
-from app.reader_routes import ReaderAuth, configure_reader_credentials
-from app.reader_routes import router as reader_router
+from app.reader import ReaderAuth, configure_reader_credentials
+from app.reader import router as reader_router
 from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
 from app.system_routes import router as system_router
