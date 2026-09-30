@@ -306,6 +306,9 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "retry_enrichments",
         # A3 ingest (ADR 0022): the write side of an agent source.
         "submit_items",
+        # The other direction (issue #171): the caller discovered addresses and
+        # the deployment fetches them through the source's own collector.
+        "fetch_source_items",
     }
 
 
@@ -613,6 +616,10 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
                 "urls": ["https://x.example/feed", "https://y.example/feed"],
                 "schedule_policy": {"type": "fixed", "interval": "30m"},
             },
+        ),
+        (
+            "fetch_source_items",
+            {"source_id": "src-1", "urls": ["https://x.example/archives/1"]},
         ),
         ("set_source_status", {"source_id": "src-1", "status": "paused"}),
         ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}),
@@ -1221,6 +1228,11 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
                 "urls": ["https://tamper-batch.example/feed"],
                 "schedule_policy": {"type": "fixed", "interval": "30m"},
             },
+            "urls",
+        ),
+        (
+            "fetch_source_items",
+            {"source_id": "src-1", "urls": ["https://tamper-items.example/1"]},
             "urls",
         ),
         (

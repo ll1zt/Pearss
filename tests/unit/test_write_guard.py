@@ -66,6 +66,8 @@ CONFIRMATION = REPO_ROOT / "src/app/mcp/confirmation.py"
 ARGUMENTS: dict[str, Any] = {
     "url": "https://example.test/feed.xml",
     "urls": ["https://example.test/a.xml", "https://example.test/b.xml"],
+    "batch_size": 5,
+    "min_interval_seconds": 1.5,
     "schedule_policy": {"type": "fixed", "interval": "30m"},
     "type": "rss",
     "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
@@ -132,6 +134,8 @@ def _perturbed(value: Any) -> Any:
         return value + "X"
     if isinstance(value, int):
         return value + 1
+    if isinstance(value, float):
+        return value + 1.0
     if value is None:
         return "X"
     if isinstance(value, dict):
@@ -163,8 +167,8 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     tools = _write_tools()
     # The count is a claim, not a property: a new write tool has to change this
     # line, which is where someone notices that the confirmation surface grew.
-    assert len(tools) == 14, (
-        f"expected the fourteen write tools, found {sorted(tools)} -- update the "
+    assert len(tools) == 15, (
+        f"expected the fifteen write tools, found {sorted(tools)} -- update the "
         "claim in this docstring if the surface really changed"
     )
 

@@ -99,6 +99,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 |---|---|
 | `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
 | `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，逐条报告 `created/existing/failed` |
+| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。确认文本含条数、URL 预览与**列表指纹**（只比条数会被换掉一个地址的列表骗过）；地址必须在本源 host 上 |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
