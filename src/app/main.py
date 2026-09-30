@@ -201,10 +201,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # which is the only one Starlette runs.
     mcp_inner = app.state.mcp_app
 
+    # The application's own collector registry: the scheduler, the routes and
+    # the lifespan all use this one, so two applications in one process do not
+    # share collectors, sandboxed children or installed plugins (issue #84).
+    registry = app.state.collector_registry
+
     scheduler = Scheduler(
         app.state.session_factory,
         client=client,
         tick_seconds=float(os.environ.get("PEARSS_TICK_SECONDS", "60")),
+        registry=registry,
     )
     app.state.scheduler = scheduler
 
@@ -225,16 +231,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler.watch(worker.liveness)
 
     async with mcp_inner.router.lifespan_context(mcp_inner):
-        from app.collector_registry import (
-            for_each_sandboxed_collector,
-            restore_installed_plugins,
-            set_http_transport,
-            sync_plugin_table,
-        )
-
         try:
             # Restore approved installations before egress wiring or starting jobs.
-            restore_installed_plugins(app.state.session_factory)
+            registry.restore_installed_plugins(app.state.session_factory)
             # Names the assumption and checks it against the data (issue
             # #89): the column exists on every table, so a second tenant is
             # representable, and every read would silently stop returning it.
@@ -253,10 +252,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # later (ADR 0023), and `_installed_registration` reads this back to
             # give it the same egress path. Applying it to the current children is
             # the other half.
-            for_each_sandboxed_collector(
-                lambda name, child: set_http_transport(name, transport)
+            registry.for_each_sandboxed_collector(
+                lambda name, child: registry.set_http_transport(name, transport)
             )
-            sync_plugin_table(app.state.session_factory)
+            registry.sync_plugin_table(app.state.session_factory)
             if scheduler_enabled():
                 await scheduler.start()
                 await worker.start()
@@ -270,7 +269,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # with pipes; without this they outlive a graceful shutdown and
             # are only reaped when the OS tears the host down. Stopped before
             # the client closes because a live child may still be mid-call.
-            for_each_sandboxed_collector(lambda name, child: child.stop())
+            registry.for_each_sandboxed_collector(lambda name, child: child.stop())
             client.close()
 
 
@@ -339,6 +338,14 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         openapi_url="/openapi.json" if docs_enabled() else None,
     )
     app.state.session_factory = session_factory or create_session_factory()
+
+    # One collector registry per application (issue #84). Built before the MCP
+    # sub-app, whose core client reads it off `app.state`. Constructing it is
+    # cheap: the registrations (and the sandboxed children) are built lazily on
+    # first use.
+    from app.collector_registry import CollectorRegistry
+
+    app.state.collector_registry = CollectorRegistry()
 
     # The Reader API is a compatibility surface with its own authentication,
     # mounted separately per docs/api/style-guide.md rather than mixed into

@@ -141,25 +141,26 @@ async def reader_client(reader_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]
 def _reap_sandboxed_children() -> Iterator[None]:
     """Stop any sandboxed collector a test spawned.
 
-    `collector_registry` holds `_SANDBOX_CHILDREN` in a module global and the
-    children spawn lazily, so any test that builds the registry -- directly, or
-    indirectly by constructing an app -- leaves live subprocesses behind. The
-    app's lifespan stops them in production, but suites that drive the app
-    through `ASGITransport` never enter it. Without this teardown those
-    children outlive the suite, leaking pipes and finally being reaped by the
-    OS at interpreter shutdown (visible as ResourceWarnings).
+    Each application owns a collector registry now (issue #84), and building
+    one starts its sandboxed children (they spawn lazily, but reading a
+    manifest is the first use). The app's lifespan stops them in production,
+    but suites that drive the app through `ASGITransport` never enter it.
+    `reset_registries` stops every registry built in this process -- module
+    default and per-application alike -- so whichever test spawned a child,
+    none outlive the test. Without it they leak pipes and are reaped by the OS
+    at interpreter shutdown (visible as ResourceWarnings).
 
-    Autouse and module-global because the leak is: whichever test spawned a
-    child, the registry still holds it at the end of any test.
+    Autouse and process-wide because the leak is: the child is held by
+    whichever registry the test built, and the registry instance is not
+    reachable from the fixture that created the application.
     """
     yield
     from app import collector_registry
 
-    collector_registry.for_each_sandboxed_collector(lambda name, child: child.stop())
-    # Installed plugins are module state too (ADR 0023) and they outrank the
-    # shipped collectors in URL matching, so a plugin left registered by one
-    # test would claim a later test's sources.
-    collector_registry.forget_installed_plugins()
+    # Installed plugins are per-registry state too (ADR 0023) and they outrank
+    # the shipped collectors in URL matching, so a plugin left registered by
+    # one test would claim a later test's sources.
+    collector_registry.reset_registries()
 
 
 # --------------------------------------------------------------------------

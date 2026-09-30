@@ -198,7 +198,7 @@ def test_a_transport_failure_stays_network_and_keeps_the_child(
     # `start` is on the sandboxed proxy, not the `Collector` Protocol the
     # registry declares; the tests drive the real child directly.
     cast("Any", registration.collector).start()
-    child = collector_registry._SANDBOX_CHILDREN["zhihu"]
+    child = collector_registry.default_registry()._sandbox_children["zhihu"]
     assert child._proc is not None
     pid = child._proc.pid
     collector_registry.set_http_transport(
@@ -236,7 +236,7 @@ def test_a_policy_refusal_keeps_its_blocked_classification(
     # `start` is on the sandboxed proxy, not the `Collector` Protocol the
     # registry declares; the tests drive the real child directly.
     cast("Any", registration.collector).start()
-    child = collector_registry._SANDBOX_CHILDREN["zhihu"]
+    child = collector_registry.default_registry()._sandbox_children["zhihu"]
     assert child._proc is not None
     pid = child._proc.pid
 

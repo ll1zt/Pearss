@@ -75,11 +75,11 @@ def app(session_factory: sessionmaker[Session]) -> FastAPI:
 
 @pytest.fixture(autouse=True)
 def _reap_sandboxed_children() -> Iterator[None]:
-    """The registry spawns sandbox children lazily; stop them after the test."""
+    """Each application's registry spawns children; stop them after the test."""
     yield
     from app import collector_registry
 
-    collector_registry.for_each_sandboxed_collector(lambda name, child: child.stop())
+    collector_registry.reset_registries()
 
 
 def _free_port() -> int:

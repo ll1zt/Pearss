@@ -13,10 +13,10 @@ from pathlib import Path
 import httpx
 import pytest
 import sqlalchemy as sa
+from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Plugin
-from app import collector_registry
 from tests.e2e.conftest import REPO_ROOT, _FixtureOrigin
 from tests.e2e.test_plugin_collection import (
     _FETCHING_COLLECTOR,
@@ -91,6 +91,7 @@ async def _collect(client: httpx.AsyncClient, source_id: str) -> None:
 @pytest.mark.parametrize("operation", ["reimport", "reload", "uninstall"])
 async def test_user_keeps_shipped_sources_when_installing_a_plugin(
     served: str,
+    app: FastAPI,
     plugin_dir: Path,
     origin: _FixtureOrigin,
     session_factory: sessionmaker[Session],
@@ -103,7 +104,7 @@ async def test_user_keeps_shipped_sources_when_installing_a_plugin(
     """
     _install_plugin(plugin_dir, "fetching", _FETCHING_COLLECTOR)
     with _FixtureOriginTransport(origin.url) as transport:
-        collector_registry.set_http_transport("telegram", transport)
+        app.state.collector_registry.set_http_transport("telegram", transport)
         async with _client(served) as client:
             assert await _listed(client) == SHIPPED
             telegram_id = await _add_source(client, TELEGRAM_URL)
@@ -151,6 +152,7 @@ async def test_user_keeps_shipped_sources_when_installing_a_plugin(
 
 async def test_user_keeps_shipped_sources_after_rejected_import(
     served: str,
+    app: FastAPI,
     plugin_dir: Path,
     origin: _FixtureOrigin,
     session_factory: sessionmaker[Session],
@@ -158,7 +160,7 @@ async def test_user_keeps_shipped_sources_after_rejected_import(
     """Given shipped collectors, When an invalid import is refused, Then no loss."""
     _install_plugin(plugin_dir, "broken", "def broken(:\n")
     with _FixtureOriginTransport(origin.url) as transport:
-        collector_registry.set_http_transport("telegram", transport)
+        app.state.collector_registry.set_http_transport("telegram", transport)
         async with _client(served) as client:
             assert await _listed(client) == SHIPPED
             telegram_id = await _add_source(client, TELEGRAM_URL)

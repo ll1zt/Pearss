@@ -38,6 +38,7 @@ from adapters.repository import (
 from adapters.repository.search_index import index_item
 from adapters.sanitize import sanitize_html
 from app import collector_registry
+from app.collector_registry import CollectorRegistry
 from app.collector_registry import Registration as CollectorRegistration
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.enums import ErrorClass
@@ -218,6 +219,7 @@ def collect_source(
     client: httpx.Client,
     tenant_id: str = SINGLE_TENANT,
     max_pages: int = 1,
+    registry: CollectorRegistry | None = None,
 ) -> CollectionResult:
     """Fetch, parse, normalise and store one source.
 
@@ -230,12 +232,19 @@ def collect_source(
     earlier run missed anything. It defaults to 1 because every extra page is a
     request against someone else's server, and routine collection only needs
     what the origin shows as current.
+
+    `registry` is the application's own collector registry; `None` means the
+    process default, which is what direct callers (the CLI, collector suites)
+    pass. Application paths always pass theirs explicitly -- the point of the
+    parameter is that an application never silently reads another one's
+    collectors (issue #84).
     """
+    registry = registry or collector_registry.default_registry()
     # The plugin lifecycle gate (ADR 0017): a disabled collector collects
     # nothing. Skipped rather than failed — the same semantics as a paused
     # source, an operator decision that must not masquerade as an incident
     # (a failed run here would page the operator for a state they chose).
-    registration = collector_registry.select_for(
+    registration = registry.select_for(
         source.type, source.url or source.canonical_url or ""
     )
     if registration is not None and _plugin_disabled(
@@ -262,11 +271,12 @@ def collect_source(
         client=client,
         tenant_id=tenant_id,
         max_pages=max_pages,
+        registry=registry,
     )
     if not result.succeeded or max_pages <= 1:
         return result
 
-    registration = collector_registry.select_for(source.type, url)
+    registration = registry.select_for(source.type, url)
     if registration is None:
         return result
     backfiller = collector_registry.backfiller(registration)
@@ -282,7 +292,12 @@ def collect_source(
             # pages already fetched are kept; only the backfill stops.
             break
         page = _collect_one_page(
-            session, url=page_url, source=source, client=client, tenant_id=tenant_id
+            session,
+            url=page_url,
+            source=source,
+            client=client,
+            tenant_id=tenant_id,
+            registry=registry,
         )
         pages += 1
         result = _merge(result, page)
@@ -308,6 +323,7 @@ def _collect_one_page(
     client: httpx.Client,
     tenant_id: str,
     max_pages: int = 1,
+    registry: CollectorRegistry | None = None,
 ) -> CollectionResult:
     """One fetch-parse-store pass over `url`.
 
@@ -319,9 +335,10 @@ def _collect_one_page(
     and every routine collection of a paged source crawled up to twenty pages
     instead of the one the budget promised.
     """
+    registry = registry or collector_registry.default_registry()
     # Selection happens before any network call: match_url is documented as
     # network-free, and a URL no collector claims should not be fetched at all.
-    registration = collector_registry.select_for(source.type, url)
+    registration = registry.select_for(source.type, url)
     if registration is None:
         # Classified as structure_changed rather than parse: nothing here knows
         # how to read what the origin would return, which is what the
