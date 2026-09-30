@@ -197,3 +197,103 @@ async def test_an_invalid_shared_policy_is_refused_before_anything_is_created(
     assert response.status_code == 422
     assert response.json()["detail"]["error"]["code"] == "invalid_source"
     assert await _subscribed_urls(writer) == set()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unknown_shared_type_is_refused(writer: httpx.AsyncClient) -> None:
+    """A type the taxonomy does not have is one refusal, not a per-item failure."""
+    response = await _batch(
+        writer, [feed("bad-type")], key="bad-type", type="carrier-pigeon"
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["code"] == "invalid_source"
+    assert await _subscribed_urls(writer) == set()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_explicit_shared_type_skips_inference(
+    writer: httpx.AsyncClient,
+) -> None:
+    """`type` is a real override, not only 'auto'."""
+    response = await _batch(writer, [feed("explicit")], key="explicit", type="web")
+
+    assert response.status_code == 200, response.text
+    listed = await writer.get("/v1/sources", params={"limit": 100})
+    assert {row["type"] for row in listed.json()["data"]} == {"web"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_invalid_shared_chain_is_refused_before_anything_is_created(
+    writer: httpx.AsyncClient,
+) -> None:
+    """The gate-time deadlock guard applies to the batch too."""
+    response = await _batch(
+        writer,
+        [feed("bad-chain")],
+        key="bad-chain",
+        pipeline_chain=[{"plugin_id": "nope", "kind": "translation"}],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["code"] == "invalid_pipeline_chain"
+    assert await _subscribed_urls(writer) == set()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_a_folder_is_applied_to_every_source_in_the_batch(
+    writer: httpx.AsyncClient,
+) -> None:
+    """Shared options really are shared, and the folder is normalised once."""
+    response = await _batch(
+        writer, [feed("f1"), feed("f2")], key="folder", folder="  tech  "
+    )
+
+    assert response.status_code == 200, response.text
+    listed = await writer.get("/v1/sources", params={"limit": 100})
+    assert {row["folder"] for row in listed.json()["data"]} == {"tech"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_explicit_null_folder_means_the_default(
+    writer: httpx.AsyncClient,
+) -> None:
+    """`folder: null` is the same request as omitting it.
+
+    The validator only runs for a value that was *sent*, so this is the one
+    path that reaches its None branch; the field's convention is that an absent
+    folder means the default folder, not that the source has none.
+    """
+    response = await writer.post(
+        "/v1/sources:batch",
+        headers={"Idempotency-Key": "null-folder"},
+        json={
+            "urls": [feed("null-folder")],
+            "schedule_policy": policy(),
+            "folder": None,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    listed = await writer.get("/v1/sources", params={"limit": 100})
+    assert {row["folder"] for row in listed.json()["data"]} == {"default"}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unusable_shared_folder_is_refused(writer: httpx.AsyncClient) -> None:
+    """The folder validator runs for the batch exactly as for the single create."""
+    response = await _batch(
+        writer, [feed("bad-folder")], key="bad-folder", folder="tech/2026"
+    )
+
+    assert response.status_code == 422
+    # The validation handler renders the envelope at the top level (no
+    # `detail` wrapper), which is the shape every schema failure uses.
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert await _subscribed_urls(writer) == set()
