@@ -30,13 +30,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from datetime import UTC, datetime
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import httpx
 
-from adapters.http import FetchPolicy, fetch
+from adapters.http import FetchError, FetchPolicy, fetch
 from adapters.raw_payload import RawPayload
 from core.enums import ErrorClass
+from core.models import ItemDraft
 
 LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +80,10 @@ class WpPost:
     title: str
     content_html: str
     published_at: str | None  # date_gmt, as the API renders it
+    # The post's own guid: the identity the *feed* uses for the same article
+    # (`?p=<id>` on most installs). It is what lets an article reached by
+    # address land on the item the feed already produced instead of beside it.
+    guid: str | None = None
 
 
 def looks_like_summary_feed(raw: RawPayload) -> bool:
@@ -171,6 +177,7 @@ def parse_rest_posts(raw: RawPayload) -> list[WpPost]:
         content = (item.get("content") or {}).get("rendered") or ""
         title = (item.get("title") or {}).get("rendered") or ""
         date_gmt = item.get("date_gmt")
+        guid = (item.get("guid") or {}).get("rendered")
         posts.append(
             WpPost(
                 id=post_id,
@@ -178,6 +185,7 @@ def parse_rest_posts(raw: RawPayload) -> list[WpPost]:
                 title=title if isinstance(title, str) else "",
                 content_html=content if isinstance(content, str) else "",
                 published_at=date_gmt if isinstance(date_gmt, str) else None,
+                guid=guid if isinstance(guid, str) and guid else None,
             )
         )
     return posts
@@ -294,3 +302,111 @@ def _cdata(html: str) -> str:
     output path applies (rss_out._safe_cdata).
     """
     return f"<description><![CDATA[{html.replace(']]>', '')}]]></description>"
+
+
+# --------------------------------------------------------------------------
+# Single-post path: one address in, one draft out (the item capability)
+# --------------------------------------------------------------------------
+
+_POST_FIELDS = "id,link,title,content,date_gmt,guid"
+
+
+def post_id_from_url(url: str) -> int | None:
+    """The WordPress post id this address names, or None.
+
+    Two shapes, both common: the `?p=<id>` query form (what WordPress's own
+    canonical guid looks like) and a trailing numeric path segment
+    (`/archives/2391`). A numeric segment is only a *candidate* --
+    `fetch_post_by_url` checks the answer against the address before trusting
+    it, because a numeric segment could be a category index.
+    """
+    parts = urlsplit(url)
+    query_id = parse_qs(parts.query).get("p", [None])[0]
+    if query_id is not None and query_id.isdigit():
+        return int(query_id)
+    last = parts.path.rstrip("/").rsplit("/", 1)[-1]
+    return int(last) if last.isdigit() else None
+
+
+def rest_candidates(url: str) -> tuple[str, ...]:
+    """The REST post endpoints this address could belong to, likeliest first.
+
+    A WordPress install sits at the domain root or one directory down, so two
+    candidates cover virtually every site. The address's own leading path
+    segment is tried first when there is one -- `/blog/archives/2391` names a
+    `/blog` install -- and the domain root second, which keeps the common case
+    to a single request. The caller treats a miss as "not WordPress" rather
+    than as an error.
+    """
+    parts = urlsplit(url)
+    origin = urlunsplit((parts.scheme, parts.netloc, "", "", ""))
+    trimmed = parts.path.strip("/")
+    first_segment = trimmed.split("/", 1)[0] if trimmed else ""
+    bases: list[str] = []
+    if first_segment:
+        bases.append(
+            urlunsplit((parts.scheme, parts.netloc, f"/{first_segment}", "", ""))
+        )
+    bases.append(origin)
+    return tuple(f"{base}/{_WP_API_SEGMENT}" for base in bases)
+
+
+def fetch_post_by_url(
+    url: str, *, client: httpx.Client, source_id: str
+) -> WpPost | None:
+    """The REST post for this address, or None when it cannot be confirmed.
+
+    Guessing the id and then *checking the answer* is the point: `include=<id>`
+    returning a post is not proof that it is the post this address names, so
+    the returned post must carry that id or link back to the address. A miss
+    tries the next candidate and finally returns None -- never an exception,
+    because the caller has a working fallback and a site without a REST API
+    must not fail the address.
+    """
+    post_id = post_id_from_url(url)
+    if post_id is None:
+        return None
+    policy = FetchPolicy(
+        accept="application/json", extra_headers={"accept": "application/json"}
+    )
+    for base in rest_candidates(url):
+        endpoint = f"{base}?include={post_id}&_fields={_POST_FIELDS}"
+        try:
+            raw = fetch(endpoint, client=client, source_id=source_id, policy=policy)
+            posts = parse_rest_posts(raw)
+        except (FetchError, CollectorError) as exc:
+            LOGGER.info("wordpress REST single post unavailable at %s (%s)", base, exc)
+            continue
+        for post in posts:
+            if post.id == post_id or _permalink_key(post.link) == _permalink_key(url):
+                return post
+    return None
+
+
+def draft_from_post(post: WpPost, *, source_id: str) -> ItemDraft:
+    """The draft for a REST post: the full article, under the feed's identity.
+
+    The identity is the post's own `guid` -- the same string the feed's
+    `<guid>` carries -- so an article reached by address lands on the item the
+    feed already produced instead of a duplicate beside it. A payload with no
+    guid falls back to the link rule `parse` uses for an entry with none.
+    """
+    return ItemDraft(
+        source_id=source_id,
+        external_id=post.guid or f"link:{post.link}",
+        title=post.title or post.link,
+        canonical_url=post.link,
+        published_at=_parse_gmt(post.published_at),
+        content=post.content_html,
+    )
+
+
+def _parse_gmt(value: str | None) -> datetime | None:
+    """`date_gmt` as an aware datetime: the field's own name states the zone."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
