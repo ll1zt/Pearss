@@ -108,6 +108,10 @@ async def _guarded_write(
 
 def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     """Register the mutating tools on `server`, bound to `core`."""
+    # The application's collector registry, read once so the tool body derives
+    # the same fields the confirmation resolver derives (issue #84).
+    registry = getattr(core, "registry", None)
+
     # ---------------------------------------------------------------- writes
 
     @server.tool(
@@ -136,7 +140,13 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         folder: str = "",
     ) -> dict[str, Any]:
         fields = _add_source_fields(
-            url, schedule_policy, type, pipeline_chain, target_lang, folder
+            url,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            registry=registry,
         )
         return await _guarded_write(
             core,

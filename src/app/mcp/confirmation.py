@@ -27,6 +27,7 @@ import json
 import logging
 from typing import Any, cast
 
+from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.resolve import Elicit
 from pydantic import BaseModel, Field, create_model
 
@@ -195,6 +196,21 @@ def _confirm_resolver(**kwargs: Any) -> Elicit[Any]:
     return _asked(_confirmation_schema(fields), summary)
 
 
+def _registry_from_context(ctx: Context | None) -> Any:
+    """The running application's collector registry, from the MCP request.
+
+    A confirmation resolver runs before the tool body, so it cannot read the
+    core client's registry directly. The MCP request carries the ASGI scope,
+    whose `app` is the FastAPI application that mounted the MCP sub-app, and
+    the application's registry is on its state. `None` (a direct call with no
+    request) falls back to the process default in `infer_source_type`.
+    """
+    request = getattr(getattr(ctx, "request_context", None), "request", None)
+    scope = getattr(request, "scope", None)
+    app = scope.get("app") if isinstance(scope, dict) else None
+    return getattr(getattr(app, "state", None), "collector_registry", None)
+
+
 def _add_source_fields(
     url: str,
     schedule_policy: dict[str, Any],
@@ -202,14 +218,19 @@ def _add_source_fields(
     pipeline_chain: list[dict[str, Any]] | None = None,
     target_lang: str = "",
     folder: str = "",
+    registry: Any = None,
 ) -> dict[str, Any]:
     """What add_source confirms and executes, derived in one place.
 
     `type` is resolved to the type that will actually be sent, so the user is
     asked about a concrete source rather than about the literal "auto".
+
+    `registry` is the application's collector registry, passed through to the
+    type inference so the confirmation and the executing request see the same
+    collectors (issue #84).
     """
     requested = type.strip().lower()
-    source_type = infer_source_type(url) if requested == "auto" else requested
+    source_type = infer_source_type(url, registry) if requested == "auto" else requested
     return {
         "url": url,
         "type": source_type,
@@ -227,10 +248,24 @@ def _add_source_confirmation(
     pipeline_chain: list[dict[str, Any]] | None = None,
     target_lang: str = "",
     folder: str = "",
+    ctx: Context | None = None,
 ) -> Elicit[Any]:
-    """The add_source question: names the source and prefills every argument."""
+    """The add_source question: names the source and prefills every argument.
+
+    `ctx` is injected by the SDK, and is how the "auto" type inference asks the
+    running application's collector registry rather than the process default
+    (issue #84). It is optional so a direct call -- the write-guard sweep that
+    drives resolvers without a request -- still works, falling back to the
+    default.
+    """
     fields = _add_source_fields(
-        url, schedule_policy, type, pipeline_chain, target_lang, folder
+        url,
+        schedule_policy,
+        type,
+        pipeline_chain,
+        target_lang,
+        folder,
+        registry=_registry_from_context(ctx),
     )
     return _confirm_resolver(
         _summary=(

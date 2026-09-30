@@ -52,6 +52,11 @@ class CoreAPIClient:
 
     def __init__(self, app: Any) -> None:
         self._app = app
+        # The application's own collector registry, so the URL-to-type
+        # heuristic below asks the same collectors the rest of the application
+        # uses. A caller with no application (the guard tests) leaves it None
+        # and the heuristic falls back to the process default (issue #84).
+        self.registry = getattr(getattr(app, "state", None), "collector_registry", None)
 
     def _token(self) -> str:
         return os.environ.get(CORE_API_AUTH_ENV, "")

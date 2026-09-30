@@ -680,7 +680,7 @@ def add_sources_batch(
         for url in body.urls:
             try:
                 source_type = (
-                    infer_source_type(url)
+                    infer_source_type(url, request.app.state.collector_registry)
                     if requested_type == "auto"
                     else requested_type
                 )
