@@ -162,6 +162,10 @@ just coverage-gate         # 只读已有 .coverage（CI 用；无数据即失�
 
 未覆盖且**确实到不了**的行，在 commit message 里说明理由，而不是写成凑数的测试——`// unreachable: <为什么>` 是允许的，垃圾测试不允许。
 
+**改动落在进程外入口时，量尺会变。** `__main__.py` 的整体 28% 是诊断数字（它的正确性由沙箱集成测试与手工验收覆盖），但 `just coverage-diff` 只看**本次新增**的行——而子进程里执行的代码，父进程的 coverage 看不到，门禁会把它们读作未覆盖。两期各矩一次：`collect_pages`（补 `src/plugins/collectors/twitter/test_walk.py`）与 `collect_item`（`tests/integration/test_collect_item_rpc.py` 的 `_dispatch_in_process`）。
+
+因此规则是：**在子进程入口（`plugins/collectors/__main__.py` 等）新增分支时，同时写一条“在本进程里直接调用同一个函数”的测试**；真实子进程测试保留，它证明的是进程边界本身，两者不可互相替代。
+
 ### 测试驱动：先场景，后实现
 
 新功能与缺陷修复的默认顺序（本仓库已在用，写入此处以免遗忘）：

@@ -231,6 +231,52 @@ rss 采集器的 fetch 钩子已内置升级路径（ADR 0016 之后的增量，
 抓页面做正文提取——后者脆弱且贵。合并回 feed 载荷（而不是改 parse）意味着
 normalize/dedupe/闸门零改动，条目身份保持稳定。
 
+## 可选能力 `item`：按地址抓取一条
+
+采集器默认只能解析**自己的 listing**（feed / 预览页 / listing JSON）。当调用方（agent）能
+枚举出一批**地址**（归档页、sitemap、站内搜索），而它们不在源的 listing 里时，`item` 能力
+把这些地址抓进**同一个源**：
+
+```python
+@HOOKIMPL
+def collect_item(
+    *, source_id: str, url: str, client: httpx.Client
+) -> list[ItemDraft]: ...
+```
+
+契约与 `fetch`/`parse` 相同：只抛 `FetchError` 或 `CollectorError`（它既抓又解析，两者都合法）。
+**声明而非探测**：`source_config().features` 里加 `"item"`，并在 `_DECLARATIONS`
+（`src/app/collector_registry.py`）里给该采集器加 `"item"`——registry 校验“声明 ↔ 实现”
+两侧一致，**声明了没有实现会启动失败**。
+
+宿主侧的顺序（采集器看不到这些）：
+
+```
+POST /v1/sources/{id}:fetch-items  或  MCP fetch_source_items
+  → 同源校验：地址 host 必须等于源自己的 host（允许 www.）——不满足即拒绝，不发请求
+  → registry.collect_item_with(...)   ← 未声明 item 的源在这里被拒（structure_changed）
+  → normalise_and_store(...)          ← 唯一写入路径：净化/去重/闸门/索引
+```
+
+两条硬要求：
+
+1. **身份要与 feed 对齐**，否则每次重发现都会多一条。有稳定 id 的源（WordPress 的
+   `guid.rendered`）就用它；否则用 `link:<canonical>`（与 `parse` 对无 guid 条目的规则一致），
+   并接受 ADR 0045 记录的“已知缺口”。
+2. **抓取走宿主提供的 `client`**（超时/大小/SSRF 策略在宿主侧）；不要自建客户端，也不要
+   自己去判“这个地址属于不属于本源”——那是宿主在**抓取之前**做的（同源硬校验）。
+
+参考实现：`src/plugins/collectors/rss/collector.py::collect_item`——WordPress REST 优先
+（地址形状能指出 post 时），失败回落 `adapters/article.py` 的通用抽取。**抽取器只有这一份**
+（fulltext 处理器用同一份），这是 ADR 0045 决策 3 的硬约束。
+
+### 什么时候用 `item`，什么时候用 A3 `submit_items`
+
+| 情况 | 用哪个 |
+|---|---|
+| 你发现了**地址**（归档页/sitemap），想让部署去抓 | `fetch_source_items` / `:fetch-items`（目标：已有采集源） |
+| 你已经**抓到了内容**，部署读不到那个来源（登录态、内部系统） | `submit_items` / `:ingest`（目标：`agent` 型源，ADR 0022） |
+
 ## 处理器（P3）：翻译参考实现
 
 处理器消费已存储条目、产出派生物（`item_enrichment` 表），与采集器共享
