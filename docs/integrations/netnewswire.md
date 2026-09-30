@@ -106,7 +106,7 @@ POST -> 表单字段 T=<token>
 
 两者**不可互换**：GET 不接受 query 中的 token，POST 不接受 header。scheme 必须
 严格为 `GoogleLogin`，字段名必须小写 `auth`。代码与测试见
-`src/app/reader_routes.py`，依据记录在 ADR 0005。
+`src/app/reader/`（`auth.py` 是认证层），依据记录在 ADR 0005。
 
 凭据由环境变量注入（`PEARSS_READER_USERNAME` / `PEARSS_READER_PASSWORD`），库内
 只存 scrypt 哈希。**token 由密码哈希派生、永不过期（ADR 0016，风险已知并接
