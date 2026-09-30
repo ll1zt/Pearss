@@ -118,40 +118,42 @@ ADR 0041 决策 1：「批量形态本身也不缺」→ 改为「批量建源�
 
 ## 验收判据（BDD）
 
-> 场景编号：本 ADR 声明 **AC-161..166**（`SCENARIOS.md` 现最大号段为 AC-157..160）。
+> 场景编号见 issue #159（登记表里该号段是「保留」，测试尚未落地）。按
+> `SCENARIOS.md` 规则 4，编号一旦被文档引用，「保留」就陈旧了——所以这里只写行为，
+> 不逐条写号；实现时由测试文件头与登记表把号段钉住。
 
 ```gherkin
-Scenario: AC-161 一次调用订阅一批，只确认一次
+Scenario: 一次调用订阅一批，只确认一次
   Given 一份含 10 个 URL 的清单
   When agent 调用 add_sources
   Then 产生 1 次 elicitation（而非 10 次）
   And 10 个源都能被 list_sources 查到
 
-Scenario: AC-162 确认覆盖全部执行参数
+Scenario: 确认覆盖全部执行参数
   Given 用户在确认里看到的 urls 集合与共享选项
   When 任一 URL 或任一共享选项与确认值不同
   Then 返回 aborted
   And 不创建任何源
 
-Scenario: AC-163 部分失败不丢成功项
+Scenario: 部分失败不丢成功项
   Given 一批 3 个 URL，其中 1 个不可解析（如非法 scheme）
   When 提交
   Then 2 个源被创建
   And 返回里那 1 条带 status=failed 与既有 ErrorClass（不得新增字符串常量）
 
-Scenario: AC-164 同 key 重放返回同一批结果
+Scenario: 同 key 重放返回同一批结果
   Given 一次成功的批量建源使用了 idempotency key K
   When 用 K 重放同一请求
   Then 结果与首次逐字段一致
   And 没有新建重复源
 
-Scenario: AC-165 批量上限与单条不变量不被削弱
+Scenario: 批量上限与单条不变量不被削弱
   Given 超过上限的 URL 数
   When 提交
   Then 返回 422 并建议分批
   And 单条路径的校验（canonical_url / chain / 类型推断）与审计与单条端点完全一致
 
-Scenario: AC-166 工具面预算仍然成立
+Scenario: 工具面预算仍然成立
   Given 新的工具面
   When 序列化测量
   Then 不超预算（或预算被显式提高且提交说明记录了原因）
@@ -184,4 +186,4 @@ Scenario: AC-166 工具面预算仍然成立
 所以第 3 条的“不足”条件成立：预算按 ADR 要求显式提高并写明原因。
 
 实现顺序：① 描述瘦身 PR（本节的数字即证据）→ ② `/v1/sources:batch` + `add_sources`
-（按 AC-161..166 红测先行）。
+（按 issue #159 里登记的号段红测先行）。
