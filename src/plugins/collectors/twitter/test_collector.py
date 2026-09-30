@@ -482,6 +482,52 @@ def test_video_variant_edges_are_ignored_not_crashed() -> None:
 
 
 @pytest.mark.unit
+def test_a_video_without_a_thumbnail_url_still_renders_a_video() -> None:
+    """AC-160: no `media_url_https` means no poster and a text fallback."""
+    from plugins.collectors.twitter.collector import _media_html
+
+    item = {
+        key: value for key, value in _VIDEO_ITEM.items() if key != "media_url_https"
+    }
+    out = _media_html([item])
+
+    assert out is not None
+    assert "<video" in out
+    assert 'src="https://video.twimg.com/2176.mp4"' in out
+    assert "poster=" not in out
+    assert 'href="https://x.com/u/status/1/video/1"' in out
+    assert "▶ 视频" in out
+
+
+@pytest.mark.unit
+def test_a_lower_bitrate_variant_does_not_replace_the_best() -> None:
+    """AC-160: the first-seen best is only replaced by a higher bitrate."""
+    from plugins.collectors.twitter.collector import _video_src
+
+    assert (
+        _video_src(
+            {
+                "video_info": {
+                    "variants": [
+                        {
+                            "content_type": "video/mp4",
+                            "bitrate": 2176000,
+                            "url": "https://video.twimg.com/hi.mp4",
+                        },
+                        {
+                            "content_type": "video/mp4",
+                            "bitrate": 256000,
+                            "url": "https://video.twimg.com/lo.mp4",
+                        },
+                    ]
+                }
+            }
+        )
+        == "https://video.twimg.com/hi.mp4"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "video_info",
     [{"variants": "nope"}, {}, None],

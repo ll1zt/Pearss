@@ -327,6 +327,17 @@ def test_a_video_from_an_untrusted_source_is_removed(src: str) -> None:
 
 
 @pytest.mark.unit
+def test_a_video_url_that_cannot_be_parsed_is_refused() -> None:
+    """AC-158: `urlparse` can raise (an invalid IPv6 host); that is not allowed.
+
+    The exception path is the difference between "refuse this URL" and "fail
+    the whole ingest".
+    """
+    out = sanitize_html('<video src="https://[bad" controls></video>')
+    assert "<video" not in out.lower()
+
+
+@pytest.mark.unit
 def test_a_video_url_with_no_host_is_refused() -> None:
     """AC-158: a URL with no host cannot be on the allowlist.
 
