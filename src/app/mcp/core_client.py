@@ -106,29 +106,3 @@ class CoreAPIClient:
         self, path: str, **params: Any
     ) -> tuple[int, dict[str, Any], str | None]:
         return await self.request("GET", path, params=params or None)
-
-
-def _infer_source_type(url: str) -> str:
-    """Suggest a source type from the URL, before the operator overrides it.
-
-    A URL a sandboxed collector claims (zhihu, telegram, x.com/home) cannot
-    be collected by the rss collector - routing it as `rss` sends the rss
-    collector at an HTML page and the origin answers 403 (observed when
-    subscribing a Zhihu profile). So: a collector match means `web`; anything
-    else stays `rss`, the default for a feed URL. `parser_plugin_id` exists
-    for finer targeting; this inference only picks between rss and web.
-    """
-    from app import collector_registry
-
-    for name, matcher in collector_registry.matchers():
-        if name != "rss" and _safe_match(matcher, url):
-            return "web"
-    return "rss"
-
-
-def _safe_match(matcher: Any, url: str) -> bool:
-    """A matcher that raises (a malformed candidate URL) simply does not match."""
-    try:
-        return bool(matcher(url))
-    except Exception:
-        return False

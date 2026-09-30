@@ -280,6 +280,9 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "list_plugins",
         "set_plugin_status",
         "add_source",
+        # The batch primitive (ADR 0044, issue #159): one confirmation covers a
+        # list of URLs, because the single tool means one dialog per source.
+        "add_sources",
         "update_schedule_policy",
         "set_source_status",
         "set_source_folder",

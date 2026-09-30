@@ -65,6 +65,7 @@ CONFIRMATION = REPO_ROOT / "src/app/mcp/confirmation.py"
 # real shapes: the fields it derives are what these scenarios compare.
 ARGUMENTS: dict[str, Any] = {
     "url": "https://example.test/feed.xml",
+    "urls": ["https://example.test/a.xml", "https://example.test/b.xml"],
     "schedule_policy": {"type": "fixed", "interval": "30m"},
     "type": "rss",
     "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
@@ -77,6 +78,8 @@ ARGUMENTS: dict[str, Any] = {
     "until": "2026-02-01T00:00:00Z",
     "include_published": True,
     "plugin_id": "rss",
+    "trust_level": "standard",
+    "parser_plugin_id": "rss",
     "items": [{"title": "A", "url": "https://x.test/a", "content": "<p>a</p>"}],
 }
 
@@ -149,7 +152,7 @@ def _perturbed(value: Any) -> Any:
 
 
 def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
-    """AC-75: for each of the twelve, no argument can change unnoticed.
+    """AC-75: for each write tool, no argument can change unnoticed.
 
     Asserting the diff rather than the field list is what keeps this from
     pinning today's implementation: a tool may name its fields however it
@@ -160,8 +163,8 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     tools = _write_tools()
     # The count is a claim, not a property: a new write tool has to change this
     # line, which is where someone notices that the confirmation surface grew.
-    assert len(tools) == 13, (
-        f"expected the thirteen write tools, found {sorted(tools)} -- update the "
+    assert len(tools) == 14, (
+        f"expected the fourteen write tools, found {sorted(tools)} -- update the "
         "claim in this docstring if the surface really changed"
     )
 

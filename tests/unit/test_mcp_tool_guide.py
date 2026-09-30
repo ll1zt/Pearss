@@ -208,7 +208,7 @@ SURFACE_BUDGET_CHARS = 15_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:
-    """AC-66: the bound is the deliverable, so it is a test, not a paragraph.
+    """AC-66 / AC-166: the bound is the deliverable, so it is a test, not a paragraph.
 
     AC-71 (the #74 boundary): moving the protocol-field guidance into the
     instructions kept the surface from growing; this is the measurement.

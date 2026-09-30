@@ -28,6 +28,7 @@ from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     backlog_for_source,
     create_source,
+    derive_source_id,
     failed_enrichments_for_source,
     get_source,
     job_for_source,
@@ -56,8 +57,9 @@ from app.api_conventions import (
     replay_or_none,
 )
 from app.auth import Principal, read_required, write_required
+from app.collector_registry import infer_source_type
 from app.scheduler import collect_now
-from core.enums import SourceStatus, SourceType, TrustLevel
+from core.enums import ErrorClass, SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
@@ -74,6 +76,11 @@ DIAGNOSE_RUNS = 5
 # counts say how much is stuck; these rows say what is wrong, and five is
 # enough to see a class and its provider message without becoming a list.
 DIAGNOSE_FAILED_ENRICHMENTS = 5
+
+# How many URLs one batch request may carry. A bound, not a capability: the
+# endpoint exists for "subscribe this list", and a list longer than this is
+# better split so one request stays reviewable and bounded (ADR 0044).
+SOURCE_BATCH_LIMIT: Final = 50
 
 
 # How long a stored response is replayed. Long enough to cover a client that
@@ -161,6 +168,38 @@ class SourceCreate(BaseModel):
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         return self
+
+
+class SourceBatchCreate(BaseModel):
+    """Body for creating several sources in one request.
+
+    Shared options apply to every URL. `type` may be `'auto'`, resolved per URL
+    against the collectors exactly as the single endpoint's callers resolve it,
+    so there is no per-item type field to keep in step.
+
+    The list is validated for shape only. Whether a URL is usable *for its
+    type* is decided per item by the handler, because one bad entry must fail
+    alone rather than refuse the batch (ADR 0044).
+    """
+
+    urls: list[str] = Field(min_length=1)
+    schedule_policy: dict[str, Any]
+    type: str = "auto"
+    trust_level: TrustLevel = TrustLevel.STANDARD
+    parser_plugin_id: str | None = Field(default=None, max_length=128)
+    pipeline_chain: list[dict[str, Any]] | None = None
+    target_lang: str | None = None
+    folder: str | None = Field(default=None, max_length=256)
+
+    @field_validator("folder")
+    @classmethod
+    def _valid_folder(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return normalize_folder(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class SourcePatch(BaseModel):
@@ -546,6 +585,163 @@ def add_source(
         body=payload,
     )
     return JSONResponse(status_code=201, content=payload)
+
+
+@router.post("/sources:batch", operation_id="addSourcesBatch")
+def add_sources_batch(
+    request: Request,
+    body: SourceBatchCreate,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Add several sources in one request, reporting each item's outcome.
+
+    The batch primitive behind MCP's `add_sources` (ADR 0044). Shared options
+    apply to every URL, and `type: 'auto'` is resolved per URL. A URL that
+    cannot be used fails alone -- the rest are still created -- because
+    refusing the whole list over one typo is the loop this endpoint replaces.
+
+    Answers 200 with per-item results rather than 201: the body is a report
+    about a list, and some of it may have failed.
+    """
+    endpoint = "POST /v1/sources:batch"
+    if len(body.urls) > SOURCE_BATCH_LIMIT:
+        raise api_error(
+            status_code=422,
+            code="batch_too_large",
+            message=(
+                f"A batch may carry at most {SOURCE_BATCH_LIMIT} URLs; this one "
+                f"has {len(body.urls)}."
+            ),
+            suggestion=(
+                f"Split the list into batches of {SOURCE_BATCH_LIMIT} and retry."
+            ),
+        )
+
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    try:
+        policy_json = schedule_policy_to_json(
+            schedule_policy_from_json(body.schedule_policy)
+        )
+    except ValueError as exc:
+        raise api_error(
+            status_code=422,
+            code="invalid_source",
+            message=str(exc),
+            suggestion=(
+                "schedule_policy is {type: fixed, interval: '30m'} or "
+                "{type: adaptive, min: '15m', max: '24h'}."
+            ),
+        ) from exc
+
+    requested_type = body.type.strip().lower()
+    if requested_type not in {"auto", "rss", "web", "agent"}:
+        raise api_error(
+            status_code=422,
+            code="invalid_source",
+            message=f"unsupported source type: {body.type!r}",
+            suggestion="Use 'auto', 'rss', 'web' or 'agent'.",
+        )
+
+    if body.pipeline_chain:
+        # Same gate-time deadlock guard as the single endpoint: a chain naming
+        # a processor this deployment cannot run is refused at configuration
+        # time, before any source exists.
+        from app.enrichment_worker import registered_processor_ids
+
+        try:
+            parse_chain(
+                json.dumps(body.pipeline_chain),
+                target_lang=body.target_lang,
+                known_plugins=registered_processor_ids(),
+            )
+        except (ValueError, KeyError) as exc:
+            raise api_error(
+                status_code=422,
+                code="invalid_pipeline_chain",
+                message=str(exc),
+                suggestion=(
+                    "Use a list of {plugin_id, kind, lang?, required?} naming "
+                    "registered processors; kinds: translation, summary, "
+                    "fulltext, tts_audio."
+                ),
+            ) from exc
+
+    folder = body.folder or DEFAULT_FOLDER
+    chain_json = json.dumps(body.pipeline_chain) if body.pipeline_chain else None
+    at = timestamp(_now())
+
+    results: list[dict[str, Any]] = []
+    with factory() as session:
+        for url in body.urls:
+            try:
+                source_type = (
+                    infer_source_type(url)
+                    if requested_type == "auto"
+                    else requested_type
+                )
+                canonical = source_canonical_key(source_type=source_type, url=url)
+            except ValueError as exc:
+                # This item alone: the rest of the list still gets created.
+                results.append(
+                    {
+                        "url": url,
+                        "status": "failed",
+                        "error_class": ErrorClass.PARSE.value,
+                        "detail": str(exc),
+                    }
+                )
+                continue
+
+            source_id = derive_source_id(
+                tenant_id=SINGLE_TENANT,
+                source_type=source_type,
+                canonical_url=canonical,
+            )
+            existed = session.get(SourceRow, source_id) is not None
+            row = create_source(
+                session,
+                source_type=source_type,
+                url=url,
+                canonical_url=canonical,
+                schedule_policy=policy_json,
+                tenant_id=SINGLE_TENANT,
+                trust_level=body.trust_level.value,
+                parser_plugin_id=body.parser_plugin_id,
+                pipeline_chain=chain_json,
+                target_lang=body.target_lang,
+                folder=folder,
+                at=at,
+            )
+            results.append(
+                {
+                    "url": url,
+                    "status": "existing" if existed else "created",
+                    "source_id": row.id,
+                }
+            )
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "created": sum(1 for item in results if item["status"] == "created"),
+        "existing": sum(1 for item in results if item["status"] == "existing"),
+        "failed": sum(1 for item in results if item["status"] == "failed"),
+        "results": results,
+    }
+    payload["correlation_id"] = current_correlation_id()
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
 
 
 def _require_source(session: Session, source_id: str) -> SourceRow:

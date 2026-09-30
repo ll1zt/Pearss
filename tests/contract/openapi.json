@@ -416,6 +416,89 @@
         "title": "PublishStatus",
         "type": "string"
       },
+      "SourceBatchCreate": {
+        "description": "Body for creating several sources in one request.\n\nShared options apply to every URL. `type` may be `'auto'`, resolved per URL\nagainst the collectors exactly as the single endpoint's callers resolve it,\nso there is no per-item type field to keep in step.\n\nThe list is validated for shape only. Whether a URL is usable *for its\ntype* is decided per item by the handler, because one bad entry must fail\nalone rather than refuse the batch (ADR 0044).",
+        "properties": {
+          "folder": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder"
+          },
+          "parser_plugin_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parser Plugin Id"
+          },
+          "pipeline_chain": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Chain"
+          },
+          "schedule_policy": {
+            "additionalProperties": true,
+            "title": "Schedule Policy",
+            "type": "object"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Lang"
+          },
+          "trust_level": {
+            "$ref": "#/components/schemas/TrustLevel",
+            "default": "standard"
+          },
+          "type": {
+            "default": "auto",
+            "title": "Type",
+            "type": "string"
+          },
+          "urls": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Urls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "urls",
+          "schedule_policy"
+        ],
+        "title": "SourceBatchCreate",
+        "type": "object"
+      },
       "SourceCreate": {
         "description": "Body for creating a source.\n\n`pipeline_chain` + `target_lang` enable the processing chain at creation\ntime — the correct ordering: first source with chain, then first fetch,\nso no item is ever cached unprocessed.",
         "properties": {
@@ -3478,6 +3561,69 @@
           }
         ],
         "summary": "Trigger Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources:batch": {
+      "post": {
+        "description": "Add several sources in one request, reporting each item's outcome.\n\nThe batch primitive behind MCP's `add_sources` (ADR 0044). Shared options\napply to every URL, and `type: 'auto'` is resolved per URL. A URL that\ncannot be used fails alone -- the rest are still created -- because\nrefusing the whole list over one typo is the loop this endpoint replaces.\n\nAnswers 200 with per-item results rather than 201: the body is a report\nabout a list, and some of it may have failed.",
+        "operationId": "addSourcesBatch",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceBatchCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add Sources Batch",
         "tags": [
           "core-api"
         ]
