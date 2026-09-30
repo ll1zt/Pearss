@@ -21,11 +21,12 @@ pinning them would pin the fixture rather than the property.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import pytest
 
-from adapters.embedding_model import model_directory
 from plugins.processors.embed.encoder import Encoder
+from tests import model_weights
 
 pytestmark = pytest.mark.integration
 
@@ -33,9 +34,12 @@ DIMENSIONS = 384
 
 
 def _encoder_or_skip() -> Encoder:
-    directory = model_directory()
-    if not (directory / "manifest.json").is_file():
-        pytest.skip(f"no embedding model at {directory}; run `just fetch-model`")
+    directory = model_weights.readable_weights()
+    if directory is None:
+        pytest.skip(
+            f"no readable embedding model at {model_weights.configured_path()}; "
+            "run `just fetch-model`"
+        )
     return Encoder(directory)
 
 
@@ -101,3 +105,21 @@ def test_the_query_and_passage_prefixes_are_actually_applied() -> None:
     text = "linux scheduler"
 
     assert encoder.encode(text, as_query=True) != encoder.encode(text)
+
+
+def test_an_unreadable_model_directory_skips_instead_of_failing(
+    unreadable_model_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-179: "cannot look" is not a failure of the suite.
+
+    The weights exist, owned by another account -- the shape a multi-user host
+    has -- and the cases that need them must skip with a reason that says how to
+    get them, which is what this file's docstring promises. Before the shared
+    check, `Path.is_file()` raised here and the four cases above failed.
+    """
+    monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(unreadable_model_dir))
+
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _encoder_or_skip()
+
+    assert "just fetch-model" in str(excinfo.value)

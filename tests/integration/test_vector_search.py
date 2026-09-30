@@ -34,6 +34,7 @@ from app.enrichment_worker import _open_gate_if_complete
 from app.pipeline import normalise_and_store
 from core.models import ItemDraft
 from plugins.processors.embed.encoder import Encoder
+from tests import model_weights
 
 pytestmark = pytest.mark.integration
 
@@ -58,10 +59,12 @@ def _model_dir(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The stand-in is the default because it is always present in the checkout; a
     real model already in the environment wins, because the tests that need
-    meaning have nothing to measure against a stand-in with random weights.
+    meaning have nothing to measure against a stand-in with random weights. A
+    configured directory that cannot be *read* is "no real model here" rather
+    than a crash, which is what it used to be (issue #179).
     """
-    current = os.environ.get("PEARSS_EMBEDDING_MODEL_DIR", "")
-    if not (Path(current) / "manifest.json").is_file():
+    configured = os.environ.get("PEARSS_EMBEDDING_MODEL_DIR")
+    if configured is None or model_weights.readable_weights(Path(configured)) is None:
         monkeypatch.setenv("PEARSS_EMBEDDING_MODEL_DIR", str(FIXTURES))
 
 
@@ -395,13 +398,15 @@ def _real_model_or_skip() -> Path:
     plumbing and knows nothing about meaning. Only the real model can answer the
     question this test asks, so it says so rather than pretending.
     """
-    directory = Path(os.environ.get("PEARSS_EMBEDDING_MODEL_DIR", ""))
-    manifest = directory / "manifest.json"
-    if not manifest.is_file():
-        pytest.skip(f"no embedding model at {directory}; run `just fetch-model`")
-    declared = json.loads(manifest.read_text(encoding="utf-8"))
-    if declared["name"] != "multilingual-e5-small":
-        pytest.skip(f"{declared['name']} is the test stand-in, not real weights")
+    directory = model_weights.readable_weights()
+    if directory is None:
+        pytest.skip(
+            f"no readable embedding model at {model_weights.configured_path()}; "
+            "run `just fetch-model`"
+        )
+    if model_weights.declared_name(directory) != "multilingual-e5-small":
+        declared = model_weights.declared_name(directory)
+        pytest.skip(f"{declared!r} is the test stand-in, not real weights")
     return directory
 
 
