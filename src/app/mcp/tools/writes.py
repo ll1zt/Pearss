@@ -36,6 +36,8 @@ from app.mcp.confirmation import (
     _delete_items_fields,
     _delete_source_items_confirmation,
     _delete_source_items_fields,
+    _fetch_items_confirmation,
+    _fetch_items_fields,
     _remove_source_confirmation,
     _remove_source_fields,
     _retry_enrichments_confirmation,
@@ -218,6 +220,49 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 "parser_plugin_id": parser_plugin_id or None,
                 # Empty means "the API's default folder", not "no folder".
                 **({"folder": folder} if folder else {}),
+            },
+            extra=lambda _status: {"audit": "recorded by the Core API"},
+        )
+
+    @server.tool(
+        annotations=write_annotations(destructive=False, open_world=True),
+        description=(
+            "Fetch a list of article addresses into an existing source. "
+            "Requires confirmation: the deployment makes real outbound requests "
+            "for every address. Each address must be on the source's own host "
+            "(others are reported as rejected and never fetched), and the "
+            "source's collector must be able to fetch one address (the rss "
+            "collector can). Results are per address, so one failure does not "
+            "stop the rest. Use this when you have *addresses* to fetch; use "
+            "submit_items when you already fetched the content yourself."
+        ),
+    )
+    async def fetch_source_items(
+        source_id: str,
+        urls: list[str],
+        ctx: Context,
+        confirmed: Annotated[Confirmation | None, Resolve(_fetch_items_confirmation)],
+        batch_size: int = 0,
+        min_interval_seconds: float = 0.0,
+    ) -> dict[str, Any]:
+        fields = _fetch_items_fields(source_id, urls, batch_size, min_interval_seconds)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="POST",
+            path=f"/v1/sources/{source_id}:fetch-items",
+            body={
+                "urls": urls,
+                # Omitted rather than sent as 0: the API's own defaults and
+                # clamps are the server's business, and 0 is not a value it
+                # would accept (batch_size >= 1).
+                **({"batch_size": batch_size} if batch_size else {}),
+                **(
+                    {"min_interval_seconds": min_interval_seconds}
+                    if min_interval_seconds
+                    else {}
+                ),
             },
             extra=lambda _status: {"audit": "recorded by the Core API"},
         )

@@ -236,6 +236,46 @@
       "type": "object"
     }
   },
+  "fetch_source_items": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": true,
+      "read_only_hint": false
+    },
+    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Each address must be on the source's own host (others are reported as rejected and never fetched), and the source's collector must be able to fetch one address (the rss collector can). Results are per address, so one failure does not stop the rest. Use this when you have *addresses* to fetch; use submit_items when you already fetched the content yourself.",
+    "input_schema": {
+      "properties": {
+        "batch_size": {
+          "default": 0,
+          "title": "Batch Size",
+          "type": "integer"
+        },
+        "min_interval_seconds": {
+          "default": 0.0,
+          "title": "Min Interval Seconds",
+          "type": "number"
+        },
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Urls",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "urls"
+      ],
+      "title": "fetch_source_itemsArguments",
+      "type": "object"
+    }
+  },
   "get_item": {
     "annotations": {
       "destructive_hint": false,

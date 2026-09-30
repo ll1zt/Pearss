@@ -195,16 +195,26 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # tokens in the first place (AC-66).
 #
 # 14,000 was what the surface measured after the pass that moved cross-tool
-# guidance into the server instructions. 15,000 adds the room the batch tool
-# needs (ADR 0044, issue #162): a second trim pass cut 423 characters from the
+# guidance into the server instructions. 15,000 added the room the batch tool
+# needed (ADR 0044, issue #162): a second trim pass cut 423 characters from the
 # nine largest descriptions, leaving 13,543, and `add_sources` is expected to
 # measure about 900 -- so the surface lands near 14,450 and 15,000 leaves ~550.
+#
+# 16,000 adds `fetch_source_items` (issue #171): the address-fetching tool, and
+# its description has to keep the "addresses vs already-fetched content"
+# distinction that decides whether a model reaches for this tool or for
+# `submit_items` -- reaching for the wrong one either asks the site for
+# nothing or asks a stranger for something twice. Its first draft measured
+# 1,128 characters and asked for a deliberate raise; the trimmed version
+# measures 922 and the surface lands at 15,689, so 16,000 leaves the next tool
+# the same ~300 to argue for in a diff.
+#
 # The number matters less than the fact that growth has to be argued for in a
 # diff. It is deliberately not 8,000: cutting that far means deleting the
 # selection guidance -- "use delete_source_items to clear a bad crawl",
 # "set_source_status instead" -- that keeps a model from reaching for the
 # irreversible tool.
-SURFACE_BUDGET_CHARS = 15_000
+SURFACE_BUDGET_CHARS = 16_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:

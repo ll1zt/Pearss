@@ -354,6 +354,56 @@ def _add_sources_confirmation(
     )
 
 
+def _fetch_items_fields(
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> dict[str, Any]:
+    """What fetch_source_items confirms and executes, derived in one place.
+
+    The URL list travels as count + preview + fingerprint, the same
+    reconciliation add_sources uses: an elicitation form carries primitives
+    only, and a confirmation that pinned just the *count* would accept any list
+    of that length -- which is the whole reason the fingerprint exists (#67).
+
+    The pacing knobs are part of the confirmed values because they are the
+    difference between a polite request and a burst; 0 renders as "default"
+    (the API's own values), so the dialog does not claim a number the server
+    has not clamped yet.
+    """
+    preview = "; ".join(urls[:5])
+    more = "" if len(urls) <= 5 else f" (+{len(urls) - 5} more)"
+    return {
+        "source_id": source_id,
+        "count": str(len(urls)),
+        "urls": f"{preview}{more}",
+        "urls_fingerprint": _urls_fingerprint(urls),
+        "batch_size": str(batch_size) if batch_size else "default",
+        "min_interval_seconds": (
+            f"{min_interval_seconds:g}" if min_interval_seconds else "default"
+        ),
+    }
+
+
+def _fetch_items_confirmation(
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> Elicit[Any]:
+    """The fetch_source_items question: one dialog for the whole list."""
+    fields = _fetch_items_fields(source_id, urls, batch_size, min_interval_seconds)
+    return _confirm_resolver(
+        _summary=(
+            f"Fetch {fields['count']} address(es) into source "
+            f"{fields['source_id']}? Pacing: {fields['batch_size']} per burst, "
+            f"{fields['min_interval_seconds']}s apart. {fields['urls']}"
+        ),
+        _fields=fields,
+    )
+
+
 def _update_schedule_policy_fields(
     source_id: str, schedule_policy: dict[str, Any]
 ) -> dict[str, Any]:
