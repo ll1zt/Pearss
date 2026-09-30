@@ -54,6 +54,7 @@ from adapters.repository import (
 # alias keeps the call sites in this module short.
 from adapters.repository import timestamp as _iso
 from adapters.repository.search_index import index_missing
+from app.collector_registry import CollectorRegistry
 from app.liveness_watch import LoopWatch, always_alive
 from app.pipeline import CollectionResult, collect_source
 from core.alerting import AlertState
@@ -168,6 +169,7 @@ def collect_now(
     policy_json: str,
     client: httpx.Client,
     now: datetime | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> tuple[JobRunStatus, CollectionResult | None]:
     """Run one source's collection, recording the job run around it.
 
@@ -227,7 +229,11 @@ def collect_now(
 
     try:
         result = collect_source(
-            session, source=source, client=client, tenant_id=SINGLE_TENANT
+            session,
+            source=source,
+            client=client,
+            tenant_id=SINGLE_TENANT,
+            registry=registry,
         )
     except Exception as exc:
         # Failures are normally values, but an exception can still escape the
@@ -303,6 +309,7 @@ def run_tick(
     client: httpx.Client,
     now: datetime | None = None,
     concurrency: int | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> TickReport:
     """One scheduler pass: evaluate every active source, collect those due.
 
@@ -371,6 +378,7 @@ def run_tick(
                     policy_json=policy_json,
                     client=client,
                     now=moment,
+                    registry=registry,
                 )
                 session.commit()
             return "collected" if status is JobRunStatus.SUCCEEDED else "failed"
@@ -432,9 +440,14 @@ class Scheduler:
         index_every: float = INDEX_CATCHUP_INTERVAL_SECONDS,
         concurrency: int | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        registry: CollectorRegistry | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._client = client
+        # The application's collector registry, threaded into every collection
+        # this loop runs. None means the process default, which is what a test
+        # constructing a bare Scheduler gets (issue #84).
+        self._registry = registry
         self._tick_seconds = tick_seconds
         # Injected so the maintenance schedules can be driven deterministically
         # in tests: reaping orphans and pruning the audit log are both gated on
@@ -758,6 +771,7 @@ class Scheduler:
                 self._session_factory,
                 client=self._client,
                 concurrency=self._concurrency,
+                registry=self._registry,
             )
         if self._on_tick is not None:
             self._on_tick(report)

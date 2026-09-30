@@ -741,9 +741,7 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
     The injected transport is the app's own shared client, so the SSRF
     guard covers sandboxed egress too.
     """
-    from app import collector_registry
-
-    collector_registry._registry()  # build children (they spawn lazily)
+    registry = app.state.collector_registry
     # Run the lifespan by hand: ASGITransport does not enter it, and this
     # test needs the wiring that happens inside, not the routes.
 
@@ -771,7 +769,7 @@ async def test_lifespan_wires_the_sandboxed_egress_transport(
         monkeypatch.setenv("PEARSS_ALLOW_PRIVATE_FETCH", "1")
         async with app.router.lifespan_context(app):
             for name in ("telegram", "twitter", "zhihu", "zsxq"):
-                child = collector_registry._SANDBOX_CHILDREN[name]
+                child = registry._sandbox_children[name]
                 transport = child._http_transport
                 assert isinstance(transport, HostClientTransport), (
                     f"sandboxed collector {name!r} must egress through a "
@@ -824,12 +822,11 @@ async def test_lifespan_stops_every_sandboxed_child_on_shutdown(
     ResourceWarnings about running subprocesses, which is how this gap was
     found -- but the production consequence is orphaned collector processes.
     """
-    from app import collector_registry
-
-    collector_registry._registry()
+    registry = app.state.collector_registry
+    registry._registry_for_build()
     # Force-real spawn so there is a live process whose death can be observed
     # (children are lazy; a built registry alone leaves _proc as None).
-    child = collector_registry._SANDBOX_CHILDREN["telegram"]
+    child = registry._sandbox_children["telegram"]
     child.start()
     proc = child._proc
     assert proc is not None, "the child must be running before the lifespan exits"

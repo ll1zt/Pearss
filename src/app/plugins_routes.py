@@ -39,7 +39,7 @@ from app.api_conventions import (
     replay_or_none,
 )
 from app.auth import Principal, read_required, write_required
-from app.collector_registry import by_name, plugins_for_surface
+from app.collector_registry import shipped_collector_ids
 from core.enums import PluginStatus
 from core.tenancy import SINGLE_TENANT
 
@@ -90,7 +90,7 @@ def read_plugins(
         }
     plugins = [
         {**manifest, "status": statuses.get(str(manifest["id"]), "enabled")}
-        for manifest in plugins_for_surface()
+        for manifest in request.app.state.collector_registry.plugins_for_surface()
     ]
     has_more = offset + limit < len(plugins)
     return {
@@ -107,7 +107,14 @@ def read_plugin(
     _: Principal = Depends(read_required),
 ) -> dict[str, Any]:
     del _
-    manifest = next((m for m in plugins_for_surface() if m["id"] == plugin_id), None)
+    manifest = next(
+        (
+            m
+            for m in request.app.state.collector_registry.plugins_for_surface()
+            if m["id"] == plugin_id
+        ),
+        None,
+    )
     if manifest is None:
         raise api_error(
             status_code=404,
@@ -147,7 +154,7 @@ def _set_status(
     principal: Principal,
     key: str,
 ) -> JSONResponse:
-    registration = by_name(plugin_id)
+    registration = request.app.state.collector_registry.by_name(plugin_id)
     if registration is None:
         raise api_error(
             status_code=404,
@@ -238,9 +245,10 @@ def import_plugin(
     if replayed is not None:
         return replayed
 
-    from app import collector_registry, plugin_loader
+    from app import plugin_loader
 
-    if plugin_id in collector_registry.shipped_collector_ids():
+    registry = request.app.state.collector_registry
+    if plugin_id in shipped_collector_ids():
         raise api_error(
             status_code=409,
             code="plugin_id_taken",
@@ -283,7 +291,8 @@ def import_plugin(
         )
         session.commit()
 
-    collector_registry.install_plugin(plugin_id, manifest)
+    registry = request.app.state.collector_registry
+    registry.install_plugin(plugin_id, manifest)
 
     body = _plugin_representation(manifest, PluginStatus.ENABLED.value)
     remember(
@@ -313,15 +322,14 @@ def uninstall_plugin(
     collector out from under its sources would make them fail on the next
     tick with a classification that blamed the origin.
     """
-    from app import collector_registry
-
     endpoint = f"DELETE /v1/plugins/{plugin_id}"
     factory = request.app.state.session_factory
+    registry = request.app.state.collector_registry
     replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
     if replayed is not None:
         return replayed
 
-    if plugin_id not in collector_registry.installed_plugin_ids():
+    if plugin_id not in registry.installed_plugin_ids():
         raise api_error(
             status_code=404,
             code="plugin_not_installed",
@@ -343,7 +351,7 @@ def uninstall_plugin(
     in_use = [
         source_id
         for source_id, url in candidates
-        if (registration := collector_registry.by_name(plugin_id)) is not None
+        if (registration := registry.by_name(plugin_id)) is not None
         and registration.collector.match_url(url)
     ]
     if in_use:
@@ -364,7 +372,7 @@ def uninstall_plugin(
         session.execute(sa_text("delete from plugin where id = :id"), {"id": plugin_id})
         session.commit()
 
-    collector_registry.uninstall_plugin(plugin_id)
+    registry.uninstall_plugin(plugin_id)
 
     body = {"id": plugin_id, "uninstalled": True, "files": "left in place"}
     body["correlation_id"] = current_correlation_id()
@@ -393,15 +401,16 @@ def reload_plugin(
     not (ADR 0017): the plugin's state lives in its own process, and the host
     keeps none.
     """
-    from app import collector_registry, plugin_loader
+    from app import plugin_loader
 
     endpoint = f"POST /v1/plugins/{plugin_id}:reload"
     factory = request.app.state.session_factory
+    registry = request.app.state.collector_registry
     replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
     if replayed is not None:
         return replayed
 
-    if plugin_id not in collector_registry.installed_plugin_ids():
+    if plugin_id not in registry.installed_plugin_ids():
         raise api_error(
             status_code=404,
             code="plugin_not_installed",
@@ -426,7 +435,7 @@ def reload_plugin(
 
     manifest = dict(on_disk.manifest)
     manifest["checksum"] = on_disk.checksum
-    collector_registry.install_plugin(plugin_id, manifest)
+    registry.install_plugin(plugin_id, manifest)
 
     body = _plugin_representation(manifest, PluginStatus.ENABLED.value)
     body["reloaded"] = True

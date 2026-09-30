@@ -1190,6 +1190,7 @@ def trigger_source(
             source_id=source_id,
             policy_json=row.schedule_policy,
             client=client,
+            registry=request.app.state.collector_registry,
         )
         session.commit()
 
