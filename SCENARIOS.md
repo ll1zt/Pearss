@@ -70,7 +70,7 @@
 | AC-150..156 | #152 告警与诊断的归因：源标题/分类/计数/detail 摘要；`:diagnose` failed_enrichments + last_run.error_class | issue #152 | 已合并 | `tests/unit/test_alerting.py`、`tests/integration/test_alerting.py`、`tests/integration/test_sources_api.py` |
 | AC-157..160 | #91 X 视频渲染为宿主受限的 `<video>`（非白名单宿主/自动播放/事件属性被剥离，降级存活） | issue #91 | 已合并 | `tests/unit/test_sanitize.py`、`tests/unit/test_properties_sanitize.py`、`src/plugins/collectors/twitter/test_collector.py` |
 | AC-161..166 | #159 add_sources 批量建源：一次确认覆盖一批（ADR 0044） | issue #159 | 已合并 | `tests/integration/test_sources_batch.py`、`tests/integration/test_mcp_add_sources.py` |
-| AC-167 | #167 文章抽取器提为共享件 `adapters/article.py`：抽取输出逐字节不变，且仓库里只有一份实现 | issue #167 | 已合并 | `tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
+| AC-167 | #167 文章抽取器提为共享件 `adapters/article.py`：抽取输出逐字节不变，且仓库里只有一份实现 | issue #167 / ADR 0045 | 已合并 | `tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
 | AC-168 | #168 采集器新增可选能力 `collect_item`：未声明的源在调用采集器之前被拒绝 | issue #168 | 已合并 | `tests/unit/test_collect_item_capability.py`、`tests/integration/test_collect_item_rpc.py` |
 | AC-169..171 | #169 rss 实现 `collect_item`（WordPress 地址取全文且身份对齐 / 非 WP 回落共享抽取器 / 产物达阈值故链不二次抓取） | issue #169 | 已合并 | `tests/unit/test_rss_collect_item.py` |
 | AC-172..175 | #170 按地址抓取入库（同源校验先于抓取 / 非本源拒绝且不落库 / 一条失败不影响其余 / 节拍夹取与幂等重放） | issue #170 | 已合并 | `tests/integration/test_fetch_items.py`、`tests/e2e/test_failure_paths.py` |
