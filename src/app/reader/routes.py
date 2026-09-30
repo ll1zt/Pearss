@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from adapters import reader_api
 from adapters.db_models import Item as ItemRow
+from adapters.timestamps import fixed_width_utc
 from app.middleware import CREDENTIALLESS_AUTH_FAILURE
 from app.reader import operations
 from app.reader.auth import (
@@ -384,6 +385,7 @@ def stream_items_ids(
     n: int = Query(default=10000),
     xt: list[str] = Query(default=[]),
     it: list[str] = Query(default=[]),
+    ot: str | None = Query(default=None),
     c: str | None = Query(default=None),
 ) -> dict[str, object]:
     """Item ids for a stream.
@@ -419,6 +421,11 @@ def stream_items_ids(
 
     Pending items are always excluded: the gate applies to the Reader API just
     as it does to RSS.
+
+    `ot` is a lower bound on `published_at`, in Unix seconds. ReadYou sends it
+    on every global sync (`getReadItemIds(since = now - 1 month)`) and pages to
+    exhaustion, so honouring it bounds the walk to the window the client asked
+    for instead of the whole read history.
     """
     # An unrecognised state yields nothing rather than being dropped: a filter
     # we cannot honour must not widen into the unfiltered list.
@@ -439,6 +446,7 @@ def stream_items_ids(
         limit=limit,
         offset=offset,
         boundary=boundary,
+        published_after=_window_start(ot),
     )
     next_cursor = _encode_cursor(offset, page) if has_more and page else None
 
@@ -842,3 +850,25 @@ def _parse_ts(value: str | None) -> datetime | None:
     if len(raw) >= 16:
         number //= 1_000_000
     return datetime.fromtimestamp(number, tz=UTC)
+
+
+def _window_start(raw: str | None) -> str | None:
+    """Google Reader's `ot` as a fixed-width UTC bound, or None for "no bound".
+
+    `ot` is Unix seconds. miniflux applies it only when it is a positive
+    integer, comparing strictly (`published_at > ot`). An absent, malformed or
+    non-positive value means "no lower bound" rather than "nothing": a filter
+    we cannot honour must not narrow the answer to the empty set, the same rule
+    an unrecognised state follows. The bound is rendered in the column's own
+    fixed-width format, so the comparison is lexicographic and chronological at
+    once.
+    """
+    if raw is None:
+        return None
+    try:
+        seconds = int(raw.strip())
+    except ValueError:
+        return None
+    if seconds <= 0:
+        return None
+    return fixed_width_utc(datetime.fromtimestamp(seconds, tz=UTC))

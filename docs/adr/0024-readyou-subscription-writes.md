@@ -236,3 +236,63 @@ UI 上表现为删除永不成功。拒绝方案实际产出的是「看似更�
 中关于 `t=` 的段落在 2026-09-16 之后不再是现行决策**；现行状态以本节为准。
 教训（第三次同构）：写「某端点做不到 X」之前，先确认支撑 X 的机制是否
 已经存在——三回里有两回（`it=`、`t=`），答案是「已存在，只是没被接上」。
+
+## 修订（2026-09-30）：#92 覆盖度未决项裁决（对账 ReadYou@d2b979c）
+
+`docs/integrations/google-reader-api-coverage.md` 在文档清理轮删除时，留下 7 个
+「未定」项，迁入 issue #92。本修订按 issue 的方法逐项裁决：**先回答「哪个客户端
+会因此出错」**，再决定修或明确记 declined。对账对象是 `ReadYouApp/ReadYou@d2b979c`
+——与本 ADR 初版钉住的同一 revision，因此结论可直接比对。
+
+### 对账结论（读客户端源码得到，非推测）
+
+| 参数 / 行为 | ReadYou@d2b979c 的实际调用 | 裁决 |
+|---|---|---|
+| `ot` | **每次全局同步都发**：`getReadItemIds(since = now − 1 月)`（`GoogleReaderRssService.kt:293`）；`fetchItemIdsAndContinue`（`:672`）循环到 `continuation == null`，**无页数上限** | **实现** |
+| `nt` | 全库零引用 | 已明确不做 |
+| `r`（排序 `o`） | `r` 只作为 edit-tag / subscription-edit 的**移除字段**出现（`GoogleReaderAPI.kt:414`、`:447`），从不是排序参数 | 已明确不做 |
+| `ac=subscribe` | 从不发送；`subscribe()`（`:130`）走 `quickadd` | 已明确不做 |
+| 未知端点 `[]` vs `404` | 从不探测未知端点；非 2xx 一律抛异常并重试，没有「200 空数组 = 不支持」分支 | 已明确不做（保留 404） |
+| `quickadd` `numResults=0` | DTO 有该字段（`GoogleReaderDTO.kt:94`）但**从不读取**；只 `requireNotNull(streamId)`（`:141`） | 已明确不做（保留 400） |
+| `rename-tag` 不存在 → `404` | `renameTag` 只发 `s`/`dest`，不依赖 404 | 已明确不做（保留 200 no-op） |
+
+### `ot` 实现（本次唯一的代码变更）
+
+忽略 `ot` 的代价比原账本记的更大：账本写于 `c` 游标修复**之前**，当时只取第一页，
+所以记为「有界偏差（多传数据）」。现在游标会翻到穷尽，忽略 `ot` 意味着**每轮同步
+翻完整个已读历史**；而当已读历史超过本服务单次游走上限（`_MAX_SERVED = 100_000`）
+时会被**截断**，更早的远程已读条目就此不再传播。
+
+实现与 miniflux 对齐（`internal/googlereader`，`handler.go:1047`、
+`entry_query_builder.go:85`）：
+
+- `ot` 是 Unix 秒；**仅在 > 0 时生效**（`0`/缺失/非数字 = 无下界，而不是「空集」）
+- 比较是**严格大于**：`published_at > ot`
+- 在 **SQL 层、`LIMIT` 之前**下推，与 `it=`/`xt=` 同一位置；NULL `published_at`
+  无法满足 `>`，因此无日期条目离开有窗口的流（miniflux 同样如此）
+
+### 修正「已知缺口」一节
+
+初版「后果」下的「已知缺口」列表已过期，两个方向都错，以本修订为准：
+
+- `ac=unsubscribe` 与 `t=` 重命名订阅源**均已实现**（见 2026-09-16 修订），
+  从缺口列表移除
+- 现行缺口（有意保留，各有可执行证据）：
+
+| 缺口 | 理由 | 证据 |
+|---|---|---|
+| `nt` | 无调用方 | `test_reader_coverage_gaps.py::test_nt_is_ignored` |
+| `r=o` 升序 | 无调用方；游标按降序设计 | `test_reader_coverage_gaps.py::test_r_o_does_not_change_the_order` |
+| `ac=subscribe` | 订阅走 `quickadd`（决策 1/3） | `test_reader_coverage_gaps.py::test_ac_subscribe_is_refused_and_creates_nothing` |
+| 未知端点返回 404 而非 `[]` | 无调用方探测；404 更正确 | `test_reader_coverage_gaps.py::test_an_unknown_reader_endpoint_is_404` |
+| `quickadd` 非法 URL 返回 400 而非 `numResults=0` | 无调用方读 `numResults` | `test_reader_coverage_gaps.py::test_quickadd_with_an_invalid_url_is_400` |
+| `rename-tag` 不存在时 200 no-op 而非 404 | 无调用方依赖 | `test_reader_coverage_gaps.py::test_rename_tag_on_a_missing_folder_is_ok` |
+| 空分组不落库（刷新后消失） | 模型无 folder 实体，集合由源派生 | `test_reader_api.py::test_tag_list_reports_the_folders_that_exist` |
+
+`ot` 的实现由 `test_reader_coverage_gaps.py::test_ot_windows_the_read_stream`
+与 `::test_a_non_positive_or_unparseable_ot_disables_the_window` 钉住。
+
+### 范围声明不变
+
+「完整 Google Reader API 从来不是目标」不变；本修订只把未决项落到可判定的去向
+（实现或 declined），没有扩大范围。若要改变目标本身，应新开 ADR。
