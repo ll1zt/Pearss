@@ -46,6 +46,7 @@ from adapters.repository import (
 
 # The API-wide conventions live in app.api_conventions; they are re-exported
 # so the sibling route modules keep one import shape during the move.
+from app import pipeline
 from app.api_conventions import (
     _now,
     api_error,
@@ -200,6 +201,25 @@ class SourceBatchCreate(BaseModel):
             return normalize_folder(value)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
+
+
+class SourceFetchItems(BaseModel):
+    """Body for fetching a caller's addresses into one source.
+
+    `urls` are addresses the caller discovered -- an agent enumerating a
+    site's history, typically -- and every one of them must be on the source's
+    own host, or it is refused rather than fetched.
+
+    The two knobs shape the pacing: `batch_size` addresses are fetched, then a
+    pause of `min_interval_seconds`. Both are clamped by the server, and the
+    deployment's own interval (PEARSS_FETCH_MIN_INTERVAL) is a floor under
+    them, so a caller cannot ask this deployment to hit someone's server
+    harder than the operator allows.
+    """
+
+    urls: list[str] = Field(min_length=1)
+    batch_size: int | None = Field(default=None, ge=1)
+    min_interval_seconds: float | None = Field(default=None, ge=0)
 
 
 class SourcePatch(BaseModel):
@@ -731,6 +751,121 @@ def add_sources_batch(
         "existing": sum(1 for item in results if item["status"] == "existing"),
         "failed": sum(1 for item in results if item["status"] == "failed"),
         "results": results,
+    }
+    payload["correlation_id"] = current_correlation_id()
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
+@router.post("/sources/{source_id}:fetch-items", operation_id="fetchSourceItems")
+def fetch_source_items(
+    request: Request,
+    source_id: str,
+    body: SourceFetchItems,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Fetch a caller's addresses into one source, reporting each outcome.
+
+    The service side of content-level discovery: the caller (an agent, usually)
+    enumerates *addresses* -- which this deployment cannot do without crawling
+    the site -- and the source's own collector fetches them. The site's
+    knowledge stays in the collector, and every item still lands through the
+    one write path (normalise -> dedupe -> gate), which is why this is not the
+    same thing as `POST /v1/sources/{id}:ingest`: there the caller fetched, and
+    the source is an `agent` source holding content from outside this
+    deployment's reach.
+
+    Answers 200 with per-address results: the body is a report about a list, and
+    some of it may have failed. Two refusals happen before anything is fetched,
+    because nothing about the list could have made them work: a collector
+    without the item capability (422), and a list over the request ceiling
+    (422).
+    """
+    endpoint = f"POST /v1/sources/{source_id}:fetch-items"
+    if len(body.urls) > pipeline.MAX_FETCH_ITEMS:
+        raise api_error(
+            status_code=422,
+            code="batch_too_large",
+            message=(
+                f"At most {pipeline.MAX_FETCH_ITEMS} addresses may be fetched in "
+                f"one request; this one has {len(body.urls)}."
+            ),
+            suggestion=(
+                f"Split the list into batches of {pipeline.MAX_FETCH_ITEMS} and "
+                "retry -- each request is paced on its own."
+            ),
+        )
+
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        row = _require_source(session, source_id)
+        if row.status != SourceStatus.ACTIVE.value:
+            raise api_error(
+                status_code=409,
+                code="source_not_active",
+                message=(
+                    f"Source is {row.status}; only active sources fetch addresses."
+                ),
+                suggestion="Set status to active before fetching addresses.",
+            )
+        registry = request.app.state.collector_registry
+        registration = registry.select_for(row.type, row.url or row.canonical_url or "")
+        # The capability gate, before the client is even resolved: a source
+        # whose collector cannot read one address must not have a caller's list
+        # turned into requests against its origin.
+        if registration is None or not registration.item:
+            raise api_error(
+                status_code=422,
+                code="unsupported_capability",
+                message=(
+                    f"The collector for source {source_id!r} cannot fetch a "
+                    "single address, so this list was not fetched."
+                ),
+                suggestion=(
+                    "Use a source whose collector declares the item capability "
+                    "(the rss collector does), or fetch the content yourself "
+                    "and POST it to /v1/sources/{id}:ingest."
+                ),
+            )
+        outcome = pipeline.fetch_items(
+            session,
+            source=row,
+            client=_shared_client(request),
+            urls=body.urls,
+            batch_size=body.batch_size,
+            min_interval_seconds=body.min_interval_seconds,
+            registry=registry,
+        )
+
+    payload: dict[str, Any] = {
+        "requested": outcome.requested,
+        "inserted": outcome.inserted,
+        # The effective pacing, not the requested one: the server clamps both.
+        "batch_size": outcome.batch_size,
+        "min_interval_seconds": outcome.min_interval_seconds,
+        "deployment_min_interval_seconds": outcome.deployment_min_interval_seconds,
+        "results": [
+            {
+                "url": item.url,
+                "action": item.action.value,
+                "item_id": item.item_id,
+                "error_class": item.error_class,
+                "detail": item.detail,
+            }
+            for item in outcome.results
+        ],
     }
     payload["correlation_id"] = current_correlation_id()
     remember(

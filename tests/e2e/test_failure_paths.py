@@ -570,3 +570,39 @@ async def test_a_write_without_a_key_is_refused_rather_than_executed(
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["error"]["code"] == "idempotency_key_required"
     assert _count(session_factory, "source") == 0
+
+
+# --------------------------------------------------------------------------
+# Scenario: an address off the source's host is refused, and nothing is stored
+# --------------------------------------------------------------------------
+
+
+async def test_an_address_off_the_source_host_writes_nothing(
+    served: str, session_factory: sessionmaker[Session]
+) -> None:
+    """The provenance boundary, end to end: refused, and the store untouched.
+
+    A happy path cannot show this. `:fetch-items` is the one endpoint that
+    takes *addresses* rather than content, so it is the one place a caller
+    could try to make this deployment fetch from a server the source never
+    agreed to talk to -- and the refusal has to hold where the request
+    actually lands, not only in the pipeline helper the integration tests
+    call.
+    """
+    source_id = _seed_source(session_factory)
+
+    async with httpx.AsyncClient(base_url=served) as client:
+        response = await client.post(
+            f"/v1/sources/{source_id}:fetch-items",
+            headers={
+                "Authorization": f"Bearer {API_TOKEN}",
+                "Idempotency-Key": "e2e-fetch-items-offhost",
+            },
+            json={"urls": ["https://elsewhere.example/blog/archives/1"]},
+        )
+
+    assert response.status_code == 200, response.text
+    [result] = response.json()["results"]
+    assert result["action"] == "rejected"
+    assert result["error_class"] == "structure_changed"
+    assert _count(session_factory, "item") == 0

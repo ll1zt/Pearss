@@ -12,9 +12,13 @@ each place is how they drift.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.orm import Session
@@ -643,3 +647,272 @@ def bodies_for(session: Session, items: list[Item]) -> dict[str, str]:
     between "this item has no body" and "the body is blank".
     """
     return filestore.bodies_for({item.id: item.content_ref for item in items})
+
+
+# --------------------------------------------------------------------------
+# Content-level discovery: a caller's address list, against one source
+#
+# The pipeline owns the sequence -- accept the address, fetch it through the
+# source's collector, store the draft -- so the route, the MCP tool and any
+# future caller share one implementation of "what happens to an address". A
+# collector only ever sees addresses this module has already accepted.
+# --------------------------------------------------------------------------
+
+# The caller's knobs and the server's bounds on them. The defaults are the
+# polite shape: a burst of `batch_size` addresses, then a pause.
+DEFAULT_FETCH_ITEMS_BATCH: Final = 20
+MAX_FETCH_ITEMS_BATCH: Final = 50
+DEFAULT_FETCH_ITEMS_INTERVAL: Final = 2.0
+MAX_FETCH_ITEMS_INTERVAL: Final = 60.0
+# One request's worth of work. The whole list runs inside the HTTP request, so
+# a caller with more addresses sends several requests rather than holding one
+# open; the caller's own batch size and interval bound the wall-clock cost.
+MAX_FETCH_ITEMS: Final = 200
+
+
+class FetchItemAction(StrEnum):
+    """What happened to one address, in the caller's vocabulary.
+
+    Four values rather than the store's own action names: the caller branches
+    on "did this address become an item", and the dedupe nuance (`insert` vs
+    `insert_related` vs `skip_same_source`) is this deployment's business.
+    """
+
+    # A new item (or a pending one advanced by fresher content).
+    STORED = "stored"
+    # The store recognised the item and kept what was there.
+    EXISTING = "existing"
+    # Refused here, before the collector was called.
+    REJECTED = "rejected"
+    # The collector was called and the fetch or the parse failed.
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchedAddress:
+    """One address the caller supplied, and what became of it."""
+
+    url: str
+    action: FetchItemAction
+    item_id: str | None = None
+    error_class: str | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchItemsResult:
+    """The whole report: what was asked, what was stored, per address.
+
+    The effective pacing rides along because the server clamps what the caller
+    asked for: a caller that cannot see the effective values cannot tell
+    "accepted as asked" from "quietly overridden".
+    """
+
+    requested: int
+    inserted: int
+    batch_size: int
+    min_interval_seconds: float
+    deployment_min_interval_seconds: float
+    results: tuple[FetchedAddress, ...]
+
+
+def fetch_items(
+    session: Session,
+    *,
+    source: SourceRow,
+    client: httpx.Client,
+    urls: Sequence[str],
+    tenant_id: str = SINGLE_TENANT,
+    batch_size: int | None = None,
+    min_interval_seconds: float | None = None,
+    registry: CollectorRegistry | None = None,
+) -> FetchItemsResult:
+    """Fetch a caller's addresses into one source, reporting each outcome.
+
+    The caller supplies addresses it discovered outside the feed window (an
+    agent enumerating a site's history); the source's collector fetches them,
+    so the site's knowledge stays in the collector and every item still lands
+    through `normalise_and_store` -- one write path, one dedupe rule, one gate.
+
+    Two guards run *before* anything is fetched:
+
+    - **the host**: an address must be on the source's own host (`www.` aside).
+      `source_id` is the provenance boundary (ADR 0022), and a list of
+      addresses is not a licence to fetch from servers this source never
+      agreed to talk to.
+    - **the capability**: `collect_item_with` refuses a collector that does not
+      declare the item capability, so an unsupported source produces no
+      request at all.
+
+    One address's failure does not stop the list -- except a `blocked` answer,
+    which is the origin asking this deployment to stop. The remaining
+    addresses are then reported as rejected and not fetched, because
+    continuing is exactly the burst the pacing exists to prevent.
+
+    `batch_size` and `min_interval_seconds` shape the pacing: that many
+    addresses are fetched, then a pause of that many seconds. Both are clamped
+    to the server's bounds, and the deployment's own interval is a floor under
+    them (an operator's statement about how hard this deployment may hit
+    someone else's server, which a request cannot talk down).
+    """
+    registry = registry or collector_registry.default_registry()
+    source_url = source.url or source.canonical_url or ""
+    registration = registry.select_for(source.type, source_url)
+    effective_batch = _clamped_batch_size(batch_size)
+    effective_interval, deployment_floor = _clamped_interval(min_interval_seconds)
+    chain = chain_for_source(session, source_id=source.id)
+
+    results: list[FetchedAddress] = []
+    inserted = 0
+
+    for index, raw_url in enumerate(urls):
+        if index and index % effective_batch == 0:
+            # Between bursts, not before the first: the caller asked for this
+            # shape and the deployment's floor already governs the spacing.
+            time.sleep(effective_interval)
+
+        url = raw_url.strip()
+        if not _on_source_host(source_url, url):
+            results.append(
+                FetchedAddress(
+                    url=raw_url,
+                    action=FetchItemAction.REJECTED,
+                    error_class=ErrorClass.STRUCTURE_CHANGED.value,
+                    detail="address is not on the source's own host",
+                )
+            )
+            continue
+        if registration is None:
+            results.append(
+                FetchedAddress(
+                    url=raw_url,
+                    action=FetchItemAction.REJECTED,
+                    error_class=ErrorClass.STRUCTURE_CHANGED.value,
+                    detail="no collector serves this source",
+                )
+            )
+            continue
+
+        try:
+            drafts = collector_registry.collect_item_with(
+                registration, source_id=source.id, url=url, client=client
+            )
+        except Exception as exc:
+            # The classified error is duck-typed across every plugin boundary
+            # in this repository (in-process FetchError, the spec's
+            # CollectorError, the registry's own): one handler covers them all,
+            # and anything without an ErrorClass is a bug, not an outcome.
+            error_class = getattr(exc, "error_class", None)
+            if not isinstance(error_class, ErrorClass):
+                raise
+            results.append(
+                FetchedAddress(
+                    url=raw_url,
+                    action=FetchItemAction.FAILED,
+                    error_class=error_class.value,
+                    detail=getattr(exc, "detail", str(exc)),
+                )
+            )
+            if error_class is ErrorClass.BLOCKED:
+                results.extend(
+                    FetchedAddress(
+                        url=rest,
+                        action=FetchItemAction.REJECTED,
+                        error_class=ErrorClass.BLOCKED.value,
+                        detail="not attempted: the origin refused this address",
+                    )
+                    for rest in urls[index + 1 :]
+                )
+                break
+            continue
+
+        if not drafts:
+            # An address that yields nothing is not a silent success: the
+            # caller asked about it and gets an answer.
+            results.append(
+                FetchedAddress(
+                    url=raw_url,
+                    action=FetchItemAction.FAILED,
+                    error_class=ErrorClass.PARSE.value,
+                    detail="the address produced no item",
+                )
+            )
+            continue
+
+        for entry in normalise_and_store(
+            session, drafts, tenant_id=tenant_id, chain=chain
+        ):
+            stored = entry.outcome.action in (
+                DedupeAction.INSERT,
+                DedupeAction.INSERT_RELATED,
+                DedupeAction.UPDATE_PENDING,
+            )
+            if stored:
+                inserted += 1
+            results.append(
+                FetchedAddress(
+                    url=raw_url,
+                    action=(
+                        FetchItemAction.STORED if stored else FetchItemAction.EXISTING
+                    ),
+                    item_id=entry.outcome.item.id,
+                )
+            )
+
+    return FetchItemsResult(
+        requested=len(urls),
+        inserted=inserted,
+        batch_size=effective_batch,
+        min_interval_seconds=effective_interval,
+        deployment_min_interval_seconds=deployment_floor,
+        results=tuple(results),
+    )
+
+
+def _clamped_batch_size(batch_size: int | None) -> int:
+    if batch_size is None:
+        return DEFAULT_FETCH_ITEMS_BATCH
+    return max(1, min(int(batch_size), MAX_FETCH_ITEMS_BATCH))
+
+
+def _clamped_interval(min_interval_seconds: float | None) -> tuple[float, float]:
+    """The effective interval, and the deployment's floor under it.
+
+    The floor comes from the deployment's own pacing settings
+    (`app.fetch_pacing`, the same numbers the enrichment worker obeys), so one
+    operator setting governs every path that fetches from someone else's
+    server.
+    """
+    from app.fetch_pacing import HostPacer
+
+    floor = HostPacer.from_env().min_interval
+    requested = (
+        DEFAULT_FETCH_ITEMS_INTERVAL
+        if min_interval_seconds is None
+        else float(min_interval_seconds)
+    )
+    return max(0.0, min(requested, MAX_FETCH_ITEMS_INTERVAL), floor), floor
+
+
+def _on_source_host(source_url: str, address: str) -> bool:
+    """Whether `address` is on the source's own host (`www.` aside).
+
+    `www.` is the one difference allowed: sites publish their feed and their
+    articles under either name, and they are the same site. Anything that is
+    not an http(s) address is refused here too -- the check is on the parsed
+    host, and a `file:` or `javascript:` address has none.
+    """
+    source_host = _url_host(source_url)
+    address_host = _url_host(address)
+    return bool(source_host) and _without_www(source_host) == _without_www(address_host)
+
+
+def _url_host(url: str) -> str:
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        return ""
+    return (parts.hostname or "").lower()
+
+
+def _without_www(host: str) -> str:
+    return host[4:] if host.startswith("www.") else host
