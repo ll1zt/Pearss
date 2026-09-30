@@ -38,6 +38,7 @@ from typing import Any
 import httpx
 
 from adapters.raw_payload import RawPayload
+from adapters.sanitize import video_url_allowed
 from core.enums import ErrorClass
 from core.models import ItemDraft
 from core.plugins.hooks import (
@@ -593,8 +594,46 @@ def _media_items(tweet: Json) -> list[Json]:
     return [m for m in plain if isinstance(m, dict)] if isinstance(plain, list) else []
 
 
+def _video_src(item: Json) -> str | None:
+    """The best playable mp4 URL for a media item, if its host is allowed.
+
+    X's `video_info.variants` mixes an HLS playlist with a few mp4 renditions;
+    only the mp4 renditions are usable as a `<video src>`, and the highest
+    bitrate is worth defaulting to. A variant on a host the sanitiser does not
+    admit is ignored: emitting it would make the whole element (and its fallback
+    content) get dropped downstream, losing the video entirely (ADR 0043).
+    """
+    info = item.get("video_info")
+    variants = info.get("variants") if isinstance(info, dict) else None
+    if not isinstance(variants, list):
+        return None
+    best_bitrate = -1
+    best_url: str | None = None
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        if _text(variant.get("content_type")) != "video/mp4":
+            continue
+        url = _text(variant.get("url"))
+        if not url or not video_url_allowed(url):
+            continue
+        bitrate = variant.get("bitrate")
+        # `bool` is an `int` subclass, so a boolean would compare as 0 or 1.
+        if isinstance(bitrate, bool) or not isinstance(bitrate, int):
+            bitrate = 0
+        if bitrate > best_bitrate:
+            best_bitrate, best_url = bitrate, url
+    return best_url
+
+
 def _media_html(media: list[Json], *, quote: bool = False) -> str | None:
     """Media items as markup, optionally wrapped for a quote block.
+
+    A video/animated-gif item becomes a `<video controls>` when X's
+    `video_info` carries a playable mp4 on an allowed host (ADR 0043); the
+    existing thumbnail + external link is kept as the element's *content*, so if
+    the sanitiser ever stops allowing the tag the reader still sees the picture
+    and the link rather than nothing.
 
     `quote=True` drops the enclosing `<p>` because a `<blockquote>` holds the
     quote's own content; nesting block elements inside one is what the
@@ -616,9 +655,18 @@ def _media_html(media: list[Json], *, quote: bool = False) -> str | None:
                     f'<img src="{html.escape(url, quote=True)}"{size} alt="{label}" '
                     f'title="{label}"/>'
                 )
-                out.append(f'<a href="{href}">{img}</a>')
+                fallback = f'<a href="{href}">{img}</a>'
             else:
-                out.append(f'<a href="{href}">{label}</a>')
+                fallback = f'<a href="{href}">{label}</a>'
+            src = _video_src(item)
+            if src:
+                poster = f' poster="{html.escape(url, quote=True)}"' if url else ""
+                out.append(
+                    f'<video src="{html.escape(src, quote=True)}"{poster} '
+                    f"controls{size}>{fallback}</video>"
+                )
+            else:
+                out.append(fallback)
     if not out:
         return None
     if quote:
