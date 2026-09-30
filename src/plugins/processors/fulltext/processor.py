@@ -49,8 +49,13 @@ from typing import Any, Final
 
 import httpx
 
-from adapters.article import MIN_ARTICLE_CHARS, extract_article_markup, plain_length
-from adapters.http import FetchPolicy, fetch
+from adapters.article import (
+    ARTICLE_FETCH_POLICY,
+    MIN_ARTICLE_CHARS,
+    extract_article_markup,
+    plain_length,
+)
+from adapters.http import fetch
 from adapters.sanitize import sanitize_html
 from core.enums import ErrorClass
 from core.plugins.hooks import HOOKIMPL, ProcessorError
@@ -64,16 +69,9 @@ LOGGER = logging.getLogger(__name__)
 # is smaller than the cost of a spurious fetch (a request to someone's blog).
 MIN_PLAIN_CHARS: Final = 200
 
-# Articles are big; feeds are not. Half the host's feed cap is already
-# generous for a single page.
-MAX_ARTICLE_BYTES: Final = 2_500_000
-
-# Timeouts tighter than the collector defaults: this fetch happens inside the
-# enrichment lease, one per item, and a slow origin should not hold a worker
-# slot for the feed-sized total budget.
-CONNECT_TIMEOUT: Final = 10.0
-READ_TIMEOUT: Final = 20.0
-TOTAL_TIMEOUT: Final = 45.0
+# The article-page fetch bounds (timeouts, size cap) live with the extractor,
+# in `adapters/article.py`: the rss collector's address path fetches the same
+# kind of page, and two copies of "how big is an article" would drift.
 
 
 @HOOKIMPL
@@ -134,12 +132,7 @@ def _fetch_article(url: str, *, item_id: str) -> str:
     wrapper only translates the failure into the processor contract so the
     worker's retry semantics see one exception type.
     """
-    policy = FetchPolicy(
-        connect_timeout=CONNECT_TIMEOUT,
-        read_timeout=READ_TIMEOUT,
-        total_timeout=TOTAL_TIMEOUT,
-        max_bytes=MAX_ARTICLE_BYTES,
-    )
+    policy = ARTICLE_FETCH_POLICY
     try:
         with httpx.Client(follow_redirects=True) as client:
             payload = fetch(url, client=client, policy=policy)

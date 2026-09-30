@@ -14,6 +14,8 @@ no origin, no network and no database in this file.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from adapters import article
@@ -150,3 +152,89 @@ def test_measuring_unparseable_content_falls_back_to_word_count() -> None:
     measured = article.plain_length('<?xml version="1.0" encoding="utf-8"?>')
 
     assert measured > 0
+
+
+# --------------------------------------------------------------------------
+# Page metadata: what an address-only fetch needs to build a draft
+# --------------------------------------------------------------------------
+
+
+def test_page_metadata_prefers_open_graph_over_the_title_element() -> None:
+    """A `<title>` carries the site name; `og:title` is the article's own."""
+    page = (
+        "<html><head>"
+        "<title>Fallback title - Bear Blog</title>"
+        '<meta property="og:title" content="Open Graph title">'
+        '<link rel="canonical" href="https://bear.example.com/blog/posts/hello">'
+        '<meta property="article:published_time" content="2026-07-27T15:00:00+00:00">'
+        "</head><body></body></html>"
+    )
+
+    meta = article.page_metadata(page)
+
+    assert meta.title == "Open Graph title"
+    assert meta.canonical_url == "https://bear.example.com/blog/posts/hello"
+    assert meta.published_at == datetime(2026, 7, 27, 15, 0, tzinfo=UTC)
+
+
+def test_page_metadata_falls_back_to_title_and_a_time_element() -> None:
+    """Plenty of sites publish no Open Graph tags at all."""
+    page = (
+        "<html><head><title>Plain title</title></head>"
+        '<body><time datetime="2026-07-27T15:00:00">27 July</time></body></html>'
+    )
+
+    meta = article.page_metadata(page)
+
+    assert meta.title == "Plain title"
+    assert meta.canonical_url is None
+    # Naive in, naive out: the page did not say which zone, and guessing one
+    # is how a timestamp silently shifts (the collector guide's rule).
+    assert meta.published_at == datetime(2026, 7, 27, 15, 0)
+
+
+def test_page_metadata_is_empty_rather_than_fatal_without_a_head() -> None:
+    """A fragment with no metadata yields Nones, never an error.
+
+    The caller has the address it asked for, so a page that says nothing
+    about itself is still a usable article; failing here would turn a good
+    fetch into a failed item.
+    """
+    meta = article.page_metadata("<p>bare fragment</p>")
+
+    assert (meta.title, meta.canonical_url, meta.published_at) == (None, None, None)
+
+
+def test_page_metadata_survives_html_it_cannot_parse() -> None:
+    """Unparseable markup is the same answer as no metadata, not an exception.
+
+    The article itself already parsed (the caller extracted it); a head the
+    parser chokes on must not fail a fetch that produced good content.
+    """
+    meta = article.page_metadata("")
+
+    assert (meta.title, meta.canonical_url, meta.published_at) == (None, None, None)
+
+
+def test_page_metadata_falls_back_to_og_url() -> None:
+    """Plenty of sites publish `og:url` and no `rel=canonical`."""
+    page = (
+        "<html><head><title>t</title>"
+        '<meta property="og:url" content="https://bear.example.com/blog/posts/hello">'
+        "</head><body></body></html>"
+    )
+
+    assert article.page_metadata(page).canonical_url == (
+        "https://bear.example.com/blog/posts/hello"
+    )
+
+
+def test_page_metadata_ignores_a_date_it_cannot_read() -> None:
+    """A junk date is no date: the draft records the absence, not a guess."""
+    page = (
+        "<html><head><title>t</title>"
+        '<meta property="article:published_time" content="last Tuesday">'
+        "</head><body></body></html>"
+    )
+
+    assert article.page_metadata(page).published_at is None

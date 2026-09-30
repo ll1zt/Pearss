@@ -13,6 +13,12 @@ everyone — `wordpress.py` detects the truncation, swaps the data source and
 merges the full text back into the payload `parse` already understands. Any
 failure on that path falls back to the plain feed: a summary is strictly
 better than a failed collection.
+
+The optional item hook (registry `item=True`) runs the other way round: the
+caller supplies an *address* it discovered outside the feed window, and the
+collector turns that one address into a draft — the same WordPress REST path
+first, then the shared article extractor (`adapters/article.py`) as the
+fallback, so both directions agree on what a full text is.
 """
 
 from __future__ import annotations
@@ -26,6 +32,13 @@ from typing import Any
 import feedparser
 import httpx
 
+from adapters.article import (
+    ARTICLE_FETCH_POLICY,
+    MIN_ARTICLE_CHARS,
+    extract_article_markup,
+    page_metadata,
+    plain_length,
+)
 from adapters.http import FetchError
 from adapters.http import fetch as plain_fetch
 from adapters.raw_payload import ConditionalState, RawPayload
@@ -340,6 +353,57 @@ def _text(value: object) -> str:
 
 
 @HOOKIMPL
+def collect_item(*, source_id: str, url: str, client: httpx.Client) -> list[ItemDraft]:
+    """Fetch one already-known address of this source into a draft.
+
+    Two paths, in order. WordPress first: an address whose shape names a post
+    is answered from the REST API, which carries the full rendered article
+    *and* the post's own guid -- the identity the feed uses, so the item is the
+    one the feed already produced. Anything else (no REST API, a disabled
+    endpoint, an id guess the API does not confirm) falls back to fetching the
+    page and extracting the article with the shared extractor, the same one
+    the fulltext processor uses.
+
+    Only FetchError and CollectorError escape, like `fetch` and `parse`.
+    """
+    post = wordpress.fetch_post_by_url(url, client=client, source_id=source_id)
+    if post is not None:
+        return [wordpress.draft_from_post(post, source_id=source_id)]
+    return [_article_draft(url, source_id=source_id, client=client)]
+
+
+def _article_draft(url: str, *, source_id: str, client: httpx.Client) -> ItemDraft:
+    """The generic path: fetch the page, extract the article, derive identity.
+
+    The canonical URL is the page's own `rel=canonical` when it declares one
+    (the address a caller found routinely carries tracking parameters), and
+    the identity then follows `parse`'s rule for an entry with no guid. A page
+    whose extracted text falls below the extractor's floor is a parse failure
+    rather than a stored shell.
+    """
+    payload = plain_fetch(
+        url, client=client, source_id=source_id, policy=ARTICLE_FETCH_POLICY
+    )
+    html_text = payload.text()
+    markup = extract_article_markup(html_text, base_url=url)
+    if plain_length(markup) < MIN_ARTICLE_CHARS:
+        raise CollectorError(
+            ErrorClass.PARSE,
+            f"no extractable article at {url} ({plain_length(markup)} chars)",
+        )
+    meta = page_metadata(html_text)
+    canonical = meta.canonical_url or url
+    return ItemDraft(
+        source_id=source_id,
+        external_id=f"link:{canonical}",
+        title=meta.title or canonical,
+        canonical_url=canonical,
+        published_at=meta.published_at,
+        content=markup,
+    )
+
+
+@HOOKIMPL
 def source_config() -> Manifest:
     """The rss collector's manifest."""
     return Manifest(
@@ -348,7 +412,7 @@ def source_config() -> Manifest:
         name="RSS/Atom 采集",
         description="标准 RSS/Atom feed；WordPress 摘要 feed 自动升级全文。",
         example_url="https://hnrss.org/frontpage",
-        features=frozenset({"fetch", "wordpress-upgrade"}),
+        features=frozenset({"fetch", "wordpress-upgrade", "item"}),
         required_config=(),
     )
 

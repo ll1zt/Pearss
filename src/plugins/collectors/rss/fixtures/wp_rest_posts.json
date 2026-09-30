@@ -2,6 +2,9 @@
   {
     "id": 2379,
     "link": "https://bear.example.com/blog/archives/2379",
+    "guid": {
+      "rendered": "https://bear.example.com/blog/?p=2379"
+    },
     "title": {
       "rendered": "視力検査と昼食"
     },
@@ -13,6 +16,9 @@
   {
     "id": 2376,
     "link": "https://bear.example.com/blog/archives/2376/",
+    "guid": {
+      "rendered": "https://bear.example.com/blog/?p=2376"
+    },
     "title": {
       "rendered": "引っ越し準備"
     },

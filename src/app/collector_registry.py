@@ -203,8 +203,10 @@ _DECLARATIONS: tuple[tuple[str, bool, frozenset[str]], ...] = (
     ("zsxq", True, frozenset({"fetches"})),
     # rss stays in-process: it handles the host's own protocol and needs no
     # credentials. Its fetch hook upgrades WordPress summary feeds to full
-    # text via the origin's REST API, falling back to the plain payload.
-    ("rss", False, frozenset({"fetches"})),
+    # text via the origin's REST API, falling back to the plain payload; its
+    # item hook fetches one address the caller discovered (WordPress REST
+    # first, the shared article extractor as the fallback).
+    ("rss", False, frozenset({"fetches", "item"})),
 )
 
 # Every registry built in this process, for teardown only. A suite that
