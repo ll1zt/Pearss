@@ -579,6 +579,48 @@
         "title": "SourceCreate",
         "type": "object"
       },
+      "SourceFetchItems": {
+        "description": "Body for fetching a caller's addresses into one source.\n\n`urls` are addresses the caller discovered -- an agent enumerating a\nsite's history, typically -- and every one of them must be on the source's\nown host, or it is refused rather than fetched.\n\nThe two knobs shape the pacing: `batch_size` addresses are fetched, then a\npause of `min_interval_seconds`. Both are clamped by the server, and the\ndeployment's own interval (PEARSS_FETCH_MIN_INTERVAL) is a floor under\nthem, so a caller cannot ask this deployment to hit someone's server\nharder than the operator allows.",
+        "properties": {
+          "batch_size": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Batch Size"
+          },
+          "min_interval_seconds": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Interval Seconds"
+          },
+          "urls": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Urls",
+            "type": "array"
+          }
+        },
+        "required": [
+          "urls"
+        ],
+        "title": "SourceFetchItems",
+        "type": "object"
+      },
       "SourcePatch": {
         "description": "Body for updating a source. Absent fields are left alone.\n\n`pipeline_chain` is a JSON list of {plugin_id, kind, lang?, required?}\nspecs the source's items must complete before the gate opens; an explicit\n`null` clears the chain (items go ready straight after normalisation).\nAbsent vs explicit-null is decided by `model_fields_set`, the pydantic v2\nway to give PATCH bodies three-state fields.",
         "properties": {
@@ -3397,6 +3439,78 @@
           }
         ],
         "summary": "Diagnose Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:fetch-items": {
+      "post": {
+        "description": "Fetch a caller's addresses into one source, reporting each outcome.\n\nThe service side of content-level discovery: the caller (an agent, usually)\nenumerates *addresses* -- which this deployment cannot do without crawling\nthe site -- and the source's own collector fetches them. The site's\nknowledge stays in the collector, and every item still lands through the\none write path (normalise -> dedupe -> gate), which is why this is not the\nsame thing as `POST /v1/sources/{id}:ingest`: there the caller fetched, and\nthe source is an `agent` source holding content from outside this\ndeployment's reach.\n\nAnswers 200 with per-address results: the body is a report about a list, and\nsome of it may have failed. Two refusals happen before anything is fetched,\nbecause nothing about the list could have made them work: a collector\nwithout the item capability (422), and a list over the request ceiling\n(422).",
+        "operationId": "fetchSourceItems",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceFetchItems"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Fetch Source Items",
         "tags": [
           "core-api"
         ]
