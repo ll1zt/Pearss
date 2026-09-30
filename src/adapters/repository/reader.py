@@ -33,6 +33,7 @@ def visible_ids_for_stream(
     after_published_at: str | None = None,
     after_item_id: str | None = None,
     after_published_null: bool = False,
+    published_after: str | None = None,
     with_ordering: bool = False,
 ) -> list[str] | list[tuple[str, str | None]]:
     """Item ids for a Reader API stream, newest first.
@@ -61,6 +62,12 @@ def visible_ids_for_stream(
     shrinks the set, a deletion removes a served row, a new arrival pushes
     rows deeper, and in all three cases the next page still starts exactly
     after the last served id rather than at an absolute row number.
+
+    `published_after` is the `ot=` window: a fixed-width UTC bound, applied as
+    a strict `>` before `limit` for the same reason `it`/`xt` are -- a window
+    filtered after the limit would return fewer items than asked and look like
+    missing data. A NULL `published_at` cannot satisfy `>`, so undated items
+    leave a windowed stream; miniflux's `published_at > $n` drops them too.
     """
     from adapters import reader_api
 
@@ -125,6 +132,11 @@ def visible_ids_for_stream(
         include_states=include_states,
         exclude_states=exclude_states,
     )
+
+    if published_after is not None:
+        # `ot`: strictly after the bound. NULL cannot satisfy `>`, so undated
+        # items drop out of a windowed stream rather than leaking into it.
+        query = query.where(ItemRow.published_at > published_after)
 
     # Keyset continuation, not OFFSET: a membership change between pages
     # (an item read elsewhere, a deletion, a new arrival) shifts an offset

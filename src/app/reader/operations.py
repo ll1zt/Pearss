@@ -403,6 +403,7 @@ def select_stream_ids(
     limit: int,
     offset: int,
     boundary: StreamBoundary | None,
+    published_after: str | None = None,
 ) -> tuple[list[tuple[str, str | None]], bool]:
     """One page of a stream's ids and whether more remain.
 
@@ -411,6 +412,9 @@ def select_stream_ids(
     have to repeat every filter, and a rule written twice is a rule that drifts.
     Each row carries its ordering columns so the caller's cursor can anchor to
     the last row actually served -- an id alone is not a boundary.
+
+    `published_after` is Google Reader's `ot=` lower bound, already rendered as
+    a fixed-width UTC timestamp by the route.
     """
     from adapters.repository import visible_ids_for_stream
 
@@ -426,6 +430,7 @@ def select_stream_ids(
             after_published_null=boundary.published_null if boundary else False,
             include_states=include_states,
             exclude_states=exclude_states,
+            published_after=published_after,
             with_ordering=True,
         )
         ordered = cast("list[tuple[str, str | None]]", rows)

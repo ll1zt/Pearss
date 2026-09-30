@@ -993,7 +993,7 @@
     },
     "/api/greader.php/reader/api/0/stream/items/ids": {
       "get": {
-        "description": "Item ids for a stream.\n\n`c` is a continuation cursor: the reply carries `continuation` while more\nitems remain, and the client follows it. That is part of the protocol,\nnot an optimisation -- a client that cannot page can only ever see the\nfirst page, and it has no way to tell a truncated answer from a complete\none. Read You's `fetchItemIdsAndContinue` loops `while continuation !=\nnull`, so omitting the cursor made it treat the first 1000 ids as the\nwhole read set, which is how a read item marked in another client failed\nto propagate.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nThe page size bounds the *answer*, so a short page is meaningful: if\nfewer ids come back than were asked for, the stream is exhausted. That is\nwhat lets the cursor below be a plain offset rather than something the\nclient has to interpret -- it never has to compare pages, only to keep\nasking while a cursor is offered.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.",
+        "description": "Item ids for a stream.\n\n`c` is a continuation cursor: the reply carries `continuation` while more\nitems remain, and the client follows it. That is part of the protocol,\nnot an optimisation -- a client that cannot page can only ever see the\nfirst page, and it has no way to tell a truncated answer from a complete\none. Read You's `fetchItemIdsAndContinue` loops `while continuation !=\nnull`, so omitting the cursor made it treat the first 1000 ids as the\nwhole read set, which is how a read item marked in another client failed\nto propagate.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nThe page size bounds the *answer*, so a short page is meaningful: if\nfewer ids come back than were asked for, the stream is exhausted. That is\nwhat lets the cursor below be a plain offset rather than something the\nclient has to interpret -- it never has to compare pages, only to keep\nasking while a cursor is offered.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.\n\n`ot` is a lower bound on `published_at`, in Unix seconds. ReadYou sends it\non every global sync (`getReadItemIds(since = now - 1 month)`) and pages to\nexhaustion, so honouring it bounds the walk to the window the client asked\nfor instead of the whole read history.",
         "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_get",
         "parameters": [
           {
@@ -1044,6 +1044,22 @@
           },
           {
             "in": "query",
+            "name": "ot",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ot"
+            }
+          },
+          {
+            "in": "query",
             "name": "c",
             "required": false,
             "schema": {
@@ -1089,7 +1105,7 @@
         ]
       },
       "post": {
-        "description": "Item ids for a stream.\n\n`c` is a continuation cursor: the reply carries `continuation` while more\nitems remain, and the client follows it. That is part of the protocol,\nnot an optimisation -- a client that cannot page can only ever see the\nfirst page, and it has no way to tell a truncated answer from a complete\none. Read You's `fetchItemIdsAndContinue` loops `while continuation !=\nnull`, so omitting the cursor made it treat the first 1000 ids as the\nwhole read set, which is how a read item marked in another client failed\nto propagate.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nThe page size bounds the *answer*, so a short page is meaningful: if\nfewer ids come back than were asked for, the stream is exhausted. That is\nwhat lets the cursor below be a plain offset rather than something the\nclient has to interpret -- it never has to compare pages, only to keep\nasking while a cursor is offered.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.",
+        "description": "Item ids for a stream.\n\n`c` is a continuation cursor: the reply carries `continuation` while more\nitems remain, and the client follows it. That is part of the protocol,\nnot an optimisation -- a client that cannot page can only ever see the\nfirst page, and it has no way to tell a truncated answer from a complete\none. Read You's `fetchItemIdsAndContinue` loops `while continuation !=\nnull`, so omitting the cursor made it treat the first 1000 ids as the\nwhole read set, which is how a read item marked in another client failed\nto propagate.\n\n`xt` excludes a state, `it` includes one -- both are how a client fetches\na subset, and both are applied in SQL so `n` bounds the *answer* rather\nthan the pre-filter set. That ordering is load-bearing: Read You asks for\n\"the newest 1000 unread\", and filtering after a limit would hand it fewer\nthan it asked for, which it counts as items that do not exist.\n\nFreshRSS clients express the read stream with `it=`, not `s=`. Read You\nsends `s=reading-list&it=<read>` for a FreshRSS account and `s=<read>` for\na Google Reader one (`useIt = isFreshRss` in its source). Ignoring `it`\nmade that query return the whole library -- and because the client reads\nthe result as \"these are read\", it marked every unread item read on each\nsync, while a parallel branch flipped them back. The unread count\noscillated between 0 and the total.\n\nThe page size bounds the *answer*, so a short page is meaningful: if\nfewer ids come back than were asked for, the stream is exhausted. That is\nwhat lets the cursor below be a plain offset rather than something the\nclient has to interpret -- it never has to compare pages, only to keep\nasking while a cursor is offered.\n\nPending items are always excluded: the gate applies to the Reader API just\nas it does to RSS.\n\n`ot` is a lower bound on `published_at`, in Unix seconds. ReadYou sends it\non every global sync (`getReadItemIds(since = now - 1 month)`) and pages to\nexhaustion, so honouring it bounds the walk to the window the client asked\nfor instead of the whole read history.",
         "operationId": "stream_items_ids_api_greader_php_reader_api_0_stream_items_ids_post",
         "parameters": [
           {
@@ -1136,6 +1152,22 @@
               },
               "title": "It",
               "type": "array"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ot",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ot"
             }
           },
           {
