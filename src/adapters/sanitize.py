@@ -15,9 +15,11 @@ construction and simply drops anything not named.
 from __future__ import annotations
 
 import logging
-from typing import Final
+from typing import Final, cast
+from urllib.parse import urlparse
 
 import nh3
+from lxml import html as lxml_html
 
 LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ ALLOWED_TAGS = frozenset(
         "u",
         "ul",
         "var",
+        "video",
         "wbr",
     }
 )
@@ -100,6 +103,9 @@ ALLOWED_TAGS = frozenset(
 ALLOWED_ATTRIBUTES = {
     "a": frozenset({"href", "title"}),
     "img": frozenset({"src", "alt", "title", "width", "height", "loading", "class"}),
+    # No `autoplay`/`loop`/`muted`: autoplay is harassment and spends the
+    # reader's data without asking (ADR 0043). `src` is host-constrained below.
+    "video": frozenset({"src", "controls", "poster", "width", "height"}),
     "time": frozenset({"datetime"}),
     "td": frozenset({"colspan", "rowspan"}),
     "th": frozenset({"colspan", "rowspan", "scope"}),
@@ -121,18 +127,77 @@ ALLOWED_ATTRIBUTES = {
 # and a client that ships no such rule renders the image exactly as before.
 AVATAR_CLASS: Final = "pearss-avatar"
 
+# The hosts a `<video src>` may point at (ADR 0043). This is the same move as
+# the avatar class: what the allowlist grants is a *source*, not the tag -- an
+# enumerable CDN, not "any https URL". A video from anywhere else is not a
+# video we know what to do with, and admitting the tag unconditionally would
+# turn it into an arbitrary remote-fetch and tracking channel.
+VIDEO_HOSTS: Final = frozenset({"video.twimg.com"})
 
-def _img_class_filter(tag: str, attribute: str, value: str) -> str | None:
-    """Keep an img class only when it is exactly the avatar marker.
 
-    nh3 calls this for every whitelisted attribute, not just class, and None
-    means "strip this attribute" -- so a non-class attribute must be passed
-    through untouched, or the filter would strip every img's src. Only a
-    class value that is not exactly the marker is refused.
+def video_url_allowed(url: str) -> bool:
+    """Whether `url` is a media URL from an allowed video host (ADR 0043).
+
+    Scheme is pinned to https, and the host is compared exactly: a suffix check
+    would admit `video.twimg.com.evil.example`.
     """
-    if tag != "img" or attribute != "class":
-        return value
-    return AVATAR_CLASS if value.strip() == AVATAR_CLASS else None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in VIDEO_HOSTS
+
+
+def _attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+    """Keep an img class only when it is the avatar marker, a video src only
+    from an allowed host.
+
+    nh3 calls this for every whitelisted attribute, not just the two above, and
+    None means "strip this attribute" -- so a non-target attribute must be
+    passed through untouched, or the filter would strip every img's src. Only a
+    class value that is not exactly the marker, or a video src on a foreign
+    host, is refused.
+    """
+    if tag == "img" and attribute == "class":
+        return AVATAR_CLASS if value.strip() == AVATAR_CLASS else None
+    if tag == "video" and attribute == "src":
+        return value if video_url_allowed(value) else None
+    return value
+
+
+def _drop_foreign_video(html: str) -> str:
+    """Remove `<video>` elements that are not from an allowed host (ADR 0043).
+
+    nh3's attribute filter strips a bad `src` but cannot remove the element, so
+    a hostile `<video>` would survive as an inert (or fallback-rendering) shell.
+    Removing it here keeps "a video from a foreign host is stripped" literally
+    true. This pass only ever *removes* nodes; the nh3 pass afterwards is still
+    the security boundary. It runs only when the body mentions `<video`, so an
+    ordinary body is not paid for.
+    """
+    if "<video" not in html.lower():
+        return html
+    # unreachable-ish: lxml's HTML parser repairs rather than rejects, so the
+    # frame always parses. Kept because returning the input unchanged is the
+    # safe direction a future parser change would need.
+    try:  # pragma: no cover
+        wrapper = lxml_html.fromstring(f"<div>{html}</div>")
+    except Exception:  # pragma: no cover
+        return html
+    removed = False
+    for element in list(wrapper.iter("video")):
+        src = element.get("src")
+        if src is None or not video_url_allowed(src):
+            # `drop_tree` merges the element's tail into the previous sibling,
+            # which plain `remove()` does not; it is typed on HtmlElement, not
+            # on the `_Element` `iter()` yields.
+            cast(lxml_html.HtmlElement, element).drop_tree()
+            removed = True
+    if not removed:
+        return html
+    serialized = str(lxml_html.tostring(wrapper, encoding="unicode"))
+    frame = len("<div>")
+    return serialized[frame : -len("</div>")]
 
 
 # Content of these is dropped along with the tag, rather than being unwrapped
@@ -158,6 +223,7 @@ def sanitize_html(html: str) -> str:
         LOGGER.warning("refusing to sanitise a %d character body", len(html))
         return ""
 
+    html = _drop_foreign_video(html)
     return nh3.clean(
         html,
         tags=ALLOWED_TAGS,
@@ -167,6 +233,6 @@ def sanitize_html(html: str) -> str:
         # CSS can carry url() tracking and behaviour we have no way to audit,
         # so no style declarations are allowed through at all.
         filter_style_properties=frozenset(),
-        attribute_filter=_img_class_filter,
+        attribute_filter=_attribute_filter,
         strip_comments=True,
     )
