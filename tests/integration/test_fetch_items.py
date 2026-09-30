@@ -359,6 +359,7 @@ async def test_a_list_over_the_cap_is_refused_as_a_whole(
     assert origin.requests == []
 
 
+@pytest.mark.fixture
 def test_the_rest_fixture_still_carries_a_guid() -> None:
     """The identity this path relies on is the one the fixture records.
 
