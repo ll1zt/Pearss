@@ -416,6 +416,35 @@
         "title": "PublishStatus",
         "type": "string"
       },
+      "ReadStatePatch": {
+        "description": "What a caller may change about its own consumption state.\n\nThree-valued on purpose: an absent field means \"leave this alone\", which is\nwhat a PATCH promises and what lets a client star an item without claiming\nto know whether it is read.",
+        "properties": {
+          "is_read": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Read"
+          },
+          "is_starred": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Starred"
+          }
+        },
+        "title": "ReadStatePatch",
+        "type": "object"
+      },
       "SourceBatchCreate": {
         "description": "Body for creating several sources in one request.\n\nShared options apply to every URL. `type` may be `'auto'`, resolved per URL\nagainst the collectors exactly as the single endpoint's callers resolve it,\nso there is no per-item type field to keep in step.\n\nThe list is validated for shape only. Whether a URL is usable *for its\ntype* is decided per item by the handler, because one bad entry must fail\nalone rather than refuse the batch (ADR 0044).",
         "properties": {
@@ -2237,6 +2266,130 @@
           }
         ],
         "summary": "List Item Enrichments",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/items/{item_id}/read-state": {
+      "get": {
+        "description": "This item's consumption state, in first-class terms.\n\nRead state is what a Reader *writes*, and until now the only vocabulary for\nwriting it was Google Reader's: an agent had no way to mark an item read, and\na client with no interest in that dialect had none either (issue #196).\n\nThe gate does not apply here, deliberately: this answer carries no content,\nand consumption state is the caller's own record rather than the item's --\nit is also the one thing the Reader layer needs to be true for an item it\ncannot yet show. The item still has to exist (404 otherwise), because a\nread state for an id nobody has is not a state.",
+        "operationId": "getItemReadState",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getitemreadstate",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Item Read State",
+        "tags": [
+          "core-api"
+        ]
+      },
+      "patch": {
+        "description": "Mark one item read, starred, or both -- without touching the item.\n\nThe merge is the same domain function the Reader layer uses\n(`core.reader_state.merge_state`), so \"star this\" means the same thing\nwhichever vocabulary asked, and a field the caller did not mention keeps its\nvalue. That is also what makes the write idempotent: repeating it produces\nthe same state, and the second call costs an insert that updates a row to\nwhat it already says.\n\nItem facts are not part of this write and cannot be: `content_hash`, `guid`,\n`publish_status` and `content_ref` are columns of a different table, and a\npublished item's content is frozen (ADR 0008).",
+        "operationId": "patchItemReadState",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Item Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadStatePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Patch Item Read State",
         "tags": [
           "core-api"
         ]

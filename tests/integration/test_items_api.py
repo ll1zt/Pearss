@@ -1042,3 +1042,149 @@ async def test_ac197_the_gate_applies_to_the_address_lookup_too(
 
     assert response.status_code == 200, response.text
     assert response.json()["data"] == []
+
+
+# --------------------------------------------------------------------------
+# AC-203 / AC-204: consumption state as a first-class atom
+# --------------------------------------------------------------------------
+
+
+def _row_facts(session: sessionmaker[Session], item_id: str) -> tuple[Any, ...]:
+    """The item's own columns: the ones a read-state write must not touch."""
+    with session() as db:
+        return tuple(
+            db.execute(
+                sa.text(
+                    "select guid, content_hash, publish_status, content_ref,"
+                    " updated_at from item where id = :id"
+                ),
+                {"id": item_id},
+            ).one()
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac203_read_state_round_trips_and_absent_means_false(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-203: write, read back, and no row reads as unread/unstarred.
+
+    The gap was vocabulary rather than storage: the table has existed since P1,
+    but the only way to write it was Google Reader's dialect, so an agent could
+    not mark an item read at all (issue #196). An item nobody has touched
+    answers with `false`/`false` and `updated_at: null` -- the absence of a row
+    is a state, and saying so is what keeps a caller from writing one just to
+    find out.
+    """
+    before = await client.get("/v1/items/item-0003/read-state")
+
+    assert before.status_code == 200, before.text
+    assert before.json()["is_read"] is False
+    assert before.json()["is_starred"] is False
+    assert before.json()["updated_at"] is None
+
+    written = await client.patch(
+        "/v1/items/item-0003/read-state",
+        headers={"Idempotency-Key": "read-state-1"},
+        json={"is_read": True},
+    )
+    assert written.status_code == 200, written.text
+    assert written.json()["is_read"] is True
+    assert written.json()["is_starred"] is False
+    assert written.json()["updated_at"] is not None
+
+    read_back = await client.get("/v1/items/item-0003/read-state")
+    assert read_back.json()["is_read"] is True
+
+    # Omitted means unchanged: this is what lets a client star an item without
+    # claiming to know whether it has been read.
+    starred = await client.patch(
+        "/v1/items/item-0003/read-state",
+        headers={"Idempotency-Key": "read-state-2"},
+        json={"is_starred": True},
+    )
+    assert starred.json() == {
+        "item_id": "item-0003",
+        "is_read": True,
+        "is_starred": True,
+        "updated_at": starred.json()["updated_at"],
+        "correlation_id": starred.json()["correlation_id"],
+    }
+
+    # Repeating the write is one state, and the same key is the same response.
+    replay = await client.patch(
+        "/v1/items/item-0003/read-state",
+        headers={"Idempotency-Key": "read-state-2"},
+        json={"is_starred": True},
+    )
+    assert replay.headers.get("idempotent-replay") == "true"
+    assert replay.json() == starred.json()
+    assert (await client.get("/v1/items/item-0003/read-state")).json()[
+        "is_read"
+    ] is True
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac204_writing_read_state_does_not_touch_the_item(
+    client: httpx.AsyncClient,
+    store: sessionmaker[Session],
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-204: the item's own columns are pinned by literal value.
+
+    "Mark it read" must not be a write to the item: a published item's content
+    is frozen (clients cache it), so a read-state write that reached `guid`,
+    `content_hash`, `publish_status` or `content_ref` would either break a
+    client's cache or corrupt identity. Literal values, because a relative
+    assertion would pass if the columns stopped being selected at all.
+    """
+    before = _row_facts(session_factory, "item-0003")
+    assert before == (
+        "guid-0003",
+        "hash-0003",
+        "ready",
+        None,
+        "2026-01-01T00:00:00.000000Z",
+    )
+
+    written = await client.patch(
+        "/v1/items/item-0003/read-state",
+        headers={"Idempotency-Key": "read-state-facts"},
+        json={"is_read": True, "is_starred": True},
+    )
+
+    assert written.status_code == 200, written.text
+    assert _row_facts(session_factory, "item-0003") == before
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_read_state_refuses_an_unknown_item_and_an_empty_patch(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """Two refusals: no such item, and a patch that changes nothing.
+
+    An empty patch is refused for the same reason the source PATCH refuses one:
+    it looks like a write and is not, so answering 200 would tell a caller
+    something happened.
+    """
+    unknown = await client.get("/v1/items/no-such-item/read-state")
+    assert unknown.status_code == 404, unknown.text
+    assert unknown.json()["detail"]["error"]["code"] == "item_not_found"
+
+    empty = await client.patch(
+        "/v1/items/item-0003/read-state",
+        headers={"Idempotency-Key": "read-state-empty"},
+        json={},
+    )
+    assert empty.status_code == 400, empty.text
+    assert empty.json()["detail"]["error"]["code"] == "empty_patch"
+
+    write_unknown = await client.patch(
+        "/v1/items/no-such-item/read-state",
+        headers={"Idempotency-Key": "read-state-unknown"},
+        json={"is_read": True},
+    )
+    assert write_unknown.status_code == 404, write_unknown.text
