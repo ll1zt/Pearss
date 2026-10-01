@@ -30,24 +30,33 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from typing import Final
+from dataclasses import dataclass
+from typing import Any, Final
 
 import httpx
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     append_unit,
     chain_for_source,
     claim_next_work,
     counts_for_work,
+    delete_items,
+    enqueue_chain,
+    enrichment_status,
     finish_work,
+    get_item,
     get_source,
+    requeue_enrichment,
     units_for_work,
 )
 from app import collector_registry
 from app.collector_registry import CollectorRegistry
+from app.collector_registry import Registration as CollectorRegistration
 from app.liveness_watch import LoopWatch, always_alive
 from app.pipeline import fetch_one, fetch_pacing, outcome_for
+from core.enrichment import EnrichmentSpec, EnrichmentStatus
 from core.enums import ErrorClass, UnitOutcome
 from core.work import WorkRecord, terminal_status
 
@@ -58,9 +67,281 @@ LOGGER = logging.getLogger(__name__)
 # long as its targets take.
 DEFAULT_WORK_SWEEP_SECONDS: Final = 30.0
 
-# The kinds this host can execute. Adding one is a deliberate act: the claim
-# filters on this set, so an unimplemented kind waits instead of failing.
-EXECUTABLE_KINDS: Final[frozenset[str]] = frozenset({"fetch"})
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UnitResult:
+    """What one target's execution produced, in the ledger's own terms.
+
+    One vocabulary, and it is the ledger's: an executor says what happened to
+    its target, not what a response should look like. `rejected` and `failed`
+    stay apart for the reason they do everywhere else -- only one of them is
+    worth re-sending.
+    """
+
+    outcome: UnitOutcome
+    error_class: ErrorClass | None = None
+    detail: str = ""
+    ref: str | None = None
+    # "Do not attempt what is left of this list." Only an origin refusing this
+    # deployment sets it, and `stop_detail` says why in the rows that follow.
+    stop: bool = False
+    stop_detail: str = ""
+    # Run only once this target's ledger row is committed, never before:
+    # deletion's file reclaim is exactly this (files removed inside a
+    # transaction cannot come back).
+    after_commit: Callable[[], int] | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkRuntime:
+    """Whatever a kind resolved once, before its first target.
+
+    The base carries nothing on purpose: a kind that needs something defines a
+    subclass and returns it from `prepare`, so `run` receives values that cannot
+    be missing and cannot disagree with what was resolved. Typed `Any` at the
+    call site (the base signature), concrete in each subclass -- the worker's
+    loop is generic over kinds, and the type lives where the knowledge does.
+    """
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SourceRuntime(WorkRuntime):
+    """A work about one source: the source, and whatever the kind needs of it."""
+
+    source: SourceRow
+    registration: CollectorRegistration | None = None
+    chain: tuple[EnrichmentSpec, ...] = ()
+
+
+class KindExecutor:
+    """One work kind: a preflight for the whole work, then one target at a time.
+
+    Splitting the two is what lets a kind resolve what it needs once (a source,
+    its collector, its chain) while still recording a row per target -- and what
+    keeps the worker's loop free of anything kind-specific.
+    """
+
+    def prepare(
+        self, session: Session, work: WorkRecord, registry: CollectorRegistry
+    ) -> str | WorkRuntime:
+        """A reason *every* target will fail, or the runtime the targets need.
+
+        A work naming something this deployment does not have is refused here
+        rather than per target: nothing about a target could have made it work.
+        """
+        return WorkRuntime()
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: Any,
+        client: httpx.Client,
+    ) -> UnitResult:
+        """Execute one target. A classified failure is a return value, not a raise."""
+        raise NotImplementedError
+
+    def pacing(self, work: WorkRecord) -> tuple[int, float]:
+        """(batch size, interval). The default paces nothing: only a kind that
+        makes real outbound requests has a reason to wait."""
+        return (1, 0.0)
+
+
+def _source_runtime(
+    session: Session, work: WorkRecord, registry: CollectorRegistry
+) -> str | SourceRuntime:
+    """The source a work names, or the reason there is none.
+
+    One reader for both `prepare` and `run`, so the two cannot disagree about
+    which source a work is about.
+    """
+    source_id = str(work.params.get("source_id") or "")
+    source = get_source(session, source_id) if source_id else None
+    if source is None:
+        return f"no source {source_id!r}"
+    registration = registry.select_for(
+        source.type, source.url or source.canonical_url or ""
+    )
+    return SourceRuntime(
+        source=source,
+        registration=registration,
+        chain=chain_for_source(session, source_id=source.id),
+    )
+
+
+class FetchExecutor(KindExecutor):
+    """Addresses through the source's collector (issue #190).
+
+    The only kind that makes outbound requests, so the only one that paces.
+    """
+
+    def prepare(
+        self, session: Session, work: WorkRecord, registry: CollectorRegistry
+    ) -> str | SourceRuntime:
+        resolved = _source_runtime(session, work, registry)
+        if isinstance(resolved, str):
+            return resolved
+        if resolved.registration is None or not resolved.registration.item:
+            return "the collector for this source cannot fetch a single address"
+        return resolved
+
+    def pacing(self, work: WorkRecord) -> tuple[int, float]:
+        return fetch_pacing(work.params)
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: SourceRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        unit = fetch_one(
+            session,
+            source=runtime.source,
+            registration=runtime.registration,
+            client=client,
+            url=target,
+        )
+        blocked = unit.error_class is ErrorClass.BLOCKED
+        return UnitResult(
+            outcome=outcome_for(unit.action),
+            error_class=unit.error_class,
+            detail=unit.detail,
+            ref=unit.item_id,
+            stop=blocked,
+            stop_detail=(
+                "not attempted: the origin refused this address" if blocked else ""
+            ),
+        )
+
+
+class DeleteExecutor(KindExecutor):
+    """Items by id, deleted with everything that only existed because of them.
+
+    A target that is already gone is `skipped`, not `failed`: the end state the
+    caller asked for is true, and a client retrying a lost response must see the
+    same success the first attempt produced (which is why the endpoint has been
+    idempotent all along).
+    """
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: WorkRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        result = delete_items(session, [target])
+        if result.counts["items"] == 0:
+            return UnitResult(outcome=UnitOutcome.SKIPPED, detail="already gone")
+        return UnitResult(
+            outcome=UnitOutcome.OK,
+            detail=(
+                f"deleted {result.counts['items']} item(s), "
+                f"{result.counts['enrichments']} product(s), "
+                f"{result.counts['read_states']} state row(s)"
+            ),
+            after_commit=result.reclaim.reclaim,
+        )
+
+
+class EnrichExecutor(KindExecutor):
+    """One source's chain queued for each named item (issue #197).
+
+    The per-item half of `backfill_chain`: that function selects the items and
+    queues the same rows for each, so a work target and a backfilled item go
+    through one rule -- idempotent on the (item, plugin, version, kind, lang,
+    input_hash) identity, which is why "already queued" is `skipped` and not a
+    failure.
+    """
+
+    def prepare(
+        self, session: Session, work: WorkRecord, registry: CollectorRegistry
+    ) -> str | SourceRuntime:
+        resolved = _source_runtime(session, work, registry)
+        if isinstance(resolved, str):
+            return resolved
+        if not resolved.chain:
+            return "the source has no pipeline_chain; there is nothing to queue"
+        return resolved
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: SourceRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        item = get_item(session, target)
+        if item is None:
+            return UnitResult(
+                outcome=UnitOutcome.FAILED,
+                error_class=ErrorClass.STRUCTURE_CHANGED,
+                detail=f"no item {target!r}",
+            )
+        queued = enqueue_chain(
+            session,
+            item_id=item.id,
+            content_hash=item.content_hash,
+            chain=runtime.chain,
+        )
+        if queued == 0:
+            return UnitResult(
+                outcome=UnitOutcome.SKIPPED, detail="its products are already queued"
+            )
+        return UnitResult(outcome=UnitOutcome.OK, detail=f"queued {queued} product(s)")
+
+
+class RetryExecutor(KindExecutor):
+    """Failed chain rows, requeued one at a time (issue #195's rule, per target)."""
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: WorkRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        status = enrichment_status(session, target)
+        if status is None:
+            return UnitResult(
+                outcome=UnitOutcome.FAILED,
+                error_class=ErrorClass.STRUCTURE_CHANGED,
+                detail=f"no enrichment row {target!r}",
+            )
+        if status == EnrichmentStatus.SUCCEEDED.value:
+            # The product exists, so the end state the caller wanted is already
+            # true; producing it again is a different command.
+            return UnitResult(
+                outcome=UnitOutcome.SKIPPED,
+                detail="already succeeded: its product exists",
+            )
+        if not requeue_enrichment(session, target):
+            return UnitResult(outcome=UnitOutcome.SKIPPED, detail=f"already {status}")
+        return UnitResult(outcome=UnitOutcome.OK, detail="requeued")
+
+
+# One entry per kind this host can execute. Adding one is a deliberate act: the
+# claim filters on this map's keys, so a kind without an executor waits instead
+# of being claimed and failed.
+EXECUTORS: Final[dict[str, KindExecutor]] = {
+    "fetch": FetchExecutor(),
+    "delete": DeleteExecutor(),
+    "enrich": EnrichExecutor(),
+    "retry": RetryExecutor(),
+}
+
+EXECUTABLE_KINDS: Final[frozenset[str]] = frozenset(EXECUTORS)
 
 
 class WorkWorker:
@@ -157,13 +438,17 @@ class WorkWorker:
 
         Re-entrant by design: targets that already have a ledger row are skipped,
         which is what makes a crashed pass resumable rather than a restart.
+
+        Everything kind-specific lives in an executor (see EXECUTORS). What is
+        here is what every kind shares: resolve once, record each outcome as it
+        happens, and stop when the world says stop.
         """
+        executor = EXECUTORS[work.kind]
         written = 0
         with self._session_factory() as session:
-            source_id = str(work.params.get("source_id") or "")
-            source = get_source(session, source_id) if source_id else None
-            if source is None:
-                # The work names a source this deployment does not have. Every
+            prepared = executor.prepare(session, work, registry)
+            if isinstance(prepared, str):
+                # The work names something this deployment cannot use, so every
                 # target is accounted for rather than left queued forever.
                 for target in work.targets:
                     append_unit(
@@ -172,44 +457,36 @@ class WorkWorker:
                         target=target,
                         outcome=UnitOutcome.FAILED,
                         error_class=ErrorClass.STRUCTURE_CHANGED,
-                        detail=f"no source {source_id!r}",
+                        detail=prepared,
                     )
                 session.commit()
                 self._close(session, work.id)
                 return len(work.targets)
 
-            registration = registry.select_for(
-                source.type, source.url or source.canonical_url or ""
-            )
-            chain = chain_for_source(session, source_id=source.id)
             done = {row.target for row in units_for_work(session, work.id)}
-            batch_size, interval = fetch_pacing(work.params)
-
+            batch_size, interval = executor.pacing(work)
             for index, target in enumerate(work.targets):
                 if target in done:
                     continue
                 if index and index % batch_size == 0:
                     time.sleep(interval)
-                unit = fetch_one(
-                    session,
-                    source=source,
-                    registration=registration,
-                    client=self._client,
-                    url=target,
-                    chain=chain,
+                result = executor.run(
+                    session, work, target, runtime=prepared, client=self._client
                 )
                 append_unit(
                     session,
                     work_id=work.id,
                     target=target,
-                    outcome=outcome_for(unit.action),
-                    error_class=unit.error_class,
-                    detail=unit.detail,
-                    ref=unit.item_id,
+                    outcome=result.outcome,
+                    error_class=result.error_class,
+                    detail=result.detail,
+                    ref=result.ref,
                 )
                 session.commit()
+                if result.after_commit is not None:
+                    result.after_commit()
                 written += 1
-                if unit.error_class is ErrorClass.BLOCKED:
+                if result.stop:
                     for rest in work.targets[index + 1 :]:
                         if rest in done:
                             continue
@@ -219,7 +496,7 @@ class WorkWorker:
                             target=rest,
                             outcome=UnitOutcome.REJECTED,
                             error_class=ErrorClass.BLOCKED,
-                            detail="not attempted: the origin refused this address",
+                            detail=result.stop_detail,
                         )
                     session.commit()
                     break
