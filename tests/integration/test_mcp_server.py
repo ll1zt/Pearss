@@ -27,7 +27,11 @@ from sqlalchemy import text
 from adapters.filestore import store_body
 from app.main import create_app, create_engine_for
 from app.middleware import CorrelationAndAuditMiddleware
-from tests.integration.conftest import ServerInThread, free_port
+from tests.integration.conftest import (
+    ServerInThread,
+    free_port,
+    run_work_to_completion,
+)
 from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -876,10 +880,15 @@ async def test_submit_items_refuses_without_confirmation(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmed_submit_items_stores_into_the_agent_source(
-    mcp_url: str,
+async def test_confirmed_submit_items_queues_and_then_stores(
+    mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
-    """The confirmed path must actually store, and land where it was told."""
+    """AC-211: the confirmed path queues one item, and the worker lands it where told.
+
+    Since #199 the answer is a handle: the tool used to inline the report, which
+    meant an agent pushing a long batch held a response proportional to it. Both
+    moments are asserted, because "queued" and "stored" are now different ones.
+    """
     source_id = await _an_agent_source(mcp_url)
     payload = await _call(
         mcp_url,
@@ -889,7 +898,13 @@ async def test_confirmed_submit_items_stores_into_the_agent_source(
     )
     assert payload.get("declined") is None, payload
     assert payload.get("aborted") is None, payload
-    assert payload["inserted"] == 1, payload
+    assert payload["counts"]["total"] == 1, payload
+
+    # Queued, not stored: the response is a handle, not a deed.
+    empty = await _call(mcp_url, "search_items", {"limit": 100, "source_id": source_id})
+    assert empty["data"] == []
+
+    await run_work_to_completion(mcp_env, payload["work_id"])
 
     stored = await _call(
         mcp_url, "search_items", {"limit": 100, "source_id": source_id}
@@ -899,12 +914,15 @@ async def test_confirmed_submit_items_stores_into_the_agent_source(
 
 
 @pytest.mark.asyncio
-async def test_submit_items_refuses_a_non_agent_source(mcp_url: str) -> None:
+async def test_submit_items_refuses_a_non_agent_source(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
     """Pushing into an rss source would launder provenance.
 
-    src-1 is an rss source: its items are supposed to come from one origin,
-    so the ingest endpoint refuses it rather than mixing in content from
-    somewhere else.
+    src-1 is an rss source: its items are supposed to come from one origin, so
+    the work refuses it rather than mixing in content from somewhere else. The
+    refusal is the *source's*, so every target carries the same reason -- which
+    is what the ledger shows instead of a 409 the tool would have to relay.
     """
     payload = await _call(
         mcp_url,
@@ -912,11 +930,21 @@ async def test_submit_items_refuses_a_non_agent_source(mcp_url: str) -> None:
         {"source_id": "src-1", "items": [_submitted_item()]},
         confirm=True,
     )
-    assert payload["error"] == "not_an_agent_source", payload
+    assert payload.get("work_id"), payload
+
+    await run_work_to_completion(mcp_env, payload["work_id"])
+
+    units = await _call(mcp_url, "work_units", {"work_id": payload["work_id"]})
+    [unit] = units["data"]
+    assert unit["outcome"] == "failed", unit
+    assert unit["error_class"] == "structure_changed", unit
+    assert "only agent sources accept pushed items" in unit["detail"], unit
 
 
 @pytest.mark.asyncio
-async def test_submitted_content_is_sanitised(mcp_url: str) -> None:
+async def test_submitted_content_is_sanitised(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
     """The tool must not become a way to store live markup.
 
     Ingest routes through the same store-boundary sanitiser as collection, so
@@ -937,8 +965,11 @@ async def test_submitted_content_is_sanitised(mcp_url: str) -> None:
         },
         confirm=True,
     )
-    assert payload["inserted"] == 1, payload
-    item_id = payload["results"][0]["id"]
+    assert payload.get("work_id"), payload
+    await run_work_to_completion(mcp_env, payload["work_id"])
+
+    units = await _call(mcp_url, "work_units", {"work_id": payload["work_id"]})
+    item_id = units["data"][0]["ref"]
 
     body = await _call(mcp_url, "get_item_body", {"item_id": item_id})
     assert "alert(1)" not in str(body), body
@@ -1391,12 +1422,15 @@ async def test_delete_source_removes_its_items(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_items_takes_the_ids_it_was_given(mcp_url: str) -> None:
-    """A batch delete reaches the API with the ids the caller named.
+async def test_delete_items_takes_the_ids_it_was_given(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """AC-211: a batch delete reaches the API with the ids the caller named.
 
-    The list travels as a comma-joined string through the elicitation schema,
-    so this also pins that the round trip survives: a bug in that encoding
-    would abort every batch as "arguments differ".
+    The list travels as a comma-joined string through the elicitation schema, so
+    this also pins that the round trip survives: a bug in that encoding would
+    abort every batch as "arguments differ". The answer is a job handle now, and
+    the ids are still there until the worker runs.
     """
     found = await _call(mcp_url, "search_items", {"limit": 5, "fields": "id"})
     ids = [row["id"] for row in found.get("data", [])]
@@ -1405,7 +1439,13 @@ async def test_delete_items_takes_the_ids_it_was_given(mcp_url: str) -> None:
 
     result = await _call(mcp_url, "delete_items", {"item_ids": ids[:1]}, confirm=True)
     assert result.get("declined") is None and result.get("aborted") is None, result
-    assert result["items"] == 1
+    assert result["counts"]["total"] == 1, result
+
+    # Nothing is gone yet: the response is a handle, and the row is still there.
+    before = await _call(mcp_url, "search_items", {"limit": 5, "fields": "id"})
+    assert ids[0] in [row["id"] for row in before.get("data", [])]
+
+    await run_work_to_completion(mcp_env, result["work_id"])
 
     after = await _call(mcp_url, "search_items", {"limit": 5, "fields": "id"})
     assert ids[0] not in [row["id"] for row in after.get("data", [])]

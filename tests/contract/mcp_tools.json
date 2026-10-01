@@ -65,7 +65,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add several sources in one call. Requires user confirmation: this makes real outbound requests to a third party for every URL. Options apply to the whole batch, and `type` 'auto' is resolved per URL exactly as add_source resolves it. Results are per item: a URL that cannot be used fails alone and the rest are still created. Use add_source for a single source, where the dialog names it exactly.",
+    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch, and `type` 'auto' is resolved per URL as add_source resolves it. Returns a job handle -- read each URL's outcome with work_units, where an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -159,7 +159,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Permanently delete specific items by id. Requires confirmation. The bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible.",
+    "description": "Permanently delete specific items by id. Requires confirmation: the bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible. Returns a job handle -- read each id's outcome with work_units, where one that was already gone is `skipped`.",
     "input_schema": {
       "properties": {
         "item_ids": {
@@ -815,7 +815,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'. Pushing into an rss or web source is refused: that would mix one origin's content into another's provenance. Items are visible to readers as soon as stored, unless the source has a chain. Requires confirmation: this adds content to the corpus, and the chain can make real outbound requests to the submitted URLs and spend provider budget on it.",
+    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's provenance. Requires confirmation: this adds content to the corpus, and the chain can make real outbound requests to the submitted URLs and spend provider budget. Returns a job handle; read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "items": {

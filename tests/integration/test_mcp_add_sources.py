@@ -20,7 +20,7 @@ import pytest
 import sqlalchemy as sa
 
 from app.main import create_app, create_engine_for
-from tests.integration.conftest import ServerInThread, free_port
+from tests.integration.conftest import ServerInThread, free_port, run_work_to_completion
 from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.integration
@@ -185,16 +185,40 @@ async def test_the_dialog_asks_about_the_batch_once(base_url: str) -> None:
     assert "urls_fingerprint" in properties, properties
 
 
+def _payload(reply: dict[str, Any]) -> dict[str, Any]:
+    """The JSON body of a completed `tools/call` reply."""
+    for block in reply.get("result", {}).get("content", []):
+        text_value = block.get("text")
+        if text_value:
+            parsed: dict[str, Any] = json.loads(text_value)
+            return parsed
+    return {}
+
+
 @pytest.mark.asyncio
-async def test_the_whole_batch_is_created_after_one_confirmation(
+async def test_the_whole_batch_becomes_one_job_that_subscribes_every_url(
     base_url: str, env: dict[str, str]
 ) -> None:
-    """AC-161: accepting the one dialog subscribes every URL."""
+    """AC-161 / AC-211: accepting the one dialog queues one work for the whole list.
+
+    Since #199 the answer is a handle (issue #199): the subscriptions land when
+    the worker runs, and `work_units` is where each URL's outcome goes. Both
+    halves are asserted here, because "queued" and "subscribed" are now two
+    different moments and a test that checked only one of them would pass while
+    the other was broken.
+    """
     urls = [feed("a"), feed("b"), feed("c")]
 
     reply = await _ask(base_url, urls, replayed=urls)
 
     assert "error" not in reply, reply
+    payload = _payload(reply)
+    assert payload["counts"]["total"] == 3, payload
+    # Nothing is subscribed yet: the response is a handle, not a deed.
+    assert _subscribed_urls(env["PEARSS_DATABASE_URL"]) == set()
+
+    await run_work_to_completion(env, payload["work_id"])
+
     assert _subscribed_urls(env["PEARSS_DATABASE_URL"]) == set(urls)
 
 

@@ -54,7 +54,11 @@ from sqlalchemy.orm import sessionmaker
 
 from adapters.repository import create_source, timestamp
 from app.main import create_app, create_engine_for
-from tests.integration.conftest import ServerInThread, free_port
+from tests.integration.conftest import (
+    ServerInThread,
+    free_port,
+    run_work_to_completion,
+)
 from tests.migrated_schema import migrated_database
 
 pytestmark = pytest.mark.integration
@@ -335,8 +339,14 @@ async def test_an_identical_retry_executes(base_url: str, env: dict[str, str]) -
     assert "error" not in reply, reply
     text = reply["result"]["content"][0]["text"]
     body = json.loads(text)
-    assert body["inserted"] == 2, body
+    # Since #199 the tool queues a job instead of storing inline: the identical
+    # retry must queue the same two items, and the worker is what stores them.
+    assert body["counts"]["total"] == 2, body
+    assert body["work_id"], body
     assert body["audit_id"], body
+
+    await run_work_to_completion(env, body["work_id"])
+
     stored = _stored_titles(env["PEARSS_DATABASE_URL"])
     assert {"Retry A", "Retry B"} <= set(stored), stored
 

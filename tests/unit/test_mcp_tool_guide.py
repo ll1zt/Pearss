@@ -240,11 +240,23 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # (~180) is not enough for a *new* tool: #196 added the read-state atoms to /v1
 # without touching this surface, so whoever exposes them here (or adds the next
 # tool) has to trim descriptions or argue the number up in that diff.
-SURFACE_BUDGET_CHARS = 17_200
+#
+# #199 (A group) spent most of it: `delete_items`, `add_sources` and
+# `submit_items` answer with a work handle now and point at `work_units`, which
+# is the price of collapsing their responses to O(1) -- the descriptions have to
+# say where the per-item results went. Rewriting them rather than padding cut 237
+# characters, so the surface lands at 17,100 and 17,400 leaves the next tool the
+# same ~300 to argue for. The B group (selection-shaped commands, #199) measures
+# this again in its own diff.
+SURFACE_BUDGET_CHARS = 17_400
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:
-    """AC-66 / AC-166: the bound is the deliverable, so it is a test, not a paragraph.
+    """AC-66 / AC-166 / AC-212: the bound is the deliverable, so it is a test.
+
+    AC-212 (issue #199) is the same measurement applied to a change that
+    collapsed three tools' responses: the surface may not grow past the bound
+    while the tools start answering with handles.
 
     AC-71 (the #74 boundary): moving the protocol-field guidance into the
     instructions kept the surface from growing; this is the measurement.

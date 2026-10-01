@@ -98,17 +98,17 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | 工具 | 理由 |
 |---|---|
 | `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
-| `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，逐条报告 `created/existing/failed` |
+| `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
 | `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；确认文本含条数、URL 预览与**列表指纹**（只比条数会被换掉一个地址的列表骗过）；地址必须在本源 host 上 |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
 | `set_source_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
 | `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆；确认文本说明会删掉什么） |
-| `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文） |
+| `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文）：返回**作业句柄**，逐 id 结果查 `work_units`（已消失的 id 是 `skipped`） |
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
-| `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数） |
+| `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数）：返回**作业句柄**，逐条结果查 `work_units` |
 | `retry_enrichments` | 重排队失败的处理器链产物：`enrichment_id` 只重排**一行**（`POST /v1/enrichments/{id}:retry`），`source_id` 重排该源全部失败行 |
 | `backfill_source` | 对历史条目一次性补跑处理器链 |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |

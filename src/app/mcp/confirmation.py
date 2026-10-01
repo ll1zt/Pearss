@@ -302,14 +302,17 @@ def _add_sources_fields(
 ) -> dict[str, Any]:
     """What add_sources confirms and executes, derived in one place.
 
-    `type` stays as requested -- `auto` is resolved server-side per URL
-    (`/v1/sources:batch`), so the confirmed value is exactly the executed one.
-    The URL list travels as count + preview + fingerprint, the same
-    reconciliation `submit_items` uses for item bodies.
+    The fields are the command value (issue #199): the kind, the targets as a
+    count + preview + fingerprint, and the params. `type` stays as requested --
+    `auto` is resolved server-side per URL by the `subscribe` executor, so the
+    confirmed value is exactly the executed one. The URL list travels as count +
+    preview + fingerprint, the same reconciliation `submit_items` uses for item
+    bodies.
     """
     preview = "; ".join(urls[:5])
     more = "" if len(urls) <= 5 else f" (+{len(urls) - 5} more)"
     return {
+        "kind": "subscribe",
         "count": str(len(urls)),
         "urls": f"{preview}{more}",
         "urls_fingerprint": _urls_fingerprint(urls),
@@ -537,11 +540,24 @@ def _submit_items_fields(source_id: str, items: list[dict[str, Any]]) -> dict[st
     )
     more = "" if len(items) <= 5 else f" (+{len(items) - 5} more)"
     return {
+        "kind": "ingest",
         "source_id": source_id,
         "item_count": str(len(items)),
         "items_fingerprint": _items_fingerprint(items),
         "titles": f"{titles}{more}",
     }
+
+
+def ingest_targets(items: list[dict[str, Any]]) -> list[str]:
+    """The submitted items as the *targets* of an `ingest` work (issue #199).
+
+    One item per target, as canonical JSON. The executor validates each target
+    with the same model the endpoint uses (`app.ingest`), so a target that is
+    not a usable item fails alone instead of refusing the batch -- and the
+    confirmation's fingerprint is computed over these same items, so what the
+    user saw is what is queued.
+    """
+    return [json.dumps(item, separators=(",", ":"), sort_keys=True) for item in items]
 
 
 def _submit_items_confirmation(
@@ -650,11 +666,18 @@ def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
 def _delete_items_fields(item_ids: list[str]) -> dict[str, Any]:
     """What delete_items confirms and executes, derived in one place.
 
-    The list travels as one comma-joined string because an elicitation field is
-    a primitive; the join is deterministic, so a reordered or shortened list
-    compares unequal.
+    The fields are the command value (issue #199): the kind, the targets as a
+    count + preview + fingerprint, and the params. The list also travels as one
+    comma-joined string because an elicitation field is a primitive and the
+    dialog names what is about to disappear; the join is deterministic, so a
+    reordered or shortened list compares unequal.
     """
-    return {"item_ids": _comma_join(item_ids)}
+    return {
+        "kind": "delete",
+        "item_ids": _comma_join(item_ids),
+        "count": str(len(item_ids)),
+        "targets_fingerprint": _urls_fingerprint(item_ids),
+    }
 
 
 def _delete_items_confirmation(item_ids: list[str]) -> Elicit[Any]:
