@@ -335,6 +335,19 @@ reindex batch="":
     exec uv run python -m app.reindex
 
 
+# Jobs from the shell: submit a file of targets, read their ledger, re-send failures.
+# The list never goes through a model's context -- it is read here, and the
+# command value is posted to /v1/works like any other caller's. See
+# `just work --help` (and `uv run python -m app.work_cli --help`).
+work *args:
+    #!/usr/bin/env bash
+    set -a
+    # shellcheck disable=SC1091
+    [ -f .env ] && source .env
+    set +a
+    exec uv run python -m app.work_cli {{args}}
+
+
 # Back up the fact-source data (SQLite snapshot + file store) into PEARSS_BACKUP_DIR (default backups/).
 backup:
     #!/usr/bin/env bash

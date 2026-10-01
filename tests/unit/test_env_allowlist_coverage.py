@@ -24,6 +24,10 @@ HOST_SIDE: frozenset[str] = frozenset(
     {
         "PEARSS_API_TOKEN",
         "PEARSS_API_READ_TOKEN",
+        # Where the CLI (app.work_cli) sends its requests. Host-side: it is the
+        # operator's view of where the deployment answers, and no collector or
+        # plugin has a reason to know it.
+        "PEARSS_API_URL",
         "PEARSS_MCP_TOKEN",
         "PEARSS_MCP_ALLOWED_HOSTS",
         "PEARSS_DATABASE_URL",
