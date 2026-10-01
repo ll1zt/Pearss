@@ -53,6 +53,7 @@ from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
 from app.system_routes import router as system_router
 from app.tenancy_check import report_other_tenants
+from app.work_routes import router as work_router
 
 LOGGER = logging.getLogger(__name__)
 
@@ -360,6 +361,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.include_router(items_router)
     app.include_router(system_router)
     app.include_router(plugins_router)
+    app.include_router(work_router)
 
     @app.exception_handler(RequestValidationError)
     def on_validation(request: Request, exc: RequestValidationError) -> JSONResponse:

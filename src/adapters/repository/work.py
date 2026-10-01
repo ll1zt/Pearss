@@ -34,16 +34,25 @@ def create_work(
     session: Session,
     *,
     kind: str,
+    targets: list[str],
     params: dict[str, Any],
+    fingerprint: str,
     tenant_id: str,
     correlation_id: str | None = None,
     retry_of: str | None = None,
 ) -> WorkRecord:
-    """Record a requested batch as `queued`. Executing it is not this function."""
+    """Record a requested batch as `queued`. Executing it is not this function.
+
+    `fingerprint` is the command value's digest and is required: a work without
+    one could not be recognised as a repeat, which is the property the partial
+    unique index enforces.
+    """
     row = WorkRow(
         id=f"work-{secrets.token_hex(16)}",
         kind=kind,
+        targets_json=dumps(targets),
         params_json=dumps(params),
+        fingerprint=fingerprint,
         status=WorkStatus.QUEUED.value,
         correlation_id=correlation_id,
         retry_of=retry_of,
@@ -57,6 +66,26 @@ def create_work(
 
 def work_by_id(session: Session, work_id: str) -> WorkRecord | None:
     row = session.get(WorkRow, work_id)
+    return None if row is None else _work_record(row)
+
+
+def live_work_by_fingerprint(session: Session, fingerprint: str) -> WorkRecord | None:
+    """The queued/running work for this command value, if one is in flight.
+
+    "In flight" is the whole condition: a finished work does not block the same
+    command from being submitted again, which is what a caller wanting a fresh
+    run of the same batch needs (ADR 0046; a plain unique constraint would have
+    forbidden that forever).
+    """
+    row = session.scalars(
+        sa.select(WorkRow)
+        .where(
+            WorkRow.fingerprint == fingerprint,
+            WorkRow.status.in_((WorkStatus.QUEUED.value, WorkStatus.RUNNING.value)),
+        )
+        .order_by(WorkRow.created_at.desc())
+        .limit(1)
+    ).first()
     return None if row is None else _work_record(row)
 
 
@@ -109,22 +138,23 @@ def units_for_work(
     return [_unit_record(row) for row in session.scalars(query)]
 
 
-def counts_for_work(
-    session: Session, work_id: str, *, total_targets: int
-) -> dict[str, int]:
+def counts_for_work(session: Session, work_id: str) -> dict[str, int]:
     """The work's statistics, folded from its rows.
 
-    `total_targets` comes from the command (it is what the caller asked for),
-    so `queued` can be derived as "targets the ledger has not reached yet"
-    rather than tracked.
+    `total` comes from the work row itself (the command's targets), not from a
+    caller-supplied number, so the statistics cannot disagree with the work
+    they describe.
     """
+    work = work_by_id(session, work_id)
+    if work is None:
+        raise LookupError(f"no work {work_id!r}")
     outcomes = [
         UnitOutcome(row.outcome)
         for row in session.scalars(
             sa.select(WorkUnitRow).where(WorkUnitRow.work_id == work_id)
         )
     ]
-    return work_counts(total_targets=total_targets, outcomes=outcomes)
+    return work_counts(total_targets=len(work.targets), outcomes=outcomes)
 
 
 def claim_work(session: Session, work_id: str) -> WorkRecord | None:
@@ -167,6 +197,7 @@ def _work_record(row: WorkRow) -> WorkRecord:
     return WorkRecord(
         id=row.id,
         kind=row.kind,
+        targets=_string_list(row.targets_json),
         params=_loads(row.params_json),
         status=WorkStatus(row.status),
         retry_of=row.retry_of,
@@ -193,3 +224,10 @@ def _unit_record(row: WorkUnitRow) -> UnitRecord:
 def _loads(value: str) -> dict[str, Any]:
     loaded = json.loads(value)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _string_list(value: str) -> list[str]:
+    loaded = json.loads(value)
+    if not isinstance(loaded, list):
+        return []
+    return [str(item) for item in loaded]

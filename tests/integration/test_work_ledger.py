@@ -44,7 +44,12 @@ def test_a_work_row_round_trips_through_the_repository(
     """
     with session_factory() as session:
         created = create_work(
-            session, kind="fetch", params={"subscription": "s1"}, tenant_id="default"
+            session,
+            kind="fetch",
+            targets=["https://a.example/1"],
+            params={"subscription": "s1"},
+            fingerprint="fp-round-trip",
+            tenant_id="default",
         )
         session.commit()
         work_id = created.id
@@ -55,6 +60,7 @@ def test_a_work_row_round_trips_through_the_repository(
     assert record is not None
     assert record.id == work_id
     assert record.kind == "fetch"
+    assert record.targets == ["https://a.example/1"]
     assert record.params == {"subscription": "s1"}
     assert record.status is WorkStatus.QUEUED
     assert record.finished_at is None
@@ -65,7 +71,14 @@ def test_the_ledger_refuses_a_second_row_for_the_same_target(
 ) -> None:
     """AC-181: a repeated target is refused by the database, not by the caller."""
     with session_factory() as session:
-        work = create_work(session, kind="fetch", params={}, tenant_id="default")
+        work = create_work(
+            session,
+            kind="fetch",
+            targets=["https://a.example/1"],
+            params={},
+            fingerprint="fp-duplicate",
+            tenant_id="default",
+        )
         append_unit(
             session,
             work_id=work.id,
@@ -103,7 +116,14 @@ def test_ledger_rows_carry_their_target_and_class(
     can live; `target` is what makes "why did *this* address fail" answerable.
     """
     with session_factory() as session:
-        work = create_work(session, kind="fetch", params={}, tenant_id="default")
+        work = create_work(
+            session,
+            kind="fetch",
+            targets=["https://a.example/rejected", "https://a.example/slow"],
+            params={},
+            fingerprint="fp-attribution",
+            tenant_id="default",
+        )
         append_unit(
             session,
             work_id=work.id,
@@ -139,7 +159,14 @@ def test_counts_agree_with_the_rows_in_the_database(
 ) -> None:
     """AC-182 (the persistence half): the fold reads the ledger, nothing else."""
     with session_factory() as session:
-        work = create_work(session, kind="fetch", params={}, tenant_id="default")
+        work = create_work(
+            session,
+            kind="fetch",
+            targets=[f"https://a.example/{n}" for n in range(1, 7)],
+            params={},
+            fingerprint="fp-counts",
+            tenant_id="default",
+        )
         for target, outcome in (
             ("https://a.example/1", UnitOutcome.OK),
             ("https://a.example/2", UnitOutcome.OK),
@@ -153,7 +180,7 @@ def test_counts_agree_with_the_rows_in_the_database(
         work_id = work.id
 
     with session_factory() as session:
-        counts = counts_for_work(session, work_id, total_targets=6)
+        counts = counts_for_work(session, work_id)
 
     assert counts == {
         "ok": 2,
