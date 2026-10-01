@@ -114,6 +114,7 @@ from adapters.repository.sources import (
 )
 from adapters.repository.work import (
     append_unit,
+    claim_next_work,
     claim_work,
     counts_for_work,
     create_work,
@@ -138,6 +139,7 @@ __all__ = [
     "backlog_for_source",
     "chain_for_source",
     "claim_job_run",
+    "claim_next_work",
     "claim_work",
     "collectable_sources",
     "consecutive_failures",

@@ -80,6 +80,7 @@
 | AC-180..182 | #187 work/work_unit 持久层：迁移双向往返、`(work_id,target)` 唯一约束由 DB 强制、counts 由账本折叠（无计数列） | issue #187 | 已合并 | `tests/integration/test_work_ledger.py`、`tests/unit/test_work_fold.py` |
 | AC-183..185 | #188 `POST /v1/works`：响应 O(1)（句柄 + 折叠 counts，无逐条结果）／同一命令值在飞时复用同一 work（不产生第二批）／大提交不阻塞 | issue #188 | 已合并 | `tests/integration/test_works_api.py` |
 | AC-186..188 | #189 读一个作业：句柄回环（账本覆盖每个 target 恰好一次）／逐目标归因（rejected 与 failed 分开计数）／账本分页与过滤稳定 | issue #189 | 已合并 | `tests/integration/test_works_read.py` |
+| AC-189..192 | #190 抓取执行器：同源地址抓取入库且身份落在已有条目上（再抓一次不新增行）／跨源地址拒绝且 origin 零请求／一条失败不拖垮整批（partial）／origin 拒绝后中止本轮、其余只记 rejected 不再发请求；断点续跑按账本跳过已有行 | issue #190 | 已合并 | `tests/integration/test_work_fetch.py`、`tests/unit/test_work_fold.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
