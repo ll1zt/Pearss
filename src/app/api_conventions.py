@@ -206,6 +206,41 @@ def _bad_keyset_cursor() -> HTTPException:
     )
 
 
+def encode_target_cursor(target: str) -> str:
+    """An opaque cursor over a unique text key.
+
+    For lists ordered by a unique key (a work's ledger, ordered by target),
+    keyset paging is not just an optimisation: the ledger *grows while it is
+    read* -- the executor appends rows as it works -- so an offset cursor would
+    re-serve or skip rows depending on where a new one landed.
+    """
+    return base64.urlsafe_b64encode(f"t1:{target}".encode()).decode().rstrip("=")
+
+
+def decode_target_cursor(cursor: str | None) -> str | None:
+    """Decode a target cursor, or None when there is no cursor to honour."""
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode()).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        raise _bad_target_cursor() from None
+    prefix, sep, target = decoded.partition(":")
+    if prefix != "t1" or not sep or not target:
+        raise _bad_target_cursor()
+    return target
+
+
+def _bad_target_cursor() -> HTTPException:
+    return api_error(
+        status_code=400,
+        code="invalid_cursor",
+        message="The cursor could not be decoded.",
+        suggestion="Omit the cursor to start from the beginning.",
+    )
+
+
 # --------------------------------------------------------------------------
 # Idempotency
 # --------------------------------------------------------------------------

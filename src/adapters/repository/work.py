@@ -120,19 +120,26 @@ def append_unit(
 
 
 def units_for_work(
-    session: Session, work_id: str, *, limit: int | None = None
+    session: Session,
+    work_id: str,
+    *,
+    outcome: UnitOutcome | None = None,
+    after_target: str | None = None,
+    limit: int | None = None,
 ) -> list[UnitRecord]:
-    """The work's ledger, ordered by target.
+    """The work's ledger, ordered by target, optionally filtered and paged.
 
-    Ordered so paging is stable and a caller diffing two reads sees a
-    deterministic sequence; the key is (work_id, target), so this is the
-    table's own order and costs nothing.
+    Ordered by `target` -- the second half of the key -- so paging is keyset and
+    stable while the executor appends rows: an offset would re-serve or skip
+    rows depending on where a newly appended one landed. `after_target` is the
+    decoded cursor.
     """
-    query = (
-        sa.select(WorkUnitRow)
-        .where(WorkUnitRow.work_id == work_id)
-        .order_by(WorkUnitRow.target)
-    )
+    query = sa.select(WorkUnitRow).where(WorkUnitRow.work_id == work_id)
+    if outcome is not None:
+        query = query.where(WorkUnitRow.outcome == outcome.value)
+    if after_target is not None:
+        query = query.where(WorkUnitRow.target > after_target)
+    query = query.order_by(WorkUnitRow.target)
     if limit is not None:
         query = query.limit(limit)
     return [_unit_record(row) for row in session.scalars(query)]
