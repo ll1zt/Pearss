@@ -39,6 +39,8 @@ from core.enums import (
     PublishStatus,
     SourceStatus,
     TrustLevel,
+    UnitOutcome,
+    WorkStatus,
 )
 from tests.migrated_schema import migrated_database
 
@@ -98,6 +100,10 @@ _TABLED_ENUM_COLUMNS: dict[tuple[str, str], Any] = {
     ("job_run", "status"): JobRunStatus,
     ("plugin", "status"): PluginStatus,
     ("item_enrichment", "status"): EnrichmentStatus,
+    # The work ledger (ADR 0046). `outcome` is checked here rather than in the
+    # generic map because the column name is not unique across tables yet.
+    ("work", "status"): WorkStatus,
+    ("work_unit", "outcome"): UnitOutcome,
 }
 
 _CHECK_IN = re.compile(r"\b(\w+)\s+IN\s*\(([^)]*)\)", re.IGNORECASE)

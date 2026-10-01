@@ -1,0 +1,88 @@
+"""The work ledger's domain shape: statuses, records, and the counts fold.
+
+A **work** is one requested batch -- "do this to these targets" -- and its
+**units** are the per-target outcomes. Nothing here touches a database: the
+ledger's statistics are a *pure fold* over the unit outcomes (ADR 0046), so the
+same numbers are reachable without reading a stored counter. That is the point
+of the fold: a counter beside the rows is a second source of truth for the same
+fact, and it drifts the first time one writer forgets the other.
+
+`rejected` vs `failed` carries the retry decision: a rejected target was
+refused by this deployment before anything ran (same-host policy, missing
+capability, over the request ceiling), so retrying it changes nothing; a failed
+target was attempted and the world said no, so it is the one worth re-sending.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from core.enums import ErrorClass, UnitOutcome, WorkStatus
+
+# A work in one of these will not change again. Derived from the status
+# vocabulary rather than listed twice, so a new terminal state is one edit.
+TERMINAL_STATUSES: frozenset[WorkStatus] = frozenset(
+    {
+        WorkStatus.SUCCEEDED,
+        WorkStatus.PARTIAL,
+        WorkStatus.FAILED,
+        WorkStatus.CANCELLED,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WorkRecord:
+    """One work as the domain sees it."""
+
+    id: str
+    kind: str
+    params: dict[str, Any]
+    status: WorkStatus
+    retry_of: str | None
+    created_at: datetime
+    finished_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class UnitRecord:
+    """One target's outcome inside a work (a ledger row)."""
+
+    target: str
+    outcome: UnitOutcome
+    error_class: ErrorClass | None
+    detail: str
+    ref: str | None
+    at: datetime
+
+
+def counts_from(outcomes: Iterable[UnitOutcome]) -> dict[str, int]:
+    """Count each outcome, zero-filled across the whole vocabulary.
+
+    Every key is always present so a caller branching on `counts["rejected"]`
+    never has to handle absence: "none were rejected" and "the key is missing"
+    are the same fact and should read the same.
+    """
+    counts = {outcome.value: 0 for outcome in UnitOutcome}
+    for outcome in outcomes:
+        counts[outcome.value] += 1
+    return counts
+
+
+def work_counts(
+    *, total_targets: int, outcomes: Iterable[UnitOutcome]
+) -> dict[str, int]:
+    """The work's counts: the fold, plus what the ledger has not reached yet.
+
+    `queued` is derived (targets minus rows) rather than tracked: a target with
+    no row has no outcome yet, which is exactly what "queued" means. A work
+    whose ledger covers every target therefore reports `queued == 0`.
+    """
+    outcomes = list(outcomes)
+    counts = counts_from(outcomes)
+    counts["queued"] = max(0, total_targets - len(outcomes))
+    counts["total"] = total_targets
+    return counts

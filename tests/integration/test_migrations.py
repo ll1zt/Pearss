@@ -62,6 +62,8 @@ EXPECTED_TABLES = (
     | API_TABLES
     | {"plugin", "item_enrichment", STATS_TABLE}
     | FTS_TABLES
+    # The work ledger (ADR 0046): a requested batch and its per-target rows.
+    | {"work", "work_unit"}
 )
 
 

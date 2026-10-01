@@ -163,3 +163,36 @@ class TrustLevel(StrEnum):
     STANDARD = "standard"
     TRUSTED = "trusted"
     RESTRICTED = "restricted"
+
+
+class WorkStatus(StrEnum):
+    """Lifecycle of one requested batch of work (ADR 0046).
+
+    `partial` is a first-class terminal state on purpose: "some targets
+    succeeded and some did not" is the normal outcome of a batch aimed at a
+    third party. Collapsing it into `failed` would either hide the successes
+    or force every caller to re-derive the split from the ledger.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class UnitOutcome(StrEnum):
+    """What happened to one target inside a work (ADR 0046).
+
+    `rejected` (this deployment refused the target before acting: policy,
+    capability, quota) is deliberately distinct from `failed` (the action ran
+    and the world said no). One is our decision and is not worth retrying; the
+    other is the origin's and is. `skipped` is "nothing to do" (an already
+    absent row), which is not a failure either.
+    """
+
+    OK = "ok"
+    SKIPPED = "skipped"
+    REJECTED = "rejected"
+    FAILED = "failed"

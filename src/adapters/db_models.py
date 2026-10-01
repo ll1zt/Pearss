@@ -44,6 +44,9 @@ ENUM_LENGTHS = {
     # The plugin table's own taxonomies; not source/trust borrowings.
     "plugin_status": 16,
     "plugin_trust": 16,
+    # The work ledger (ADR 0046).
+    "work_status": 16,
+    "unit_outcome": 16,
 }
 
 
@@ -625,4 +628,88 @@ class ItemEnrichment(Base):
         sa.Index("ix_enrichment_item_status", "item_id", "status"),
         sa.Index("ix_enrichment_status", "status"),
         sa.Index("ix_item_enrichment_upstream", "item_id", "upstream_plugin_id"),
+    )
+
+
+class Work(Base):
+    """One requested batch of work, and its lifecycle (ADR 0046).
+
+    Distinct from `job`/`job_run`, which describe *scheduled collection* per
+    source: a work is a caller's request ("fetch these addresses", "delete
+    these items"), has no schedule, and keeps its per-target outcomes in
+    `work_unit` rather than in a metrics blob -- because "why did *this* target
+    fail" has to be answerable per target.
+    """
+
+    __tablename__ = "work"
+
+    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
+    kind: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(32), nullable=False)
+    # The command's parameters as canonical JSON. Never raw upstream bodies.
+    params_json: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    status: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["work_status"]), nullable=False
+    )
+    correlation_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
+    # A retry points back at the work it retries instead of rewriting it.
+    retry_of: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.ForeignKey("work.id", ondelete="SET NULL"), nullable=True
+    )
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    finished_at: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+
+    __table_args__ = (
+        enum_check(
+            "workstatus",
+            "status",
+            ("queued", "running", "succeeded", "partial", "failed", "cancelled"),
+        ),
+    )
+
+
+class WorkUnit(Base):
+    """One target's outcome inside a work: the ledger row.
+
+    The composite primary key is the whole idea: one row per target per work,
+    so replaying a target cannot add a second row -- and the database, not a
+    caller's SELECT-then-INSERT, is what refuses it. `target` is NOT NULL
+    because the row exists to answer "what happened to *this*"; `error_class`
+    uses the one taxonomy, so a class cannot be invented here.
+    """
+
+    __tablename__ = "work_unit"
+
+    work_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("work.id", ondelete="CASCADE"), primary_key=True
+    )
+    target: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, primary_key=True)
+    outcome: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["unit_outcome"]), nullable=False
+    )
+    error_class: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["error_class"]), nullable=True
+    )
+    detail: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text, nullable=False, default=""
+    )
+    # What the unit produced, when it produced something (an item id, a new
+    # work id for a retry). Opaque here on purpose: each kind knows its own.
+    ref: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
+    at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        enum_check("unitoutcome", "outcome", ("ok", "skipped", "rejected", "failed")),
+        enum_check(
+            "errorclass",
+            "error_class",
+            ("network", "parse", "structure_changed", "blocked", "auth"),
+        ),
+        # The sweep reads "what is still queued" and the retry-failed path
+        # reads "what failed", both filtered by work.
+        sa.Index("ix_work_unit_work_outcome", "work_id", "outcome"),
     )
