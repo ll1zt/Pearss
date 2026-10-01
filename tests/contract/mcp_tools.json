@@ -243,7 +243,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Each address must be on the source's own host (others are reported as rejected and never fetched), and the source's collector must be able to fetch one address (the rss collector can). Results are per address, so one failure does not stop the rest. Use this when you have *addresses* to fetch; use submit_items when you already fetched the content yourself.",
+    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately -- the work keeps running after this call, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`), and the source's collector must be able to fetch one address (rss can). Use this when you have addresses to fetch; use submit_items when you already fetched the content yourself.",
     "input_schema": {
       "properties": {
         "batch_size": {
@@ -369,6 +369,28 @@
       "ui": {
         "resourceUri": "ui://pearss/health"
       }
+    }
+  },
+  "get_work": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false,
+      "read_only_hint": true
+    },
+    "description": "A submitted job's status and folded counts: ok, skipped, rejected (never attempted), failed, and queued (no ledger row yet). Constant size: the target list is not included. Read-only.",
+    "input_schema": {
+      "properties": {
+        "work_id": {
+          "title": "Work Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_id"
+      ],
+      "title": "get_workArguments",
+      "type": "object"
     }
   },
   "list_enrichments": {
@@ -849,6 +871,43 @@
         "schedule_policy"
       ],
       "title": "update_schedule_policyArguments",
+      "type": "object"
+    }
+  },
+  "work_units": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": true,
+      "open_world_hint": false,
+      "read_only_hint": true
+    },
+    "description": "Per-target results of a job: outcome, error_class, detail and the item it produced. Page with cursor; pass outcome to see only what needs re-sending (`rejected` was never attempted, `failed` was). Read-only.",
+    "input_schema": {
+      "properties": {
+        "cursor": {
+          "default": "",
+          "title": "Cursor",
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "outcome": {
+          "default": "",
+          "title": "Outcome",
+          "type": "string"
+        },
+        "work_id": {
+          "title": "Work Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_id"
+      ],
+      "title": "work_unitsArguments",
       "type": "object"
     }
   }

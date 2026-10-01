@@ -354,7 +354,7 @@ def _add_sources_confirmation(
     )
 
 
-def _fetch_items_fields(
+def _fetch_work_fields(
     source_id: str,
     urls: list[str],
     batch_size: int = 0,
@@ -362,19 +362,26 @@ def _fetch_items_fields(
 ) -> dict[str, Any]:
     """What fetch_source_items confirms and executes, derived in one place.
 
-    The URL list travels as count + preview + fingerprint, the same
-    reconciliation add_sources uses: an elicitation form carries primitives
-    only, and a confirmation that pinned just the *count* would accept any list
-    of that length -- which is the whole reason the fingerprint exists (#67).
+    The dialog carries the command: the `kind`, the target list (as count +
+    preview + fingerprint) and the params that shape the run. It is the same
+    value the server hashes into the command fingerprint, so "the confirmation
+    covers what executes" is one computation rather than two lists kept in
+    step by hand.
 
-    The pacing knobs are part of the confirmed values because they are the
+    The list travels as count + preview + fingerprint, the reconciliation
+    add_sources uses: an elicitation form carries primitives only, and a
+    confirmation that pinned just the *count* would accept any list of that
+    length -- which is the whole reason the fingerprint exists (#67).
+
+    The pacing knobs are among the confirmed values because they are the
     difference between a polite request and a burst; 0 renders as "default"
-    (the API's own values), so the dialog does not claim a number the server
-    has not clamped yet.
+    (the server's own values), so the dialog does not claim a number that has
+    not been clamped yet.
     """
     preview = "; ".join(urls[:5])
     more = "" if len(urls) <= 5 else f" (+{len(urls) - 5} more)"
     return {
+        "kind": "fetch",
         "source_id": source_id,
         "count": str(len(urls)),
         "urls": f"{preview}{more}",
@@ -386,17 +393,23 @@ def _fetch_items_fields(
     }
 
 
-def _fetch_items_confirmation(
+def _fetch_work_confirmation(
     source_id: str,
     urls: list[str],
     batch_size: int = 0,
     min_interval_seconds: float = 0.0,
 ) -> Elicit[Any]:
-    """The fetch_source_items question: one dialog for the whole list."""
-    fields = _fetch_items_fields(source_id, urls, batch_size, min_interval_seconds)
+    """The fetch_source_items question: one dialog for the whole batch.
+
+    The summary says *job* because that is what the caller is agreeing to: the
+    answer comes back as a handle, the deployment keeps fetching after the
+    client's request ends, and the per-address results live in the work's
+    ledger rather than in a response whose size follows the list.
+    """
+    fields = _fetch_work_fields(source_id, urls, batch_size, min_interval_seconds)
     return _confirm_resolver(
         _summary=(
-            f"Fetch {fields['count']} address(es) into source "
+            f"Queue a fetch job for {fields['count']} address(es) into source "
             f"{fields['source_id']}? Pacing: {fields['batch_size']} per burst, "
             f"{fields['min_interval_seconds']}s apart. {fields['urls']}"
         ),

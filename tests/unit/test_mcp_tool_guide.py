@@ -214,7 +214,19 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # selection guidance -- "use delete_source_items to clear a bad crawl",
 # "set_source_status instead" -- that keeps a model from reaching for the
 # irreversible tool.
-SURFACE_BUDGET_CHARS = 16_000
+# 17,000 adds the read side of the work mechanism (issue #191): `get_work` and
+# `work_units`, the pair that reads the handle the first handle-returning write
+# tool answers with. A tool that answers with a handle and no way to read it is
+# a capability removed rather than a response shape changed: the per-address
+# results the submit tool used to inline had to land somewhere reachable, and
+# those two tools cost 883 characters together. Trimming first cut the
+# descriptions this change touched (fetch_source_items 622 -> 597, get_work
+# 223 -> 183, work_units 207), so the raise is the pair itself and not prose;
+# the surface lands at 16,667 and 17,000 leaves the next tool the same ~300 to
+# argue for. #197/#199 (the plural kinds) revisit this number in their own diff:
+# they move six macro tools onto the same mechanism, and whether that shrinks
+# the face depends on how many readers they need beside it.
+SURFACE_BUDGET_CHARS = 17_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:

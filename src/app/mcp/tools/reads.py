@@ -344,3 +344,44 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         if status != 200:
             return _error_from(payload, status)
         return _truncate(payload)
+
+    @server.tool(
+        annotations=reads,
+        description=(
+            "A submitted job's status and folded counts: ok, skipped, rejected "
+            "(never attempted), failed, and queued (no ledger row yet). "
+            "Constant size: the target list is not included. Read-only."
+        ),
+    )
+    async def get_work(work_id: str) -> dict[str, Any]:
+        status, payload, _ = await core.get(f"/v1/works/{work_id}")
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
+
+    @server.tool(
+        annotations=reads,
+        description=(
+            "Per-target results of a job: outcome, error_class, detail and the "
+            "item it produced. Page with cursor; pass outcome to see only what "
+            "needs re-sending (`rejected` was never attempted, `failed` was). "
+            "Read-only."
+        ),
+    )
+    async def work_units(
+        work_id: str,
+        outcome: str = "",
+        # 20, like every other list tool: the tool face has one documented
+        # default, and `/v1`'s 50 is available by passing `limit` explicitly.
+        limit: int = 20,
+        cursor: str = "",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": min(limit, 100)}
+        if outcome:
+            params["outcome"] = outcome
+        if cursor:
+            params["cursor"] = cursor
+        status, payload, _ = await core.get(f"/v1/works/{work_id}/units", **params)
+        if status != 200:
+            return _error_from(payload, status)
+        return _truncate(payload)
