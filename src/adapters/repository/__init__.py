@@ -118,6 +118,7 @@ from adapters.repository.work import (
     counts_for_work,
     create_work,
     finish_work,
+    live_work_by_fingerprint,
     units_for_work,
     work_by_id,
 )
@@ -172,6 +173,7 @@ __all__ = [
     "list_jobs",
     "list_plugin_rows",
     "list_sources",
+    "live_work_by_fingerprint",
     "mark_all_read",
     "mark_published",
     "paging_state",

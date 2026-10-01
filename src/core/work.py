@@ -15,7 +15,9 @@ target was attempted and the world said no, so it is the one worth re-sending.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import hashlib
+import json
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -36,10 +38,18 @@ TERMINAL_STATUSES: frozenset[WorkStatus] = frozenset(
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WorkRecord:
-    """One work as the domain sees it."""
+    """One work as the domain sees it.
+
+    `targets` is the command's input and is a field of its own rather than a
+    key inside `params`: it is *what* the work is about, while `params` holds
+    the kind's own knobs (which source, which chain). Keeping them apart is
+    also what lets `counts` derive `total` from the row instead of from a
+    caller-supplied number.
+    """
 
     id: str
     kind: str
+    targets: list[str]
     params: dict[str, Any]
     status: WorkStatus
     retry_of: str | None
@@ -57,6 +67,30 @@ class UnitRecord:
     detail: str
     ref: str | None
     at: datetime
+
+
+def command_fingerprint(
+    *, kind: str, targets: Sequence[str], params: Mapping[str, Any]
+) -> str:
+    """The digest that makes "the same command" recognisable (ADR 0046 law 7).
+
+    Derived from the command's *value* and nothing else -- never from time or a
+    random source -- because its job is to answer "is this the same request
+    again?" for a caller that re-issues it after a timeout. Target order is
+    part of the value: the ledger and the response both report that order, so a
+    permutation is a different command.
+
+    It is not a security boundary: it decides whether a live work is reused,
+    and a caller who can submit a command can already compute its digest.
+    """
+    canonical = json.dumps(
+        {"kind": kind, "targets": list(targets), "params": dict(params)},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def counts_from(outcomes: Iterable[UnitOutcome]) -> dict[str, int]:

@@ -767,6 +767,36 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WorkSubmit": {
+        "description": "Body for submitting a work.",
+        "properties": {
+          "kind": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Kind",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "title": "Params",
+            "type": "object"
+          },
+          "targets": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "targets"
+        ],
+        "title": "WorkSubmit",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -3799,6 +3829,69 @@
           }
         ],
         "summary": "Read Snapshot",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/works": {
+      "post": {
+        "description": "Accept a batch of work; answer with a handle, not with a report.\n\nAnswers 202 rather than 200 because the work has not happened yet: it is\nqueued, and `Location` names where its status lives.",
+        "operationId": "submitWork",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Submit Work",
         "tags": [
           "core-api"
         ]

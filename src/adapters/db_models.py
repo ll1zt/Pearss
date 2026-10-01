@@ -645,8 +645,20 @@ class Work(Base):
 
     id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
     kind: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(32), nullable=False)
+    # The command's input, canonical JSON. A field of its own rather than a key
+    # inside params_json: it is what the work is about.
+    targets_json: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text, nullable=False, default="[]"
+    )
     # The command's parameters as canonical JSON. Never raw upstream bodies.
     params_json: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # The command value's digest (core.work.command_fingerprint). Nullable
+    # because a work created before the fingerprint existed has none -- and
+    # SQL treats NULLs as distinct, so legacy rows cannot collide in the
+    # unique index below.
+    fingerprint: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
+    )
     status: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.String(ENUM_LENGTHS["work_status"]), nullable=False
     )
@@ -668,6 +680,20 @@ class Work(Base):
             "workstatus",
             "status",
             ("queued", "running", "succeeded", "partial", "failed", "cancelled"),
+        ),
+        # One *live* work per command value: a caller re-issuing the same
+        # command while the first is still queued or running gets that work
+        # back instead of a second batch. Deliberately partial: once a work is
+        # terminal, submitting the same command again is a new request (the
+        # caller may genuinely want a fresh run), and a plain unique constraint
+        # would forbid it forever. The predicate mirrors
+        # `uq_job_run_active_per_job`.
+        sa.Index(
+            "uq_work_live_fingerprint",
+            "fingerprint",
+            unique=True,
+            sqlite_where=sa.text("status IN ('queued', 'running')"),
+            postgresql_where=sa.text("status IN ('queued', 'running')"),
         ),
     )
 
