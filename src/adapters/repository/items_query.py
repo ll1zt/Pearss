@@ -34,6 +34,13 @@ class ItemFilter:
     # already depend on, and this is a different question (see issue #80, ADR
     # 0035 decision 2).
     full_text: str | None = None
+    # Exact match on the item's stored `url`, which is already the canonical
+    # form (`normalize` stores `canonicalize_url(draft.canonical_url)`), so a
+    # caller passes a canonicalised address and the comparison is literal.
+    # Separate from `query`/`full_text` because "which item is this address?"
+    # is an identity question: neither a title substring nor a body search can
+    # answer it (measured: the address-to-item lookup had no answer at all).
+    url: str | None = None
     since: str | None = None
     until: str | None = None
 
@@ -231,6 +238,8 @@ def _filter_conditions(
         conditions.append(
             ItemRow.title.like(f"%{escape_like(filter.query)}%", escape="\\")
         )
+    if filter.url:
+        conditions.append(ItemRow.url == filter.url)
     if filter.since:
         conditions.append(sort_column >= filter.since)
     if filter.until:

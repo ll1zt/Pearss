@@ -1692,6 +1692,10 @@ async def test_diagnose_answers_the_question_in_one_call(
         "succeeded": 0,
         "failed": 0,
         "oldest_queued_at": None,
+        # The rate belongs with the backlog (issue #193): "eleven stuck" is a
+        # different answer when they are draining than when they are not.
+        "rate_per_min": 0.0,
+        "rate_window_minutes": 15.0,
     }
     assert body["runs"] == []
     # The two issue-#152 additions, stated rather than omitted: an absent key
@@ -1814,3 +1818,132 @@ async def test_diagnose_answers_why_the_chain_is_stuck(
     assert failed[0]["attempt_count"] == 3
     # Metadata and error text only: never the item body (AGENTS.md, ADR 0042).
     assert "ITEM-SECRET-MARKER" not in response.text
+
+
+# --------------------------------------------------------------------------
+# AC-198: the queue of one source, in one constant-size answer
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac198_the_queue_is_a_fold_over_the_rows(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-198: `:queue` reconciles with the per-row listing, and the rate is derived.
+
+    The measured need: reading per-source backlogs across 82 sources cost 82
+    calls, and not one of them said whether anything was moving. The counts are
+    the same rows `/v1/sources/{id}/enrichments` renders, so they are reconciled
+    here by counting that endpoint's own output -- a queue number that disagrees
+    with the rows it summarises is worse than no number.
+    """
+    from collections import Counter
+    from datetime import UTC, datetime
+
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import RATE_WINDOW_MINUTES, timestamp
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "queue-1"},
+        json={
+            "url": "https://queue.example/feed",
+            "schedule_policy": policy(),
+            "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
+            "target_lang": "en",
+        },
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+
+    now = timestamp(datetime.now(UTC))
+    old = timestamp(datetime(2026, 1, 1, tzinfo=UTC))
+    statuses = ["queued", "queued", "running", "succeeded", "failed"]
+    with session_factory() as session:
+        for index, status in enumerate(statuses):
+            item_id = f"queue-item-{index}"
+            session.add(
+                ItemRow(
+                    id=item_id,
+                    source_id=source_id,
+                    guid=f"queue-guid-{index}",
+                    content_hash=f"queue-hash-{index}",
+                    title=f"Queued {index}",
+                    url=f"https://queue.example/{index}",
+                    publish_status="ready",
+                    tenant_id="default",
+                    created_at=old,
+                    updated_at=old,
+                )
+            )
+            session.add(
+                ItemEnrichment(
+                    id=f"queue-enr-{index}",
+                    item_id=item_id,
+                    plugin_id="translate",
+                    plugin_version="0.1.0",
+                    kind="translation",
+                    lang="en",
+                    input_hash=f"queue-hash-{index}",
+                    status=status,
+                    attempt_count=0,
+                    tenant_id="default",
+                    created_at=old,
+                    # Only the completed row is recent, so the rate has exactly
+                    # one completion to find in its window.
+                    updated_at=now if status == "succeeded" else old,
+                )
+            )
+        session.commit()
+
+    response = await writer.get(f"/v1/sources/{source_id}:queue")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    rows = (
+        await writer.get(f"/v1/sources/{source_id}/enrichments", params={"limit": 100})
+    ).json()["data"]
+    counted = Counter(row["status"] for row in rows)
+    assert (
+        payload["queued"],
+        payload["running"],
+        payload["succeeded"],
+        payload["failed"],
+    ) == (
+        counted["queued"],
+        counted["running"],
+        counted["succeeded"],
+        counted["failed"],
+    )
+    # Derived from the completion stamps: one completion inside a 15-minute
+    # window is 1/15 per minute. A stored counter would not follow the rows.
+    assert payload["rate_per_min"] == round(1 / RATE_WINDOW_MINUTES, 3)
+    assert payload["rate_window_minutes"] == RATE_WINDOW_MINUTES
+    assert payload["oldest_queued_at"] == old
+    # Constant size: counts, never rows. A `data` array here would make the
+    # answer grow with the backlog it is supposed to summarise.
+    assert set(payload) == {
+        "source_id",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "oldest_queued_at",
+        "rate_per_min",
+        "rate_window_minutes",
+        "correlation_id",
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_queue_of_an_unknown_source_is_a_404(
+    writer: httpx.AsyncClient,
+) -> None:
+    """A queue of zeros for an id nobody has is a lie shaped like data."""
+    response = await writer.get("/v1/sources/no-such-source:queue")
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"]["error"]["code"] == "source_not_found"

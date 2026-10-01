@@ -1701,6 +1701,25 @@
             }
           },
           {
+            "description": "Exact match on an item's canonical url. The url is normalised the way identity normalises it (scheme/host case, default ports, tracking parameters, fragment), so a shared link with a `utm_` parameter finds the stored item. A miss is an empty page, not a 404.",
+            "in": "query",
+            "name": "url",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exact match on an item's canonical url. The url is normalised the way identity normalises it (scheme/host case, default ports, tracking parameters, fragment), so a shared link with a `utm_` parameter finds the stored item. A miss is an empty page, not a 404.",
+              "title": "Url"
+            }
+          },
+          {
             "description": "Full-text search over titles and bodies, through the FTS5 index. Pair it with sort=relevance for best-match order; without it the matches stay newest-first.",
             "in": "query",
             "name": "full_text",
@@ -3614,6 +3633,56 @@
           }
         ],
         "summary": "Ingest Items",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:queue": {
+      "get": {
+        "description": "What this source's chain is doing, in one constant-size answer.\n\nThe counts are a fold over the chain rows -- the same rows\n`/v1/sources/{id}/enrichments` renders -- so the two cannot disagree; the\nrate is derived from the completion timestamps in a window, never stored\n(ADR 0009's rule about `next_run_time`, applied to a statistic). Together\nthey answer \"how much is waiting, and is it draining?\", which used to cost\none call per source: a measured backlog check across 82 sources was 82\nrequests, and none of them said how fast anything was moving.\n\n`oldest_queued_at` is what counts cannot say: a queue of one that has been\nwaiting an hour is a different problem from a queue of one that just\narrived.",
+        "operationId": "getSourceQueue",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getsourcequeue",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Source Queue",
         "tags": [
           "core-api"
         ]

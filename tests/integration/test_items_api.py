@@ -937,3 +937,108 @@ def _seed_pair_with_vectors(session: Session, encoder: Any) -> tuple[str, str]:
         session.commit()
         made.append(item.id)
     return made[0], made[1]
+
+
+# --------------------------------------------------------------------------
+# AC-197: an item by its address
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac197_an_item_is_found_by_its_address(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-197: `url` answers "is this address stored?", exactly.
+
+    The measured need: after a 568-address backfill there was no way to ask
+    whether one address had landed. `q` searches titles and `full_text` searches
+    bodies; neither is an identity question, and paging the whole list to look
+    for a url costs a request per page.
+    """
+    response = await client.get(
+        "/v1/items", params={"url": "https://blog.example.com/post/3"}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [item["id"] for item in body["data"]] == ["item-0003"]
+    assert body["total"] == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac197_a_shared_link_finds_the_stored_item(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-197: the address people actually paste, not the stored form.
+
+    A link copied out of a newsletter carries campaign parameters and often a
+    fragment. The lookup normalises the way identity does, so the answer is
+    about the resource rather than about the string -- and a parameter that is
+    *not* a known tracker is preserved, because for many sites it is part of the
+    address (`?page=2` is a different page, not tracking noise).
+    """
+    tracked = await client.get(
+        "/v1/items",
+        params={
+            "url": "https://blog.example.com/post/3?utm_source=news&utm_medium=x#top"
+        },
+    )
+    assert [item["id"] for item in tracked.json()["data"]] == ["item-0003"]
+
+    meaningful = await client.get(
+        "/v1/items", params={"url": "https://blog.example.com/post/3?page=2"}
+    )
+    assert meaningful.json()["data"] == [], (
+        "an unknown query parameter identifies a different resource, so this "
+        "must not match the row that was stored without it"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac197_a_miss_is_an_empty_page_and_a_bad_url_is_a_refusal(
+    client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-197: "not stored" and "not an address" are different answers.
+
+    An address nobody stored is ordinary information (200, empty). Something
+    that cannot be an address at all is a refusal, because answering "no such
+    item" would be true and useless.
+    """
+    missing = await client.get(
+        "/v1/items", params={"url": "https://blog.example.com/post/9999"}
+    )
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["data"] == []
+    assert missing.json()["total"] == 0
+
+    refused = await client.get("/v1/items", params={"url": "mailto:hi@example.com"})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"]["error"]["code"] == "invalid_url"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac197_the_gate_applies_to_the_address_lookup_too(
+    app: FastAPI, client: httpx.AsyncClient, store: sessionmaker[Session]
+) -> None:
+    """AC-197: an unpublished item is not discoverable by address either.
+
+    The gate lives in the shared condition list, which is why this filter cannot
+    be an exception to it: "find the item whose address is X" must not be the way
+    around "pending rows are invisible".
+    """
+    with app.state.session_factory() as session:
+        session.execute(
+            sa.text("update item set publish_status = 'pending' where id = 'item-0003'")
+        )
+        session.commit()
+
+    response = await client.get(
+        "/v1/items", params={"url": "https://blog.example.com/post/3"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == []

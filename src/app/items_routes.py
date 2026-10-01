@@ -51,6 +51,7 @@ from app.api_conventions import (
 from app.auth import Principal, read_required, write_required
 from core.enums import PublishStatus
 from core.models import Item
+from core.normalize import canonicalize_url
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
@@ -198,6 +199,16 @@ def read_items(
     q: str | None = Query(
         default=None, max_length=200, description="Substring match on the title."
     ),
+    url: str | None = Query(
+        default=None,
+        max_length=2048,
+        description=(
+            "Exact match on an item's canonical url. The url is normalised the "
+            "way identity normalises it (scheme/host case, default ports, "
+            "tracking parameters, fragment), so a shared link with a `utm_` "
+            "parameter finds the stored item. A miss is an empty page, not a 404."
+        ),
+    ),
     full_text: str | None = Query(
         default=None,
         max_length=200,
@@ -259,6 +270,7 @@ def read_items(
             ),
             query=q,
             full_text=full_text,
+            url=_canonical_or_refuse(url),
             since=_parse_bound(since, code="invalid_since", field="since"),
             until=_parse_bound(until, code="invalid_until", field="until"),
         )
@@ -291,6 +303,32 @@ def read_items(
         "total": total,
         "correlation_id": current_correlation_id(),
     }
+
+
+def _canonical_or_refuse(url: str | None) -> str | None:
+    """The stored form of a caller's url, or a 422 the caller can act on.
+
+    Normalised through the same function identity uses (`canonicalize_url`),
+    because the point of the lookup is "is this address already stored?" -- and
+    answering it against a differently-normalised string would say no to a row
+    that is there. A url that cannot be normalised is refused rather than
+    matched literally: a `mailto:` or a relative path has no stored form, and
+    answering "no such item" would be technically true and useless.
+    """
+    if url is None:
+        return None
+    try:
+        return canonicalize_url(url)
+    except ValueError as exc:
+        raise api_error(
+            status_code=422,
+            code="invalid_url",
+            message=str(exc),
+            suggestion=(
+                "Pass an absolute http(s) url, e.g. the one an item's `url` "
+                "field returned."
+            ),
+        ) from None
 
 
 def _embed_query(text: str) -> list[float]:

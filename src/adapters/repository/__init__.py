@@ -28,9 +28,11 @@ from adapters.repository.deletion import (
     delete_source_items,
 )
 from adapters.repository.enrichment import (
+    RATE_WINDOW_MINUTES,
     backfill_chain,
     backlog_for_source,
     chain_for_source,
+    completion_rate_per_min,
     enqueue_chain,
     failed_enrichments_for_source,
     parse_chain,
@@ -128,6 +130,7 @@ __all__ = [
     "COLLECT_JOB_TYPE",
     "EPOCH_FLOOR",
     "FEED_WINDOW",
+    "RATE_WINDOW_MINUTES",
     "DeletionResult",
     "ItemFilter",
     "ItemPage",
@@ -142,6 +145,7 @@ __all__ = [
     "claim_next_work",
     "claim_work",
     "collectable_sources",
+    "completion_rate_per_min",
     "consecutive_failures",
     "count_items",
     "count_matching",

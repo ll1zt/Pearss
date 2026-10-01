@@ -126,6 +126,15 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
   用 `cursor` 分页，用 `outcome` 过滤——`outcome=failed` 就是「我该重发哪些」。
   `rejected`（没尝试过，例如非同源）与 `failed`（尝试了但失败）分开，因为只有后者值得重发。
 
+issue #193 的两个读原语**并入既有工具**（不新增工具名：工具面是每轮对话的上下文预算）：
+
+- `search_items(url=…)`：按**规范化后的 canonical url** 精确查条目——回答「这个地址落库没有」。
+  未命中是空列表（不是错误）；未知 query 参数被保留，所以 `?page=2` 不等于 `?page=1`；
+  pending 条目同样查不到（闸门对该过滤一样生效）。
+- `diagnose_source` 的 `chain` 块里带队列四计数 + `rate_per_min`（由窗口内完成时间戳推导、**不落库**）
+  + `rate_window_minutes`。只要队列、不要诊断时用 `GET /v1/sources/{id}:queue`：O(1)、常数大小，
+  计数与 `/v1/sources/{id}/enrichments` 的逐行结果对账一致。
+
 ## 四、错误返回
 
 `architecture-spec.md` §2.3 规定工具返回：
