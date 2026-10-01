@@ -1,8 +1,9 @@
 # ADR 0045：内容级发现——地址由外部提供，采集器按地址形状抓取（`POST /v1/sources/{id}:fetch-items` + MCP `fetch_source_items`）
 
-- 状态：accepted
+- 状态：accepted（**部分 superseded**：D7 的同步批量端点与 D10 的「不新增持久化」已被 [ADR 0046](0046-work-as-a-first-class-citizen.md) 取代；D1–D6、D8、D9、D11 仍有效）
 - 日期：2026-09-30
 - issue：#167、#168、#169、#170、#171、#172（本 ADR 是 #172 的交付物）
+- 修订：2026-10-01（标注被 ADR 0046 取代的 D7/D10，**不重写原文**）
 - 相关 / 修订：ADR 0017（能力声明与双向校验）、ADR 0022（`submit_items` 与 `source_id` 溯源边界）、ADR 0044（批量确认先例）、ADR 0029（抓取礼貌）、ADR 0010（MCP 经 `/v1`）、ADR 0028（fulltext 处理器）、ADR 0036（工具面是 `/v1` 的投影）
 
 **新增场景从 **AC-167** 起**（AC-167..176，见 `SCENARIOS.md`）。
