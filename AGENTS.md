@@ -40,6 +40,7 @@ core -> adapters -> plugins -> app
 - 失败必须使用唯一的 `ErrorClass` enum：`network`、`parse`、`structure_changed`、`blocked`、`auth`。不得新增字符串常量绕过 enum；DB 层用 CHECK 约束强制（SQLite 不自发强制 VARCHAR 枚举）
 - **下次抓取时间从 policy + 历史推导，不落库**。存 `next_run_time` 会与推导结果成为两个事实源，改 policy、失败退避、恢复备份三处都会分叉（ADR 0009）
 - 所有写操作必须幂等，API 写请求需要 `Idempotency-Key`
+- **复数操作 = 作业 + 账本**（ADR 0046）：效果 O(1) 返回句柄（`202` + `work_id`），逐条结果**只**在 `work_unit` 账本里（可寻址：`(work, target)`），响应字节数不随输入规模变化；`counts` 由账本折叠而不落库；`rejected`（没尝试）与 `failed`（尝试了但失败）必须分开——只有后者值得重发
 - 所有 API 调用方均需经过 Core API 审计中间件；不得只在 MCP 层做审计
 - 任何 API/MCP 写操作都必须有清晰的 actor、session/correlation ID；需要用户确认的 MCP 动作必须走 elicitation
 
