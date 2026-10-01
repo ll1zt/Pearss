@@ -489,16 +489,37 @@ def _backfill_source_confirmation(source_id: str) -> Elicit[Any]:
     )
 
 
-def _retry_enrichments_fields(source_id: str) -> dict[str, Any]:
-    """What retry_enrichments confirms and executes, derived in one place."""
-    return {"source_id": source_id}
+def _retry_enrichments_fields(
+    enrichment_id: str = "", source_id: str = ""
+) -> dict[str, Any]:
+    """What retry_enrichments confirms and executes, derived in one place.
+
+    Two granularities of one intent (issue #195): one row, or every failed row
+    of one source. Which one this is decides the endpoint *and* the sentence,
+    so both are derived from the same pair of arguments the caller passed.
+    """
+    return {"enrichment_id": enrichment_id, "source_id": source_id}
 
 
-def _retry_enrichments_confirmation(source_id: str) -> Elicit[Any]:
-    fields = _retry_enrichments_fields(source_id)
-    source = fields["source_id"]
+def _retry_enrichments_confirmation(
+    enrichment_id: str = "", source_id: str = ""
+) -> Elicit[Any]:
+    fields = _retry_enrichments_fields(enrichment_id, source_id)
+    if fields["enrichment_id"]:
+        target = f"processing-chain row {fields['enrichment_id']}"
+    elif fields["source_id"]:
+        target = (
+            f"every failed processing-chain product of source {fields['source_id']}"
+        )
+    else:
+        # The dialog is shown before the tool body can refuse, so it says what
+        # is wrong rather than claiming to retry "source ''".
+        target = "nothing: no enrichment_id and no source_id were given"
     return _confirm_resolver(
-        _summary=f"Requeue failed processing-chain products for source {source}?",
+        _summary=(
+            f"Requeue {target}? The worker charges the provider again for "
+            "whatever it retries."
+        ),
         _fields=fields,
     )
 

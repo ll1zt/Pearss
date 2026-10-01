@@ -109,7 +109,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
 | `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数） |
-| `retry_enrichments` | 重排队失败的处理器链产物 |
+| `retry_enrichments` | 重排队失败的处理器链产物：`enrichment_id` 只重排**一行**（`POST /v1/enrichments/{id}:retry`），`source_id` 重排该源全部失败行 |
 | `backfill_source` | 对历史条目一次性补跑处理器链 |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 

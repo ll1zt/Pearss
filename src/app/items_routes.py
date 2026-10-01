@@ -30,9 +30,11 @@ from adapters.filestore import read_body
 from adapters.repository import (
     ItemFilter,
     count_matching,
+    enrichment_status,
     get_item,
     mark_published,
     query_items,
+    requeue_enrichment,
     timestamp,
 )
 from adapters.repository import (
@@ -49,6 +51,7 @@ from app.api_conventions import (
     replay_or_none,
 )
 from app.auth import Principal, read_required, write_required
+from core.enrichment import EnrichmentStatus
 from core.enums import PublishStatus
 from core.models import Item
 from core.normalize import canonicalize_url
@@ -522,6 +525,82 @@ def _neighbours(
         ],
         "correlation_id": current_correlation_id(),
     }
+
+
+@router.post("/enrichments/{enrichment_id}:retry", operation_id="retryEnrichment")
+def retry_enrichment(
+    request: Request,
+    enrichment_id: str = Path(min_length=1, max_length=64),
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Requeue one failed chain row -- and only that row.
+
+    The granularity the source-scoped route lacks. A source can hold 23
+    permanently failed products while the caller wants three of them retried
+    (measured: that was all-or-nothing), and the row is addressable --
+    `list_enrichments` returns its id -- so the command can name it.
+
+    Only `failed` rows are requeued. A `queued` or `running` row is already on
+    its way, so this answers the same 200 with `requeued: 0`: the request means
+    "make sure this row will be attempted", and that is already true. A
+    `succeeded` row is a 409 -- its product exists, and producing it again is a
+    different command -- while an id naming nothing is a 404.
+
+    What a requeue *means* lives in one place (`requeue_enrichment`), which is
+    also what the source-scoped route calls once per failed row: the attempt
+    budget restarts and the stale failure is cleared, while `input_hash` stays,
+    because the content has not changed.
+    """
+    endpoint = f"POST /v1/enrichments/{enrichment_id}:retry"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        status = enrichment_status(session, enrichment_id)
+        if status is None:
+            raise api_error(
+                status_code=404,
+                code="enrichment_not_found",
+                message=f"No processing-chain row with id {enrichment_id!r}.",
+                suggestion=(
+                    "Ids come from list_enrichments, or from an item's "
+                    "/v1/items/{id}/enrichments."
+                ),
+            )
+        if status == EnrichmentStatus.SUCCEEDED.value:
+            raise api_error(
+                status_code=409,
+                code="enrichment_not_retryable",
+                message=(
+                    f"Row {enrichment_id!r} is {status}: its product exists, so "
+                    "there is nothing to retry."
+                ),
+                suggestion=(
+                    "Re-processing a succeeded row is a different command; a "
+                    "changed item content already produces a new product."
+                ),
+            )
+        requeued = 1 if requeue_enrichment(session, enrichment_id) else 0
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "enrichment_id": enrichment_id,
+        "status": "queued" if requeued else status,
+        "requeued": requeued,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
 
 
 @router.get("/items/{item_id}/related", operation_id="listRelatedItems")

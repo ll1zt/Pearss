@@ -564,17 +564,20 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Requeue failed processing-chain rows for one source (e.g. after fixing the provider key). Requires confirmation: rows restart the attempt budget and the provider charges again.",
+    "description": "Requeue failed processing-chain rows (e.g. after fixing the provider key). Requires confirmation: the attempt budget restarts and the provider charges again. Pass enrichment_id to retry one row, or source_id for every failed row of that source.",
     "input_schema": {
       "properties": {
+        "enrichment_id": {
+          "default": "",
+          "title": "Enrichment Id",
+          "type": "string"
+        },
         "source_id": {
+          "default": "",
           "title": "Source Id",
           "type": "string"
         }
       },
-      "required": [
-        "source_id"
-      ],
       "title": "retry_enrichmentsArguments",
       "type": "object"
     }

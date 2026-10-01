@@ -11,6 +11,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -1947,3 +1948,236 @@ async def test_the_queue_of_an_unknown_source_is_a_404(
 
     assert response.status_code == 404, response.text
     assert response.json()["detail"]["error"]["code"] == "source_not_found"
+
+
+# --------------------------------------------------------------------------
+# AC-201 / AC-202: the row-level retry
+# --------------------------------------------------------------------------
+
+
+async def _seed_failed_rows(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    *,
+    slug: str,
+    statuses: list[str],
+) -> tuple[str, list[str]]:
+    """A source with a chain and one row per status, seeded through the ORM.
+
+    Constructing the rows directly is what the existing enrichment tests do:
+    there is no public "create a failed product" call, and what these scenarios
+    need is the *state*, which is exactly what a failed row is.
+    """
+    from datetime import UTC, datetime
+
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": f"{slug}-source"},
+        json={
+            "url": f"https://{slug}.example/feed",
+            "schedule_policy": policy(),
+            "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
+            "target_lang": "en",
+        },
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+
+    now = timestamp(datetime.now(UTC))
+    ids: list[str] = []
+    with session_factory() as session:
+        for index, status in enumerate(statuses):
+            item_id = f"{slug}-item-{index}"
+            enrichment_id = f"{slug}-enr-{index}"
+            ids.append(enrichment_id)
+            session.add(
+                ItemRow(
+                    id=item_id,
+                    source_id=source_id,
+                    guid=f"{slug}-guid-{index}",
+                    content_hash=f"{slug}-hash-{index}",
+                    title=f"Row {index}",
+                    url=f"https://{slug}.example/{index}",
+                    publish_status="ready",
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                ItemEnrichment(
+                    id=enrichment_id,
+                    item_id=item_id,
+                    plugin_id="translate",
+                    plugin_version="0.1.0",
+                    kind="translation",
+                    lang="en",
+                    input_hash=f"{slug}-hash-{index}",
+                    status=status,
+                    error_class=None if status == "queued" else "auth",
+                    detail=None
+                    if status == "queued"
+                    else f"provider said no ({index})",
+                    attempt_count=0 if status == "queued" else 3,
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        session.commit()
+    return source_id, ids
+
+
+async def _row_state(
+    session_factory: sessionmaker[Session], enrichment_id: str
+) -> tuple[Any, ...]:
+    """One row's retry-relevant columns, by value."""
+    from sqlalchemy import select
+
+    from adapters.db_models import ItemEnrichment
+
+    with session_factory() as session:
+        return tuple(
+            session.execute(
+                select(
+                    ItemEnrichment.status,
+                    ItemEnrichment.attempt_count,
+                    ItemEnrichment.error_class,
+                    ItemEnrichment.detail,
+                    ItemEnrichment.next_attempt_at,
+                ).where(ItemEnrichment.id == enrichment_id)
+            ).one()
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac201_a_row_level_retry_touches_only_that_row(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-201: one row comes back, the others keep their state and their count.
+
+    The measured gap: 23 permanently failed products, three worth retrying, and
+    the source-scoped route was all-or-nothing. The untouched rows are asserted
+    *by value* rather than as "still failed": a bulk UPDATE that forgot its
+    WHERE would change them and still look like a success.
+    """
+    source_id, (first, second, third) = await _seed_failed_rows(
+        writer,
+        session_factory,
+        slug="rowretry",
+        statuses=["failed", "failed", "failed"],
+    )
+
+    response = await writer.post(
+        f"/v1/enrichments/{second}:retry",
+        headers={"Idempotency-Key": "rowretry-one"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["enrichment_id"] == second
+    assert payload["status"] == "queued"
+    assert payload["requeued"] == 1
+
+    assert await _row_state(session_factory, second) == (
+        "queued",
+        0,
+        None,
+        None,
+        None,
+    )
+    for untouched in (first, third):
+        assert await _row_state(session_factory, untouched) == (
+            "failed",
+            3,
+            "auth",
+            f"provider said no ({'0' if untouched == first else '2'})",
+            None,
+        )
+    assert source_id
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac202_a_retried_row_restarts_its_budget_exactly_once(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-202: retrying restarts the budget; it is not an unbounded reset.
+
+    Retrying is the caller's decision ("the provider is fixed"), so the attempt
+    budget restarts and the stale failure is cleared -- which is what makes a
+    row that exhausted its attempts retryable at all. What it must not do is
+    keep resetting on its own: a second retry while the row is already queued is
+    a no-op (`requeued: 0`), and a row whose product exists is refused outright.
+    """
+    _, (row, succeeded) = await _seed_failed_rows(
+        writer, session_factory, slug="rowbudget", statuses=["failed", "succeeded"]
+    )
+
+    first = await writer.post(
+        f"/v1/enrichments/{row}:retry", headers={"Idempotency-Key": "rowbudget-1"}
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["requeued"] == 1
+    assert (await _row_state(session_factory, row))[0] == "queued"
+
+    # Already on its way: the request is "make sure this row will run", and that
+    # is already true, so nothing is reset a second time.
+    again = await writer.post(
+        f"/v1/enrichments/{row}:retry", headers={"Idempotency-Key": "rowbudget-2"}
+    )
+    assert again.status_code == 200, again.text
+    assert again.json() == {
+        "enrichment_id": row,
+        "status": "queued",
+        "requeued": 0,
+        "correlation_id": again.json()["correlation_id"],
+    }
+    assert (await _row_state(session_factory, row))[0] == "queued"
+
+    # A product that exists is not a failure to retry: producing it again is a
+    # different command.
+    refused = await writer.post(
+        f"/v1/enrichments/{succeeded}:retry",
+        headers={"Idempotency-Key": "rowbudget-3"},
+    )
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"]["code"] == "enrichment_not_retryable"
+
+    unknown = await writer.post(
+        "/v1/enrichments/no-such-row:retry",
+        headers={"Idempotency-Key": "rowbudget-4"},
+    )
+    assert unknown.status_code == 404, unknown.text
+    assert unknown.json()["detail"]["error"]["code"] == "enrichment_not_found"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_source_scoped_retry_still_clears_every_failed_row(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """The coarser granularity still works, through the same requeue.
+
+    It is now a loop over the row-level function rather than its own UPDATE, so
+    this pins that the loop covers every failed row (and only failed ones).
+    """
+    source_id, (first, second, already) = await _seed_failed_rows(
+        writer, session_factory, slug="rowany", statuses=["failed", "failed", "queued"]
+    )
+
+    response = await writer.post(
+        f"/v1/sources/{source_id}:retry-enrichments",
+        headers={"Idempotency-Key": "rowany-all"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["requeued"] == 2
+    assert (await _row_state(session_factory, first))[0] == "queued"
+    assert (await _row_state(session_factory, second))[0] == "queued"
+    assert (await _row_state(session_factory, already))[0] == "queued"
