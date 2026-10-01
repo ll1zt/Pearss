@@ -57,6 +57,7 @@ from app.mcp.confirmation import (
     _update_schedule_policy_confirmation,
     _update_schedule_policy_fields,
     _write_verdict,
+    ingest_targets,
 )
 from app.mcp.core_client import CoreAPIClient, _fresh_key
 from app.mcp.rendering import (
@@ -173,13 +174,12 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Add several sources in one call. Requires user confirmation: this "
-            "makes real outbound requests to a third party for every URL. "
-            "Options apply to the whole batch, and `type` 'auto' is resolved per "
-            "URL exactly as add_source resolves it. Results are per item: a URL "
-            "that cannot be used fails alone and the rest are still created. "
-            "Use add_source for a single source, where the dialog names it "
-            "exactly."
+            "Add several sources in one call. Requires user confirmation: these "
+            "sources make real outbound requests to a third party. Options apply "
+            "to the whole batch, and `type` 'auto' is resolved per URL as "
+            "add_source resolves it. Returns a job handle -- read each URL's "
+            "outcome with work_units, where an unusable one fails alone. Use "
+            "add_source for a single source, where the dialog names it exactly."
         ),
     )
     async def add_sources(
@@ -209,18 +209,24 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             confirmed=confirmed,
             fields=fields,
             method="POST",
-            path="/v1/sources:batch",
+            path="/v1/works",
             body={
-                "urls": urls,
-                "type": fields["type"],
-                "schedule_policy": schedule_policy,
-                "trust_level": trust_level,
-                "pipeline_chain": pipeline_chain,
-                "target_lang": target_lang or None,
-                "parser_plugin_id": parser_plugin_id or None,
-                # Empty means "the API's default folder", not "no folder".
-                **({"folder": folder} if folder else {}),
+                "kind": fields["kind"],
+                "targets": urls,
+                "params": {
+                    "type": fields["type"],
+                    "schedule_policy": schedule_policy,
+                    "trust_level": trust_level,
+                    "pipeline_chain": pipeline_chain,
+                    "target_lang": target_lang or None,
+                    "parser_plugin_id": parser_plugin_id or None,
+                    # Empty means "the API's default folder", not "no folder".
+                    **({"folder": folder} if folder else {}),
+                },
             },
+            # 202: the subscriptions are queued, not created. The handle is the
+            # answer, and work_units is where each URL's outcome lands.
+            ok=(202,),
             extra=lambda _status: {"audit": "recorded by the Core API"},
         )
 
@@ -426,10 +432,12 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Permanently delete specific items by id. Requires confirmation. "
-            "The bodies, read state and processor products go with them. Use "
-            "this to clean up items that were fetched wrongly or are no "
-            "longer wanted; ids come from search_items. Not reversible."
+            "Permanently delete specific items by id. Requires confirmation: "
+            "the bodies, read state and processor products go with them. Use "
+            "this to clean up items that were fetched wrongly or are no longer "
+            "wanted; ids come from search_items. Not reversible. Returns a job "
+            "handle -- read each id's outcome with work_units, where one that "
+            "was already gone is `skipped`."
         ),
     )
     async def delete_items(
@@ -443,8 +451,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             confirmed=confirmed,
             fields=fields,
             method="POST",
-            path="/v1/items:delete",
-            body={"item_ids": item_ids},
+            path="/v1/works",
+            body={
+                "kind": fields["kind"],
+                "targets": item_ids,
+                "params": {},
+            },
+            # 202: the deletion is queued, not done. The handle is the answer.
+            ok=(202,),
         )
 
     @server.tool(
@@ -619,12 +633,12 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "title, url, published_at and content; Pearss stores it through the "
             "same pipeline as collected items. The target must be a source of "
             "type 'agent' — create one with add_source and a url like "
-            "'agent://newsletter-intake'. Pushing into an rss or web source is "
-            "refused: that would mix one origin's content into another's "
-            "provenance. Items are visible to readers as soon as stored, unless "
-            "the source has a chain. Requires confirmation: this adds content "
-            "to the corpus, and the chain can make real outbound requests to "
-            "the submitted URLs and spend provider budget on it."
+            "'agent://newsletter-intake'; pushing into an rss or web source is "
+            "refused, which would mix one origin's content into another's "
+            "provenance. Requires confirmation: this adds content to the corpus, "
+            "and the chain can make real outbound requests to the submitted URLs "
+            "and spend provider budget. Returns a job handle; read each item's "
+            "outcome with work_units."
         ),
     )
     async def submit_items(
@@ -639,7 +653,13 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             confirmed=confirmed,
             fields=fields,
             method="POST",
-            path=f"/v1/sources/{source_id}:ingest",
-            body={"items": items},
-            ok=(200, 201),
+            path="/v1/works",
+            body={
+                "kind": fields["kind"],
+                "targets": ingest_targets(items),
+                "params": {"source_id": source_id},
+            },
+            # 202: the items are queued, not stored. The handle is the answer,
+            # and work_units is where each one's outcome lands.
+            ok=(202,),
         )

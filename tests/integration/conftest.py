@@ -268,3 +268,42 @@ def unreadable_model_dir(tmp_path: Path) -> Iterator[Path]:
     finally:
         # tmp_path's cleanup has to be able to remove it.
         root.chmod(0o700)
+
+
+# The statuses a work never leaves. Shared so a test can ask "is my work done?"
+# without restating the vocabulary.
+TERMINAL_WORK_STATUSES = frozenset({"succeeded", "partial", "failed"})
+
+
+async def run_work_to_completion(
+    env: dict[str, str], work_id: str, *, sweeps: int = 10
+) -> None:
+    """Run the real worker until `work_id` is terminal.
+
+    A sweep claims the *oldest* queued work and these modules share one database,
+    so one sweep may run somebody else's work. Sweeping until *this* work is
+    terminal is what makes an assertion about "my work" be about my work.
+    """
+    from adapters.repository import work_by_id
+    from app.main import create_engine_for
+    from app.work_worker import WorkWorker
+
+    engine = create_engine_for(env["PEARSS_DATABASE_URL"])
+    factory = sessionmaker(engine, expire_on_commit=False)
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(599, text="no request belongs to this test")
+        )
+    )
+    try:
+        worker = WorkWorker(factory, client=client)
+        for _ in range(sweeps):
+            with factory() as session:
+                work = work_by_id(session, work_id)
+            if work is not None and work.status.value in TERMINAL_WORK_STATUSES:
+                return
+            await worker.sweep_once()
+    finally:
+        client.close()
+        engine.dispose()
+    raise AssertionError(f"work {work_id!r} never reached a terminal status")
