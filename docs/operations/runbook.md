@@ -301,6 +301,28 @@ JobRun、不产生采集历史。若发现某个 agent 源在 `/v1/jobs` 里出�
 
 「通过 Reader API 拉取正文后 `ready` 变 `published`」是预期行为（首次输出即冻结，ADR 0016），不是数据修复。
 
+## 作业与批量投递（`just work`）
+
+批量入口在 CLI，不在模型上下文里：把目标写成文件，命令值由 CLI 构造并发到 `/v1/works`。
+
+```bash
+just work submit --kind fetch --source <source_id> --targets-file urls.txt   # 打印 work_id
+just work status <work_id>                                                   # 状态 + 折叠 counts
+just work units <work_id> [--outcome failed]                                 # 逐目标账本（TSV）
+just work retry-failed <work_id>                                             # 只重发失败目标
+```
+
+- 列表**不回显**：stdout 只有 work_id（可 `WORK=$(just work submit …)` 捕获），说明走 stderr。
+- 凭据从环境读（`PEARSS_API_TOKEN`；justfile 会自动 source `.env`），**从不打印**。API 地址默认
+  `http://127.0.0.1:8000`，用 `PEARSS_API_URL` 指向别处。
+- 同一命令值（kind + 有序 targets + params）在 API 的幂等窗口内是**同一个作业**；窗口之后重新提交
+  是新的一次运行。目标文件里的空行与 `#` 注释会被跳过。
+- `subscribe` / `ingest` 这两个 kind 已被 API 接受但**还没有执行器**（issue #220），提交后会停在
+  `queued`——`just work status` 看得到，不会静默失败。
+- 超时丢结果的旧形态（`:fetch-items` 一次几百个地址）已被限制为 ≤ 20 个地址的兼容壳（ADR 0046）；
+  大批量一律走作业。
+
+
 ## 故障处置表
 
 | 症状 | 先看什么 | 安全动作 | 不要做什么 |
