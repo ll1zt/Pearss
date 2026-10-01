@@ -1,14 +1,21 @@
 """Content-level discovery: a caller's addresses, fetched into one source.
 
-Scenario register (normative source: `SCENARIOS.md`; issues #170 and #192;
-AC-172..175, AC-195..196).
+Scenario register (normative source: `SCENARIOS.md`; issues #170, #192, #194;
+AC-172..175, AC-195..196, AC-199..200).
 
 `POST /v1/sources/{id}:fetch-items` is the service side of "an agent enumerates
 a site's history": the caller discovers *addresses* (which the deployment
 cannot, without crawling the site), and the source's own collector fetches
 them. Everything lands through the same write path as any collection.
 
-Since #192 the endpoint is a **restricted compatibility shim**: it still
+Since #194 the plural endpoint has a singular sibling:
+`POST /v1/sources/{id}:fetch-item` fetches one address and answers with one
+receipt (and one ledger row), and it is the atom both plural forms run -- the
+shim above loops it, and a `kind=fetch` work runs it once per target. "One
+implementation, two granularities" is only true if all three agree, which is what
+AC-200 checks here.
+
+Since #192 the plural endpoint is a **restricted compatibility shim**: it still
 answers with the per-address report (existing callers do not change), but only
 up to a ceiling that a response can carry, and it records the run in the work
 ledger on the way out. `POST /v1/works` is the replacement, where the row is
@@ -164,6 +171,20 @@ async def _fetch_items(
         f"/v1/sources/{source_id}:fetch-items",
         headers={"Idempotency-Key": key},
         json={"urls": urls, **options},
+    )
+
+
+async def _fetch_item(
+    writer: httpx.AsyncClient,
+    source_id: str,
+    url: str,
+    *,
+    key: str = "fetch-item-key",
+) -> httpx.Response:
+    return await writer.post(
+        f"/v1/sources/{source_id}:fetch-item",
+        headers={"Idempotency-Key": key},
+        json={"url": url},
     )
 
 
@@ -481,3 +502,189 @@ def test_the_rest_fixture_still_carries_a_guid() -> None:
     """
     posts = json.loads((FIXTURES / "wp_rest_posts.json").read_text(encoding="utf-8"))
     assert all(post["guid"]["rendered"].startswith(SITE) for post in posts)
+
+
+# --------------------------------------------------------------------------
+# AC-199: one address, one receipt, one ledger row
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac199_one_address_answers_with_one_receipt_and_a_ledger_row(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-199: the atom's answer is one receipt, and it is written down.
+
+    A response cannot be smaller than the effect it reports, and the effect is
+    one address -- so there is no list here, and no pacing knobs either. The
+    receipt is also the record: one work with this address as its target and one
+    unit, so "what happened to it?" survives the response.
+    """
+    from adapters.repository import units_for_work, work_by_id
+    from core.enums import UnitOutcome, WorkStatus
+
+    source_id = await _add_source(writer)
+
+    response = await _fetch_item(writer, source_id, ARTICLE_URL)
+
+    assert response.status_code == 200, response.text
+    receipt = response.json()
+    assert receipt["url"] == ARTICLE_URL
+    assert receipt["outcome"] == "ok"
+    assert receipt["error_class"] is None
+    assert receipt["item_id"]
+    assert receipt["work_id"]
+
+    with session_factory() as session:
+        work = work_by_id(session, receipt["work_id"])
+        units = units_for_work(session, receipt["work_id"])
+    assert work is not None and work.status is WorkStatus.SUCCEEDED
+    assert work.kind == "fetch" and work.targets == [ARTICLE_URL]
+    assert [(unit.target, unit.outcome) for unit in units] == [
+        (ARTICLE_URL, UnitOutcome.OK)
+    ]
+    assert units[0].ref == receipt["item_id"]
+    assert units[0].detail == "stored"
+
+    stored = await writer.get("/v1/items", params={"url": ARTICLE_URL})
+    assert [row["id"] for row in stored.json()["data"]] == [receipt["item_id"]]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac199_an_off_host_address_is_a_receipt_and_no_request(
+    writer: httpx.AsyncClient, origin: Origin, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-199: a refusal is an outcome, not an exception.
+
+    An address off the source's host is a fact about that address, so it comes
+    back as a receipt (`rejected`, with the class that says why) -- and the
+    origin is never asked, which is only observable at the origin.
+    """
+    from adapters.repository import units_for_work, work_by_id
+    from core.enums import ErrorClass, UnitOutcome, WorkStatus
+
+    source_id = await _add_source(writer)
+    origin.requests.clear()
+
+    response = await _fetch_item(writer, source_id, OFF_SITE_URL)
+
+    assert response.status_code == 200, response.text
+    receipt = response.json()
+    assert receipt["outcome"] == "rejected"
+    assert receipt["error_class"] == "structure_changed"
+    assert receipt["item_id"] is None
+    assert origin.requests == []
+    assert await _stored_urls(writer) == set()
+
+    with session_factory() as session:
+        work = work_by_id(session, receipt["work_id"])
+        units = units_for_work(session, receipt["work_id"])
+    # Nothing was done, so the work is not a success -- `rejected` is a fact
+    # about the target, and the fold has to read it that way.
+    assert work is not None and work.status is WorkStatus.FAILED
+    assert [(unit.outcome, unit.error_class) for unit in units] == [
+        (UnitOutcome.REJECTED, ErrorClass.STRUCTURE_CHANGED)
+    ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_atom_refuses_the_same_sources_the_batch_does(
+    writer: httpx.AsyncClient, origin: Origin
+) -> None:
+    """The source-level refusals hold for one address too.
+
+    A single address must not be a way around them: an unknown source is a 404,
+    a collector without the item capability is a 422, and an inactive source is
+    a 409 -- all before anything is fetched.
+    """
+    origin.requests.clear()
+
+    unknown = await _fetch_item(writer, "no-such-source", ARTICLE_URL)
+    assert unknown.status_code == 404, unknown.text
+    assert unknown.json()["detail"]["error"]["code"] == "source_not_found"
+
+    agent_id = await _add_source(writer, url="agent://singular", kind="agent")
+    incapable = await _fetch_item(writer, agent_id, ARTICLE_URL)
+    assert incapable.status_code == 422, incapable.text
+    assert incapable.json()["detail"]["error"]["code"] == "unsupported_capability"
+
+    paused_id = await _add_source(writer, url="https://paused.example/feed")
+    paused = await writer.patch(
+        f"/v1/sources/{paused_id}",
+        headers={"Idempotency-Key": "pause-for-atom"},
+        json={"status": "paused"},
+    )
+    assert paused.status_code == 200, paused.text
+    inactive = await _fetch_item(writer, paused_id, f"{SITE}/blog/archives/1")
+    assert inactive.status_code == 409, inactive.text
+    assert inactive.json()["detail"]["error"]["code"] == "source_not_active"
+
+    assert origin.requests == []
+
+
+# --------------------------------------------------------------------------
+# AC-200: the atom and the work executor agree
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac200_the_atom_and_a_one_target_work_agree(
+    writer: httpx.AsyncClient,
+    origin: Origin,
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-200: same address, two entry points, one identity and one outcome.
+
+    The atom is what the work executor runs per target, so this is the property
+    that has to hold: a caller asking for one address and a caller asking a work
+    for the same address must not produce two rows, two identities or two
+    answers. The second call goes through the real executor -- the same worker
+    the deployment runs -- not through a second HTTP path.
+    """
+    from adapters.repository import units_for_work, work_by_id
+    from app.work_worker import WorkWorker
+    from core.enums import UnitOutcome, WorkStatus
+
+    source_id = await _add_source(writer)
+
+    receipt = (await _fetch_item(writer, source_id, ARTICLE_URL)).json()
+    assert receipt["outcome"] == "ok"
+
+    submitted = await writer.post(
+        "/v1/works",
+        headers={"Idempotency-Key": "atom-and-work"},
+        json={
+            "kind": "fetch",
+            "targets": [ARTICLE_URL],
+            "params": {"source_id": source_id},
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+    work_id = submitted.json()["work_id"]
+
+    client = httpx.Client(transport=httpx.MockTransport(origin.handler))
+    worker = WorkWorker(session_factory, client=client)
+    try:
+        report = await worker.sweep_once()
+    finally:
+        client.close()
+    assert report == {"works": 1, "units": 1}
+
+    with session_factory() as session:
+        work = work_by_id(session, work_id)
+        units = units_for_work(session, work_id)
+    assert [(unit.target, unit.outcome) for unit in units] == [
+        (ARTICLE_URL, UnitOutcome.OK)
+    ]
+    # Same identity: the work deduped onto the row the atom stored, rather than
+    # growing a second one for the same article.
+    assert units[0].ref == receipt["item_id"]
+    assert work is not None and work.status is WorkStatus.SUCCEEDED
+
+    stored = await writer.get("/v1/items", params={"url": ARTICLE_URL})
+    assert [row["id"] for row in stored.json()["data"]] == [receipt["item_id"]]
+    assert stored.json()["total"] == 1
