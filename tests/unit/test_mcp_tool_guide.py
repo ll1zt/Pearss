@@ -237,8 +237,9 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # #195 spent most of that: `retry_enrichments` gained `enrichment_id` beside
 # `source_id` (+134, to 17,016) instead of a second tool for the same intent at
 # a different granularity, which is the trade this budget is for. What is left
-# (~180) is not enough for the read-state pair #196 needs, so that change has to
-# trim descriptions or argue the number up in its own diff.
+# (~180) is not enough for a *new* tool: #196 added the read-state atoms to /v1
+# without touching this surface, so whoever exposes them here (or adds the next
+# tool) has to trim descriptions or argue the number up in that diff.
 SURFACE_BUDGET_CHARS = 17_200
 
 

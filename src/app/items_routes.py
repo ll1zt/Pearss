@@ -34,8 +34,10 @@ from adapters.repository import (
     get_item,
     mark_published,
     query_items,
+    read_states_for,
     requeue_enrichment,
     timestamp,
+    upsert_read_state,
 )
 from adapters.repository import (
     delete_items as repository_delete_items,
@@ -55,6 +57,7 @@ from core.enrichment import EnrichmentStatus
 from core.enums import PublishStatus
 from core.models import Item
 from core.normalize import canonicalize_url
+from core.reader_state import TagChange, merge_state
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
@@ -422,12 +425,7 @@ def read_item(
         # A pending item is reported absent rather than as forbidden: saying
         # "this exists but you may not see it" would leak the gate's decisions
         # to a caller who has no business knowing them.
-        raise api_error(
-            status_code=404,
-            code="item_not_found",
-            message=f"No item with id {item_id!r}.",
-            suggestion="Search items to find the intended id.",
-        )
+        raise _item_not_found(item_id)
     return {name: v for name, v in _field_map(item).items() if name in selected}
 
 
@@ -462,12 +460,7 @@ def list_item_enrichments(
     offset = decode_cursor(cursor)
     with request.app.state.session_factory() as session:
         if get_item(session, item_id) is None:
-            raise api_error(
-                status_code=404,
-                code="item_not_found",
-                message=f"No item with id {item_id!r}.",
-                suggestion="Search items to find the intended id.",
-            )
+            raise _item_not_found(item_id)
         query = sa.select(ItemEnrichment).where(ItemEnrichment.item_id == item_id)
         if status is not None:
             query = query.where(ItemEnrichment.status == status)
@@ -500,12 +493,7 @@ def _neighbours(
         if item is None or item.publish_status is PublishStatus.PENDING:
             # Absent rather than forbidden, exactly as the body endpoint reports
             # it: "this exists but you may not see it" would leak the gate.
-            raise api_error(
-                status_code=404,
-                code="item_not_found",
-                message=f"No item with id {item_id!r}.",
-                suggestion="Search items to find the intended id.",
-            )
+            raise _item_not_found(item_id)
         found = finder(session, item_id=item_id, tenant_id=SINGLE_TENANT, limit=limit)
         if found is None:
             code, message, suggestion = absent
@@ -603,6 +591,136 @@ def retry_enrichment(
     return JSONResponse(status_code=200, content=payload)
 
 
+class ReadStatePatch(BaseModel):
+    """What a caller may change about its own consumption state.
+
+    Three-valued on purpose: an absent field means "leave this alone", which is
+    what a PATCH promises and what lets a client star an item without claiming
+    to know whether it is read.
+    """
+
+    is_read: bool | None = None
+    is_starred: bool | None = None
+
+
+def _read_state_payload(item_id: str, state: Any) -> dict[str, Any]:
+    """One consumption-state receipt, in the shape both methods return."""
+    return {
+        "item_id": item_id,
+        # No row is unread and unstarred (the table stores only what a client
+        # reported), so an absent row answers with the same booleans as a row
+        # that says false -- and `updated_at: None` is what tells them apart.
+        "is_read": False if state is None else bool(state.is_read),
+        "is_starred": False if state is None else bool(state.is_starred),
+        "updated_at": (
+            None
+            if state is None or state.updated_at is None
+            else _iso(state.updated_at)
+        ),
+        "correlation_id": current_correlation_id(),
+    }
+
+
+@router.get("/items/{item_id}/read-state", operation_id="getItemReadState")
+def read_item_read_state(
+    request: Request,
+    item_id: str = Path(min_length=1, max_length=64),
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """This item's consumption state, in first-class terms.
+
+    Read state is what a Reader *writes*, and until now the only vocabulary for
+    writing it was Google Reader's: an agent had no way to mark an item read, and
+    a client with no interest in that dialect had none either (issue #196).
+
+    The gate does not apply here, deliberately: this answer carries no content,
+    and consumption state is the caller's own record rather than the item's --
+    it is also the one thing the Reader layer needs to be true for an item it
+    cannot yet show. The item still has to exist (404 otherwise), because a
+    read state for an id nobody has is not a state.
+    """
+    del _
+    with request.app.state.session_factory() as session:
+        if get_item(session, item_id) is None:
+            raise _item_not_found(item_id)
+        states = read_states_for(session, [item_id], tenant_id=SINGLE_TENANT)
+    return _read_state_payload(item_id, states.get(item_id))
+
+
+@router.patch("/items/{item_id}/read-state", operation_id="patchItemReadState")
+def patch_item_read_state(
+    request: Request,
+    body: ReadStatePatch,
+    item_id: str = Path(min_length=1, max_length=64),
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Mark one item read, starred, or both -- without touching the item.
+
+    The merge is the same domain function the Reader layer uses
+    (`core.reader_state.merge_state`), so "star this" means the same thing
+    whichever vocabulary asked, and a field the caller did not mention keeps its
+    value. That is also what makes the write idempotent: repeating it produces
+    the same state, and the second call costs an insert that updates a row to
+    what it already says.
+
+    Item facts are not part of this write and cannot be: `content_hash`, `guid`,
+    `publish_status` and `content_ref` are columns of a different table, and a
+    published item's content is frozen (ADR 0008).
+    """
+    if body.is_read is None and body.is_starred is None:
+        raise api_error(
+            status_code=400,
+            code="empty_patch",
+            message="Nothing to change: is_read and is_starred are both absent.",
+            suggestion=(
+                "Pass is_read, is_starred, or both. An omitted field keeps its "
+                "current value."
+            ),
+        )
+
+    endpoint = f"PATCH /v1/items/{item_id}/read-state"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        if get_item(session, item_id) is None:
+            raise _item_not_found(item_id)
+        current = read_states_for(session, [item_id], tenant_id=SINGLE_TENANT).get(
+            item_id
+        )
+        merged = merge_state(
+            item_id=item_id,
+            current=current,
+            change=TagChange(is_read=body.is_read, is_starred=body.is_starred),
+            at=datetime.now(UTC),
+        )
+        upsert_read_state(session, merged, tenant_id=SINGLE_TENANT)
+        session.commit()
+
+    payload = _read_state_payload(item_id, merged)
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
+def _item_not_found(item_id: str) -> Exception:
+    return api_error(
+        status_code=404,
+        code="item_not_found",
+        message=f"No item with id {item_id!r}.",
+        suggestion="Search items to find the intended id.",
+    )
+
+
 @router.get("/items/{item_id}/related", operation_id="listRelatedItems")
 def list_related_items(
     request: Request,
@@ -698,12 +816,7 @@ def read_item_body(
             # A pending item is reported absent rather than as forbidden:
             # saying "this exists but you may not see it" would leak the
             # gate's decisions to a caller who has no business knowing them.
-            raise api_error(
-                status_code=404,
-                code="item_not_found",
-                message=f"No item with id {item_id!r}.",
-                suggestion="Search items to find the intended id.",
-            )
+            raise _item_not_found(item_id)
         if not item.content_ref:
             raise api_error(
                 status_code=404,
