@@ -233,6 +233,12 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # read tool would have cost ~400 characters, and the queue's four counts plus a
 # derived rate ride along in an answer the tool already gives. The surface lands
 # at 16,882 and 17,200 leaves the next tool the same ~300 to argue for.
+#
+# #195 spent most of that: `retry_enrichments` gained `enrichment_id` beside
+# `source_id` (+134, to 17,016) instead of a second tool for the same intent at
+# a different granularity, which is the trade this budget is for. What is left
+# (~180) is not enough for the read-state pair #196 needs, so that change has to
+# trim descriptions or argue the number up in its own diff.
 SURFACE_BUDGET_CHARS = 17_200
 
 

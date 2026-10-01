@@ -537,25 +537,48 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Requeue failed processing-chain rows for one source (e.g. after "
-            "fixing the provider key). Requires confirmation: rows restart "
-            "the attempt budget and the provider charges again."
+            "Requeue failed processing-chain rows (e.g. after fixing the "
+            "provider key). Requires confirmation: the attempt budget restarts "
+            "and the provider charges again. Pass enrichment_id to retry one "
+            "row, or source_id for every failed row of that source."
         ),
     )
     async def retry_enrichments(
-        source_id: str,
         ctx: Context,
         confirmed: Annotated[
             Confirmation | None, Resolve(_retry_enrichments_confirmation)
         ],
+        enrichment_id: str = "",
+        source_id: str = "",
     ) -> dict[str, Any]:
-        fields = _retry_enrichments_fields(source_id)
+        """One row, or one source's failed rows.
+
+        Two granularities of one intent, so one tool: a source can hold 23
+        permanently failed products while the caller wants three retried, and
+        `list_enrichments` already returns the ids that name one row.
+        """
+        fields = _retry_enrichments_fields(enrichment_id, source_id)
+        if enrichment_id:
+            path = f"/v1/enrichments/{enrichment_id}:retry"
+        elif source_id:
+            path = f"/v1/sources/{source_id}:retry-enrichments"
+        else:
+            # Not a protocol error: the model can fix this with a tool it
+            # already has, and the message says which call returns the id.
+            return {
+                "error": "missing_target",
+                "suggestion": (
+                    "Pass enrichment_id (one row) or source_id (every failed "
+                    "row of that source)."
+                ),
+                "next_actions": ["list_enrichments", "list_sources"],
+            }
         return await _guarded_write(
             core,
             confirmed=confirmed,
             fields=fields,
             method="POST",
-            path=f"/v1/sources/{source_id}:retry-enrichments",
+            path=path,
         )
 
     @server.tool(

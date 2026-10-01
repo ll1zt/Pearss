@@ -1464,3 +1464,119 @@ async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
     assert source_id in [row["id"] for row in listed["data"]]
 
     await _call(mcp_url, "remove_source", {"source_id": source_id}, confirm=True)
+
+
+# --------------------------------------------------------------------------
+# AC-201: the row-level retry through the tool face
+# --------------------------------------------------------------------------
+
+
+def _seed_retry_rows(
+    env: dict[str, str], *, slug: str, statuses: list[str]
+) -> list[str]:
+    """One item with one chain row per status, written through the ORM.
+
+    The same shape the API-level scenarios seed: there is no public call that
+    creates a failed product, and what is needed here is that state.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+    from adapters.db_models import Item as ItemRow
+    from adapters.db_models import ItemEnrichment
+    from adapters.repository import timestamp
+
+    engine = create_engine_for(env["PEARSS_DATABASE_URL"])
+    now = timestamp(datetime.now(UTC))
+    ids: list[str] = []
+    try:
+        with _sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add(
+                ItemRow(
+                    id=f"{slug}-item",
+                    source_id="src-1",
+                    guid=f"{slug}-guid",
+                    content_hash=f"{slug}-hash",
+                    title="Retry me",
+                    url=f"https://blog.example.com/{slug}",
+                    publish_status="ready",
+                    tenant_id="default",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            for index, status in enumerate(statuses):
+                enrichment_id = f"{slug}-enr-{index}"
+                ids.append(enrichment_id)
+                session.add(
+                    ItemEnrichment(
+                        id=enrichment_id,
+                        item_id=f"{slug}-item",
+                        plugin_id="translate",
+                        plugin_version="0.1.0",
+                        kind="translation",
+                        lang="en",
+                        input_hash=f"{slug}-hash-{index}",
+                        status=status,
+                        error_class=None if status == "queued" else "auth",
+                        detail=None if status == "queued" else f"no ({index})",
+                        attempt_count=0 if status == "queued" else 3,
+                        tenant_id="default",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            session.commit()
+    finally:
+        engine.dispose()
+    return ids
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_row_level_retry_requeues_exactly_one(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """The tool's second granularity: one row, named by its id.
+
+    `retry_enrichments` was source-only, so 23 permanently failed products with
+    three worth retrying had no expression (issue #195). The other row is
+    asserted by value: a requeue that ignored the id would change it too and
+    still look like a success.
+    """
+    first, second = _seed_retry_rows(
+        mcp_env, slug="mcp-retry", statuses=["failed", "failed"]
+    )
+
+    result = await _call(
+        mcp_url, "retry_enrichments", {"enrichment_id": second}, confirm=True
+    )
+
+    assert result.get("error") is None, result
+    assert result["enrichment_id"] == second
+    assert result["status"] == "queued"
+    assert result["requeued"] == 1
+
+    listed = await _call(mcp_url, "list_enrichments", {"item_id": "mcp-retry-item"})
+    by_id = {row["id"]: row for row in listed["data"]}
+    assert by_id[second]["status"] == "queued"
+    assert by_id[second]["attempt_count"] == 0
+    assert by_id[second]["detail"] is None
+    assert by_id[first]["status"] == "failed"
+    assert by_id[first]["attempt_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_the_row_level_retry_says_what_it_needs(mcp_url: str) -> None:
+    """No target is a fixable mistake, not a protocol error.
+
+    The answer is a *string* code with the tools that supply an id, so a caller
+    that forgot the target can fix it with a call it already has -- and the
+    error shape is the one `_error_from` uses rather than a second, nested one
+    (issue #216).
+    """
+    result = await _call(mcp_url, "retry_enrichments", {}, confirm=True)
+
+    assert isinstance(result.get("error"), str), result
+    assert result["error"] == "missing_target"
+    assert "list_enrichments" in result["next_actions"]

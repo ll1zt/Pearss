@@ -1597,6 +1597,70 @@
         ]
       }
     },
+    "/v1/enrichments/{enrichment_id}:retry": {
+      "post": {
+        "description": "Requeue one failed chain row -- and only that row.\n\nThe granularity the source-scoped route lacks. A source can hold 23\npermanently failed products while the caller wants three of them retried\n(measured: that was all-or-nothing), and the row is addressable --\n`list_enrichments` returns its id -- so the command can name it.\n\nOnly `failed` rows are requeued. A `queued` or `running` row is already on\nits way, so this answers the same 200 with `requeued: 0`: the request means\n\"make sure this row will be attempted\", and that is already true. A\n`succeeded` row is a 409 -- its product exists, and producing it again is a\ndifferent command -- while an id naming nothing is a 404.\n\nWhat a requeue *means* lives in one place (`requeue_enrichment`), which is\nalso what the source-scoped route calls once per failed row: the attempt\nbudget restarts and the stale failure is cleared, while `input_hash` stays,\nbecause the content has not changed.",
+        "operationId": "retryEnrichment",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "enrichment_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Enrichment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Retry Enrichment",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
     "/v1/items": {
       "get": {
         "description": "List collected items, newest first by default.\n\nTwo ways to search, and they answer different questions: `q` is a substring\nmatch on the title, and `full_text` is a real search over titles and bodies\n(ADR 0035). `full_text` with `sort=relevance` ranks by FTS5's bm25; without\nit the matches keep the time order and its keyset cursor.\n\nBodies are not included at any `fields` setting; fetch them from\n`/v1/items/{id}/body`. Pending items never appear.",

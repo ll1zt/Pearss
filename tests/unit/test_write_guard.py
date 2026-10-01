@@ -74,6 +74,8 @@ ARGUMENTS: dict[str, Any] = {
     "target_lang": "en",
     "folder": "tech",
     "source_id": "src-1",
+    # The row-level retry's target (issue #195): one chain row, or a source.
+    "enrichment_id": "enr-1",
     "status": "disabled",
     "item_ids": ["i1", "i2"],
     "since": "2026-01-01T00:00:00Z",

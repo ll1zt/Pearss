@@ -11,9 +11,10 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
@@ -221,6 +222,69 @@ def completion_rate_per_min(
         ).scalar_one()
     )
     return round(finished / window_minutes, 3)
+
+
+def enrichment_status(session: Session, enrichment_id: str) -> str | None:
+    """One row's status, or None when no row has that id."""
+    return session.execute(
+        select(ItemEnrichment.status).where(ItemEnrichment.id == enrichment_id)
+    ).scalar_one_or_none()
+
+
+def requeue_enrichment(session: Session, enrichment_id: str) -> bool:
+    """Put one failed row back in the queue. True if it was failed.
+
+    The only writer of "this row becomes retryable": the source-scoped route
+    calls it once per failed row instead of carrying its own UPDATE, so the two
+    granularities cannot drift in what a requeue *means*. It means the attempt
+    budget restarts and the stale failure is cleared -- the operator or agent
+    has decided the failure is worth another pass -- while `input_hash` stays,
+    because the content has not changed.
+
+    A row that is not failed is left alone: requeueing a `running` row would
+    hand the same product to two workers, and a `succeeded` row already has one.
+    """
+    # session.execute is typed as returning Result[Any], but a DML statement
+    # yields a CursorResult at runtime, which is where rowcount lives (the same
+    # cast work.py and feed.py use for the same reason).
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            update(ItemEnrichment)
+            .where(
+                ItemEnrichment.id == enrichment_id,
+                ItemEnrichment.status == EnrichmentStatus.FAILED.value,
+            )
+            .values(
+                status=EnrichmentStatus.QUEUED.value,
+                attempt_count=0,
+                next_attempt_at=None,
+                error_class=None,
+                detail=None,
+                updated_at=timestamp(datetime.now(UTC)),
+            )
+        ),
+    )
+    return int(result.rowcount or 0) > 0
+
+
+def failed_enrichment_ids_for_source(session: Session, *, source_id: str) -> list[str]:
+    """The failed chain rows of one source, oldest first.
+
+    Selected rather than updated in bulk so the source-scoped requeue is a loop
+    over `requeue_enrichment` -- one meaning of "requeue", N callers.
+    """
+    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    return list(
+        session.execute(
+            select(ItemEnrichment.id)
+            .where(
+                ItemEnrichment.item_id.in_(item_ids),
+                ItemEnrichment.status == EnrichmentStatus.FAILED.value,
+            )
+            .order_by(ItemEnrichment.updated_at, ItemEnrichment.id)
+        ).scalars()
+    )
 
 
 def failed_enrichments_for_source(

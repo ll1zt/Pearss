@@ -34,6 +34,7 @@ from adapters.repository import (
     create_source,
     create_work,
     derive_source_id,
+    failed_enrichment_ids_for_source,
     failed_enrichments_for_source,
     finish_work,
     get_source,
@@ -41,6 +42,7 @@ from adapters.repository import (
     list_job_runs,
     list_sources,
     parse_chain,
+    requeue_enrichment,
     timestamp,
 )
 from adapters.repository import (
@@ -1381,36 +1383,17 @@ def retry_source_enrichments(
     if replayed is not None:
         return replayed
 
-    from sqlalchemy import select as _select
-    from sqlalchemy import update as _update
-
-    from adapters.db_models import Item as _ItemRow
-    from adapters.db_models import ItemEnrichment
-
     with factory() as session:
         _require_source(session, source_id)
-        result = session.execute(
-            _update(ItemEnrichment)
-            .where(
-                ItemEnrichment.status == "failed",
-                ItemEnrichment.item_id.in_(
-                    _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
-                ),
+        # Select, then requeue one row at a time through the same function the
+        # row-level endpoint uses: two granularities, one meaning of "requeue".
+        requeued = sum(
+            1
+            for enrichment_id in failed_enrichment_ids_for_source(
+                session, source_id=source_id
             )
-            .values(
-                status="queued",
-                # The content has not changed, so keep input_hash; but the
-                # attempt budget restarts on an explicit re-trigger — the
-                # operator has decided the failure is worth another pass.
-                # The stale failure's error fields are cleared with it.
-                attempt_count=0,
-                next_attempt_at=None,
-                error_class=None,
-                detail=None,
-                updated_at=timestamp(_now()),
-            ),
+            if requeue_enrichment(session, enrichment_id)
         )
-        requeued = int(result.rowcount or 0)
         session.commit()
 
     payload: dict[str, Any] = {
