@@ -664,10 +664,6 @@ DEFAULT_FETCH_ITEMS_BATCH: Final = 20
 MAX_FETCH_ITEMS_BATCH: Final = 50
 DEFAULT_FETCH_ITEMS_INTERVAL: Final = 2.0
 MAX_FETCH_ITEMS_INTERVAL: Final = 60.0
-# One request's worth of work. The whole list runs inside the HTTP request, so
-# a caller with more addresses sends several requests rather than holding one
-# open; the caller's own batch size and interval bound the wall-clock cost.
-MAX_FETCH_ITEMS: Final = 200
 
 
 class FetchItemAction(StrEnum):

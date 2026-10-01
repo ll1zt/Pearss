@@ -76,6 +76,7 @@
 | AC-172..175 | #170 按地址抓取入库（同源校验先于抓取 / 非本源拒绝且不落库 / 一条失败不影响其余 / 节拍夹取与幂等重放） | issue #170 | 已合并 | `tests/integration/test_fetch_items.py`、`tests/e2e/test_failure_paths.py` |
 | AC-176 | #171 MCP `fetch_source_items`：一次确认覆盖整批，且指纹覆盖 URL 列表（改任一 URL 即变） | issue #171 | 已合并 | `tests/integration/test_mcp_work_tools.py` |
 | AC-193..194 | #191 `fetch_source_items` 句柄化：响应为 `work_id` + counts 且**大小不随地址数变化**（10 个与 40 个地址字节等长）／确认覆盖 targets 与 params（换掉参数即失效且不落 work 行）；新增读侧 `get_work`、`work_units`（逐条账本 + outcome 过滤 + 错误码沿用 /v1） | issue #191 | 已合并 | `tests/integration/test_mcp_work_tools.py` |
+| AC-195..196 | #192 旧 `:fetch-items` 降级为受限兼容壳：小批（≤ 20）保持既有同步逐条语义**且**把同一次运行补记进账本（终态 work + 每地址一条 unit，永不占用在飞命令索引）；超限 422 且错误体指向 `/v1/works`（不再劝调用方切批——切批正是丢结果的那种投递） | issue #192 | 已合并 | `tests/integration/test_fetch_items.py` |
 | AC-177..178 | #174 长度度量唯一（`adapters/article.plain_length`）：升级判定按**可见文本**（实体编码不改变判定 / 不拿更短的正文换掉更长摘要） | issue #174 | 已合并 | `src/plugins/collectors/rss/test_wordpress.py`、`tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
 | AC-179 | #179 模型不可用时用例 skip 而不是失败：「不存在」与「不可读」得同一答案（reason 指向 `just fetch-model`），真实可读时照常执行 | issue #179 | 已合并 | `tests/integration/test_model_weights.py`、`tests/integration/test_embedding_semantics.py` |
 | AC-180..182 | #187 work/work_unit 持久层：迁移双向往返、`(work_id,target)` 唯一约束由 DB 强制、counts 由账本折叠（无计数列） | issue #187 | 已合并 | `tests/integration/test_work_ledger.py`、`tests/unit/test_work_fold.py` |

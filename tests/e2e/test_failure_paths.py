@@ -102,7 +102,7 @@ def _count(session_factory: sessionmaker[Session], table: str) -> int:
     `FROM` clause; the allowlist is what keeps that from being string
     construction, and every caller passes a literal defined here.
     """
-    if table not in {"source", "item", "audit_log"}:
+    if table not in {"source", "item", "audit_log", "work", "work_unit"}:
         raise ValueError(f"unexpected table {table!r}")
     if table == "audit_log":
         # Only the audit table has a writer behind a queue to wait for; a
@@ -606,3 +606,7 @@ async def test_an_address_off_the_source_host_writes_nothing(
     assert result["action"] == "rejected"
     assert result["error_class"] == "structure_changed"
     assert _count(session_factory, "item") == 0
+    # The refusal is recorded rather than silent: the compat run leaves a work
+    # and one unit for the address (ADR 0046), while the item store stays empty.
+    assert _count(session_factory, "work") == 1
+    assert _count(session_factory, "work_unit") == 1

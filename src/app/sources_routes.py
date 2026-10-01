@@ -26,10 +26,14 @@ from sqlalchemy.orm import Session
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
 from adapters.repository import (
+    append_unit,
     backlog_for_source,
+    counts_for_work,
     create_source,
+    create_work,
     derive_source_id,
     failed_enrichments_for_source,
+    finish_work,
     get_source,
     job_for_source,
     list_job_runs,
@@ -65,6 +69,7 @@ from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
 from core.tenancy import SINGLE_TENANT
+from core.work import command_fingerprint, terminal_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -764,7 +769,18 @@ def add_sources_batch(
     return JSONResponse(status_code=200, content=payload)
 
 
-@router.post("/sources/{source_id}:fetch-items", operation_id="fetchSourceItems")
+# This endpoint answers with one result per address, so its ceiling is what a
+# *response* can carry, not what the server accepts: the MCP read tools default
+# to 20 rows, and a list bigger than that belongs in a work, where a gateway
+# timeout cannot lose it (ADR 0046).
+MAX_COMPAT_FETCH_ITEMS: Final = 20
+
+
+@router.post(
+    "/sources/{source_id}:fetch-items",
+    operation_id="fetchSourceItems",
+    deprecated=True,
+)
 def fetch_source_items(
     request: Request,
     source_id: str,
@@ -773,6 +789,16 @@ def fetch_source_items(
     key: str = Depends(idempotency_key),
 ) -> JSONResponse:
     """Fetch a caller's addresses into one source, reporting each outcome.
+
+    **Deprecated**: the list runs inside this request and the answer carries one
+    result per address, so the response's size follows its input. Two hundred
+    addresses time out at the gateway while the deployment keeps fetching, and
+    the results die with the response that carried them. `POST /v1/works` with
+    `kind=fetch` is the replacement -- it answers with a handle, and
+    `GET /v1/works/{id}/units` is where the per-address results live, so they
+    survive a timeout and can be re-read. This endpoint stays for callers that
+    already use it, limited to `MAX_COMPAT_FETCH_ITEMS` addresses: a batch small
+    enough to answer inline.
 
     The service side of content-level discovery: the caller (an agent, usually)
     enumerates *addresses* -- which this deployment cannot do without crawling
@@ -783,24 +809,34 @@ def fetch_source_items(
     the source is an `agent` source holding content from outside this
     deployment's reach.
 
-    Answers 200 with per-address results: the body is a report about a list, and
-    some of it may have failed. Two refusals happen before anything is fetched,
-    because nothing about the list could have made them work: a collector
-    without the item capability (422), and a list over the request ceiling
-    (422).
+    Two refusals happen before anything is fetched, because nothing about the
+    list could have made them work: a collector without the item capability
+    (422), and a list over this endpoint's ceiling (422, pointing at
+    `/v1/works`).
+
+    The run is recorded in the work ledger before the response is built, so
+    "what happened to this address?" stays answerable later even though this
+    response is itself a report. That work is written **terminal** -- by then
+    the fetch has happened -- so it never occupies the live-command index and
+    no worker can pick it up; a compat run that dies mid-flight therefore
+    leaves no row, which is one more reason to move to `/v1/works`, where the
+    row is written before the fetch.
     """
     endpoint = f"POST /v1/sources/{source_id}:fetch-items"
-    if len(body.urls) > pipeline.MAX_FETCH_ITEMS:
+    if len(body.urls) > MAX_COMPAT_FETCH_ITEMS:
         raise api_error(
             status_code=422,
             code="batch_too_large",
             message=(
-                f"At most {pipeline.MAX_FETCH_ITEMS} addresses may be fetched in "
-                f"one request; this one has {len(body.urls)}."
+                f"This endpoint answers with one result per address, so it "
+                f"accepts at most {MAX_COMPAT_FETCH_ITEMS} addresses; this "
+                f"list has {len(body.urls)}."
             ),
             suggestion=(
-                f"Split the list into batches of {pipeline.MAX_FETCH_ITEMS} and "
-                "retry -- each request is paced on its own."
+                "POST the whole list to /v1/works with kind=fetch and read the "
+                "per-address results from GET /v1/works/{id}/units: the work "
+                "keeps running after the request returns, and a timeout cannot "
+                "lose the results."
             ),
         )
 
@@ -848,6 +884,45 @@ def fetch_source_items(
             min_interval_seconds=body.min_interval_seconds,
             registry=registry,
         )
+        # The run is recorded before the report is built: the ledger is the
+        # provenance (ADR 0046), and this is what keeps "what happened to this
+        # address?" answerable after the response is gone. Created and closed
+        # in the same transaction -- the fetch has already happened -- so it is
+        # never visible as a live command.
+        params: dict[str, Any] = {"source_id": source_id}
+        if body.batch_size:
+            params["batch_size"] = body.batch_size
+        if body.min_interval_seconds:
+            params["min_interval_seconds"] = body.min_interval_seconds
+        work = create_work(
+            session,
+            kind="fetch",
+            targets=list(body.urls),
+            params=params,
+            fingerprint=command_fingerprint(
+                kind="fetch", targets=list(body.urls), params=params
+            ),
+            tenant_id=SINGLE_TENANT,
+            correlation_id=current_correlation_id(),
+        )
+        for item in outcome.results:
+            append_unit(
+                session,
+                work_id=work.id,
+                target=item.url,
+                # One vocabulary to the other: the report's word for what
+                # happened, mapped where the pipeline defines that mapping.
+                outcome=pipeline.outcome_for(item.action),
+                error_class=(
+                    None if item.error_class is None else ErrorClass(item.error_class)
+                ),
+                detail=item.detail or "",
+                ref=item.item_id,
+            )
+        finish_work(
+            session, work.id, status=terminal_status(counts_for_work(session, work.id))
+        )
+        session.commit()
 
     payload: dict[str, Any] = {
         "requested": outcome.requested,
