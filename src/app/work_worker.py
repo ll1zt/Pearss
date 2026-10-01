@@ -27,13 +27,16 @@ deployment's interval is a floor under them.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 
 import httpx
+from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as SourceRow
@@ -42,22 +45,31 @@ from adapters.repository import (
     chain_for_source,
     claim_next_work,
     counts_for_work,
+    create_source,
     delete_items,
+    derive_source_id,
     enqueue_chain,
     enrichment_status,
     finish_work,
     get_item,
     get_source,
+    parse_chain,
     requeue_enrichment,
+    timestamp,
     units_for_work,
 )
 from app import collector_registry
-from app.collector_registry import CollectorRegistry
+from app.collector_registry import CollectorRegistry, infer_source_type
 from app.collector_registry import Registration as CollectorRegistration
+from app.ingest import IngestItem, ingest_draft
 from app.liveness_watch import LoopWatch, always_alive
-from app.pipeline import fetch_one, fetch_pacing, outcome_for
+from app.pipeline import fetch_one, fetch_pacing, normalise_and_store, outcome_for
 from core.enrichment import EnrichmentSpec, EnrichmentStatus
-from core.enums import ErrorClass, UnitOutcome
+from core.enums import ErrorClass, SourceType, UnitOutcome
+from core.folders import DEFAULT_FOLDER
+from core.models import schedule_policy_from_json, schedule_policy_to_json
+from core.normalize import DedupeAction, source_canonical_key
+from core.tenancy import SINGLE_TENANT
 from core.work import WorkRecord, terminal_status
 
 LOGGER = logging.getLogger(__name__)
@@ -331,6 +343,208 @@ class RetryExecutor(KindExecutor):
         return UnitResult(outcome=UnitOutcome.OK, detail="requeued")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SubscribeRuntime(WorkRuntime):
+    """A subscription batch: the shared options, resolved and validated once.
+
+    "Shared" is the point. A policy or a chain this deployment cannot use is not
+    a per-URL accident, so it refuses the whole work in `prepare` rather than
+    failing two hundred targets one at a time.
+    """
+
+    policy_json: str
+    requested_type: str
+    folder: str
+    trust_level: str
+    parser_plugin_id: str
+    chain_json: str | None
+    target_lang: str
+    at: str
+    registry: CollectorRegistry
+
+
+class SubscribeExecutor(KindExecutor):
+    """URLs become sources (issue #220).
+
+    The per-URL half of `POST /v1/sources:batch`, with the same division of
+    blame: the options are judged once for the work, while each URL is judged
+    alone -- refusing a whole list over one typo is the loop the batch endpoint
+    exists to break. A URL that is already subscribed is `skipped`, because the
+    end state the caller asked for is true.
+    """
+
+    def prepare(
+        self, session: Session, work: WorkRecord, registry: CollectorRegistry
+    ) -> str | SubscribeRuntime:
+        del session
+        params = work.params
+        raw_policy = params.get("schedule_policy")
+        if not isinstance(raw_policy, (str, dict)):
+            return "the work carries no schedule_policy (a subscription needs one)"
+        try:
+            policy_json = schedule_policy_to_json(schedule_policy_from_json(raw_policy))
+        except (ValueError, TypeError) as exc:
+            return f"unusable schedule_policy: {exc}"
+
+        requested_type = str(params.get("type") or "auto").strip().lower()
+        if requested_type not in {"auto", "rss", "web", "agent"}:
+            return f"unsupported source type {requested_type!r}"
+
+        target_lang = str(params.get("target_lang") or "")
+        chain = params.get("pipeline_chain") or None
+        chain_json: str | None = None
+        if chain:
+            # Same gate-time guard as the endpoint: a chain naming a processor
+            # this deployment cannot run is refused before any source exists.
+            from app.enrichment_worker import registered_processor_ids
+
+            try:
+                parse_chain(
+                    json.dumps(chain),
+                    target_lang=target_lang,
+                    known_plugins=registered_processor_ids(),
+                )
+            except (ValueError, KeyError) as exc:
+                return f"unusable pipeline_chain: {exc}"
+            chain_json = json.dumps(chain)
+
+        raw_trust = str(params.get("trust_level") or "standard")
+        return SubscribeRuntime(
+            policy_json=policy_json,
+            requested_type=requested_type,
+            folder=str(params.get("folder") or DEFAULT_FOLDER),
+            trust_level=raw_trust,
+            parser_plugin_id=str(params.get("parser_plugin_id") or ""),
+            chain_json=chain_json,
+            target_lang=target_lang,
+            at=timestamp(datetime.now(UTC)),
+            registry=registry,
+        )
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: SubscribeRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        del work, client
+        try:
+            source_type = (
+                infer_source_type(target, runtime.registry)
+                if runtime.requested_type == "auto"
+                else runtime.requested_type
+            )
+            canonical = source_canonical_key(source_type=source_type, url=target)
+        except ValueError as exc:
+            # This URL alone: the rest of the list is still subscribed.
+            return UnitResult(
+                outcome=UnitOutcome.FAILED,
+                error_class=ErrorClass.PARSE,
+                detail=str(exc),
+            )
+
+        source_id = derive_source_id(
+            tenant_id=SINGLE_TENANT,
+            source_type=source_type,
+            canonical_url=canonical,
+        )
+        existed = session.get(SourceRow, source_id) is not None
+        create_source(
+            session,
+            source_type=source_type,
+            url=target,
+            canonical_url=canonical,
+            schedule_policy=runtime.policy_json,
+            tenant_id=SINGLE_TENANT,
+            trust_level=runtime.trust_level,
+            parser_plugin_id=runtime.parser_plugin_id,
+            pipeline_chain=runtime.chain_json,
+            target_lang=runtime.target_lang,
+            folder=runtime.folder,
+            at=runtime.at,
+        )
+        return UnitResult(
+            outcome=UnitOutcome.SKIPPED if existed else UnitOutcome.OK,
+            detail="already subscribed" if existed else f"subscribed as {source_type}",
+            ref=source_id,
+        )
+
+
+class IngestExecutor(KindExecutor):
+    """Agent-submitted content (issue #220), one target at a time.
+
+    A target is one item as canonical JSON. The validation and the identity rule
+    are the endpoint's (`app.ingest`, shared on purpose: two copies would drift
+    into two identities for the same content), and the write goes through
+    `normalise_and_store` -- the same call a collector's parsed output takes,
+    with the same sanitising, six-way dedupe, gate and index.
+    """
+
+    def prepare(
+        self, session: Session, work: WorkRecord, registry: CollectorRegistry
+    ) -> str | SourceRuntime:
+        resolved = _source_runtime(session, work, registry)
+        if isinstance(resolved, str):
+            return resolved
+        if resolved.source.type != SourceType.AGENT.value:
+            return (
+                f"source {resolved.source.id!r} is {resolved.source.type!r}; only "
+                "agent sources accept pushed items"
+            )
+        return resolved
+
+    def run(
+        self,
+        session: Session,
+        work: WorkRecord,
+        target: str,
+        *,
+        runtime: SourceRuntime,
+        client: httpx.Client,
+    ) -> UnitResult:
+        del work, client
+        try:
+            item = IngestItem.model_validate_json(target)
+        except ValidationError as exc:
+            return UnitResult(
+                outcome=UnitOutcome.FAILED,
+                error_class=ErrorClass.PARSE,
+                detail=(
+                    f"not a usable item: {exc.error_count()} validation error(s), "
+                    f"first: {exc.errors()[0].get('loc')}"
+                ),
+            )
+        draft = ingest_draft(
+            item,
+            source_id=runtime.source.id,
+            source_url=runtime.source.canonical_url,
+        )
+        ingested = normalise_and_store(
+            session,
+            [draft],
+            tenant_id=runtime.source.tenant_id,
+            chain=runtime.chain,
+        )
+        [entry] = ingested
+        # Written versus "already there": the first is work done, the second is
+        # the rule reporting that the corpus already holds this article. Both
+        # carry the dedupe's own reason, which is what a caller needs to tell
+        # them apart without reading the store.
+        written = entry.outcome.action in (
+            DedupeAction.INSERT,
+            DedupeAction.INSERT_RELATED,
+            DedupeAction.UPDATE_PENDING,
+        )
+        return UnitResult(
+            outcome=UnitOutcome.OK if written else UnitOutcome.SKIPPED,
+            detail=entry.outcome.reason or ("stored" if written else "already present"),
+            ref=entry.result.item.id,
+        )
+
+
 # One entry per kind this host can execute. Adding one is a deliberate act: the
 # claim filters on this map's keys, so a kind without an executor waits instead
 # of being claimed and failed.
@@ -339,6 +553,8 @@ EXECUTORS: Final[dict[str, KindExecutor]] = {
     "delete": DeleteExecutor(),
     "enrich": EnrichExecutor(),
     "retry": RetryExecutor(),
+    "subscribe": SubscribeExecutor(),
+    "ingest": IngestExecutor(),
 }
 
 EXECUTABLE_KINDS: Final[frozenset[str]] = frozenset(EXECUTORS)

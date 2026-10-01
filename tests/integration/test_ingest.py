@@ -203,7 +203,8 @@ async def test_the_request_schema_cannot_name_a_source() -> None:
     model rather than through a request, because an extra JSON key is dropped
     by pydantic either way and would prove nothing.
     """
-    from app.ingest_routes import IngestItem, IngestRequest
+    from app.ingest import IngestItem
+    from app.ingest_routes import IngestRequest
 
     assert "source_id" not in IngestItem.model_fields
     assert "source_id" not in IngestRequest.model_fields
