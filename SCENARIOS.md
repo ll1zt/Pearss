@@ -77,6 +77,7 @@
 | AC-176 | #171 MCP `fetch_source_items`：一次确认覆盖整批，且指纹覆盖 URL 列表（改任一 URL 即变） | issue #171 | 已合并 | `tests/integration/test_mcp_fetch_source_items.py` |
 | AC-177..178 | #174 长度度量唯一（`adapters/article.plain_length`）：升级判定按**可见文本**（实体编码不改变判定 / 不拿更短的正文换掉更长摘要） | issue #174 | 已合并 | `src/plugins/collectors/rss/test_wordpress.py`、`tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
 | AC-179 | #179 模型不可用时用例 skip 而不是失败：「不存在」与「不可读」得同一答案（reason 指向 `just fetch-model`），真实可读时照常执行 | issue #179 | 已合并 | `tests/integration/test_model_weights.py`、`tests/integration/test_embedding_semantics.py` |
+| AC-180..182 | #187 work/work_unit 持久层：迁移双向往返、`(work_id,target)` 唯一约束由 DB 强制、counts 由账本折叠（无计数列） | issue #187 | 已合并 | `tests/integration/test_work_ledger.py`、`tests/unit/test_work_fold.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
