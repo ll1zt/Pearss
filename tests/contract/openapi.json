@@ -313,7 +313,7 @@
         "type": "object"
       },
       "IngestItem": {
-        "description": "One item an agent is pushing into an agent source (ADR 0022).\n\nDeliberately *not* ItemDraft, which carries `source_id`. Binding that\ndirectly is how the endpoint this replaces let a write-scoped caller\ninject items into any source, including ones it does not own. The field\nis absent here so the privilege line holds at the type level: there is no\nkey to send, so no runtime check can be forgotten.",
+        "description": "One item an agent is pushing into an agent source (ADR 0022).\n\nDeliberately *not* ItemDraft, which carries `source_id`. Binding that\ndirectly is how the endpoint this replaces let a write-scoped caller inject\nitems into any source, including ones it does not own. The field is absent\nhere so the privilege line holds at the type level: there is no key to send,\nso no runtime check can be forgotten.",
         "properties": {
           "canonical_url": {
             "default": "",
@@ -4211,7 +4211,7 @@
     },
     "/v1/works": {
       "post": {
-        "description": "Accept a batch of work; answer with a handle, not with a report.\n\nAnswers 202 rather than 200 because the work has not happened yet: it is\nqueued, and `Location` names where its status lives.\n\nA kind the deployment can execute is claimed and run. A kind it cannot\nexecute *yet* -- `subscribe` and `ingest` are accepted for the shape they\nwill have -- is recorded and left `queued`, because refusing the command\nwould throw away what the caller asked for; `GET /v1/works/{id}` is where\nthat state is visible.",
+        "description": "Accept a batch of work; answer with a handle, not with a report.\n\nAnswers 202 rather than 200 because the work has not happened yet: it is\nqueued, and `Location` names where its status lives.\n\nEvery kind this API accepts has an executor, so a submitted work is claimed\nand run. A kind a *future* deployment does not implement is still recorded\nand left `queued` rather than refused -- the command is what the caller\nasked for, and `GET /v1/works/{id}` is where that state is visible.",
         "operationId": "submitWork",
         "parameters": [
           {

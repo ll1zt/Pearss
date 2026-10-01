@@ -14,9 +14,11 @@ is the execution rather than the timing of a background loop.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -433,18 +435,18 @@ async def test_a_work_about_a_missing_source_fails_every_target_with_the_reason(
 
 
 @pytest.mark.asyncio
-async def test_a_kind_without_an_executor_waits_rather_than_failing(
+async def test_a_kind_nobody_implemented_waits_rather_than_failing(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The kinds that need domain validation belong to another change.
+    """The claim filters on the executor map, so an unknown kind waits.
 
-    `subscribe` and `ingest` are accepted by the API (the kind is known) but no
-    executor claims them yet, so a sweep leaves them queued. That is the design
-    (issue #190): a kind can be accepted before it is implemented, and the work
-    is not claimed and failed in the meantime. Their scenarios live in the issue
-    that implements them, which is why no scenario number is cited here.
+    Every kind the API accepts now has an executor, so this is about the next
+    one: a work whose kind this host cannot run is neither claimed nor failed,
+    and it stays `queued` with its targets untouched. Written through the
+    repository, because the API refuses a kind outside its own list -- which is
+    exactly why the worker needs its own guard.
     """
-    work_id = _submit(session_factory, kind="subscribe", targets=[f"{SITE}/feed"])
+    work_id = _submit(session_factory, kind="teleport", targets=["somewhere"])
 
     assert await _sweep(session_factory) == {"works": 0, "units": 0}
     with session_factory() as session:
@@ -485,3 +487,222 @@ async def test_a_resumed_pass_skips_targets_that_already_have_a_row(
     with session_factory() as session:
         assert session.get(ItemRow, "resume-a") is None
         assert session.get(ItemRow, "resume-b") is not None, "not re-executed"
+
+
+# --------------------------------------------------------------------------
+# AC-207: a subscription batch, URL by URL
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ac207_a_subscribe_work_judges_each_url_alone(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-207: usable URLs become sources, a bad one fails only itself.
+
+    The shared options are validated once for the work (a policy or chain this
+    deployment cannot use is not a per-URL accident), while each URL is judged
+    alone -- refusing a whole list over one typo is the loop the batch endpoint
+    exists to break. The already-subscribed URL is `skipped`, and the assertion
+    that it was not *touched* is the policy it still carries: `create_source`
+    returns the existing row for the same identity rather than rewriting it, and
+    a work that quietly re-subscribed it would overwrite that policy.
+    """
+    with session_factory() as session:
+        existing = create_source(
+            session,
+            source_type="rss",
+            url=f"{SITE}/already",
+            canonical_url=f"{SITE}/already",
+            schedule_policy='{"type": "fixed", "interval": "30m"}',
+            tenant_id="default",
+            at=timestamp(datetime(2026, 10, 4, 1, 0, tzinfo=UTC)),
+        )
+        session.commit()
+        existing_id = str(existing.id)
+
+    work_id = _submit(
+        session_factory,
+        kind="subscribe",
+        targets=[f"{SITE}/already", f"{SITE}/fresh", "mailto:someone@example.com"],
+        params={
+            "schedule_policy": {"type": "fixed", "interval": "1h"},
+            "type": "rss",
+        },
+    )
+    report = await _sweep(session_factory)
+
+    assert report == {"works": 1, "units": 3}
+    units = _units(session_factory, work_id)
+    assert units[f"{SITE}/already"][:3] == (
+        UnitOutcome.SKIPPED,
+        None,
+        "already subscribed",
+    )
+    assert units[f"{SITE}/already"][3] == existing_id
+    assert units[f"{SITE}/fresh"][:3] == (UnitOutcome.OK, None, "subscribed as rss")
+    assert units["mailto:someone@example.com"][0] is UnitOutcome.FAILED
+    assert units["mailto:someone@example.com"][1] is ErrorClass.PARSE
+
+    with session_factory() as session:
+        rows = session.execute(
+            sa.text("select url, schedule_policy from source order by url")
+        ).all()
+    # Compared by interval rather than by string: the row keeps whatever form it
+    # was stored in, and what this asserts is that the *existing* source was not
+    # rewritten by a work that re-subscribed it.
+    assert [(row[0], json.loads(row[1])["interval"]) for row in rows] == [
+        (f"{SITE}/already", "30m"),
+        (f"{SITE}/fresh", "1h"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_subscribe_work_with_unusable_options_fails_every_target(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Options are the work's problem, so they are refused once, with the reason.
+
+    A missing or unusable policy would otherwise fail every target with the same
+    sentence, one row at a time -- and the caller would have to read 200 rows to
+    learn one thing.
+    """
+    work_id = _submit(
+        session_factory,
+        kind="subscribe",
+        targets=[f"{SITE}/a", f"{SITE}/b"],
+        params={"schedule_policy": {"type": "fixed", "interval": "not-a-duration"}},
+    )
+
+    await _sweep(session_factory)
+
+    units = _units(session_factory, work_id)
+    assert len(units) == 2
+    assert {unit[:2] for unit in units.values()} == {
+        (UnitOutcome.FAILED, ErrorClass.STRUCTURE_CHANGED)
+    }
+    assert all("unusable schedule_policy" in str(unit[2]) for unit in units.values())
+    with session_factory() as session:
+        assert session.execute(sa.text("select count(*) from source")).scalar_one() == 0
+
+
+# --------------------------------------------------------------------------
+# AC-208: pushed content, through the one write path
+# --------------------------------------------------------------------------
+
+
+def _ingest_target(**fields: Any) -> str:
+    """One item as canonical JSON: the shape an ingest target carries."""
+    return json.dumps(fields, separators=(",", ":"), sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_ac208_an_ingest_work_stores_through_the_same_path(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-208: pushed content lands through `normalise_and_store`, once.
+
+    The reconciliation is the interesting half: the same content pushed again --
+    by a second work, i.e. through the same call the `:ingest` endpoint makes --
+    must find the row the first push stored rather than minting a second one. An
+    identity rule with two implementations is exactly how that breaks.
+    """
+    with session_factory() as session:
+        agent = create_source(
+            session,
+            source_type="agent",
+            url="agent://inbox",
+            canonical_url="agent://inbox",
+            schedule_policy='{"type": "fixed", "interval": "30m"}',
+            tenant_id="default",
+            at=timestamp(datetime(2026, 10, 4, 2, 0, tzinfo=UTC)),
+        )
+        session.commit()
+        agent_id = str(agent.id)
+
+    # A target is the item as canonical JSON, which is also the ledger's key.
+    with_url = _ingest_target(
+        external_id="pushed-1",
+        title="Pushed one",
+        canonical_url=f"{SITE}/pushed/1",
+        content="<p>First body.</p>",
+    )
+    # No usable URL: the identity is minted under agent.invalid, which is the
+    # rule both entry points share.
+    minted_target = _ingest_target(
+        external_id="pushed-2", title="Pushed two", content="<p>Two.</p>"
+    )
+    broken = "not json at all"
+
+    first = _submit(
+        session_factory,
+        kind="ingest",
+        targets=[with_url, minted_target, broken],
+        params={"source_id": agent_id},
+    )
+    report = await _sweep(session_factory)
+
+    assert report == {"works": 1, "units": 3}
+    units = _units(session_factory, first)
+    assert units[with_url][0] is UnitOutcome.OK
+    assert units[broken][0] is UnitOutcome.FAILED
+    assert units[broken][1] is ErrorClass.PARSE
+
+    with session_factory() as session:
+        rows = session.execute(
+            sa.text("select id, url, guid, content_hash from item order by url")
+        ).all()
+    # Ordered by url, which is why agent.invalid sorts first.
+    assert [row[1] for row in rows] == [
+        "https://agent.invalid/inbox/pushed-2",
+        f"{SITE}/pushed/1",
+    ]
+    stored = {row[1]: row[0] for row in rows}
+    assert units[with_url][3] == stored[f"{SITE}/pushed/1"]
+    # The detail is the dedupe's own reason (the fallback only fires when it has
+    # nothing to say), so what is pinned here is the outcome and the reference.
+    assert units[minted_target][0] is UnitOutcome.OK
+    assert units[minted_target][2]
+    assert units[minted_target][3] == stored["https://agent.invalid/inbox/pushed-2"]
+
+    # The same content again: the dedupe finds it, and the ledger says so.
+    again = _submit(
+        session_factory,
+        kind="ingest",
+        targets=[with_url],
+        params={"source_id": agent_id},
+    )
+    await _sweep(session_factory)
+
+    repeated = _units(session_factory, again)[with_url]
+    assert repeated[0] is UnitOutcome.SKIPPED
+    assert repeated[3] == stored[f"{SITE}/pushed/1"]
+    with session_factory() as session:
+        assert session.execute(sa.text("select count(*) from item")).scalar_one() == 2
+
+
+@pytest.mark.asyncio
+async def test_an_ingest_work_about_a_non_agent_source_fails_every_target(
+    session_factory: sessionmaker[Session], source_id: str
+) -> None:
+    """Pushing into an rss source would mix one origin's content into another's.
+
+    The refusal is the source's, so it is one sentence for the whole work rather
+    than a per-target accident -- the same 409 the endpoint answers, in the
+    ledger's vocabulary.
+    """
+    work_id = _submit(
+        session_factory,
+        kind="ingest",
+        targets=[_ingest_target(external_id="x", title="X", content="<p>x</p>")],
+        params={"source_id": source_id},
+    )
+
+    await _sweep(session_factory)
+
+    units = _units(session_factory, work_id)
+    [unit] = units.values()
+    assert unit[0] is UnitOutcome.FAILED and unit[1] is ErrorClass.STRUCTURE_CHANGED
+    assert "only agent sources accept pushed items" in str(unit[2])
+    with session_factory() as session:
+        assert session.execute(sa.text("select count(*) from item")).scalar_one() == 0

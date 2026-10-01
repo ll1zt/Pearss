@@ -82,11 +82,10 @@ def submit_work(
     Answers 202 rather than 200 because the work has not happened yet: it is
     queued, and `Location` names where its status lives.
 
-    A kind the deployment can execute is claimed and run. A kind it cannot
-    execute *yet* -- `subscribe` and `ingest` are accepted for the shape they
-    will have -- is recorded and left `queued`, because refusing the command
-    would throw away what the caller asked for; `GET /v1/works/{id}` is where
-    that state is visible.
+    Every kind this API accepts has an executor, so a submitted work is claimed
+    and run. A kind a *future* deployment does not implement is still recorded
+    and left `queued` rather than refused -- the command is what the caller
+    asked for, and `GET /v1/works/{id}` is where that state is visible.
     """
     endpoint = "POST /v1/works"
     if len(body.targets) > MAX_TARGETS:

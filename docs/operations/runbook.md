@@ -317,8 +317,8 @@ just work retry-failed <work_id>                                             # �
   `http://127.0.0.1:8000`，用 `PEARSS_API_URL` 指向别处。
 - 同一命令值（kind + 有序 targets + params）在 API 的幂等窗口内是**同一个作业**；窗口之后重新提交
   是新的一次运行。目标文件里的空行与 `#` 注释会被跳过。
-- `subscribe` / `ingest` 这两个 kind 已被 API 接受但**还没有执行器**（issue #220），提交后会停在
-  `queued`——`just work status` 看得到，不会静默失败。
+- 六个 kind（`fetch` / `delete` / `enrich` / `retry` / `subscribe` / `ingest`）都已有执行器。将来新增的
+  kind 若还没有执行器，提交后会停在 `queued`（不认领也不标失败）——`just work status` 看得到，不会静默失败。
 - 超时丢结果的旧形态（`:fetch-items` 一次几百个地址）已被限制为 ≤ 20 个地址的兼容壳（ADR 0046）；
   大批量一律走作业。
 
