@@ -89,6 +89,46 @@ def live_work_by_fingerprint(session: Session, fingerprint: str) -> WorkRecord |
     return None if row is None else _work_record(row)
 
 
+def claim_next_work(session: Session, *, kinds: frozenset[str]) -> WorkRecord | None:
+    """Claim the oldest work this host can execute, or None.
+
+    `kinds` is the set of executors that exist. A kind with no executor stays
+    queued rather than being claimed and failed, so submitting a `delete` work
+    before its executor ships is harmless.
+
+    `running` works are claimable too, and that is the resume path: a work whose
+    executor died mid-way keeps the ledger rows it wrote, so re-entering it
+    continues from where it stopped instead of starting over. The claim itself
+    is a conditional UPDATE, so two workers cannot both take it.
+    """
+    row = session.scalars(
+        sa.select(WorkRow)
+        .where(
+            WorkRow.kind.in_(tuple(sorted(kinds))),
+            WorkRow.status.in_((WorkStatus.QUEUED.value, WorkStatus.RUNNING.value)),
+        )
+        .order_by(WorkRow.created_at, WorkRow.id)
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    claimed = cast(
+        "CursorResult[Any]",
+        session.execute(
+            sa.update(WorkRow)
+            .where(
+                WorkRow.id == row.id,
+                WorkRow.status.in_((WorkStatus.QUEUED.value, WorkStatus.RUNNING.value)),
+            )
+            .values(status=WorkStatus.RUNNING.value)
+        ),
+    )
+    if (claimed.rowcount or 0) == 0:
+        return None
+    session.flush()
+    return work_by_id(session, row.id)
+
+
 def append_unit(
     session: Session,
     *,

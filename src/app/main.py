@@ -231,6 +231,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # (issue #61).
     scheduler.watch(worker.liveness)
 
+    # The work loop owns requested batches (ADR 0046): a submitted work is a job,
+    # and a job needs an owner. It shares the deployment's egress client (the
+    # timeouts, size caps and SSRF guard live there) and the same
+    # PEARSS_SCHEDULER_ENABLED switch as the other two loops.
+    from app.work_worker import WorkWorker
+
+    work_worker = WorkWorker(
+        app.state.session_factory,
+        client=client,
+        registry=registry,
+        watch=scheduler.liveness,
+    )
+    app.state.work_worker = work_worker
+
     async with mcp_inner.router.lifespan_context(mcp_inner):
         try:
             # Restore approved installations before egress wiring or starting jobs.
@@ -260,12 +274,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             if scheduler_enabled():
                 await scheduler.start()
                 await worker.start()
+                await work_worker.start()
             else:
                 LOGGER.info("scheduler disabled by PEARSS_SCHEDULER_ENABLED")
             yield
         finally:
             await scheduler.stop()
             await worker.stop()
+            await work_worker.stop()
             # Sandboxed children are spawned lazily and hold real processes
             # with pipes; without this they outlive a graceful shutdown and
             # are only reaped when the OS tears the host down. Stopped before
@@ -437,6 +453,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
         workers = (
             getattr(app.state, "scheduler", None),
             getattr(app.state, "enrichment_worker", None),
+            getattr(app.state, "work_worker", None),
         )
         for worker in workers:
             if worker is None:

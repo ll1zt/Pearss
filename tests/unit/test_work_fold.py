@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import pytest
 
-from core.enums import UnitOutcome
-from core.work import counts_from, work_counts
+from core.enums import UnitOutcome, WorkStatus
+from core.work import counts_from, terminal_status, work_counts
 
 pytestmark = pytest.mark.unit
 
@@ -61,3 +61,31 @@ def test_a_fully_terminated_work_has_nothing_queued() -> None:
 
     assert counts["queued"] == 0
     assert counts["skipped"] == 1 and counts["rejected"] == 1
+
+
+def test_terminal_status_is_the_fold_of_what_happened() -> None:
+    """A finished work's label is derived, never tracked.
+
+    "All of it worked / some of it worked / none of it worked" is a fact about
+    the rows the executor just appended. A status the executor wrote alongside
+    them would be a second source of truth, and the two could disagree.
+    """
+    everything = {"total": 3, "ok": 3, "skipped": 0, "rejected": 0, "failed": 0}
+    some = {"total": 3, "ok": 1, "skipped": 0, "rejected": 1, "failed": 1}
+    none = {"total": 2, "ok": 0, "skipped": 0, "rejected": 1, "failed": 1}
+
+    assert terminal_status(everything) is WorkStatus.SUCCEEDED
+    assert terminal_status(some) is WorkStatus.PARTIAL
+    assert terminal_status(none) is WorkStatus.FAILED
+
+
+def test_nothing_to_do_still_counts_as_success() -> None:
+    """`skipped` succeeded at the only thing it had to do.
+
+    A subscription work whose origin was already subscribed did what it was
+    asked; reporting it as partial would make "worked" unreadable to a caller
+    asking exactly that.
+    """
+    counts = {"total": 2, "ok": 0, "skipped": 2, "rejected": 0, "failed": 0}
+
+    assert terminal_status(counts) is WorkStatus.SUCCEEDED

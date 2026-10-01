@@ -120,3 +120,22 @@ def work_counts(
     counts["queued"] = max(0, total_targets - len(outcomes))
     counts["total"] = total_targets
     return counts
+
+
+def terminal_status(counts: Mapping[str, int]) -> WorkStatus:
+    """How a finished work should be labelled, from its counts alone.
+
+    Derived rather than tracked: "all of it worked" / "some of it worked" /
+    "none of it worked" is a fact about the ledger, and a status an executor
+    writes could disagree with the rows it just appended.
+
+    `skipped` counts as success -- there was nothing to do -- while `rejected`
+    does not: the work did not do what it was asked, which is what a caller
+    needs to see.
+    """
+    done = counts["ok"] + counts["skipped"]
+    if counts["total"] > 0 and done == counts["total"]:
+        return WorkStatus.SUCCEEDED
+    if done > 0:
+        return WorkStatus.PARTIAL
+    return WorkStatus.FAILED

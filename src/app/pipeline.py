@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -45,7 +45,7 @@ from app import collector_registry
 from app.collector_registry import CollectorRegistry
 from app.collector_registry import Registration as CollectorRegistration
 from core.enrichment import EnrichmentKind, EnrichmentSpec
-from core.enums import ErrorClass
+from core.enums import ErrorClass, UnitOutcome
 from core.language import is_already_in, prose_text
 from core.models import Item, ItemDraft
 from core.normalize import (
@@ -771,93 +771,42 @@ def fetch_items(
             # shape and the deployment's floor already governs the spacing.
             time.sleep(effective_interval)
 
-        url = raw_url.strip()
-        if not _on_source_host(source_url, url):
-            results.append(
+        unit = fetch_one(
+            session,
+            source=source,
+            registration=registration,
+            client=client,
+            url=raw_url.strip(),
+            chain=chain,
+            tenant_id=tenant_id,
+        )
+        if unit.action is FetchItemAction.STORED:
+            inserted += 1
+        results.append(
+            FetchedAddress(
+                url=raw_url,
+                action=unit.action,
+                item_id=unit.item_id,
+                error_class=(
+                    None if unit.error_class is None else unit.error_class.value
+                ),
+                detail=unit.detail,
+            )
+        )
+        if unit.error_class is ErrorClass.BLOCKED:
+            # The origin asked this deployment to stop. The rest are reported
+            # as not attempted, because continuing is the burst the pacing
+            # exists to prevent.
+            results.extend(
                 FetchedAddress(
-                    url=raw_url,
+                    url=rest,
                     action=FetchItemAction.REJECTED,
-                    error_class=ErrorClass.STRUCTURE_CHANGED.value,
-                    detail="address is not on the source's own host",
+                    error_class=ErrorClass.BLOCKED.value,
+                    detail="not attempted: the origin refused this address",
                 )
+                for rest in urls[index + 1 :]
             )
-            continue
-        if registration is None:
-            results.append(
-                FetchedAddress(
-                    url=raw_url,
-                    action=FetchItemAction.REJECTED,
-                    error_class=ErrorClass.STRUCTURE_CHANGED.value,
-                    detail="no collector serves this source",
-                )
-            )
-            continue
-
-        try:
-            drafts = collector_registry.collect_item_with(
-                registration, source_id=source.id, url=url, client=client
-            )
-        except Exception as exc:
-            # The classified error is duck-typed across every plugin boundary
-            # in this repository (in-process FetchError, the spec's
-            # CollectorError, the registry's own): one handler covers them all,
-            # and anything without an ErrorClass is a bug, not an outcome.
-            error_class = getattr(exc, "error_class", None)
-            if not isinstance(error_class, ErrorClass):
-                raise
-            results.append(
-                FetchedAddress(
-                    url=raw_url,
-                    action=FetchItemAction.FAILED,
-                    error_class=error_class.value,
-                    detail=getattr(exc, "detail", str(exc)),
-                )
-            )
-            if error_class is ErrorClass.BLOCKED:
-                results.extend(
-                    FetchedAddress(
-                        url=rest,
-                        action=FetchItemAction.REJECTED,
-                        error_class=ErrorClass.BLOCKED.value,
-                        detail="not attempted: the origin refused this address",
-                    )
-                    for rest in urls[index + 1 :]
-                )
-                break
-            continue
-
-        if not drafts:
-            # An address that yields nothing is not a silent success: the
-            # caller asked about it and gets an answer.
-            results.append(
-                FetchedAddress(
-                    url=raw_url,
-                    action=FetchItemAction.FAILED,
-                    error_class=ErrorClass.PARSE.value,
-                    detail="the address produced no item",
-                )
-            )
-            continue
-
-        for entry in normalise_and_store(
-            session, drafts, tenant_id=tenant_id, chain=chain
-        ):
-            stored = entry.outcome.action in (
-                DedupeAction.INSERT,
-                DedupeAction.INSERT_RELATED,
-                DedupeAction.UPDATE_PENDING,
-            )
-            if stored:
-                inserted += 1
-            results.append(
-                FetchedAddress(
-                    url=raw_url,
-                    action=(
-                        FetchItemAction.STORED if stored else FetchItemAction.EXISTING
-                    ),
-                    item_id=entry.outcome.item.id,
-                )
-            )
+            break
 
     return FetchItemsResult(
         requested=len(urls),
@@ -866,6 +815,132 @@ def fetch_items(
         min_interval_seconds=effective_interval,
         deployment_min_interval_seconds=deployment_floor,
         results=tuple(results),
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchUnit:
+    """One address's outcome, in both vocabularies the two surfaces need.
+
+    `action` is the report's word (`stored`/`existing`/`rejected`/`failed`) and
+    the ledger's outcome is *derived* from it by `outcome_for`: two vocabularies
+    that are tracked separately are two vocabularies that can disagree.
+    """
+
+    action: FetchItemAction
+    error_class: ErrorClass | None = None
+    detail: str = ""
+    item_id: str | None = None
+
+
+# The ledger's word for a report's action. `stored` and `existing` are the same
+# outcome -- the unit succeeded -- and differ only in what the store did, which
+# the detail line carries.
+_ACTION_TO_OUTCOME: dict[FetchItemAction, UnitOutcome] = {
+    FetchItemAction.STORED: UnitOutcome.OK,
+    FetchItemAction.EXISTING: UnitOutcome.OK,
+    FetchItemAction.REJECTED: UnitOutcome.REJECTED,
+    FetchItemAction.FAILED: UnitOutcome.FAILED,
+}
+
+
+def outcome_for(action: FetchItemAction) -> UnitOutcome:
+    """The ledger's outcome for one address's action."""
+    return _ACTION_TO_OUTCOME[action]
+
+
+def fetch_one(
+    session: Session,
+    *,
+    source: SourceRow,
+    registration: CollectorRegistration | None,
+    client: httpx.Client,
+    url: str,
+    chain: tuple[EnrichmentSpec, ...] = (),
+    tenant_id: str = SINGLE_TENANT,
+) -> FetchUnit:
+    """One address, end to end: preflight, fetch, store. Never raises for a
+    classified failure -- the caller needs an outcome, not an exception.
+
+    This is the atom both granularities share: the batch entry point loops it
+    and reports, the work worker loops it and appends a ledger row. Extracting
+    it is what keeps "one implementation" true while the *reporting* differs.
+
+    One address is one unit even when a collector returns several drafts: they
+    are stored together (one transaction, one dedupe decision each) and reported
+    as one outcome, because the ledger's key is `(work, target)`.
+    """
+    source_url = source.url or source.canonical_url or ""
+    if not _on_source_host(source_url, url):
+        return FetchUnit(
+            action=FetchItemAction.REJECTED,
+            error_class=ErrorClass.STRUCTURE_CHANGED,
+            detail="address is not on the source's own host",
+        )
+    if registration is None:
+        return FetchUnit(
+            action=FetchItemAction.REJECTED,
+            error_class=ErrorClass.STRUCTURE_CHANGED,
+            detail="no collector serves this source",
+        )
+
+    try:
+        drafts = collector_registry.collect_item_with(
+            registration, source_id=source.id, url=url, client=client
+        )
+    except Exception as exc:
+        # The classified error is duck-typed across every plugin boundary in
+        # this repository (in-process FetchError, the spec's CollectorError,
+        # the registry's own): one handler covers them all, and anything
+        # without an ErrorClass is a bug, not an outcome.
+        error_class = getattr(exc, "error_class", None)
+        if not isinstance(error_class, ErrorClass):
+            raise
+        return FetchUnit(
+            action=FetchItemAction.FAILED,
+            error_class=error_class,
+            detail=getattr(exc, "detail", str(exc)),
+        )
+
+    if not drafts:
+        return FetchUnit(
+            action=FetchItemAction.FAILED,
+            error_class=ErrorClass.PARSE,
+            detail="the address produced no item",
+        )
+
+    ingested = normalise_and_store(session, drafts, tenant_id=tenant_id, chain=chain)
+    stored = any(
+        entry.outcome.action
+        in (
+            DedupeAction.INSERT,
+            DedupeAction.INSERT_RELATED,
+            DedupeAction.UPDATE_PENDING,
+        )
+        for entry in ingested
+    )
+    return FetchUnit(
+        action=FetchItemAction.STORED if stored else FetchItemAction.EXISTING,
+        detail="stored" if stored else "already present",
+        item_id=ingested[0].outcome.item.id if ingested else None,
+    )
+
+
+def fetch_pacing(params: Mapping[str, Any]) -> tuple[int, float]:
+    """(batch size, interval) for a work's pacing knobs, both clamped.
+
+    Shared by the batch entry point and the work worker so a work paced one way
+    through `POST /v1/works` and another way through the legacy endpoint is not
+    possible: the knobs live in the same place and clamp the same way.
+    """
+    requested_interval = params.get("min_interval_seconds")
+    interval, _floor = _clamped_interval(
+        None if requested_interval is None else float(requested_interval)
+    )
+    requested_batch = params.get("batch_size")
+    return (
+        _clamped_batch_size(None if requested_batch is None else int(requested_batch)),
+        interval,
     )
 
 
