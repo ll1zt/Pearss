@@ -307,8 +307,15 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # A3 ingest (ADR 0022): the write side of an agent source.
         "submit_items",
         # The other direction (issue #171): the caller discovered addresses and
-        # the deployment fetches them through the source's own collector.
+        # the deployment fetches them through the source's own collector. Since
+        # #191 it answers with a work handle rather than a per-address report.
         "fetch_source_items",
+        # The read side of the work mechanism (#191, ADR 0046): the handle a
+        # submission returns is only useful if it leads somewhere, and the
+        # ledger is where per-target results live once the response stops
+        # carrying them.
+        "get_work",
+        "work_units",
     }
 
 

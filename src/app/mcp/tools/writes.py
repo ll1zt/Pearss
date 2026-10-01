@@ -36,8 +36,8 @@ from app.mcp.confirmation import (
     _delete_items_fields,
     _delete_source_items_confirmation,
     _delete_source_items_fields,
-    _fetch_items_confirmation,
-    _fetch_items_fields,
+    _fetch_work_confirmation,
+    _fetch_work_fields,
     _remove_source_confirmation,
     _remove_source_fields,
     _retry_enrichments_confirmation,
@@ -229,41 +229,49 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         description=(
             "Fetch a list of article addresses into an existing source. "
             "Requires confirmation: the deployment makes real outbound requests "
-            "for every address. Each address must be on the source's own host "
-            "(others are reported as rejected and never fetched), and the "
-            "source's collector must be able to fetch one address (the rss "
-            "collector can). Results are per address, so one failure does not "
-            "stop the rest. Use this when you have *addresses* to fetch; use "
-            "submit_items when you already fetched the content yourself."
+            "for every address. Returns a job handle (work_id, status, counts) "
+            "immediately -- the work keeps running after this call, and the "
+            "response does not grow with the list. Read per-address results "
+            "with work_units. Each address must be on the source's own host "
+            "(off-host ones come back `rejected`), and the source's collector "
+            "must be able to fetch one address (rss can). Use this when you "
+            "have addresses to fetch; use submit_items when you already "
+            "fetched the content yourself."
         ),
     )
     async def fetch_source_items(
         source_id: str,
         urls: list[str],
         ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_fetch_items_confirmation)],
+        confirmed: Annotated[Confirmation | None, Resolve(_fetch_work_confirmation)],
         batch_size: int = 0,
         min_interval_seconds: float = 0.0,
     ) -> dict[str, Any]:
-        fields = _fetch_items_fields(source_id, urls, batch_size, min_interval_seconds)
+        fields = _fetch_work_fields(source_id, urls, batch_size, min_interval_seconds)
         return await _guarded_write(
             core,
             confirmed=confirmed,
             fields=fields,
             method="POST",
-            path=f"/v1/sources/{source_id}:fetch-items",
+            path="/v1/works",
             body={
-                "urls": urls,
-                # Omitted rather than sent as 0: the API's own defaults and
-                # clamps are the server's business, and 0 is not a value it
-                # would accept (batch_size >= 1).
-                **({"batch_size": batch_size} if batch_size else {}),
-                **(
-                    {"min_interval_seconds": min_interval_seconds}
-                    if min_interval_seconds
-                    else {}
-                ),
+                "kind": fields["kind"],
+                "targets": urls,
+                "params": {
+                    "source_id": source_id,
+                    # Omitted rather than sent as 0: the server's own defaults
+                    # and clamps are its business, and 0 is not a value it
+                    # would accept (batch_size >= 1).
+                    **({"batch_size": batch_size} if batch_size else {}),
+                    **(
+                        {"min_interval_seconds": min_interval_seconds}
+                        if min_interval_seconds
+                        else {}
+                    ),
+                },
             },
+            # 202: the work is queued, not done. The handle is the answer.
+            ok=(202,),
             extra=lambda _status: {"audit": "recorded by the Core API"},
         )
 

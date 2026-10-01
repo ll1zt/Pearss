@@ -99,7 +99,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 |---|---|
 | `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
 | `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，逐条报告 `created/existing/failed` |
-| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。确认文本含条数、URL 预览与**列表指纹**（只比条数会被换掉一个地址的列表骗过）；地址必须在本源 host 上 |
+| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；确认文本含条数、URL 预览与**列表指纹**（只比条数会被换掉一个地址的列表骗过）；地址必须在本源 host 上 |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
@@ -115,7 +115,16 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 
 只读工具不需要确认：`list_sources`、`get_source`、`diagnose_source`、`search_items`、`get_item`、
 `get_item_body`、`list_jobs`、`list_runs`、`list_enrichments`、`list_plugins`、
-`get_system_snapshot`。
+`get_work`、`work_units`、`get_system_snapshot`。
+
+`get_work` 与 `work_units` 是作业的读侧（ADR 0046）：返回句柄的工具
+（如 `fetch_source_items`）不再内联逐条结果，因为那种响应会随地址数膨胀、
+并在客户端超时时连同结果一起丢掉。
+- `get_work`：状态 + 折叠 counts（`ok` / `skipped` / `rejected` / `failed` / `queued`），
+  **不返回** target 列表，所以是常数大小。
+- `work_units`：逐条账本（target / outcome / error_class / detail / 产物 id），
+  用 `cursor` 分页，用 `outcome` 过滤——`outcome=failed` 就是「我该重发哪些」。
+  `rejected`（没尝试过，例如非同源）与 `failed`（尝试了但失败）分开，因为只有后者值得重发。
 
 ## 四、错误返回
 
