@@ -229,6 +229,17 @@ class SourceFetchItems(BaseModel):
     min_interval_seconds: float | None = Field(default=None, ge=0)
 
 
+class SourceFetchItem(BaseModel):
+    """Body for fetching one address into one source.
+
+    The atom the plural forms are built from: `:fetch-items` loops it, and a
+    `kind=fetch` work runs it once per target. It carries no pacing knobs
+    because there is nothing to pace: one address is one request.
+    """
+
+    url: str = Field(min_length=1, max_length=2048)
+
+
 class SourcePatch(BaseModel):
     """Body for updating a source. Absent fields are left alone.
 
@@ -988,6 +999,132 @@ def fetch_source_items(
         ],
     }
     payload["correlation_id"] = current_correlation_id()
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)
+
+
+@router.post("/sources/{source_id}:fetch-item", operation_id="fetchSourceItem")
+def fetch_source_item(
+    request: Request,
+    source_id: str,
+    body: SourceFetchItem,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Fetch one address into one source, and answer with a receipt.
+
+    The atom the plural forms are made of: `POST /v1/sources/{id}:fetch-items`
+    loops it, and `POST /v1/works` with `kind=fetch` runs it once per target.
+    One implementation (`pipeline.fetch_one`) behind all three is what keeps
+    "the same address gives the same identity and the same outcome" true
+    however it was asked for -- and what keeps the host check, the capability
+    check and the dedupe from existing in three versions.
+
+    The answer is one receipt, never a list: a response cannot be smaller than
+    the effect it reports, and the effect here is one address. Two refusals are
+    the *source's* rather than the address's, and both happen before anything
+    is fetched -- an inactive source (409) and a collector without the item
+    capability (422) -- because nothing about this address could have made them
+    work. An address off the source's host is not a refusal: it is a receipt
+    with `outcome=rejected`, because that is what happened to it.
+
+    What it did is written down before the receipt is built: a one-target work
+    and its unit, created and closed in the same transaction (by then the fetch
+    has happened), so the receipt is also a ledger row. "What happened to this
+    address?" therefore survives the response: `GET /v1/items?url=` answers for
+    the item and `GET /v1/works/{id}/units` for the attempt.
+    """
+    endpoint = f"POST /v1/sources/{source_id}:fetch-item"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    registry = request.app.state.collector_registry
+    with factory() as session:
+        row = _require_source(session, source_id)
+        if row.status != SourceStatus.ACTIVE.value:
+            raise api_error(
+                status_code=409,
+                code="source_not_active",
+                message=(
+                    f"Source is {row.status}; only active sources fetch addresses."
+                ),
+                suggestion="Set status to active before fetching addresses.",
+            )
+        registration = registry.select_for(row.type, row.url or row.canonical_url or "")
+        if registration is None or not registration.item:
+            raise api_error(
+                status_code=422,
+                code="unsupported_capability",
+                message=(
+                    f"The collector for source {source_id!r} cannot fetch a "
+                    "single address, so this address was not fetched."
+                ),
+                suggestion=(
+                    "Use a source whose collector declares the item capability "
+                    "(the rss collector does), or fetch the content yourself "
+                    "and POST it to /v1/sources/{id}:ingest."
+                ),
+            )
+        unit = pipeline.fetch_one(
+            session,
+            source=row,
+            registration=registration,
+            client=_shared_client(request),
+            url=body.url,
+        )
+        # The receipt is also the record: one target, one unit, terminal on
+        # arrival -- the fetch has already happened -- so it never occupies the
+        # live-command index and no worker can pick it up.
+        params: dict[str, Any] = {"source_id": source_id}
+        work = create_work(
+            session,
+            kind="fetch",
+            targets=[body.url],
+            params=params,
+            fingerprint=command_fingerprint(
+                kind="fetch", targets=[body.url], params=params
+            ),
+            tenant_id=SINGLE_TENANT,
+            correlation_id=current_correlation_id(),
+        )
+        append_unit(
+            session,
+            work_id=work.id,
+            target=body.url,
+            outcome=pipeline.outcome_for(unit.action),
+            error_class=unit.error_class,
+            detail=unit.detail,
+            ref=unit.item_id,
+        )
+        finish_work(
+            session, work.id, status=terminal_status(counts_for_work(session, work.id))
+        )
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "source_id": source_id,
+        "url": body.url,
+        "outcome": pipeline.outcome_for(unit.action).value,
+        "error_class": None if unit.error_class is None else unit.error_class.value,
+        # `stored` vs `already present` lives here rather than in a second
+        # field: the ledger has one outcome vocabulary, and "is it there?" is
+        # answered exactly by `GET /v1/items?url=`.
+        "detail": unit.detail,
+        "item_id": unit.item_id,
+        # The unit's address: (work_id, target) is the ledger key, so this is
+        # the reference a caller quotes when asking about this attempt later.
+        "work_id": work.id,
+        "correlation_id": current_correlation_id(),
+    }
     remember(
         factory,
         actor=principal.name,

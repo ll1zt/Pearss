@@ -579,6 +579,22 @@
         "title": "SourceCreate",
         "type": "object"
       },
+      "SourceFetchItem": {
+        "description": "Body for fetching one address into one source.\n\nThe atom the plural forms are built from: `:fetch-items` loops it, and a\n`kind=fetch` work runs it once per target. It carries no pacing knobs\nbecause there is nothing to pace: one address is one request.",
+        "properties": {
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "SourceFetchItem",
+        "type": "object"
+      },
       "SourceFetchItems": {
         "description": "Body for fetching a caller's addresses into one source.\n\n`urls` are addresses the caller discovered -- an agent enumerating a\nsite's history, typically -- and every one of them must be on the source's\nown host, or it is refused rather than fetched.\n\nThe two knobs shape the pacing: `batch_size` addresses are fetched, then a\npause of `min_interval_seconds`. Both are clamped by the server, and the\ndeployment's own interval (PEARSS_FETCH_MIN_INTERVAL) is a floor under\nthem, so a caller cannot ask this deployment to hit someone's server\nharder than the operator allows.",
         "properties": {
@@ -3488,6 +3504,78 @@
           }
         ],
         "summary": "Diagnose Source",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/sources/{source_id}:fetch-item": {
+      "post": {
+        "description": "Fetch one address into one source, and answer with a receipt.\n\nThe atom the plural forms are made of: `POST /v1/sources/{id}:fetch-items`\nloops it, and `POST /v1/works` with `kind=fetch` runs it once per target.\nOne implementation (`pipeline.fetch_one`) behind all three is what keeps\n\"the same address gives the same identity and the same outcome\" true\nhowever it was asked for -- and what keeps the host check, the capability\ncheck and the dedupe from existing in three versions.\n\nThe answer is one receipt, never a list: a response cannot be smaller than\nthe effect it reports, and the effect here is one address. Two refusals are\nthe *source's* rather than the address's, and both happen before anything\nis fetched -- an inactive source (409) and a collector without the item\ncapability (422) -- because nothing about this address could have made them\nwork. An address off the source's host is not a refusal: it is a receipt\nwith `outcome=rejected`, because that is what happened to it.\n\nWhat it did is written down before the receipt is built: a one-target work\nand its unit, created and closed in the same transaction (by then the fetch\nhas happened), so the receipt is also a ledger row. \"What happened to this\naddress?\" therefore survives the response: `GET /v1/items?url=` answers for\nthe item and `GET /v1/works/{id}/units` for the attempt.",
+        "operationId": "fetchSourceItem",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "title": "Source Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceFetchItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Fetch Source Item",
         "tags": [
           "core-api"
         ]

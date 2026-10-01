@@ -852,7 +852,7 @@ def fetch_one(
     registration: CollectorRegistration | None,
     client: httpx.Client,
     url: str,
-    chain: tuple[EnrichmentSpec, ...] = (),
+    chain: tuple[EnrichmentSpec, ...] | None = None,
     tenant_id: str = SINGLE_TENANT,
 ) -> FetchUnit:
     """One address, end to end: preflight, fetch, store. Never raises for a
@@ -867,6 +867,11 @@ def fetch_one(
     as one outcome, because the ledger's key is `(work, target)`.
     """
     source_url = source.url or source.canonical_url or ""
+    if chain is None:
+        # Resolved here rather than by each caller: forgetting the chain means
+        # an item lands with its processors unqueued, which is a silent
+        # difference between two entry points that should behave the same.
+        chain = chain_for_source(session, source_id=source.id)
     if not _on_source_host(source_url, url):
         return FetchUnit(
             action=FetchItemAction.REJECTED,
