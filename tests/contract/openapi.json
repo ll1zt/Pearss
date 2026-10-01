@@ -4211,7 +4211,7 @@
     },
     "/v1/works": {
       "post": {
-        "description": "Accept a batch of work; answer with a handle, not with a report.\n\nAnswers 202 rather than 200 because the work has not happened yet: it is\nqueued, and `Location` names where its status lives.",
+        "description": "Accept a batch of work; answer with a handle, not with a report.\n\nAnswers 202 rather than 200 because the work has not happened yet: it is\nqueued, and `Location` names where its status lives.\n\nA kind the deployment can execute is claimed and run. A kind it cannot\nexecute *yet* -- `subscribe` and `ingest` are accepted for the shape they\nwill have -- is recorded and left `queued`, because refusing the command\nwould throw away what the caller asked for; `GET /v1/works/{id}` is where\nthat state is visible.",
         "operationId": "submitWork",
         "parameters": [
           {
