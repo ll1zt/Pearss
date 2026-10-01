@@ -22,17 +22,32 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from adapters.correlation import current as current_correlation_id
-from adapters.repository import counts_for_work, create_work, live_work_by_fingerprint
-from app.api_conventions import api_error, idempotency_key, remember, replay_or_none
-from app.auth import Principal, write_required
+from adapters.repository import (
+    counts_for_work,
+    create_work,
+    live_work_by_fingerprint,
+    timestamp,
+    units_for_work,
+    work_by_id,
+)
+from app.api_conventions import (
+    api_error,
+    decode_target_cursor,
+    encode_target_cursor,
+    idempotency_key,
+    remember,
+    replay_or_none,
+)
+from app.auth import Principal, read_required, write_required
+from core.enums import ErrorClass, UnitOutcome
 from core.tenancy import SINGLE_TENANT
-from core.work import command_fingerprint
+from core.work import UnitRecord, command_fingerprint
 
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
@@ -156,4 +171,127 @@ def submit_work(
         status_code=202,
         content=payload,
         headers={"Location": f"/v1/works/{work_id}"},
+    )
+
+
+@router.get("/works/{work_id}", operation_id="getWork")
+def read_work(
+    request: Request,
+    work_id: str,
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """One work: its status, its command, and the folded counts.
+
+    Deliberately **not** the target list: a 1000-target work must not put 1000
+    strings into a response that is meant to be O(1), and the caller already
+    has what it submitted. The enumeration is `/units`, which pages.
+    """
+    del _
+    with request.app.state.session_factory() as session:
+        work = work_by_id(session, work_id)
+        if work is None:
+            raise _work_not_found(work_id)
+        counts = counts_for_work(session, work_id)
+    return {
+        "work_id": work.id,
+        "kind": work.kind,
+        "status": work.status.value,
+        "params": work.params,
+        "retry_of": work.retry_of,
+        "created_at": timestamp(work.created_at),
+        "finished_at": (
+            None if work.finished_at is None else timestamp(work.finished_at)
+        ),
+        "counts": counts,
+        "correlation_id": current_correlation_id(),
+    }
+
+
+@router.get("/works/{work_id}/units", operation_id="listWorkUnits")
+def read_work_units(
+    request: Request,
+    work_id: str,
+    _: Principal = Depends(read_required),
+    outcome: str | None = Query(
+        default=None,
+        description="Filter to one outcome (ok, skipped, rejected, failed).",
+    ),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(
+        default=None,
+        max_length=512,
+        description="Opaque cursor from a previous response.",
+    ),
+) -> dict[str, Any]:
+    """The per-target ledger: what happened to each target, paged.
+
+    This is the read that replaces the report the old endpoint returned inline.
+    Because it is a query rather than a response, it survives the client timing
+    out, it can be re-read later, and `outcome=failed` answers "what do I need
+    to re-send?" in one call -- a question that had no answer once the response
+    carrying it was lost.
+    """
+    del _
+    parsed_outcome: UnitOutcome | None = None
+    if outcome is not None:
+        try:
+            parsed_outcome = UnitOutcome(outcome)
+        except ValueError:
+            raise api_error(
+                status_code=422,
+                code="unknown_outcome",
+                message=f"Unknown outcome {outcome!r}.",
+                suggestion=(
+                    "Use one of: "
+                    + ", ".join(member.value for member in UnitOutcome)
+                    + "."
+                ),
+            ) from None
+    after_target = decode_target_cursor(cursor)
+    with request.app.state.session_factory() as session:
+        if work_by_id(session, work_id) is None:
+            raise _work_not_found(work_id)
+        # One beyond the page, so "is there a next page" is answered by the
+        # query rather than by a second count.
+        rows = units_for_work(
+            session,
+            work_id,
+            outcome=parsed_outcome,
+            after_target=after_target,
+            limit=limit + 1,
+        )
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_cursor = encode_target_cursor(page[-1].target) if has_more and page else None
+    return {
+        "data": [_unit_payload(row) for row in page],
+        "work_id": work_id,
+        "next_cursor": next_cursor,
+        "correlation_id": current_correlation_id(),
+    }
+
+
+def _unit_payload(row: UnitRecord) -> dict[str, Any]:
+    """One ledger row as the surface form.
+
+    `target` is always present and `error_class` uses the one taxonomy: a row
+    that says nothing about the target would be a row nobody can act on.
+    """
+    error_class: ErrorClass | None = row.error_class
+    return {
+        "target": row.target,
+        "outcome": row.outcome.value,
+        "error_class": None if error_class is None else error_class.value,
+        "detail": row.detail,
+        "ref": row.ref,
+        "at": timestamp(row.at),
+    }
+
+
+def _work_not_found(work_id: str) -> Exception:
+    return api_error(
+        status_code=404,
+        code="work_not_found",
+        message=f"No work with id {work_id!r}.",
+        suggestion="The id comes from the submission's Location header.",
     )

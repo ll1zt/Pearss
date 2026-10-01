@@ -3896,6 +3896,155 @@
           "core-api"
         ]
       }
+    },
+    "/v1/works/{work_id}": {
+      "get": {
+        "description": "One work: its status, its command, and the folded counts.\n\nDeliberately **not** the target list: a 1000-target work must not put 1000\nstrings into a response that is meant to be O(1), and the caller already\nhas what it submitted. The enumeration is `/units`, which pages.",
+        "operationId": "getWork",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_id",
+            "required": true,
+            "schema": {
+              "title": "Work Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getwork",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Work",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/works/{work_id}/units": {
+      "get": {
+        "description": "The per-target ledger: what happened to each target, paged.\n\nThis is the read that replaces the report the old endpoint returned inline.\nBecause it is a query rather than a response, it survives the client timing\nout, it can be re-read later, and `outcome=failed` answers \"what do I need\nto re-send?\" in one call -- a question that had no answer once the response\ncarrying it was lost.",
+        "operationId": "listWorkUnits",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_id",
+            "required": true,
+            "schema": {
+              "title": "Work Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter to one outcome (ok, skipped, rejected, failed).",
+            "in": "query",
+            "name": "outcome",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter to one outcome (ok, skipped, rejected, failed).",
+              "title": "Outcome"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a previous response.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque cursor from a previous response.",
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listworkunits",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Work Units",
+        "tags": [
+          "core-api"
+        ]
+      }
     }
   }
 }
