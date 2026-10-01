@@ -26,8 +26,10 @@ from sqlalchemy.orm import Session
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
 from adapters.repository import (
+    RATE_WINDOW_MINUTES,
     append_unit,
     backlog_for_source,
+    completion_rate_per_min,
     counts_for_work,
     create_source,
     create_work,
@@ -429,7 +431,13 @@ def diagnose_source(
             if job is not None
             else []
         )
-        chain = backlog_for_source(session, source_id)
+        chain = {
+            **backlog_for_source(session, source_id),
+            # The rate belongs with the backlog: "eleven stuck" is a different
+            # answer when they are draining than when they are not.
+            "rate_per_min": completion_rate_per_min(session, source_id=source_id),
+            "rate_window_minutes": RATE_WINDOW_MINUTES,
+        }
         failed_enrichments = failed_enrichments_for_source(
             session, source_id=source_id, limit=DIAGNOSE_FAILED_ENRICHMENTS
         )
@@ -491,6 +499,43 @@ def diagnose_source(
         # message, newest first. Metadata only -- never the item body (issue #152).
         "failed_enrichments": failed_enrichments,
         "collection": {"loop_alive": loop_alive, "loop_owner": loop_owner},
+        "correlation_id": current_correlation_id(),
+    }
+
+
+@router.get("/sources/{source_id}:queue", operation_id="getSourceQueue")
+def read_source_queue(
+    request: Request,
+    source_id: str,
+    _: Principal = Depends(read_required),
+) -> dict[str, Any]:
+    """What this source's chain is doing, in one constant-size answer.
+
+    The counts are a fold over the chain rows -- the same rows
+    `/v1/sources/{id}/enrichments` renders -- so the two cannot disagree; the
+    rate is derived from the completion timestamps in a window, never stored
+    (ADR 0009's rule about `next_run_time`, applied to a statistic). Together
+    they answer "how much is waiting, and is it draining?", which used to cost
+    one call per source: a measured backlog check across 82 sources was 82
+    requests, and none of them said how fast anything was moving.
+
+    `oldest_queued_at` is what counts cannot say: a queue of one that has been
+    waiting an hour is a different problem from a queue of one that just
+    arrived.
+    """
+    del _
+    with request.app.state.session_factory() as session:
+        _require_source(session, source_id)
+        backlog = backlog_for_source(session, source_id)
+        rate = completion_rate_per_min(session, source_id=source_id)
+    return {
+        "source_id": source_id,
+        **backlog,
+        "rate_per_min": rate,
+        # The window rides along because the number is unreadable without it:
+        # "0.0 per minute" is a stall or a quiet fifteen minutes depending on
+        # what it was measured over.
+        "rate_window_minutes": RATE_WINDOW_MINUTES,
         "correlation_id": current_correlation_id(),
     }
 

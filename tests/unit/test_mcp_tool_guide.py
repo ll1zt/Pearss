@@ -226,7 +226,14 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # argue for. #197/#199 (the plural kinds) revisit this number in their own diff:
 # they move six macro tools onto the same mechanism, and whether that shrinks
 # the face depends on how many readers they need beside it.
-SURFACE_BUDGET_CHARS = 17_000
+# 17,200 adds the two read primitives of issue #193: `search_items` gained a
+# `url` parameter (exact match on an item's canonical url) and the queue summary
+# went into `diagnose_source`'s existing backlog block. That is one parameter
+# and no new tool, which is the shape this budget is trying to encourage: a new
+# read tool would have cost ~400 characters, and the queue's four counts plus a
+# derived rate ride along in an answer the tool already gives. The surface lands
+# at 16,882 and 17,200 leaves the next tool the same ~300 to argue for.
+SURFACE_BUDGET_CHARS = 17_200
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:

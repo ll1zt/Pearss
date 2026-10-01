@@ -94,7 +94,9 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "Search collected items. `q` searches the title only, as a "
             "substring; `full_text` searches titles and bodies and ranks by "
             "relevance — use it when the words may be in the article rather "
-            "than its headline. Pass one or the other, not both. `source_id`, "
+            "than its headline. `url` matches an item's canonical url exactly: "
+            'the way to ask "is this address already stored?" A miss is an '
+            "empty list. Pass one of the three, not several. `source_id`, "
             "`since`, `until` and `publish_status` narrow the query, and "
             "`fields` is the single biggest saving (see the instructions)."
         ),
@@ -102,6 +104,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
     async def search_items(
         q: str | None = None,
         full_text: str | None = None,
+        url: str | None = None,
         source_id: str | None = None,
         limit: int = 20,
         # source_id is included by default so a result is self-describing: a
@@ -131,6 +134,7 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             params["sort"] = "relevance"
         for name, value in (
             ("q", q),
+            ("url", url),
             ("source_id", source_id),
             ("since", since),
             ("until", until),

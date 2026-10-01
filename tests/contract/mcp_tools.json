@@ -586,7 +586,7 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. Pass one or the other, not both. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the single biggest saving (see the instructions).",
+    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. `url` matches an item's canonical url exactly: the way to ask \"is this address already stored?\" A miss is an empty list. Pass one of the three, not several. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the single biggest saving (see the instructions).",
     "input_schema": {
       "properties": {
         "fields": {
@@ -670,6 +670,18 @@
           ],
           "default": null,
           "title": "Until"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
         }
       },
       "title": "search_itemsArguments",

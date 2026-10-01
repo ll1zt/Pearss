@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -186,6 +186,41 @@ def backlog_for_source(session: Session, source_id: str) -> dict[str, Any]:
         "failed": counts.get(EnrichmentStatus.FAILED.value, 0),
         "oldest_queued_at": oldest,
     }
+
+
+# How far back a completion counts towards the queue's rate. Long enough that
+# a quiet few minutes does not read as "stalled", short enough that the number
+# still describes *now*: a rate over the whole history would answer "how fast
+# has this ever been", which is not what a caller watching a queue is asking.
+RATE_WINDOW_MINUTES: Final = 15.0
+
+
+def completion_rate_per_min(
+    session: Session, *, source_id: str, window_minutes: float = RATE_WINDOW_MINUTES
+) -> float:
+    """Completions per minute over the recent window, derived on every read.
+
+    Derived rather than stored, for the reason `next_run_time` is not stored
+    (ADR 0009): a stored rate is a second source of truth, and it disagrees
+    with the rows the first time a writer forgets to update it.
+
+    `updated_at` is the completion stamp: the row is written when the product
+    lands, and a succeeded row is not touched again.
+    """
+    since = timestamp(datetime.now(UTC) - timedelta(minutes=window_minutes))
+    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    finished = int(
+        session.execute(
+            select(func.count())
+            .select_from(ItemEnrichment)
+            .where(
+                ItemEnrichment.item_id.in_(item_ids),
+                ItemEnrichment.status == EnrichmentStatus.SUCCEEDED.value,
+                ItemEnrichment.updated_at >= since,
+            )
+        ).scalar_one()
+    )
+    return round(finished / window_minutes, 3)
 
 
 def failed_enrichments_for_source(
