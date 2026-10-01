@@ -1,12 +1,18 @@
 """Content-level discovery: a caller's addresses, fetched into one source.
 
-Scenario register (normative source: `SCENARIOS.md`; issue #170; AC-172..175,
-plus AC-168's endpoint form).
+Scenario register (normative source: `SCENARIOS.md`; issues #170 and #192;
+AC-172..175, AC-195..196).
 
 `POST /v1/sources/{id}:fetch-items` is the service side of "an agent enumerates
 a site's history": the caller discovers *addresses* (which the deployment
 cannot, without crawling the site), and the source's own collector fetches
 them. Everything lands through the same write path as any collection.
+
+Since #192 the endpoint is a **restricted compatibility shim**: it still
+answers with the per-address report (existing callers do not change), but only
+up to a ceiling that a response can carry, and it records the run in the work
+ledger on the way out. `POST /v1/works` is the replacement, where the row is
+written *before* the fetch and a timeout cannot lose the results.
 
 The origin is a `MockTransport` over recorded payloads, and it records every
 request it sees: two of the scenarios are about requests that must *not*
@@ -24,6 +30,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import text as sql
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
@@ -343,20 +350,125 @@ async def test_ac175_a_capability_the_collector_lacks_is_refused_before_fetching
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_a_list_over_the_cap_is_refused_as_a_whole(
-    writer: httpx.AsyncClient, origin: Origin
+async def test_ac195_a_small_batch_still_answers_inline_and_leaves_a_ledger(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
 ) -> None:
-    """The request ceiling is one request's worth of work, refused up front."""
+    """AC-195: the compat shape is the report *and* a terminal work in the ledger.
+
+    The response is the old one (existing callers do not change); what is new is
+    that the same run is also a work with one unit per address, so "what
+    happened to this address?" stays answerable after the response is gone
+    (ADR 0046). The work arrives terminal -- the fetch has already happened --
+    which is why no worker can pick it up.
+    """
+    source_id = await _add_source(writer)
+
+    response = await _fetch_items(writer, source_id, [ARTICLE_URL, OFF_SITE_URL])
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["requested"] == 2
+    assert payload["inserted"] == 1
+    assert [(row["url"], row["action"]) for row in payload["results"]] == [
+        (ARTICLE_URL, "stored"),
+        (OFF_SITE_URL, "rejected"),
+    ]
+
+    # The ledger, read directly: these rows are written by the code under test,
+    # so this is verification rather than seeding (which goes through the
+    # repository).
+    with session_factory() as session:
+        work = (
+            session.execute(sql("select id, kind, status, finished_at from work"))
+            .mappings()
+            .one()
+        )
+        units = (
+            session.execute(
+                sql(
+                    "select target, outcome, error_class, detail, ref from work_unit "
+                    "order by rowid"
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert (work["kind"], work["status"]) == ("fetch", "partial")
+    assert work["finished_at"] is not None
+    assert [(unit["target"], unit["outcome"]) for unit in units] == [
+        (ARTICLE_URL, "ok"),
+        (OFF_SITE_URL, "rejected"),
+    ]
+    assert units[0]["ref"] == payload["results"][0]["item_id"]
+    assert units[0]["detail"] == "stored"
+    assert units[1]["error_class"] == "structure_changed"
+
+    # Written terminal, so the same command is still free to be submitted as a
+    # real work: a compat run must not occupy the live-command index and make a
+    # subsequent submission look like a duplicate of something already done.
+    submitted = await writer.post(
+        "/v1/works",
+        headers={"Idempotency-Key": "fetch-items-compat-then-work"},
+        json={
+            "kind": "fetch",
+            "targets": [ARTICLE_URL, OFF_SITE_URL],
+            "params": {"source_id": source_id},
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+    assert submitted.json()["work_id"] != work["id"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_compat_ceiling_is_inclusive(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """Exactly the ceiling is accepted; the ceiling itself is the bound.
+
+    20 is the MCP read tools' page size and the number of results this response
+    can carry without becoming the thing that loses them. Off-host addresses
+    keep it offline: they are refused before any request, one unit each.
+    """
+    source_id = await _add_source(writer)
+    urls = [f"https://elsewhere.example/blog/archives/{n}" for n in range(20)]
+
+    response = await _fetch_items(writer, source_id, urls)
+
+    assert response.status_code == 200, response.text
+    assert len(response.json()["results"]) == 20
+    with session_factory() as session:
+        assert session.execute(sql("select count(*) from work_unit")).scalar_one() == 20
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac196_a_list_over_the_compat_ceiling_is_refused_with_the_way_out(
+    writer: httpx.AsyncClient, origin: Origin, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-196: over the ceiling, the answer names the endpoint that can do it.
+
+    The ceiling is a *response* bound, so the refusal has to point at the shape
+    that has no such bound rather than telling the caller to split the list:
+    splitting a 568-address backfill into 29 requests is exactly the delivery
+    that loses results to a gateway timeout (measured: 200 addresses time out
+    while the deployment keeps fetching).
+    """
     source_id = await _add_source(writer)
     origin.requests.clear()
 
     response = await _fetch_items(
-        writer, source_id, [f"{SITE}/blog/archives/{n}" for n in range(201)]
+        writer, source_id, [f"{SITE}/blog/archives/{n}" for n in range(21)]
     )
 
     assert response.status_code == 422, response.text
-    assert response.json()["detail"]["error"]["code"] == "batch_too_large"
+    error = response.json()["detail"]["error"]
+    assert error["code"] == "batch_too_large"
+    assert "/v1/works" in error["suggestion"], error
     assert origin.requests == []
+    assert await _stored_urls(writer) == set()
+    with session_factory() as session:
+        assert session.execute(sql("select count(*) from work")).scalar_one() == 0
 
 
 @pytest.mark.fixture

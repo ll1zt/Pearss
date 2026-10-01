@@ -252,7 +252,10 @@ def collect_item(
 宿主侧的顺序（采集器看不到这些）：
 
 ```
-POST /v1/sources/{id}:fetch-items  或  MCP fetch_source_items
+POST /v1/works（kind=fetch；MCP 为 fetch_source_items）
+  ← 推荐：返回作业句柄，逐条结果在账本里（GET /v1/works/{id}/units）
+POST /v1/sources/{id}:fetch-items
+  ← 兼容壳（deprecated，≤ 20 地址）：响应内联逐条结果，收尾时把同一次运行补记进账本
   → 同源校验：地址 host 必须等于源自己的 host（允许 www.）——不满足即拒绝，不发请求
   → registry.collect_item_with(...)   ← 未声明 item 的源在这里被拒（structure_changed）
   → normalise_and_store(...)          ← 唯一写入路径：净化/去重/闸门/索引
