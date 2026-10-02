@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pluggy
 
@@ -255,6 +255,23 @@ class CollectorSpec(Protocol):
 # collector taxonomy already covers. Same freezing rules apply — the registry
 # verifies hookimpls against this spec at startup.
 # --------------------------------------------------------------------------
+
+
+# Keys the runtime places in a processor's `item_ctx` besides the item's own
+# fields. They are named here because the runtime (`app/processor_runtime`) and
+# the processors (`plugins/...`) both read them, and neither layer may import
+# the other:
+#
+# - `DEADLINE_KEY`: the absolute `time.monotonic()` instant by which `process`
+#   must return (ADR 0047). Absent for an in-process call.
+# - `MODEL_POLICY_KEY`: the worker's model-health policy for this row, e.g.
+#   `{"skip": ["m1"], "attempts_per_model": 2}` (ADR 0048).
+# - `MODEL_EVENTS_KEY`: the report channel back. The runtime creates the list; a
+#   processor appends `(model, error_class | None)` for each model it asked, and
+#   the runtime forwards it to the worker's health registry (ADR 0048).
+DEADLINE_KEY: Final = "deadline"
+MODEL_POLICY_KEY: Final = "model_policy"
+MODEL_EVENTS_KEY: Final = "model_events"
 
 
 class ProcessorError(Exception):

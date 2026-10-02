@@ -29,6 +29,11 @@ def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
 ) -> None:
     """Given a never-replying provider, when its budget expires, then its socket
     closes, failure persists, and the next item publishes without a hung sweep.
+
+    The cooldown is switched off here on purpose: this test is about the row
+    budget, and with one model a failed row legitimately parks the chain for
+    the cooldown (AC-228), which would make the later row fail for a reason
+    that is not this test's subject. Model health has its own tests.
     """
     from tests.migrated_schema import migrated_database
 
@@ -67,6 +72,7 @@ def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
     )
     monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
     monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "fixture")
+    monkeypatch.setenv("PEARSS_MODEL_COOLDOWN_SECONDS", "0")
     monkeypatch.setattr(enrichment_worker, "DEFAULT_CALL_TIMEOUT", 3.0)
     engine = sa.create_engine(migrated_database(tmp_path, "deadline.db"))
     factory = sessionmaker(engine, expire_on_commit=False)

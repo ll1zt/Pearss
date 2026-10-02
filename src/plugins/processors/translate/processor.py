@@ -55,7 +55,13 @@ from lxml import html as lxml_html
 from adapters.sanitize import sanitize_html
 from core.enums import ErrorClass
 from core.language import is_already_in, prose_text
-from core.plugins.hooks import HOOKIMPL, ProcessorError
+from core.plugins.hooks import (
+    DEADLINE_KEY,
+    HOOKIMPL,
+    MODEL_EVENTS_KEY,
+    MODEL_POLICY_KEY,
+    ProcessorError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,8 +96,22 @@ READ_SECONDS: Final = 300.0
 WRITE_SECONDS: Final = 15.0
 POOL_SECONDS: Final = 360.0
 
+# How long one attempt may take. The cap exists so one slow model cannot own a
+# six-minute row, but a provider that legitimately takes minutes is a real case
+# -- the bounds above record a 126s reply -- so 60s is a default, not a verdict
+# (ADR 0047 said this knob would arrive with the model-health work, #228).
+ATTEMPT_SECONDS_ENV: Final = "PEARSS_TRANSLATE_ATTEMPT_SECONDS"
 
-def attempt_timeout(remaining: float) -> float | None:
+# The row's model policy and its per-model report (ADR 0048). The health
+# registry itself lives in the worker, because this processor runs in a child
+# spawned per row and a counter inside one cannot outlive it; the two context
+# keys in `core.plugins.hooks` are the whole conversation between a row and
+# that registry.
+
+
+def attempt_timeout(
+    remaining: float, *, cap: float = MAX_ATTEMPT_SECONDS
+) -> float | None:
     """Seconds one attempt may spend, or None when the budget is spent.
 
     Half of what is left, capped: the cap keeps one slow model from owning a
@@ -99,8 +119,26 @@ def attempt_timeout(remaining: float) -> float | None:
     something to spend -- and that the processor always has time left to report
     why every model failed before the parent's kill arrives.
     """
-    budget = min(MAX_ATTEMPT_SECONDS, remaining / 2)
+    budget = min(cap, remaining / 2)
     return budget if budget > MIN_ATTEMPT_SECONDS else None
+
+
+def _attempt_cap() -> float:
+    """The per-attempt ceiling this deployment runs with."""
+    raw = os.environ.get(ATTEMPT_SECONDS_ENV, "").strip()
+    if not raw:
+        return MAX_ATTEMPT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        LOGGER.warning(
+            "%s is not a number (%r); using %s",
+            ATTEMPT_SECONDS_ENV,
+            raw,
+            MAX_ATTEMPT_SECONDS,
+        )
+        return MAX_ATTEMPT_SECONDS
+    return value if value > MIN_ATTEMPT_SECONDS else MAX_ATTEMPT_SECONDS
 
 
 def _attempt_http_timeout(seconds: float | None) -> httpx.Timeout:
@@ -220,6 +258,106 @@ def _parse_reply(payload: dict[str, Any]) -> str:
     return str(content)
 
 
+def _next_candidate(models: list[str], index: int, plan: _RowPlan) -> str | None:
+    """The next model this row would still ask, for the fallback log line."""
+    for model in models[index + 1 :]:
+        if not plan.exhausted(model):
+            return model
+    return None
+
+
+class _ModelReport:
+    """What each model did in this row, folded to one entry per model.
+
+    A model that answered anything is healthy for the row, so a later failure
+    of the same model must not overwrite that: the worker's registry resets on
+    "answered" and escalates on "failed", and the two facts are not equally
+    interesting.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, str | None] = {}
+
+    def failed(self, model: str, error_class: ErrorClass) -> None:
+        if self._entries.get(model, "failed") is not None:
+            self._entries[model] = error_class.value
+
+    def answered(self, model: str) -> None:
+        self._entries[model] = None
+
+    def flush(self, item_ctx: Any) -> None:
+        """Hand the report to the runtime, which forwards it to the worker."""
+        if not isinstance(item_ctx, dict):
+            return
+        events = item_ctx.get(MODEL_EVENTS_KEY)
+        if not isinstance(events, list):
+            events = []
+            item_ctx[MODEL_EVENTS_KEY] = events
+        events.extend(self._entries.items())
+
+
+class _RowPlan:
+    """The models this row may ask, and what to remember about them.
+
+    One object per `process` call, so its counters live for the row rather than
+    for the block: "retry a model twice per row" is the rule, not "twice per
+    paragraph" (issue #228).
+    """
+
+    def __init__(self, item_ctx: Any) -> None:
+        policy = item_ctx.get(MODEL_POLICY_KEY) if isinstance(item_ctx, dict) else None
+        self.item_ctx = item_ctx
+        self.skip = _skip_of(policy)
+        self.budget = _budget_of(policy)
+        self.attempts: dict[str, int] = {}
+        self.report = _ModelReport()
+
+    def candidates(self, models: list[str]) -> list[str]:
+        """The models to try, in the configured order, minus what is cooling."""
+        return [model for model in models if model not in self.skip]
+
+    def exhausted(self, model: str) -> bool:
+        """Whether this row has already spent its attempts on `model`."""
+        return self.budget is not None and self.attempts.get(model, 0) >= self.budget
+
+    def failed(self, model: str, error_class: ErrorClass) -> None:
+        self.attempts[model] = self.attempts.get(model, 0) + 1
+        self.report.failed(model, error_class)
+        if error_class not in _TRANSIENT_CHAIN_CLASSES:
+            # A permanent class will be refused again -- a rejected key, a model
+            # name the provider does not know -- so the row stops asking it now
+            # and spends what is left on the fallback (issue #228's AC-227).
+            self.attempts[model] = max(self.attempts[model], self.budget or 1)
+
+    def answered(self, model: str) -> None:
+        self.report.answered(model)
+
+    def flush(self) -> None:
+        self.report.flush(self.item_ctx)
+
+
+def _skip_of(policy: Any) -> frozenset[str]:
+    """The models the worker's registry says are cooling down right now."""
+    if not isinstance(policy, dict):
+        return frozenset()
+    skip = policy.get("skip")
+    if not isinstance(skip, list):
+        return frozenset()
+    return frozenset(model for model in skip if isinstance(model, str))
+
+
+def _budget_of(policy: Any) -> int | None:
+    """How many times one model may fail before this row stops asking it.
+
+    `None` when no policy arrived (an in-process call): the chain then behaves
+    exactly as it did before this policy existed.
+    """
+    if not isinstance(policy, dict):
+        return None
+    budget = policy.get("attempts_per_model")
+    return budget if isinstance(budget, int) and budget >= 1 else None
+
+
 @HOOKIMPL
 def process(
     item_ctx: Any,
@@ -267,6 +405,9 @@ def process(
     # The row's budget, handed over by the runtime. Absent for an in-process
     # call, which means "no budget to respect", not "no time left".
     deadline = _deadline_of(item_ctx)
+    # The row's policy and report: which models the worker's registry is
+    # skipping, and what this row must tell it afterwards.
+    plan = _RowPlan(item_ctx)
 
     # What the provider is asked to translate, and the template the product is
     # rebuilt from. The units of translation are the article's own blocks, so
@@ -285,17 +426,32 @@ def process(
             len(requests),
         )
 
-    translated = [
-        _translate_one(
-            chunk,
-            language=language,
-            base=base_url,
-            key=key,
-            models=models,
-            deadline=deadline,
-        )
-        for chunk in requests
-    ]
+    try:
+        candidates = plan.candidates(models)
+        if not candidates:
+            # Every model is cooling down. That is local backpressure, not a
+            # provider verdict: transient, and nothing is asked (AC-228).
+            raise ProcessorError(
+                ErrorClass.NETWORK,
+                "every configured model is cooling down; retrying later",
+            )
+        translated = [
+            _translate_one(
+                chunk,
+                language=language,
+                base=base_url,
+                key=key,
+                models=candidates,
+                deadline=deadline,
+                cap=_attempt_cap(),
+                plan=plan,
+            )
+            for chunk in requests
+        ]
+    finally:
+        # The report has to survive a failure too: a failed row is exactly the
+        # row whose per-model outcome the registry needs.
+        plan.flush()
     product = _rebuild(body=body, units=units, translated=translated)
     # Absolutised for the same reason the fulltext extractor does it: the
     # artifact is rendered in a reader or on a phone, where a relative path
@@ -783,7 +939,7 @@ def _deadline_of(item_ctx: Any) -> float | None:
     (`processor_runtime`); a direct in-process call has none, which means "no
     budget to respect" rather than "no time left".
     """
-    value = item_ctx.get("deadline")
+    value = item_ctx.get(DEADLINE_KEY)
     return float(value) if isinstance(value, (int, float)) else None
 
 
@@ -937,6 +1093,8 @@ def _translate_one(
     key: str,
     models: list[str],
     deadline: float | None,
+    cap: float,
+    plan: _RowPlan,
 ) -> str:
     """One chat completion through the model fallback chain.
 
@@ -954,17 +1112,25 @@ def _translate_one(
     The row's budget is spent, not discovered (issue #227): each attempt gets
     `attempt_timeout(remaining)` seconds, and a budget too small to return a
     translation stops the chain with what it has learned rather than spending
-    the rest on a call the parent will kill.
+    the rest on a call the parent will kill. The row's model policy does the
+    same for a model that keeps failing: two attempts and this row is done with
+    it, whatever is left of the document (issue #228).
     """
     failures: list[tuple[str, ProcessorError]] = []
     for index, model in enumerate(models):
+        if plan.exhausted(model):
+            # This row has already paid for this model twice: the rest of the
+            # chain is the better use of what is left (AC-224).
+            continue
         seconds = (
-            None if deadline is None else attempt_timeout(deadline - time.monotonic())
+            None
+            if deadline is None
+            else attempt_timeout(deadline - time.monotonic(), cap=cap)
         )
         if deadline is not None and seconds is None:
             raise _out_of_budget(failures)
         try:
-            return _request_one(
+            answer = _request_one(
                 source_text,
                 language=language,
                 base=base,
@@ -974,15 +1140,29 @@ def _translate_one(
             )
         except ProcessorError as exc:
             failures.append((model, exc))
-            if index + 1 < len(models):
+            plan.failed(model, exc.error_class)
+            fallback = _next_candidate(models, index, plan)
+            if fallback is not None:
                 LOGGER.warning(
                     "translate model %s failed (%s): %s; falling back to %s",
                     model,
                     exc.error_class.value,
                     exc.detail,
-                    models[index + 1],
+                    fallback,
                 )
             continue
+        plan.answered(model)
+        return answer
+    if not failures:  # pragma: no cover - an invariant, not a reachable path
+        # Unreachable as the loop stands: a model is only exhausted by a
+        # failure, and the block that exhausted the last candidate raised then,
+        # so a later block never runs. Kept because `_aggregate_failure`
+        # indexes the list -- if the loop ever stops raising per block (a
+        # partial-block retry, say), this must not become an IndexError.
+        raise ProcessorError(
+            ErrorClass.NETWORK,
+            "every model for this row has spent its retry budget; retrying later",
+        )
     # `models` is non-empty by construction (`_configured` raises otherwise),
     # so reaching here means every model contributed a failure.
     raise _aggregate_failure(failures)

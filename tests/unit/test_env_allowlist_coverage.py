@@ -48,6 +48,14 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_AUTH_RATELIMIT_WINDOW_SECONDS",
         "PEARSS_AUTH_RATELIMIT_BLOCK_SECONDS",
         "PEARSS_ALLOW_PRIVATE_FETCH",
+        # Model health (ADR 0048). Host-side by design and by architecture: the
+        # worker is the only process that sees the whole queue, and a processor
+        # child learns the resulting policy as *data* in its context
+        # (`model_policy`), never by reading these. Passing them to a child would
+        # widen the allowlist for values nothing there reads.
+        "PEARSS_MODEL_COOLDOWN_SECONDS",
+        "PEARSS_MODEL_COOLDOWN_MAX_SECONDS",
+        "PEARSS_MODEL_ATTEMPTS_PER_MODEL",
         # Where the plugin loader reads installed plugins from (ADR 0023);
         # host-side, never passed to a child -- a plugin has no business
         # knowing where other plugins live.

@@ -37,6 +37,7 @@ from adapters.repository import timestamp
 from adapters.repository.enrichment import upstream_for_spec
 from app.fetch_pacing import PACED_PROCESSORS, host_of, pacer
 from app.liveness_watch import LoopWatch, always_alive
+from app.model_health import health
 from app.processor_runtime import LEASE_GRACE_SECONDS, run_processor
 from core.enrichment import EnrichmentStatus
 from core.enums import ErrorClass, ItemEvent, PublishStatus
@@ -427,6 +428,10 @@ def _execute_row(
         else:
             content = filestore.read_body(item.content_ref)
         try:
+            # One report per row: the processor's per-model outcome, which the
+            # registry below folds in on every path -- a failed row is exactly
+            # the row whose outcome it needs (ADR 0048).
+            report: list[tuple[str, str | None]] = []
             result = run_processor(
                 processor,
                 plugin_id=row.plugin_id,
@@ -437,7 +442,11 @@ def _execute_row(
                     "url": item.url,
                     "lang": row.lang,
                     "upstream_digest": _digest_of(upstream_ref),
+                    # Which models are cooling down right now, and how many times
+                    # one of them may fail before this row stops asking it.
+                    "model_policy": health().policy(),
                 },
+                report=report,
                 target_lang=row.lang or "en",
                 deadline=deadline,
                 cancelled=cancel_event,
@@ -489,6 +498,9 @@ def _execute_row(
             # classified failure, an unexpected exception, a timeout, a cancel.
             # It runs *after* the handlers above, which is what makes the
             # cooldown observable to the sibling that is waiting on this slot.
+            # The model report is folded in here for the same reason: it must
+            # land whichever way the row ended.
+            health().record(report)
             if paced:
                 pacer().release(host)
         attempts = row.attempt_count + 1
