@@ -59,6 +59,7 @@ from adapters.repository import (
     timestamp,
 )
 from app.pipeline import normalise_and_store
+from app.scheduler import PRUNE_INTERVAL_SECONDS
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.enums import (
     AuditOutcome,
@@ -684,3 +685,102 @@ def test_the_ledger_window_prunes_finished_work_and_leaves_live_rows_alone(
     assert _item_row(session_factory, item.id) == item_before, (
         "the item's own row is untouched"
     )
+
+
+def _seed_finished_work(
+    session: Session, *, fingerprint: str, target: str, finished_days_ago: float
+) -> str:
+    """A finished work with one unit, through the repository's own write path."""
+    work = create_work(
+        session,
+        kind="delete",
+        targets=[target],
+        params={},
+        fingerprint=fingerprint,
+        tenant_id="default",
+    )
+    append_unit(session, work_id=work.id, target=target, outcome=UnitOutcome.OK)
+    finish_work(
+        session,
+        work.id,
+        status=WorkStatus.SUCCEEDED,
+        now=datetime.now(UTC) - timedelta(days=finished_days_ago),
+    )
+    session.flush()
+    return work.id
+
+
+@pytest.mark.integration
+def test_ledger_retention_of_zero_keeps_every_row(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PEARSS_WORK_RETENTION_DAYS=0` means keep the ledger forever.
+
+    The same escape hatch the audit window has, for the same reason: an operator
+    who wants the whole history must be able to say so. The setting has to reach
+    the *pass* rather than only the parser -- a window read as zero that still
+    deleted rows would be the worst possible reading of "keep everything".
+    """
+    monkeypatch.setenv("PEARSS_WORK_RETENTION_DAYS", "0")
+    with session_factory() as session:
+        work_id = _seed_finished_work(
+            session,
+            fingerprint="fp-retention-forever",
+            target="it-retention-forever",
+            finished_days_ago=400,
+        )
+        session.commit()
+
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    works_after, units_after = _ledger_rows(session_factory)
+    assert work_id in works_after, "0 days means keep everything"
+    assert f"{work_id}:it-retention-forever" in units_after
+
+
+@pytest.mark.integration
+def test_the_ledger_pass_is_throttled_between_calls(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window is enforced once per maintenance interval, not every tick.
+
+    Asserted on the ledger rather than on the timer field: an expired work that
+    appears *after* a pass survives the next call, because that call is inside
+    the interval and must not run the delete. A pass per tick would be a delete
+    against the ledger every few seconds, which is the cost the interval exists
+    to avoid.
+    """
+    monkeypatch.setenv("PEARSS_WORK_RETENTION_DAYS", "30")
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    with session_factory() as session:
+        work_id = _seed_finished_work(
+            session,
+            fingerprint="fp-retention-throttled",
+            target="it-retention-throttled",
+            finished_days_ago=40,
+        )
+        session.commit()
+
+    # The clock has not moved, so this call is inside the interval.
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    works_after, _ = _ledger_rows(session_factory)
+    assert work_id in works_after, (
+        "a second pass inside the interval must not run the delete"
+    )
+
+    # Past the interval it does run: the assertion above is about the throttle,
+    # not about the row being unreachable.
+    clock.advance(PRUNE_INTERVAL_SECONDS + 1)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+    works_final, _ = _ledger_rows(session_factory)
+    assert work_id not in works_final
