@@ -291,5 +291,6 @@ Plugin 1 --- N ItemEnrichment
 | 可重建运行记录 | RawFetch、JobRun | 配置保留期；近期保留用于诊断，不进入常规长期备份 |
 | 可重建派生物 | ItemEnrichment、处理器产物 | 从 Item + pipeline 配置重放；可按成本选择保留，不视为唯一事实源 |
 | 运维记录 | Work、WorkUnit（作业账本） | 默认 30 天保留窗口后清理（`PEARSS_WORK_RETENTION_DAYS`，ADR 0046 D-F）；**不进备份**；未结束的作业永不清理 |
+| 可丢弃临时物 | 处理器块级缓存（`<storage>/processor-cache/`） | **不进备份**、不参与恢复一致性：丢了的代价只是重译（ADR 0052）。成功行由运行时清理；永久失败的行会留下一个小目录（写明不做清理器） |
 
 注意：如果某个外部内容以后无法再次获取，而原始 payload 又是唯一副本，应通过来源配置将该 RawFetch/payload 提升为备份对象，不能机械执行“RawFetch 不备份”。

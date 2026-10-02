@@ -16,17 +16,21 @@ import json
 import logging
 import os
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from adapters import filestore
 from app.plugin_runtime import child_environment
 from core.enums import ErrorClass
 from core.plugins.hooks import (
+    CACHE_DIR_KEY,
     DEADLINE_KEY,
     MODEL_EVENTS_KEY,
     ProcessorError,
@@ -132,6 +136,19 @@ class _ChildLog:
         return f"{self._prefix} {' | '.join(kept)[:MAX_CHILD_LOG_TAIL_CHARS]}"
 
 
+def _cache_dir(plugin_id: str, item_ctx: dict[str, Any]) -> Path:
+    """Where this row's partial work lives between attempts (issue #232).
+
+    Keyed by plugin, target language and item. Per item, not per attempt -- the
+    whole point is that the *next* attempt finds what this one managed -- and
+    per language, because a translation into another language is another
+    product, not a cache hit.
+    """
+    item_id = str(item_ctx.get("item_id", "?"))
+    lang = str(item_ctx.get("lang") or "en")
+    return filestore.storage_root() / "processor-cache" / plugin_id / lang / item_id
+
+
 def _unreported(detail: str, child_log: _ChildLog) -> ProcessorError:
     """A failure the child never got to report, with its last words attached.
 
@@ -170,15 +187,14 @@ def run_processor(
         module, name = processor.__module__, processor.__qualname__
     else:
         raise ProcessorError(ErrorClass.PARSE, "processor must be importable")
-    request = json.dumps(
-        {
-            "module": module,
-            "name": name,
-            "item_ctx": item_ctx,
-            "target_lang": target_lang,
-            "deadline": deadline,
-        }
-    ).encode()
+    body = {
+        "module": module,
+        "name": name,
+        "item_ctx": {**item_ctx, CACHE_DIR_KEY: str(_cache_dir(plugin_id, item_ctx))},
+        "target_lang": target_lang,
+        "deadline": deadline,
+    }
+    request = json.dumps(body).encode()
     if len(request) > MAX_MESSAGE_BYTES:
         raise ProcessorError(ErrorClass.PARSE, "processor input exceeds size cap")
     if cancelled.is_set() or time.monotonic() >= deadline:
@@ -259,6 +275,11 @@ def run_processor(
             raise ProcessorError(
                 ErrorClass.PARSE, "invalid processor response"
             ) from exc
+        # The row is done: whatever the processor kept for a retry is now dead
+        # weight, and leaving it would be a cache nobody ever reads (ADR 0052).
+        # Only on success: a failed attempt's partial work is the next
+        # attempt's head start.
+        shutil.rmtree(_cache_dir(plugin_id, item_ctx), ignore_errors=True)
         return body
     except OSError as exc:
         raise ProcessorError(ErrorClass.NETWORK, "processor pipe failed") from exc

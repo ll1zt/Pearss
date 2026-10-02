@@ -41,11 +41,13 @@ instead of being killed at the deadline with them (issue #227).
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urljoin
 
@@ -56,6 +58,7 @@ from adapters.sanitize import sanitize_html
 from core.enums import ErrorClass
 from core.language import is_already_in, prose_text
 from core.plugins.hooks import (
+    CACHE_DIR_KEY,
     DEADLINE_KEY,
     HOOKIMPL,
     MODEL_EVENTS_KEY,
@@ -363,6 +366,50 @@ def _budget_of(policy: Any) -> int | None:
     return budget if isinstance(budget, int) and budget >= 1 else None
 
 
+def _cache_dir_of(item_ctx: Any) -> Path | None:
+    """The scratch directory the runtime offered for this row, if any."""
+    if not isinstance(item_ctx, dict):
+        return None
+    raw = item_ctx.get(CACHE_DIR_KEY)
+    return Path(raw) if isinstance(raw, str) and raw else None
+
+
+def _chunk_key(chunk: str) -> str:
+    """A block's identity: its own text, not its position in the document."""
+    return hashlib.sha256(chunk.encode("utf-8")).hexdigest()[:32]
+
+
+def _cached(cache_dir: Path | None, chunk: str) -> str | None:
+    """What an earlier attempt already produced for this block, if anything."""
+    if cache_dir is None:
+        return None
+    try:
+        return (cache_dir / _chunk_key(chunk)).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _remember(cache_dir: Path | None, chunk: str, translated: str) -> None:
+    """Keep one block's translation for the next attempt (issue #232).
+
+    Written to a temporary name and renamed into place: a concurrent row, or one
+    killed mid-write, must never leave half a translation where the next attempt
+    would read it as a finished one. A cache that cannot be written is not a
+    failure -- the translation is in hand either way, and the next attempt just
+    pays for it again.
+    """
+    if cache_dir is None:
+        return
+    target = cache_dir / _chunk_key(chunk)
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = cache_dir / f"{target.name}.part"
+        temporary.write_text(translated, encoding="utf-8")
+        temporary.replace(target)
+    except OSError as exc:  # pragma: no cover - a full or read-only store
+        LOGGER.warning("could not keep a translated block for a retry: %s", exc)
+
+
 @HOOKIMPL
 def process(
     item_ctx: Any,
@@ -413,6 +460,9 @@ def process(
     # The row's policy and report: which models the worker's registry is
     # skipping, and what this row must tell it afterwards.
     plan = _RowPlan(item_ctx)
+    # Where a previous attempt's finished blocks live (issue #232): without it a
+    # retry pays for the whole document again to get past the block that failed.
+    cache_dir = _cache_dir_of(item_ctx)
 
     # What the provider is asked to translate, and the template the product is
     # rebuilt from. The units of translation are the article's own blocks, so
@@ -442,19 +492,24 @@ def process(
             )
         translated: list[str] = []
         for index, chunk in enumerate(requests, start=1):
+            remembered = _cached(cache_dir, chunk)
+            if remembered is not None:
+                PROGRESS.info("chunk %d/%d (cached)", index, len(requests))
+                translated.append(remembered)
+                continue
             PROGRESS.info("chunk %d/%d", index, len(requests))
-            translated.append(
-                _translate_one(
-                    chunk,
-                    language=language,
-                    base=base_url,
-                    key=key,
-                    models=candidates,
-                    deadline=deadline,
-                    cap=_attempt_cap(),
-                    plan=plan,
-                )
+            answer = _translate_one(
+                chunk,
+                language=language,
+                base=base_url,
+                key=key,
+                models=candidates,
+                deadline=deadline,
+                cap=_attempt_cap(),
+                plan=plan,
             )
+            _remember(cache_dir, chunk, answer)
+            translated.append(answer)
     finally:
         # The report has to survive a failure too: a failed row is exactly the
         # row whose per-model outcome the registry needs.
