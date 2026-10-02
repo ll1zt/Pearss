@@ -6,6 +6,7 @@ from __future__ import annotations
 import gzip
 import importlib
 import json
+import logging
 import pathlib
 import time
 
@@ -1801,6 +1802,35 @@ def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
     )
 
     assert events == [("primary", "network"), ("fallback", None)]
+
+
+def test_each_block_announces_itself_on_the_progress_logger(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-231: the block counter is what a killed row is diagnosed from.
+
+    A killed child never reports its aggregate, so the host keeps the child's
+    last log lines instead; this is the line that says where the chain had got
+    to (ADR 0050).
+    """
+    _model_provider(monkeypatch, {})
+
+    with caplog.at_level(logging.INFO, logger="pearss.progress"):
+        process(
+            _ctx(
+                THREE_BLOCKS,
+                model_policy={"skip": [], "attempts_per_model": 2},
+                model_events=[],
+            ),
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "pearss.progress"
+    ] == ["chunk 1/3", "chunk 2/3", "chunk 3/3"]
 
 
 def test_the_per_attempt_ceiling_comes_from_the_environment(

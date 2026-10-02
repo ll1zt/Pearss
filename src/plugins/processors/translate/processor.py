@@ -64,6 +64,11 @@ from core.plugins.hooks import (
 )
 
 LOGGER = logging.getLogger(__name__)
+# Progress under a logger the host recognises: a killed row never reports its
+# aggregate, so this line is what says which block the chain died on (issue
+# #230). The runtime keeps the child's last log lines and attaches them to a
+# failure the child never got to report.
+PROGRESS = logging.getLogger("pearss.progress")
 
 BASE_URL_ENV: Final = "PEARSS_TRANSLATE_BASE_URL"
 API_KEY_ENV: Final = "PEARSS_TRANSLATE_API_KEY"
@@ -435,19 +440,21 @@ def process(
                 ErrorClass.NETWORK,
                 "every configured model is cooling down; retrying later",
             )
-        translated = [
-            _translate_one(
-                chunk,
-                language=language,
-                base=base_url,
-                key=key,
-                models=candidates,
-                deadline=deadline,
-                cap=_attempt_cap(),
-                plan=plan,
+        translated: list[str] = []
+        for index, chunk in enumerate(requests, start=1):
+            PROGRESS.info("chunk %d/%d", index, len(requests))
+            translated.append(
+                _translate_one(
+                    chunk,
+                    language=language,
+                    base=base_url,
+                    key=key,
+                    models=candidates,
+                    deadline=deadline,
+                    cap=_attempt_cap(),
+                    plan=plan,
+                )
             )
-            for chunk in requests
-        ]
     finally:
         # The report has to survive a failure too: a failed row is exactly the
         # row whose per-model outcome the registry needs.

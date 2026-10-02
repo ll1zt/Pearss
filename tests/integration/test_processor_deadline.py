@@ -7,6 +7,7 @@ import contextlib
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -351,6 +352,112 @@ def test_user_sees_which_model_failed_when_the_budget_runs_out(
         assert publish_status == "pending", "the gate stays shut"
         assert "fixture:" in detail, detail
         assert "deadline expired" not in detail, detail
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(5)
+        engine.dispose()
+
+
+def test_a_killed_row_keeps_what_the_chain_had_learned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-231: a killed row says where it died and what the models had said.
+
+    Before this, a killed row read exactly `processor deadline expired`: the
+    child's stderr -- where the block counter and the fallback line both live --
+    went to /dev/null, and the kill discarded the aggregate the chain had built.
+
+    The fallback model drips bytes instead of answering, so no read timeout ever
+    fires and the child really does run to the deadline: the kill is the path
+    under test rather than a timing accident.
+    """
+    from tests.migrated_schema import migrated_database
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if body["model"] != "primary":
+                # One byte at a time: a read timeout measures the gap *between*
+                # bytes, so this neither trips it nor ever completes.
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                for _ in range(1000):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+                return
+            raw = json.dumps({"error": {"message": "overloaded"}}).encode()
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv(
+        "PEARSS_TRANSLATE_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+    )
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", "primary,fallback")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    monkeypatch.setattr(enrichment_worker, "DEFAULT_CALL_TIMEOUT", 4.0)
+    engine = sa.create_engine(migrated_database(tmp_path, "killed.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    chain = (
+        '[{"plugin_id":"translate","kind":"translation","lang":"zh","required":true}]'
+    )
+    with factory() as session:
+        source = create_source(
+            session,
+            source_type="rss",
+            url="https://killed.example/feed",
+            canonical_url="https://killed.example/feed",
+            tenant_id="default",
+            schedule_policy='{"type":"fixed","interval":"30m"}',
+            pipeline_chain=chain,
+            at="2026-09-17T00:00:00.000000Z",
+        )
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source.id,
+                    external_id="killed",
+                    title="Killed article",
+                    canonical_url="https://killed.example/article",
+                    published_at=None,
+                    content=(
+                        "<p>English prose one.</p>"
+                        "<p>English prose two.</p>"
+                        "<p>English prose three.</p>"
+                    ),
+                )
+            ],
+            chain=parse_chain(chain, target_lang=None),
+        )
+        session.commit()
+    try:
+        with factory() as session:
+            enrichment_worker.sweep_queue(
+                session,
+                processors=enrichment_worker.default_processors(),
+                concurrency=1,
+                max_attempts=1,
+                row_session_factory=factory,
+            )
+        with factory() as session:
+            detail = session.scalar(sa.select(ItemEnrichment.detail))
+        assert detail is not None
+        assert "deadline expired" in detail, detail
+        assert "chunk " in detail, detail
+        assert "primary" in detail and "falling back" in detail, detail
     finally:
         server.shutdown()
         server.server_close()

@@ -273,6 +273,12 @@ DEADLINE_KEY: Final = "deadline"
 MODEL_POLICY_KEY: Final = "model_policy"
 MODEL_EVENTS_KEY: Final = "model_events"
 
+# A processor that wants a *killed* row to say where it died logs progress under
+# this logger: the runtime keeps the child's last log lines and attaches them to
+# a failure the child never got to report (ADRs 0049 and 0050). Nothing else is
+# required of a processor -- there is no progress API to implement.
+PROGRESS_LOGGER: Final = "pearss.progress"
+
 
 class ProcessorError(Exception):
     """A classified processor failure: a value the gate can act on.
