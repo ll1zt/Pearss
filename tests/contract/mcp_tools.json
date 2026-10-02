@@ -6,7 +6,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL against the collectors; pass it explicitly when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain for the spec shape.",
+    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL against the collectors; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -65,7 +65,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch, and `type` 'auto' is resolved per URL as add_source resolves it. Returns a job handle -- read each URL's outcome with work_units, where an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
+    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units, where an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -184,7 +184,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a source's items while keeping the subscription. Requires confirmation. Use this after a bad crawl: the source keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible.",
+    "description": "Delete a source's items while keeping the subscription. Requires confirmation. Use this after a bad crawl: the source keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "include_published": {
@@ -243,7 +243,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately -- the work keeps running after this call, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`), and the source's collector must be able to fetch one address (rss can). Use this when you have addresses to fetch; use submit_items when you already fetched the content yourself.",
+    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately -- the work keeps running after this call, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
     "input_schema": {
       "properties": {
         "batch_size": {
@@ -589,7 +589,7 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. `url` matches an item's canonical url exactly: the way to ask \"is this address already stored?\" A miss is an empty list. Pass one of the three, not several. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the single biggest saving (see the instructions).",
+    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. `url` matches an item's canonical url exactly: the way to ask \"is this address already stored?\" A miss is an empty list. Pass one, not several. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the biggest saving (see the instructions).",
     "input_schema": {
       "properties": {
         "fields": {

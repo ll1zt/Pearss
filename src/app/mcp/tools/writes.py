@@ -126,10 +126,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "{type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed "
             "URL), 'web' (a page a login-type collector serves, e.g. "
             "zhihu/telegram) or 'auto' (default: inferred from the URL "
-            "against the collectors; pass it explicitly when auto would guess "
-            "wrong). pipeline_chain plus target_lang gate items until the "
-            "chain completes -- see set_source_pipeline_chain for the spec "
-            "shape."
+            "against the collectors; pass it when auto would guess wrong). "
+            "pipeline_chain plus target_lang gate items until the chain "
+            "completes -- see set_source_pipeline_chain."
         ),
     )
     async def add_source(
@@ -176,8 +175,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         description=(
             "Add several sources in one call. Requires user confirmation: these "
             "sources make real outbound requests to a third party. Options apply "
-            "to the whole batch, and `type` 'auto' is resolved per URL as "
-            "add_source resolves it. Returns a job handle -- read each URL's "
+            "to the whole batch; `type` 'auto' resolves per URL as add_source "
+            "does. Returns a job handle -- read each URL's "
             "outcome with work_units, where an unusable one fails alone. Use "
             "add_source for a single source, where the dialog names it exactly."
         ),
@@ -239,10 +238,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "immediately -- the work keeps running after this call, and the "
             "response does not grow with the list. Read per-address results "
             "with work_units. Each address must be on the source's own host "
-            "(off-host ones come back `rejected`), and the source's collector "
-            "must be able to fetch one address (rss can). Use this when you "
-            "have addresses to fetch; use submit_items when you already "
-            "fetched the content yourself."
+            "(off-host ones come back `rejected`); the collector must be able "
+            "to fetch one address (rss can). Use this for addresses to fetch; "
+            "submit_items for content you already fetched."
         ),
     )
     async def fetch_source_items(
@@ -468,8 +466,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "confirmation. Use this after a bad crawl: the source keeps its "
             "crawl position, so collection resumes instead of re-reading "
             "history. Optionally narrow by since/until; pass "
-            "include_published=false to spare items a client has already "
-            "seen. Not reversible."
+            "include_published=false to spare items a client has already seen. "
+            "Not reversible. Returns a job handle -- read each item's outcome "
+            "with work_units."
         ),
     )
     async def delete_source_items(
@@ -495,6 +494,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             method="POST",
             path=f"/v1/sources/{source_id}/items:delete",
             body=body,
+            # 200 when nothing matches the selection (no job to submit) and 202
+            # when something does; both are answers.
+            ok=(200, 202),
         )
 
     @server.tool(

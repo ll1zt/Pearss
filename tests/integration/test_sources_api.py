@@ -804,7 +804,7 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
     app: FastAPI,
     writer: httpx.AsyncClient,
 ) -> None:
-    """The "bad crawl, keep collecting" case (ADR 0021).
+    """AC-215: the "bad crawl, keep collecting" case (ADR 0021).
 
     The source survives with its cursor intact, so the next walk resumes
     instead of re-fetching history -- which is what distinguishes this from
@@ -833,13 +833,40 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
         )
         session.commit()
 
+    # The selection respects the filters, and an empty selection is an answer:
+    # the item is published, so sparing published items selects nothing at all.
+    spared = await writer.post(
+        f"/v1/sources/{source_id}/items:delete",
+        headers={"Idempotency-Key": "clear-spare"},
+        json={"include_published": False},
+    )
+    assert spared.status_code == 200, spared.text
+    assert spared.json()["work_id"] is None, spared.json()
+    assert spared.json()["counts"]["total"] == 0, spared.json()
+
     cleared = await writer.post(
         f"/v1/sources/{source_id}/items:delete",
         headers={"Idempotency-Key": "clear-2"},
         json={},
     )
-    assert cleared.status_code == 200
-    assert cleared.json()["items"] == 1
+    assert cleared.status_code == 202, cleared.text
+    handle = cleared.json()
+    assert handle["kind"] == "delete", handle
+    assert handle["counts"]["total"] == 1, handle
+
+    # Nothing is gone until the work runs: the answer is a handle.
+    still_there = await writer.get(f"/v1/sources/{source_id}/enrichments")
+    assert still_there.status_code == 200
+    with app.state.session_factory() as session:
+        assert (
+            session.execute(
+                sa.text("select count(*) from item where source_id = :i"),
+                {"i": source_id},
+            ).scalar()
+            == 1
+        )
+
+    await sweep_until_terminal(app.state.session_factory, handle["work_id"])
 
     still = await writer.get(f"/v1/sources/{source_id}")
     assert still.status_code == 200, "the subscription remains"

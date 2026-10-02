@@ -248,7 +248,18 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # characters, so the surface lands at 17,100 and 17,400 leaves the next tool the
 # same ~300 to argue for. The B group (selection-shaped commands, #199) measures
 # this again in its own diff.
-SURFACE_BUDGET_CHARS = 17_400
+#
+# #199's B group (17,400 -> 17,500) converted five more tools -- `delete_items`,
+# `add_sources`, `submit_items`, `backfill_source`, `delete_source_items` -- to
+# answer with a handle, and every one of their descriptions has to say where the
+# per-item results went. A trim pass cut ~100 characters back (the four largest
+# lost only clauses that repeated something else in the same sentence), so the
+# surface lands at 17,230. Trimming further would start deleting *selection*
+# guidance -- which parameter searches what, when to reach for this tool rather
+# than that one -- and that guidance is the thing this budget exists to protect,
+# not to spend. #218 is the next change that adds a tool rather than converting
+# one, and that is where a real trim pass belongs.
+SURFACE_BUDGET_CHARS = 17_500
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:

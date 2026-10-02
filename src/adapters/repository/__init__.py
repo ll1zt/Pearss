@@ -26,6 +26,7 @@ from adapters.repository.deletion import (
     delete_items,
     delete_source,
     delete_source_items,
+    items_for_source,
 )
 from adapters.repository.enrichment import (
     RATE_WINDOW_MINUTES,
@@ -176,6 +177,7 @@ __all__ = [
     "finish_work",
     "get_item",
     "get_source",
+    "items_for_source",
     "items_missing_chain",
     "items_ready_for_feed",
     "job_for_source",

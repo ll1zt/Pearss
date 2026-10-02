@@ -1654,3 +1654,70 @@ async def test_a_confirmed_source_level_retry_submits_a_job(
     by_target = {unit["target"]: unit for unit in units["data"]}
     assert by_target[enrichment_id]["outcome"] == "ok", by_target[enrichment_id]
     assert by_target[enrichment_id]["detail"] == "requeued"
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_source_items_delete_submits_a_job(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """AC-215: clearing a source's items is a job, and the source survives it.
+
+    A *fresh* source rather than src-1: the module shares one database, and
+    deleting another test's items to prove this one works would be this test
+    reaching outside its own fixture.
+    """
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+    from adapters.db_models import Item as ItemRow
+
+    created = await _call(
+        mcp_url,
+        "add_source",
+        {
+            "url": "https://clear.example/feed",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+        confirm=True,
+    )
+    source_id = created["id"]
+
+    engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
+    try:
+        with _sessionmaker(engine, expire_on_commit=False)() as session:
+            session.add(
+                ItemRow(
+                    id="clear-mcp-item",
+                    source_id=source_id,
+                    guid="clear-mcp-guid",
+                    content_hash="clear-mcp-hash",
+                    title="Bad crawl",
+                    url="https://clear.example/1",
+                    publish_status="ready",
+                    tenant_id="default",
+                    created_at="2026-01-01T00:00:00.000000Z",
+                    updated_at="2026-01-01T00:00:00.000000Z",
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+    result = await _call(
+        mcp_url, "delete_source_items", {"source_id": source_id}, confirm=True
+    )
+
+    assert result.get("declined") is None and result.get("aborted") is None, result
+    assert result.get("work_id"), result
+    assert result["counts"]["total"] == 1, result
+
+    # Nothing is gone until the work runs.
+    before = await _call(mcp_url, "search_items", {"limit": 5, "source_id": source_id})
+    assert [row["id"] for row in before["data"]] == ["clear-mcp-item"]
+
+    await run_work_to_completion(mcp_env, result["work_id"])
+
+    after = await _call(mcp_url, "search_items", {"limit": 5, "source_id": source_id})
+    assert after["data"] == []
+    source = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert source["id"] == source_id, "the subscription survives the clear"
+    assert source["status"] == "active", source
