@@ -1,6 +1,7 @@
 """The fetch executor: a work's targets, one ledger row each.
 
-Scenario register (normative source: SCENARIOS.md, AC-189..192; issue #190).
+Scenario register (normative source: SCENARIOS.md, AC-189..192; issues #190,
+#212; AC-237).
 
 A work is executed by `WorkWorker`, which claims it, runs one unit per target and
 writes the outcome as it goes. These tests drive one sweep directly rather than
@@ -16,7 +17,7 @@ repository: the ledger, the dedupe and the gate are the real ones.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -24,8 +25,10 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.db_models import Work, WorkUnit
 from adapters.repository import (
     append_unit,
+    claim_work,
     create_source,
     create_work,
     units_for_work,
@@ -137,6 +140,25 @@ def _submit(
         )
         session.commit()
         return work.id
+
+
+def _age_ledger(
+    session_factory: sessionmaker[Session], work_id: str, *, seconds: float
+) -> None:
+    """Make a work look like a pass that stopped writing `seconds` ago.
+
+    The rows come from the repository; only the clock moves, because the clock is
+    the scenario (a work is reclaimed on the age of its last ledger row).
+    """
+    stamp = timestamp(datetime.now(UTC) - timedelta(seconds=seconds))
+    with session_factory() as session:
+        session.execute(
+            sa.update(WorkUnit).where(WorkUnit.work_id == work_id).values(at=stamp)
+        )
+        session.execute(
+            sa.update(Work).where(Work.id == work_id).values(created_at=stamp)
+        )
+        session.commit()
 
 
 def _items(session_factory: sessionmaker[Session]) -> list[dict[str, object]]:
@@ -317,6 +339,11 @@ async def test_a_resumed_pass_only_runs_targets_without_a_row(
     so continuing must fetch only what has no row. That is the difference
     between resuming and restarting -- and re-fetching what already ran is work
     the caller did not ask for twice.
+
+    "Died" is the given, and since AC-237 the lease is what says so: the row is
+    old enough that no live pass is writing it any more. A work whose ledger is
+    still moving is a work in progress, not a corpse (that is the other
+    scenario).
     """
     origin = Origin()
     worker, client = _worker(session_factory, origin)
@@ -333,6 +360,7 @@ async def test_a_resumed_pass_only_runs_targets_without_a_row(
             detail="stored by the pass that died",
         )
         session.commit()
+    _age_ledger(session_factory, work_id, seconds=3600)
     try:
         await worker.sweep_once()
         second = await worker.sweep_once()
@@ -346,6 +374,126 @@ async def test_a_resumed_pass_only_runs_targets_without_a_row(
         units = units_for_work(session, work_id)
     assert {u.target for u in units} == set(targets), "the earlier row survived"
     assert work is not None and work.status is WorkStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_ac237_a_live_running_work_is_not_claimed_by_a_second_executor(
+    session_factory: sessionmaker[Session], source_id: str
+) -> None:
+    """AC-237: `running` means "in flight", not "abandoned", while it is moving.
+
+    `running` is claimable so a pass that died can be continued; before the lease
+    that also made it claimable while it was *still going*, which is harmless
+    with one executor and a double run with two -- the second re-fetches every
+    target and only finds out at the ledger's primary key. A long work is exactly
+    when that happens: a thousand targets at the default 2s spacing is over half
+    an hour of being claimable.
+
+    The second executor is a second `WorkWorker` in this process rather than a
+    second process: the claim is what decides, and the process boundary is not
+    part of the rule.
+    """
+    origin = Origin()
+    owner, owner_client = _worker(session_factory, origin)
+    other, other_client = _worker(session_factory, origin)
+    targets = [ARTICLE_URL]
+    work_id = _submit(session_factory, source_id=source_id, targets=targets)
+    # What a live pass looks like between two targets: claimed, `running`, with a
+    # ledger row written seconds ago.
+    with session_factory() as session:
+        claim_work(session, work_id)
+        append_unit(
+            session,
+            work_id=work_id,
+            target=targets[0],
+            outcome=UnitOutcome.OK,
+            detail="written by the pass that is still running",
+        )
+        session.commit()
+    del owner
+
+    try:
+        stolen = await other.sweep_once()
+    finally:
+        owner_client.close()
+        other_client.close()
+
+    assert stolen == {"works": 0, "units": 0}, (
+        "a work whose ledger is still moving is alive and must not be taken"
+    )
+    assert origin.requests == [], origin.requests
+    with session_factory() as session:
+        work = work_by_id(session, work_id)
+    assert work is not None and work.status is WorkStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_ac237_a_work_with_no_units_is_reclaimed_once_it_is_old(
+    session_factory: sessionmaker[Session], source_id: str
+) -> None:
+    """AC-237: a pass that died before writing anything is still reclaimable.
+
+    A claim queued and then lost (the process died between the claim and the
+    first ledger row) has no unit to age, so the window falls back to
+    `created_at`. Without that fallback such a work is stranded forever: it is
+    `running` and nothing about it can ever become stale.
+    """
+    origin = Origin()
+    worker, client = _worker(session_factory, origin)
+    targets = [ARTICLE_URL]
+    work_id = _submit(session_factory, source_id=source_id, targets=targets)
+    with session_factory() as session:
+        claim_work(session, work_id)
+        session.commit()
+    _age_ledger(session_factory, work_id, seconds=3600)
+
+    try:
+        swept = await worker.sweep_once()
+    finally:
+        client.close()
+
+    assert swept == {"works": 1, "units": 1}, swept
+    with session_factory() as session:
+        work = work_by_id(session, work_id)
+    assert work is not None and work.status is WorkStatus.SUCCEEDED
+    assert origin.requests, "the reclaimed pass must do the work"
+
+
+@pytest.mark.asyncio
+async def test_ac237_a_lease_of_zero_makes_every_running_work_reclaimable(
+    session_factory: sessionmaker[Session],
+    source_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PEARSS_WORK_LEASE_SECONDS=0` is the pre-lease behaviour, on purpose.
+
+    An operator debugging a stranded work needs a way to say "take it now"
+    without waiting out the window, and a window read as zero must mean *zero*
+    rather than "keep the default" -- the same reading the retention settings
+    have.
+    """
+    monkeypatch.setenv("PEARSS_WORK_LEASE_SECONDS", "0")
+    origin = Origin()
+    worker, client = _worker(session_factory, origin)
+    targets = [ARTICLE_URL]
+    work_id = _submit(session_factory, source_id=source_id, targets=targets)
+    with session_factory() as session:
+        claim_work(session, work_id)
+        append_unit(
+            session,
+            work_id=work_id,
+            target="https://never.example/other",
+            outcome=UnitOutcome.SKIPPED,
+            detail="written just now",
+        )
+        session.commit()
+
+    try:
+        swept = await worker.sweep_once()
+    finally:
+        client.close()
+
+    assert swept == {"works": 1, "units": 1}, swept
 
 
 @pytest.mark.asyncio
