@@ -1,7 +1,7 @@
 """Content-level discovery: a caller's addresses, fetched into one source.
 
-Scenario register (normative source: `SCENARIOS.md`; issues #170, #192, #194;
-AC-172..175, AC-195..196, AC-199..200).
+Scenario register (normative source: `SCENARIOS.md`; issues #170, #192, #194,
+#211; AC-172..175, AC-195..196, AC-199..200, AC-236).
 
 `POST /v1/sources/{id}:fetch-items` is the service side of "an agent enumerates
 a site's history": the caller discovers *addresses* (which the deployment
@@ -41,6 +41,7 @@ from sqlalchemy import text as sql
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
+from app.middleware import CorrelationAndAuditMiddleware
 from tests.migrated_schema import migrated_database
 
 WRITE_TOKEN = "fetch-items-write-token"
@@ -688,3 +689,49 @@ async def test_ac200_the_atom_and_a_one_target_work_agree(
     stored = await writer.get("/v1/items", params={"url": ARTICLE_URL})
     assert [row["id"] for row in stored.json()["data"]] == [receipt["item_id"]]
     assert stored.json()["total"] == 1
+
+
+# --------------------------------------------------------------------------
+# AC-236: the shim's removal trigger is observable, so it can be evaluated
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_compat_shim_is_identifiable_in_the_audit_log(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-236: ADR 0046 §7's removal trigger can actually be answered.
+
+    The trigger (issue #211) is "no caller has used this endpoint for a full
+    retention window", and it is only usable if the audit trail identifies *this*
+    endpoint rather than "some write". The middleware records the route template
+    (`app/middleware.py::_operation`), so the row is the literal
+    `POST /v1/sources/{source_id}:fetch-items` and one count over it answers the
+    question.
+
+    Already correct before this change, and declared as such: what makes it worth
+    pinning now is that an accepted ADR depends on it. A refactor that recorded
+    the *concrete* path per request (`.../src-abc:fetch-items`) would look right
+    in a log and silently make the trigger unevaluable, because the template is
+    what the count matches.
+    """
+    source_id = await _add_source(writer)
+    response = await _fetch_items(writer, source_id, [ARTICLE_URL])
+    assert response.status_code == 200, response.text
+
+    # The audit row is written after the response is on the wire, so reading
+    # straight after the call is a race -- the same reason the MCP suite drains.
+    CorrelationAndAuditMiddleware.drain_audit()
+    with session_factory() as session:
+        rows = [
+            str(row[0])
+            for row in session.execute(
+                sql("select operation from audit_log where operation like :pattern"),
+                # Bound rather than inlined: SQLAlchemy reads the `:fetch` in
+                # the pattern as a bind parameter.
+                {"pattern": "POST /v1/sources/%:fetch-items"},
+            ).fetchall()
+        ]
+
+    assert rows == ["POST /v1/sources/{source_id}:fetch-items"], rows

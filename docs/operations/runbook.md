@@ -335,6 +335,19 @@ just work retry-failed <work_id>                                             # �
   大批量一律走作业。
 
 
+### 兼容壳（`:fetch-items`）什么时候能删
+
+ADR 0046 §7 的修订写了触发条件：**一个完整保留窗口（30 天）内 `audit_log` 里没有该 endpoint
+的调用**即可删壳。判据是可查的（审计行的 `operation` 是路由模板，不是具体路径）：
+
+```bash
+sqlite3 /var/lib/pearss/pearss.db \
+  "select count(*) from audit_log where operation like 'POST /v1/sources/%:fetch-items'"
+```
+
+返回 0 且窗口已满 30 天，就可以按 ADR 0046 §7 删掉端点、`MAX_COMPAT_FETCH_ITEMS` 与它的测试；
+`tests/integration/test_fetch_items.py` 有用例钉住「这条谓词能选中壳的调用」这个前提。
+
 ## 故障处置表
 
 | 症状 | 先看什么 | 安全动作 | 不要做什么 |
