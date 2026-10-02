@@ -13,7 +13,7 @@ Scenario register (normative source: docs/api/mcp-tool-guide.md; issue #69).
     Then  编号严格递增且无重复
 
   AC-57 描述与注解的一致性有断言
-    Given 22 个工具的 description 与 annotations (契约快照)
+    Given 工具面上每个工具的 description 与 annotations (契约快照)
     When  跑一致性检查
     Then  三类措辞与对应 hint 全部吻合
     And   故意改坏一个注解会让检查变红 (注入式验证, 见下)
@@ -257,9 +257,33 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # surface lands at 17,230. Trimming further would start deleting *selection*
 # guidance -- which parameter searches what, when to reach for this tool rather
 # than that one -- and that guidance is the thing this budget exists to protect,
-# not to spend. #218 is the next change that adds a tool rather than converting
-# one, and that is where a real trim pass belongs.
-SURFACE_BUDGET_CHARS = 17_500
+# not to spend.
+#
+# 18,000 is the first raise that pays for a *new* tool rather than for keeping
+# one (issue #218, consumption state). The read half cost nothing: `get_item`
+# folds in `is_read`/`is_starred` from the /v1 atom, which is the shape this
+# budget rewards -- "what is this item" and "what is my state with it" are one
+# question, so they are one call and no new read tool (the same move as #193).
+# The write half could not be folded: a write cannot live in a read tool, since
+# the annotations and the confirmation differ and mixing them in would make
+# `get_item` elicit. So it is a 29th tool, `set_item_read_state`, measured at 623
+# characters (name + description + schema).
+#
+# A trim pass before the raise cut 197 characters from the descriptions this
+# change touches (`submit_items`, `set_source_pipeline_chain`, `add_source`,
+# `search_items`) and from the new one; every cut removed a clause that restated
+# something else in the same description, none of them selection guidance. That
+# leaves 236 to argue for. The one remaining lever was moving the "read the
+# per-target outcomes with work_units" clause -- identical in seven
+# handle-returning tools, ~350 characters together -- into the server
+# instructions. It would fit the number without raising it, and it is not
+# dishonest; but it *moves* the text rather than removing it, and the
+# instructions are carried by every conversation too. A budget whose point is to
+# bound the always-present surface should not be balanced by relocating text
+# into another always-present surface, so the raise is the honest entry. The
+# surface lands at 17,736 and 18,000 leaves the next tool the same ~260 to argue
+# for in its own diff.
+SURFACE_BUDGET_CHARS = 18_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:

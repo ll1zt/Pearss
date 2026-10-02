@@ -78,6 +78,11 @@ ARGUMENTS: dict[str, Any] = {
     "enrichment_id": "enr-1",
     "status": "disabled",
     "item_ids": ["i1", "i2"],
+    # The read-state atom's target and its partial change (issue #218): an
+    # omitted field keeps its value, so both halves are perturbed separately.
+    "item_id": "i1",
+    "is_read": True,
+    "is_starred": False,
     "since": "2026-01-01T00:00:00Z",
     "until": "2026-02-01T00:00:00Z",
     "include_published": True,
@@ -169,8 +174,8 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     tools = _write_tools()
     # The count is a claim, not a property: a new write tool has to change this
     # line, which is where someone notices that the confirmation surface grew.
-    assert len(tools) == 15, (
-        f"expected the fifteen write tools, found {sorted(tools)} -- update the "
+    assert len(tools) == 16, (
+        f"expected the sixteen write tools, found {sorted(tools)} -- update the "
         "claim in this docstring if the surface really changed"
     )
 

@@ -92,8 +92,8 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=reads,
         description=(
             "Search collected items. `q` searches the title only, as a "
-            "substring; `full_text` searches titles and bodies and ranks by "
-            "relevance — use it when the words may be in the article rather "
+            "substring; `full_text` searches titles and bodies, ranked — use it "
+            "when the words may be in the article rather "
             "than its headline. `url` matches an item's canonical url exactly: "
             'the way to ask "is this address already stored?" A miss is an '
             "empty list. Pass one, not several. `source_id`, "
@@ -163,7 +163,8 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=reads,
         description=(
             "One item's metadata by id: title, url, author, published_at, "
-            "publish_status and the timing fields. No body — that is the "
+            "publish_status, the timing fields, and your own read/star state "
+            "(is_read, is_starred). No body — that is the "
             "item://{item_id} Resource or get_item_body. Read-only.\n\n"
             "Use it when you already hold an id: `search_items` cannot filter "
             "by id, so this is the only way to read one row without a search "
@@ -177,6 +178,22 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
         status, payload, _ = await core.get(f"/v1/items/{item_id}", **params)
         if status != 200:
             return _error_from(payload, status)
+        if fields:
+            # An explicit `fields` list is a narrowing request, so the answer
+            # stays exactly what was asked for.
+            return _truncate(payload)
+        # Consumption state lives in its own table and has its own /v1 atom;
+        # folding it in here is what keeps "what is this item and what is my
+        # state with it" one tool call instead of a second read tool in every
+        # conversation (issue #218). A state read that fails leaves the item's
+        # own answer intact rather than inventing a state.
+        state_status, state, _ = await core.get(f"/v1/items/{item_id}/read-state")
+        if state_status == 200:
+            payload = {
+                **payload,
+                "is_read": state["is_read"],
+                "is_starred": state["is_starred"],
+            }
         return _truncate(payload)
 
     @server.tool(
