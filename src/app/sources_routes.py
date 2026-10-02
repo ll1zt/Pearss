@@ -38,6 +38,7 @@ from adapters.repository import (
     failed_enrichments_for_source,
     finish_work,
     get_source,
+    items_missing_chain,
     job_for_source,
     list_job_runs,
     list_sources,
@@ -1252,7 +1253,11 @@ def update_source(
     return JSONResponse(status_code=200, content=payload)
 
 
-@router.post("/sources/{source_id}:backfill-chain", operation_id="backfillChain")
+@router.post(
+    "/sources/{source_id}:backfill-chain",
+    operation_id="backfillChain",
+    status_code=202,
+)
 def backfill_source_chain(
     request: Request,
     source_id: str,
@@ -1262,12 +1267,23 @@ def backfill_source_chain(
 ) -> JSONResponse:
     """Queue processor products for items stored before the chain was enabled.
 
-    A write (it mutates item_enrichment and spends provider budget), so it is
-    authenticated, idempotent and audited like every other write.
+    A write (it spends provider budget), so it is authenticated, idempotent and
+    audited like every other write. Unbounded was how one call turned into 122
+    fetches of a single blog, so the default is still a batch an operator can
+    watch, repeated until the backlog is done.
 
-    The batch size defaults to a conservative limit; see
-    `BackfillChainRequest`. Unbounded was how one call turned into 122 fetches
-    of a single blog, so the default is now something an operator can watch.
+    **The selection stays on this side**: naming the items would mean paging the
+    source's list and holding it, which is the caller-side loop ADR 0046 rejects.
+    What changed (issue #199) is what the answer *is* -- a work handle
+    (`kind=enrich`) rather than a count. `counts.total` is how many items were
+    selected and `GET /v1/works/{id}/units` is what happened to each, which is a
+    query and therefore survives a timeout the inline count did not. `limit` now
+    bounds *targets* rather than queued rows, which is the work's own unit.
+
+    A source with nothing stored is an answer rather than an error: no work is
+    submitted and `work_id` is null with zero counts (200 rather than 202). A
+    source with no chain is still a 422, because nothing about the selection
+    could have made it work.
     """
     endpoint = f"POST /v1/sources/{source_id}:backfill-chain"
     factory = request.app.state.session_factory
@@ -1275,7 +1291,6 @@ def backfill_source_chain(
     if replayed is not None:
         return replayed
 
-    from adapters.repository import backfill_chain
     from app.fetch_pacing import backfill_default_limit
 
     body = payload or BackfillChainRequest()
@@ -1291,8 +1306,10 @@ def backfill_source_chain(
                 suggestion="Set pipeline_chain via PATCH first.",
             )
         try:
-            queued = backfill_chain(session, source_id=source_id, limit=limit)
-        except ValueError as exc:
+            # Refused here rather than per target: a chain this deployment
+            # cannot parse is not a property of any one item.
+            chain = parse_chain(row.pipeline_chain, target_lang=row.target_lang)
+        except (ValueError, KeyError) as exc:
             raise api_error(
                 status_code=422,
                 code="invalid_chain",
@@ -1302,24 +1319,57 @@ def backfill_source_chain(
                     "translation, summary, fulltext, tts_audio."
                 ),
             ) from exc
-        session.commit()
 
-    result: dict[str, Any] = {
-        "source_id": source_id,
-        "queued": queued,
-        "limit": limit,
-        "audit": "recorded by the Core API",
-        "correlation_id": current_correlation_id(),
-    }
+        targets = items_missing_chain(
+            session, source_id=source_id, chain=chain, limit=limit
+        )
+        if not targets:
+            empty: dict[str, Any] = {
+                "source_id": source_id,
+                "limit": limit,
+                "work_id": None,
+                "kind": "enrich",
+                "status": None,
+                "counts": work_counts(total_targets=0, outcomes=[]),
+                "audit": "recorded by the Core API",
+                "correlation_id": current_correlation_id(),
+            }
+            remember(
+                factory,
+                actor=principal.name,
+                endpoint=endpoint,
+                key=key,
+                status_code=200,
+                body=empty,
+            )
+            return JSONResponse(status_code=200, content=empty)
+
+        work = submit_command(
+            session,
+            kind="enrich",
+            targets=targets,
+            params={"source_id": source_id},
+        )
+        result: dict[str, Any] = {
+            "source_id": source_id,
+            "limit": limit,
+            "audit": "recorded by the Core API",
+            **handle_payload(session, work),
+        }
+
     remember(
         factory,
         actor=principal.name,
         endpoint=endpoint,
         key=key,
-        status_code=200,
+        status_code=202,
         body=result,
     )
-    return JSONResponse(status_code=200, content=result)
+    return JSONResponse(
+        status_code=202,
+        content=result,
+        headers={"Location": f"/v1/works/{result['work_id']}"},
+    )
 
 
 @router.get("/sources/{source_id}/enrichments", operation_id="listEnrichments")

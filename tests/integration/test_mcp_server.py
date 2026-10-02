@@ -1173,7 +1173,7 @@ async def test_set_plugin_status_maps_its_operation_and_executes(
 async def test_backfill_source_executes_and_reports_queued(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
-    """The backfill tool routes to :backfill-chain and returns its count.
+    """AC-214: the backfill tool routes to :backfill-chain and returns a handle.
 
     The source needs a chain and stored items for the count to be non-zero;
     both are set up directly against the shared database, since the MCP
@@ -1210,9 +1210,12 @@ async def test_backfill_source_executes_and_reports_queued(
     )
     assert payload.get("declined") is None and payload.get("aborted") is None
     # The module database is shared, so other tests' items for this source may
-    # already be queued; what must hold is that this source now has products
-    # and the count is honest (non-zero means the verb did its job).
-    assert payload["queued"] >= 1, payload
+    # already be queued; what must hold is that the answer is a handle with a
+    # non-empty selection, and that running it leaves products behind.
+    assert payload.get("work_id"), payload
+    assert payload["counts"]["total"] >= 1, payload
+
+    await run_work_to_completion(mcp_env, payload["work_id"])
 
     listed = await _call(mcp_url, "list_enrichments", {"source_id": "src-1"})
     assert listed["data"], listed

@@ -1225,7 +1225,7 @@ async def test_backfill_chain_endpoint_queues_and_audits(
     app: FastAPI,
     session_factory: sessionmaker[Session],
 ) -> None:
-    """The :backfill-chain verb queues products for stored items.
+    """AC-214: the :backfill-chain verb queues products for stored items.
 
     Items are seeded before the call on purpose: without them `queued` is
     always 0 and the verb's actual job -- enqueuing for pre-existing items --
@@ -1276,8 +1276,16 @@ async def test_backfill_chain_endpoint_queues_and_audits(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "backfill-run-1"},
     )
-    assert first.status_code == 200, first.text
-    assert first.json()["queued"] == 2, first.json()
+    assert first.status_code == 202, first.text
+    handle = first.json()
+    assert handle["kind"] == "enrich", handle
+    assert handle["counts"]["total"] == 2, handle
+
+    # Nothing is queued until the work runs: the answer is a handle.
+    queued_yet = await writer.get(f"/v1/sources/{source_id}/enrichments")
+    assert queued_yet.json()["data"] == []
+
+    await sweep_until_terminal(session_factory, handle["work_id"])
 
     # The products exist, queued for the worker.
     listed = await writer.get(f"/v1/sources/{source_id}/enrichments")
@@ -1293,7 +1301,12 @@ async def test_backfill_chain_endpoint_queues_and_audits(
         headers={"Idempotency-Key": "backfill-run-2"},
     )
     assert again.status_code == 200
-    assert again.json()["queued"] == 0
+    # A second run has nothing left to select: every item already carries the
+    # chain's product, and the response says so rather than submitting a work
+    # with no targets.
+    assert again.status_code == 200, again.text
+    assert again.json()["work_id"] is None, again.json()
+    assert again.json()["counts"]["total"] == 0, again.json()
 
     CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as session:
@@ -1645,25 +1658,33 @@ async def test_user_backfill_queues_a_watchable_batch_not_the_whole_backlog(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "batch-run-1"},
     )
-    assert first.status_code == 200, first.text
-    assert first.json()["queued"] == 3, first.json()
+    assert first.status_code == 202, first.text
     assert first.json()["limit"] == 3, "the response names the batch it used"
+    assert first.json()["counts"]["total"] == 3, first.json()
+    await sweep_until_terminal(session_factory, first.json()["work_id"])
 
+    # Repeating reaches the *next* batch: the selection skips items that already
+    # carry the chain's product, which is what makes this idiom advance. It
+    # advances after the batch has run, because that is when the products exist.
     second = await writer.post(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "batch-run-2"},
     )
-    assert second.json()["queued"] == 3, (
-        "repeating the call must reach the next batch, not re-queue the first"
+    assert second.status_code == 202, second.text
+    assert second.json()["counts"]["total"] == 3, (
+        "repeating the call must reach the next batch, not re-select the first"
     )
+    await sweep_until_terminal(session_factory, second.json()["work_id"])
 
     explicit = await writer.post(
         f"/v1/sources/{source_id}:backfill-chain",
         headers={"Idempotency-Key": "batch-run-3"},
         json={"limit": 5},
     )
-    assert explicit.json()["queued"] == 5, "an explicit limit wins"
+    assert explicit.status_code == 202, explicit.text
+    assert explicit.json()["counts"]["total"] == 5, "an explicit limit wins"
     assert explicit.json()["limit"] == 5
+    await sweep_until_terminal(session_factory, explicit.json()["work_id"])
 
     with session_factory() as session:
         total = session.execute(
@@ -2248,5 +2269,35 @@ async def test_retrying_a_source_with_no_failures_submits_no_job(
         "queued": 0,
         "total": 0,
     }
+    with session_factory() as session:
+        assert session.execute(sa.text("select count(*) from work")).scalar_one() == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_backfilling_a_source_without_a_chain_is_refused_before_selecting(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-214: no chain is the source's refusal, and it comes before selection.
+
+    The work would refuse every target with the same sentence; a 422 up front is
+    the same fact said once, and it leaves the endpoint's contract intact: the
+    caller learns nothing about a selection that cannot happen, and no work is
+    created.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "bf-nochain-create"},
+        json={"url": "https://nochain.example/feed", "schedule_policy": policy()},
+    )
+    source_id = created.json()["id"]
+
+    response = await writer.post(
+        f"/v1/sources/{source_id}:backfill-chain",
+        headers={"Idempotency-Key": "bf-nochain-run"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"]["code"] == "no_pipeline_chain"
     with session_factory() as session:
         assert session.execute(sa.text("select count(*) from work")).scalar_one() == 0

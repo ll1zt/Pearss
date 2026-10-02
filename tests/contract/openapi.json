@@ -3599,7 +3599,7 @@
     },
     "/v1/sources/{source_id}:backfill-chain": {
       "post": {
-        "description": "Queue processor products for items stored before the chain was enabled.\n\nA write (it mutates item_enrichment and spends provider budget), so it is\nauthenticated, idempotent and audited like every other write.\n\nThe batch size defaults to a conservative limit; see\n`BackfillChainRequest`. Unbounded was how one call turned into 122 fetches\nof a single blog, so the default is now something an operator can watch.",
+        "description": "Queue processor products for items stored before the chain was enabled.\n\nA write (it spends provider budget), so it is authenticated, idempotent and\naudited like every other write. Unbounded was how one call turned into 122\nfetches of a single blog, so the default is still a batch an operator can\nwatch, repeated until the backlog is done.\n\n**The selection stays on this side**: naming the items would mean paging the\nsource's list and holding it, which is the caller-side loop ADR 0046 rejects.\nWhat changed (issue #199) is what the answer *is* -- a work handle\n(`kind=enrich`) rather than a count. `counts.total` is how many items were\nselected and `GET /v1/works/{id}/units` is what happened to each, which is a\nquery and therefore survives a timeout the inline count did not. `limit` now\nbounds *targets* rather than queued rows, which is the work's own unit.\n\nA source with nothing stored is an answer rather than an error: no work is\nsubmitted and `work_id` is null with zero counts (200 rather than 202). A\nsource with no chain is still a 422, because nothing about the selection\ncould have made it work.",
         "operationId": "backfillChain",
         "parameters": [
           {
@@ -3646,7 +3646,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {}
