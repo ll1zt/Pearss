@@ -1,11 +1,14 @@
-"""The two retention windows, and what a malformed setting means.
+"""The retention windows, the work lease, and what a malformed setting means.
 
-Both windows are environment settings read on every maintenance pass, and both
-have the same three shapes: a default, an explicit number of days, and `0`
-meaning "keep everything". The failure mode they share is the reason they are
-tested together: a *typo* must not silently become "delete everything" or
-"delete nothing". `PEARSS_WORK_RETENTION_DAYS=thrity` has to mean 30, and so does
-`-5` -- neither may reach the delete with a surprising cutoff.
+All three are environment settings read on every pass, and all three have the
+same three shapes: a default, an explicit value, and `0` meaning the permissive
+end of the scale (`0` days keeps everything; `0` seconds of lease disables the
+lease).
+
+The failure mode they share is why they are tested together: a *typo* must not
+silently become "delete everything" or "delete nothing".
+`PEARSS_WORK_RETENTION_DAYS=thrity` has to mean 30, and so does `-5` -- neither
+may reach the delete with a surprising cutoff.
 
 Scenario register (issue #203; ADR 0016 for the audit window, ADR 0046 D-F for
 the ledger):
@@ -27,6 +30,7 @@ from collections.abc import Callable
 import pytest
 
 from app.scheduler import audit_retention_days, work_retention_days
+from app.work_worker import work_lease_seconds
 
 pytestmark = pytest.mark.unit
 
@@ -65,3 +69,33 @@ def test_a_window_is_read_as_days_and_a_typo_means_the_default(
 ) -> None:
     monkeypatch.setenv(variable, raw)
     assert parser() == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, 900.0),
+        ("60", 60.0),
+        ("0", 0.0),
+        ("-5", 0.0),
+        ("oops", 900.0),
+        ("", 900.0),
+        (" 120 ", 120.0),
+        ("12.5", 12.5),
+    ],
+)
+def test_the_work_lease_is_read_as_seconds(
+    raw: str | None, expected: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`PEARSS_WORK_LEASE_SECONDS`, including the two ends that matter.
+
+    `0` must reach the claim as *zero* (take any `running` work: the pre-#212
+    behaviour, and the escape hatch for a stranded one) and a typo must fall back
+    to the default rather than to zero -- a malformed setting that silently
+    removed the protection would be the worst possible reading.
+    """
+    if raw is None:
+        monkeypatch.delenv("PEARSS_WORK_LEASE_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("PEARSS_WORK_LEASE_SECONDS", raw)
+    assert work_lease_seconds() == expected

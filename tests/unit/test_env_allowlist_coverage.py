@@ -45,6 +45,8 @@ HOST_SIDE: frozenset[str] = frozenset(
         # The ledger's window (ADR 0046 D-F): read by the scheduler, the same
         # way the audit window is, and just as meaningless to a collector.
         "PEARSS_WORK_RETENTION_DAYS",
+        # The work lease (issue #212): read by the work worker, in-process.
+        "PEARSS_WORK_LEASE_SECONDS",
         "PEARSS_SCHEDULER_ENABLED",
         "PEARSS_TICK_SECONDS",
         "PEARSS_AUTH_RATELIMIT_MAX",

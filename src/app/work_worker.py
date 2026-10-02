@@ -29,10 +29,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import httpx
@@ -78,6 +79,32 @@ LOGGER = logging.getLogger(__name__)
 # only "how long may a freshly submitted batch wait"; the work itself takes as
 # long as its targets take.
 DEFAULT_WORK_SWEEP_SECONDS: Final = 30.0
+
+# How long a `running` work may stay silent before another executor may take it
+# (issue #212). A pass that is fetching writes a ledger row per target, so a
+# silent work is either dead or between two targets -- and the gap between two
+# targets is bounded by the egress client's per-request timeout plus the pacing
+# interval, i.e. minutes, not seconds. Fifteen minutes leaves a slow origin room
+# and still reclaims a pass whose process died the same afternoon. Zero disables
+# the lease (every `running` work is reclaimable), which is the pre-#212
+# behaviour and the escape hatch for a work somebody needs resumed now.
+WORK_LEASE_ENV: Final = "PEARSS_WORK_LEASE_SECONDS"
+DEFAULT_WORK_LEASE_SECONDS: Final = 900.0
+
+
+def work_lease_seconds() -> float:
+    """The lease window, in seconds. `0` means "take any running work".
+
+    A malformed value means the default, never "no lease": a typo must not
+    quietly remove the protection (the same reading the retention settings have).
+    """
+    raw = os.environ.get(WORK_LEASE_ENV, "").strip()
+    if not raw:
+        return DEFAULT_WORK_LEASE_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return DEFAULT_WORK_LEASE_SECONDS
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -641,8 +668,11 @@ class WorkWorker:
 
     def _sweep(self) -> dict[str, int]:
         registry = self._registry or collector_registry.default_registry()
+        stale_before = datetime.now(UTC) - timedelta(seconds=work_lease_seconds())
         with self._session_factory() as session:
-            work = claim_next_work(session, kinds=EXECUTABLE_KINDS)
+            work = claim_next_work(
+                session, kinds=EXECUTABLE_KINDS, stale_before=stale_before
+            )
             session.commit()
         if work is None:
             return {"works": 0, "units": 0}

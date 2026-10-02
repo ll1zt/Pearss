@@ -89,7 +89,32 @@ def live_work_by_fingerprint(session: Session, fingerprint: str) -> WorkRecord |
     return None if row is None else _work_record(row)
 
 
-def claim_next_work(session: Session, *, kinds: frozenset[str]) -> WorkRecord | None:
+def _claimable(*, stale_before: datetime) -> Any:
+    """Which works this host may take, as one expression used twice.
+
+    `queued` is always claimable. `running` is claimable only while it looks
+    abandoned -- see `claim_next_work` for why that is a lease and not a status.
+    """
+    last_activity = (
+        sa.select(sa.func.max(WorkUnitRow.at))
+        .where(WorkUnitRow.work_id == WorkRow.id)
+        .scalar_subquery()
+    )
+    return sa.or_(
+        WorkRow.status == WorkStatus.QUEUED.value,
+        sa.and_(
+            WorkRow.status == WorkStatus.RUNNING.value,
+            # Fixed-width stamps compare lexicographically, which is what makes
+            # `<` on a Text column mean "earlier" at all.
+            sa.func.coalesce(last_activity, WorkRow.created_at)
+            < timestamp(stale_before),
+        ),
+    )
+
+
+def claim_next_work(
+    session: Session, *, kinds: frozenset[str], stale_before: datetime
+) -> WorkRecord | None:
     """Claim the oldest work this host can execute, or None.
 
     `kinds` is the set of executors that exist. A kind with no executor stays
@@ -98,14 +123,28 @@ def claim_next_work(session: Session, *, kinds: frozenset[str]) -> WorkRecord | 
 
     `running` works are claimable too, and that is the resume path: a work whose
     executor died mid-way keeps the ledger rows it wrote, so re-entering it
-    continues from where it stopped instead of starting over. The claim itself
-    is a conditional UPDATE, so two workers cannot both take it.
+    continues from where it stopped instead of starting over. But `running` also
+    covers a work that is simply *slow*, and re-entering one of those re-runs
+    targets the first executor is fetching right now -- a second process, or a
+    worker split out of the app, would double every request and only find out at
+    the ledger's primary key. So the claim is a lease: a `running` work is taken
+    only when its last ledger row (or `created_at`, for a pass that died before
+    writing one) is older than `stale_before`.
+
+    Every unit write is a heartbeat, which is what makes that a statement about
+    liveness rather than a guess: a pass that is fetching is writing rows, and a
+    pass that stopped writing for the whole window is presumed gone. The caller
+    owns the window (`app.work_worker.work_lease_seconds`), so the policy stays
+    out of the repository.
+
+    The claim itself is a conditional UPDATE carrying the same predicate, so two
+    workers cannot both take the same row.
     """
     row = session.scalars(
         sa.select(WorkRow)
         .where(
             WorkRow.kind.in_(tuple(sorted(kinds))),
-            WorkRow.status.in_((WorkStatus.QUEUED.value, WorkStatus.RUNNING.value)),
+            _claimable(stale_before=stale_before),
         )
         .order_by(WorkRow.created_at, WorkRow.id)
         .limit(1)
@@ -116,10 +155,7 @@ def claim_next_work(session: Session, *, kinds: frozenset[str]) -> WorkRecord | 
         "CursorResult[Any]",
         session.execute(
             sa.update(WorkRow)
-            .where(
-                WorkRow.id == row.id,
-                WorkRow.status.in_((WorkStatus.QUEUED.value, WorkStatus.RUNNING.value)),
-            )
+            .where(WorkRow.id == row.id, _claimable(stale_before=stale_before))
             .values(status=WorkStatus.RUNNING.value)
         ),
     )
