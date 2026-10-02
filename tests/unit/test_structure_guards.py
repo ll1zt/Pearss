@@ -2160,3 +2160,38 @@ def test_the_read_state_rule_has_exactly_one_caller() -> None:
         f"{callers}. A second caller is a second implementation of the same "
         "write (issue #202)."
     )
+
+
+def test_no_mcp_tool_writes_its_own_error_envelope() -> None:
+    """AC-223: the MCP error shape has one spelling, and it is not hand-made.
+
+    `docs/api/mcp-tool-guide.md` §4 and `rendering._error_from` say the shape is
+    flat: `error` is a stable snake_case code with `error_class`,
+    `suggestion` and `next_actions` beside it. `list_enrichments` had
+    hand-written a *nested* `{"error": {"code": ...}}` for its missing-target
+    refusal, so `payload["error"]` was a code for every other tool and an object
+    for that one -- and a caller had to branch on the type of the field whose
+    whole purpose is to be the branch. Nothing caught it because nothing
+    asserted the shape (issue #216).
+
+    A grep is the right guard rather than a behavioural sweep: the rule is about
+    the *text* of a return statement, and the alternative is a test that drives
+    all 29 tools into an error state -- which would still only cover the tools
+    someone remembered to include. What it cannot see is an indent-shifted or
+    renamed spelling (`{"error": dict(code=...)}`); the flat shape is what the
+    error paths of the shared helper produce, so anything new goes through
+    `_error_from` and never becomes a literal here.
+    """
+    offenders = [
+        str(path.relative_to(REPO_ROOT))
+        for path in sorted((REPO_ROOT / "src" / "app" / "mcp").rglob("*.py"))
+        if "__pycache__" not in path.parts
+        and '"error": {' in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], (
+        f"hand-written nested error envelopes in the MCP tool layer: {offenders} "
+        "-- the tool error shape is flat, with `error` as the code string; see "
+        "app/mcp/rendering.py::_error_from and the guide's section 4. A JSON-RPC "
+        "error body is a different thing and lives outside this package "
+        "(app/mcp_guard.py) (issue #216)."
+    )

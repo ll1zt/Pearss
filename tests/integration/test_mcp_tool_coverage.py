@@ -46,6 +46,12 @@ behind -- rather than that some method was called.
     When agent 确认后调用 retry_enrichments
     Then 返回 200 形状的结果, 带 audit_id
 
+  AC-223 工具错误只有一种形状: error 是码字符串, 不是嵌套信封 (#216)
+    Given 一个读工具在缺少目标参数时拒绝
+    When  agent 调用 list_enrichments 不给 item_id 也不给 source_id
+    Then  error 是字符串码 missing_target (不是对象)
+    And   旁边是 suggestion 与 next_actions (与 _error_from 同一形状)
+
   AC-220 读状态在工具面上是一等公民, 且不碰条目事实 (#218)
     Given 一个 ready 条目
     When  agent 确认后调用 set_item_read_state(is_read=true)
@@ -262,6 +268,26 @@ async def test_get_item_returns_the_requested_fields(mcp_url: str) -> None:
     default = await _call(mcp_url, "get_item", {"item_id": item_id})
     assert default["publish_status"] == "ready"
     assert default["id"] == item_id
+
+
+@pytest.mark.asyncio
+async def test_list_enrichments_reports_a_missing_target_as_a_code(
+    mcp_url: str,
+) -> None:
+    """AC-223: `error` is the code itself, as it is for every other tool.
+
+    The refusal is right and stays: neither id is wrong, and a model that
+    supplies one fixes it with a tool it already holds. What changed is the
+    shape -- it was a hand-made nested dict, so `payload["error"]` was a code
+    for 28 tools and an object for this one, and a caller had to branch on the
+    type of the field whose whole purpose is to be the branch (issue #216).
+    """
+    payload = await _call(mcp_url, "list_enrichments", {})
+
+    assert isinstance(payload["error"], str), payload
+    assert payload["error"] == "missing_target", payload
+    assert payload["suggestion"], payload
+    assert payload["next_actions"] == ["search_items", "list_sources"], payload
 
 
 @pytest.mark.asyncio
