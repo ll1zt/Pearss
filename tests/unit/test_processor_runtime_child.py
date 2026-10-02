@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -49,6 +51,23 @@ class Failing:
         raise ProcessorError(ErrorClass.BLOCKED, "provider returned HTTP 429")
 
 
+class _NoWatchdog:
+    """The child's deadline watchdog, disarmed.
+
+    `_child_main` starts a `threading.Timer` that calls `os._exit(124)` at the
+    deadline. In a real child that is exactly the point; driven in-process it
+    kills the *pytest* process once the deadline passes -- how this test first
+    failed the gate (exit 124, 30s after it ran, mid-suite). The watchdog is
+    not what is under test here: the two data channels are.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self.daemon = True
+
+    def start(self) -> None:
+        pass
+
+
 def _child_response(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -65,7 +84,15 @@ def _child_response(
     }
     stdin = io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
     monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr(
+        processor_runtime, "threading", SimpleNamespace(Timer=_NoWatchdog)
+    )
+    before = threading.active_count()
     processor_runtime._child_main()
+    assert threading.active_count() <= before, (
+        "the child's deadline watchdog outlived the call; in-process it would "
+        "os._exit(124) this pytest process once the deadline passed"
+    )
     payload: dict[str, Any] = json.loads(capsys.readouterr().out)
     return payload
 
