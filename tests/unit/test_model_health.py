@@ -135,7 +135,11 @@ def test_an_unparseable_knob_falls_back_to_the_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PEARSS_MODEL_ATTEMPTS_PER_MODEL", "many")
-    assert ModelHealth.from_env(clock=_Clock()).policy()["attempts_per_model"] == 2
+    monkeypatch.setenv("PEARSS_MODEL_COOLDOWN_SECONDS", "soon")
+    health = ModelHealth.from_env(clock=_Clock())
+    assert health.policy()["attempts_per_model"] == 2
+    health.record([("primary", "network")])
+    assert health.policy()["skip"] == ["primary"], "the default cooldown applies"
 
 
 def test_rows_running_in_parallel_do_not_lose_each_other_failures() -> None:

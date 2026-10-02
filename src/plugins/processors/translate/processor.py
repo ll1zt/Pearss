@@ -1153,9 +1153,12 @@ def _translate_one(
             continue
         plan.answered(model)
         return answer
-    if not failures:
-        # Every candidate had already spent this row's budget for it -- the
-        # later blocks of a document whose earlier blocks used both attempts.
+    if not failures:  # pragma: no cover - an invariant, not a reachable path
+        # Unreachable as the loop stands: a model is only exhausted by a
+        # failure, and the block that exhausted the last candidate raised then,
+        # so a later block never runs. Kept because `_aggregate_failure`
+        # indexes the list -- if the loop ever stops raising per block (a
+        # partial-block retry, say), this must not become an IndexError.
         raise ProcessorError(
             ErrorClass.NETWORK,
             "every model for this row has spent its retry budget; retrying later",
