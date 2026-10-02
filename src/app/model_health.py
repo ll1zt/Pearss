@@ -104,6 +104,14 @@ class ModelHealth:
         # Consecutive failed episodes per model, and until when it is skipped.
         self._failures: dict[str, int] = {}
         self._cooling_until: dict[str, float] = {}
+        # What the diagnostic view reports (ADR 0051): the span of the current
+        # episode, why it started, and when.
+        self._cooldown_span: dict[str, float] = {}
+        self._last_failure: dict[str, tuple[str, float]] = {}
+        # First-seen order, which is the order the chain asked in. Enough to
+        # answer "which model would the next row ask?" without the worker
+        # knowing the deployment's configured chain.
+        self._order: list[str] = []
 
     @classmethod
     def from_env(cls, *, clock: Callable[[], float] = time.monotonic) -> ModelHealth:
@@ -144,9 +152,13 @@ class ModelHealth:
         """
         with self._lock:
             for model, error_class in events:
+                if model not in self._order:
+                    self._order.append(model)
                 if error_class is None:
                     self._failures.pop(model, None)
                     self._cooling_until.pop(model, None)
+                    self._cooldown_span.pop(model, None)
+                    self._last_failure.pop(model, None)
                     continue
                 failures = self._failures.get(model, 0) + 1
                 self._failures[model] = failures
@@ -155,12 +167,44 @@ class ModelHealth:
                     self._cooldown_max_seconds,
                 )
                 self._cooling_until[model] = self._clock() + cooldown
+                self._cooldown_span[model] = cooldown
+                self._last_failure[model] = (error_class, self._clock())
                 LOGGER.warning(
                     "model %s failed (%s); skipping it for %.0fs",
                     model,
                     error_class,
                     cooldown,
                 )
+
+    def snapshot(self) -> dict[str, Any]:
+        """A read-only projection for the diagnostic view (ADR 0051).
+
+        Only what is *currently* cooling appears under `models`. A model that
+        answered is healthy and its episode is over, and reporting a cleared
+        episode would send an operator after a failure that no longer exists.
+        """
+        with self._lock:
+            now = self._clock()
+            cooling: dict[str, Any] = {}
+            for model, until in self._cooling_until.items():
+                if until <= now:
+                    continue
+                failed_class, failed_at = self._last_failure.get(model, ("", now))
+                cooling[model] = {
+                    "cooling_seconds": round(max(0.0, until - now), 1),
+                    "cooldown_seconds": self._cooldown_span.get(model, 0.0),
+                    "failures": self._failures.get(model, 0),
+                    "last_failure_class": failed_class,
+                    "since_last_failure_seconds": round(max(0.0, now - failed_at), 1),
+                }
+            return {
+                "preferred": next(
+                    (model for model in self._order if model not in cooling), None
+                ),
+                "skipped": sorted(cooling),
+                "attempts_per_model": self._attempts_per_model,
+                "models": cooling,
+            }
 
 
 _HEALTH: ModelHealth | None = None

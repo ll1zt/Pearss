@@ -65,6 +65,7 @@ from app.api_conventions import (
 )
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import infer_source_type
+from app.model_health import health
 from app.scheduler import collect_now
 from app.work_submit import handle_payload, submit_command
 from core.enums import ErrorClass, SourceStatus, SourceType, TrustLevel
@@ -432,6 +433,12 @@ def diagnose_source(
     stopping after two of them produces a confident answer built from half the
     evidence.
 
+    `model_health` is the processing chain's own dimension (issue #231): which
+    model the next row would ask, which are cooling down and for how long, and
+    what each of those failed with. A read-only projection of the worker's
+    in-memory registry (ADR 0048, ADR 0051) -- a table for it would be a second
+    fact source beside the provider's own behaviour.
+
     `get_source` remains the full single row; this is the diagnostic view.
     """
     del _
@@ -511,6 +518,10 @@ def diagnose_source(
         # message, newest first. Metadata only -- never the item body (issue #152).
         "failed_enrichments": failed_enrichments,
         "collection": {"loop_alive": loop_alive, "loop_owner": loop_owner},
+        # The model dimension of the same question: a chain that is slow because
+        # one provider is cooling down looks, without this, exactly like a chain
+        # that is slow for any other reason (issue #231).
+        "model_health": health().snapshot(),
         "correlation_id": current_correlation_id(),
     }
 
