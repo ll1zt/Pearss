@@ -9,6 +9,7 @@ import json
 import logging
 import pathlib
 import time
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -1868,6 +1869,21 @@ def test_the_per_attempt_ceiling_comes_from_the_environment(
     assert [timeout.read for timeout in handed] == [5.0]
 
 
+def _store_into(sink: list[str]) -> Callable[[str], str]:
+    """A `store` that records the artifact and returns its reference.
+
+    The tidy-looking lambda `sink.append(content) and "cas://product"` returns
+    None: `append` has no value, so the right-hand side never runs and the
+    reference is lost. mypy caught it; this is the honest version.
+    """
+
+    def store(content: str) -> str:
+        sink.append(content)
+        return "cas://product"
+
+    return store
+
+
 def _provider_with_a_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[list[str], dict[str, str]]:
@@ -1921,7 +1937,7 @@ def test_a_retry_translates_only_the_blocks_that_are_missing(
         process(
             _ctx(body, cache_dir=str(cache)),
             target_lang="zh",
-            store=lambda content: stored.append(content) and "cas://product",
+            store=_store_into(stored),
         )
     assert stored == [], "a failed pass stores nothing"
     (cached_block,) = list(cache.glob("*"))
@@ -1934,7 +1950,7 @@ def test_a_retry_translates_only_the_blocks_that_are_missing(
     process(
         _ctx(body, cache_dir=str(cache)),
         target_lang="zh",
-        store=lambda content: stored.append(content) and "cas://product",
+        store=_store_into(stored),
     )
 
     assert first_attempt, "sanity: the first attempt did reach the provider"
@@ -1949,6 +1965,6 @@ def test_a_retry_translates_only_the_blocks_that_are_missing(
     process(
         _ctx(body, cache_dir=str(tmp_path / "fresh")),
         target_lang="zh",
-        store=lambda content: fresh.append(content) and "cas://product",
+        store=_store_into(fresh),
     )
     assert stored == fresh
