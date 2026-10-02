@@ -1,10 +1,19 @@
-"""One-shot processor execution: JSON only, killable, no database in the child."""
+"""One-shot processor execution: JSON only, killable, no database in the child.
+
+The child's two pipes are both protocol: **stdout** carries the response (one
+JSON object, written once) and **stderr** carries the processor's own logs, one
+`<LEVEL> <logger> <message>` line per record. The host re-logs them with the
+row's context, so "which model failed, and where did it fall back to?" is
+answerable from the journal alone (issue #229: stderr used to go to /dev/null
+and the fallback line was written on every failure, read by nobody).
+"""
 
 from __future__ import annotations
 
 import contextlib
 import importlib
 import json
+import logging
 import os
 import selectors
 import signal
@@ -23,10 +32,75 @@ from core.plugins.hooks import (
     ProcessorError,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 REAP_SECONDS = 1.0
 # The lease reserves time for termination and the parent's result transaction.
 LEASE_GRACE_SECONDS = 5.0
+# Bounds on the child's log channel: the journal is not a bucket, and a
+# processor logging in a loop must not be able to fill it (issue #229).
+MAX_CHILD_LOG_LINES = 200
+MAX_CHILD_LOG_CHARS = 1000
+
+# The child formats records with `logging`, so the host reads its own vocabulary
+# back rather than a format we invented in two places. A line that does not open
+# with one of these is forwarded as a warning -- a traceback or a stray print is
+# an observation, not something to drop.
+_CHILD_LOG_LEVELS = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+class _ChildLog:
+    """Forward a child's stderr lines into the host's logger, bounded.
+
+    Each forwarded line carries the row's context as a prefix. That prefix is
+    the whole point: without it a processor's warning is indistinguishable from
+    the host's own, and `journalctl -u pearss | grep model` answers nothing.
+    """
+
+    def __init__(self, *, plugin_id: str, item_id: str) -> None:
+        self._prefix = f"[{plugin_id} {item_id}]"
+        self._buffer = ""
+        self._lines = 0
+        self._truncated = False
+
+    def feed(self, chunk: bytes) -> None:
+        """Take whatever arrived; emits only complete lines."""
+        self._buffer += chunk.decode("utf-8", errors="replace")
+        while "\n" in self._buffer:
+            line, _, self._buffer = self._buffer.partition("\n")
+            self._emit(line.rstrip("\r"))
+
+    def _emit(self, line: str) -> None:
+        if not line.strip():
+            return
+        if self._lines >= MAX_CHILD_LOG_LINES:
+            if not self._truncated:
+                self._truncated = True
+                LOGGER.warning(
+                    "%s child log truncated after %d lines; the rest is dropped",
+                    self._prefix,
+                    self._lines,
+                )
+            return
+        self._lines += 1
+        token, _, message = line.partition(" ")
+        level = _CHILD_LOG_LEVELS.get(token)
+        text = message if level is not None else line
+        if len(text) > MAX_CHILD_LOG_CHARS:
+            text = f"{text[:MAX_CHILD_LOG_CHARS]}…"
+        LOGGER.log(
+            logging.WARNING if level is None else level,
+            "%s %s",
+            self._prefix,
+            text,
+        )
 
 
 def run_processor(
@@ -74,20 +148,28 @@ def run_processor(
         [sys.executable, "-m", "app.processor_runtime"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         env=child_environment(plugin_id),
         start_new_session=True,
     )
     try:
-        if proc.stdin is None or proc.stdout is None:
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
             raise RuntimeError("processor pipes unavailable")
         os.set_blocking(proc.stdin.fileno(), False)
         os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stderr.fileno(), False)
+        child_log = _ChildLog(
+            plugin_id=plugin_id, item_id=str(item_ctx.get("item_id", "?"))
+        )
         output = bytearray()
         pending = memoryview(request)
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdin, selectors.EVENT_WRITE)
             selector.register(proc.stdout, selectors.EVENT_READ)
+            # Drained while the child runs, not afterwards: stderr is a pipe,
+            # and a processor that logs more than its buffer holds would block
+            # on the write instead of finishing.
+            selector.register(proc.stderr, selectors.EVENT_READ)
             while selector.get_map():
                 if cancelled.is_set():
                     raise ProcessorError(ErrorClass.NETWORK, "processor cancelled")
@@ -103,6 +185,12 @@ def run_processor(
                         if not pending:
                             selector.unregister(proc.stdin)
                             proc.stdin.close()
+                    elif key.fileobj is proc.stderr:
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(proc.stderr)
+                        else:
+                            child_log.feed(chunk)
                     else:
                         chunk = os.read(key.fd, 65536)
                         if not chunk:
@@ -151,7 +239,7 @@ def run_processor(
         try:
             proc.wait(timeout=REAP_SECONDS)
         finally:
-            for stream in (proc.stdin, proc.stdout):
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
                 if stream is not None:
                     stream.close()
 
@@ -187,6 +275,16 @@ def _child_main() -> None:
     watchdog.daemon = True
     watchdog.start()
     body: str | None = None
+    # A processor's logs go to stderr with their level; the host re-logs them
+    # with the row's context (issue #229). stderr is otherwise unused here:
+    # stdout carries the response and is redirected away from plugin prints,
+    # so this is a channel, not a side effect.
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=logging.INFO,
+        format="%(levelname)s %(name)s %(message)s",
+        force=True,
+    )
     # The row's deadline goes into the context the processor reads, not only
     # into the watchdog that kills it: a processor that cannot see its budget
     # can only discover it by being killed, and a kill discards whatever the
