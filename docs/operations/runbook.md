@@ -357,6 +357,7 @@ sqlite3 /var/lib/pearss/pearss.db \
 | `blocked` / 429 / CAPTCHA | HTTP 状态、Retry-After、robots 规则 | 暂停或大幅退避；联系内容方/使用合法 API | 绕过 CAPTCHA、伪造身份、提高并发 |
 | `auth` 错误 | 凭据状态、认证过期时间 | 用户更新合法 secret；轮换旧 token | 把凭据贴进日志、fixture、代码 |
 | pending 堆积 | enrichment JobRun、超时策略、处理器健康 | 重试；确认后 force publish；必要时暂时 hold | 直接把 pending SQL 批量改为 published |
+| 翻译行停在 `failed`（`network`）不再自动重试 | `:diagnose` 的 `failed_enrichments` 与 `model_health`（谁在冷却、冷却多久、最近失败类别） | provider 恢复后跑一次源级 `retry_enrichments`；行复活后会**复用**已有的块级缓存（ADR 0052） | 直接改数据库把行置回 `queued` |
 | RSS 内容显示错误 | Item publish_status、GUID、首次发布时间、FeedOut 配置 | 未发布：修正后再 ready；已发布：创建正确的新 Item/版本策略 | 修改已发布 Item 的正文或 GUID |
 | Reader 已读不同步（P3） | Reader API 请求日志、ReadState、认证 | 校验 endpoint/认证；按幂等事件重放 | 直接修改 Item 内容/发布状态 |
 | SQLite 损坏/无法打开 | 最近备份、磁盘、应用日志 | 停服务、保留故障副本、恢复到新文件、验证 | 在原损坏库上继续写入 |
@@ -368,7 +369,7 @@ sqlite3 /var/lib/pearss/pearss.db \
 | 经 NNW 消费的条目**永不冻结** | `item.publish_status` 是否停在 `ready` | 三条输出路径都必须写 `first_publish`；此前只有 RSS 写，Reader API 不写 → 不可变性保证在客户端实际缓存的那条路径上失效 | 只修 RSS 渲染 |
 | 应用日志**突然全部消失** | 是否执行过 alembic 迁移 | `fileConfig` 默认 `disable_existing_loggers=True`；已改为 `False` | 以为是代码没打日志 |
 | 沙箱插件日志出现 `child_error` / `failed; restarting once` | `journalctl --user -u pearss` 中 child 的 traceback（stderr 已继承宿主流） | 单次崩溃会被自动重启自愈；反复出现 = 插件代码/环境问题，先看 traceback 再决定是否 disable 该插件 | 在宿主进程内"顺手修"插件代码 |
-| 翻译链失败，但 journal 里看不出是哪个模型 | `journalctl -u pearss \| grep '\[translate '` —— 处理器子进程的日志已按行转发，带 `[plugin_id item_id]` 前缀（issue #229；此前 stderr 是 `/dev/null`，所以「日志里没有」本身当时是事实） | 按日志里的模型名与 `error_class` 处置；健康登记表会自动冷却/降级（ADR 0048），持续失败再查 provider 与 `PEARSS_TRANSLATE_*` | 在插件里自己加 `logging.basicConfig`：宿主已转发子进程 stderr，重复配置只会改变格式 |
+| 翻译链失败，但 journal 里看不出是哪个模型 | `journalctl -u pearss \| grep '\[translate '` —— 处理器子进程的日志已按行转发，带 `[plugin_id item_id]` 前缀（issue #229；此前 stderr 是 `/dev/null`，所以「日志里没有」本身当时是事实） | 按日志里的模型名与 `error_class` 处置；健康登记表会自动冷却/降级（ADR 0048），持续失败再查 provider 与 `PEARSS_TRANSLATE_*`；**建议配置 ≥2 个模型** —— 单模型链上一条失败的行会让整条链冷却 5 分钟（ADR 0048） | 在插件里自己加 `logging.basicConfig`：宿主已转发子进程 stderr，重复配置只会改变格式 |
 | 沙箱插件持续 `egress_denied` | 部署是否经 app lifespan 启动（egress 由 lifespan 注入） | 正常 systemd/`just run` 启动即已接线；自查脚本/手工调用 collector_registry 时需手动注入 transport | 给 child 直接放开网络（绕过 SSRF 拦截） |
 | 插件相关错误里 `auth` 但凭据已配置 | 凭据前缀是否在 `_COLLECTOR_ENV_PREFIXES` 登记（ADR 0017 env allowlist） | 补登记后重启服务 | 把宿主全量环境透传给 child |
 

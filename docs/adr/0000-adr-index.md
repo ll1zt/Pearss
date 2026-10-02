@@ -106,3 +106,16 @@ docs/adr/
 | [0050](0050-a-killed-row-keeps-its-diagnosis.md) | 被击杀的行保留诊断：宿主另存子进程最后 3 行（从最新往回拼、≤320 字符）并附到「没来得及上报」的失败 detail；处理器用 `pearss.progress` logger 记块进度（约定即 API）；子进程静掉 httpx/httpcore 的 INFO；击杀时向子进程索取聚合、把进度塞进 item_ctx、解析 detail 文本均被否决 | accepted（**建立在 ADR 0049 的通道上**） | 2026-10-02 |
 | [0051](0051-diagnose-projects-the-model-registry.md) | `:diagnose` 的模型健康格是登记表的只读投影：报 `preferred`/`skipped`/`attempts_per_model` 与**当前冷却中**模型的冷却剩余、本次冷却时长、失败次数、最近失败类别与距今秒数；只报冷却中、`preferred` 由 report 的首次出现顺序推导、不落库不缓存、时间报相对秒；落库、用配置链序、报已恢复模型、另开端点均被否决 | accepted（**ADR 0048 的出口**） | 2026-10-02 |
 | [0052](0052-block-level-progress-on-disk.md) | 块级进度落盘：运行时给每行一个 scratch 目录（`<storage>/processor-cache/<plugin>/<lang>/<item>`，经 `item_ctx["cache_dir"]`）、处理器每块成功后原子写入并在下一块前查缓存、成功后运行时删除+失败时保留；缓存的是块不是产物（净化路径照走、产物逐字节一致）、缓存不是事实源（不建表不加列）、写失败不是失败、块级并发推迟（带触发条件）；缓存做成表/由处理器自定路径/按 attempt 建目录/缓存产物/成功后保留均被否决 | accepted（**ADR 0047/0048 的续集**） | 2026-10-02 |
+
+## 翻译管线战役（#227..#233）的阅读顺序
+
+0047..0052 是同一件事的六个面：**行预算**（[0047](0047-processor-context-carries-the-row-budget.md)）
+让一次尝试不会吃掉整行；**模型健康**（[0048](0048-model-health-lives-in-the-worker.md)）让坏模型不再永远排
+第一；**子进程日志**（[0049](0049-child-stderr-is-a-log-channel.md)）让链内的回落第一次可见；**击杀诊断**
+（[0050](0050-a-killed-row-keeps-its-diagnosis.md)）让被击杀的行仍说得出死在哪一块；**诊断面**
+（[0051](0051-diagnose-projects-the-model-registry.md)）让"此刻为什么慢"一次调用可答；**块级进度**
+（[0052](0052-block-level-progress-on-disk.md)）让重试只补缺失块。
+
+依赖顺序就是上面的顺序：0049 是 0050 的前提（诊断从日志尾部来）；0048 是 0051 的前提（投影的就是它）；
+0047 是 0052 的前提（预算耗尽后的重试是常态）。六条各自记了被否决的备选与接受的边界，因此 **#233 不再
+新增 ADR** —— 战役的每条决策都已经有了自己的家。

@@ -37,6 +37,13 @@ The row's budget arrives in `item_ctx["deadline"]`, an absolute
 one attempt gets at most half of what is left, and when what is left cannot
 return a translation the chain stops and reports every model's reason
 instead of being killed at the deadline with them (issue #227).
+
+The chain's memory and the row's partial work live outside this process
+(ADR 0048, ADR 0052): the worker decides which models to ask, through a policy
+in `item_ctx["model_policy"]`; this processor reports back what each model did
+(`item_ctx["model_events"]`); and a scratch directory (`item_ctx["cache_dir"]`)
+carries finished blocks from one attempt to the next. None of it is required --
+a direct call without those keys behaves exactly as it did before they existed.
 """
 
 from __future__ import annotations
