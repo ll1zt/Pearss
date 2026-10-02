@@ -42,6 +42,13 @@ LEASE_GRACE_SECONDS = 5.0
 # processor logging in a loop must not be able to fill it (issue #229).
 MAX_CHILD_LOG_LINES = 200
 MAX_CHILD_LOG_CHARS = 1000
+# The last few lines are the row's progress note: a killed child takes the
+# aggregate with it, and "processor deadline expired" alone names neither the
+# block the chain died on nor what the models had said (issue #230).
+MAX_CHILD_LOG_TAIL_LINES = 3
+# Room for the prefix the row adds and the worker's own `detail[:500]`: the
+# note has to survive into the column the operator reads.
+MAX_CHILD_LOG_TAIL_CHARS = 320
 
 # The child formats records with `logging`, so the host reads its own vocabulary
 # back rather than a format we invented in two places. A line that does not open
@@ -69,6 +76,7 @@ class _ChildLog:
         self._buffer = ""
         self._lines = 0
         self._truncated = False
+        self._tail: list[str] = []
 
     def feed(self, chunk: bytes) -> None:
         """Take whatever arrived; emits only complete lines."""
@@ -80,6 +88,10 @@ class _ChildLog:
     def _emit(self, line: str) -> None:
         if not line.strip():
             return
+        # Recorded before the forwarding cap: what the child last said is worth
+        # keeping even when the journal has had enough of it.
+        self._tail.append(" ".join(line.split())[:MAX_CHILD_LOG_CHARS])
+        del self._tail[:-MAX_CHILD_LOG_TAIL_LINES]
         if self._lines >= MAX_CHILD_LOG_LINES:
             if not self._truncated:
                 self._truncated = True
@@ -101,6 +113,35 @@ class _ChildLog:
             self._prefix,
             text,
         )
+
+    def tail(self) -> str:
+        """The child's last words, for a row it never got to report.
+
+        Built from the newest line backwards, because the last thing a child
+        said is the thing that says where it died -- an older line must never
+        crowd it out of the budget.
+        """
+        if not self._tail:
+            return ""
+        kept: list[str] = []
+        for line in reversed(self._tail):
+            joined = " | ".join([line, *kept])
+            if kept and len(joined) > MAX_CHILD_LOG_TAIL_CHARS:
+                break
+            kept.insert(0, line)
+        return f"{self._prefix} {' | '.join(kept)[:MAX_CHILD_LOG_TAIL_CHARS]}"
+
+
+def _unreported(detail: str, child_log: _ChildLog) -> ProcessorError:
+    """A failure the child never got to report, with its last words attached.
+
+    The per-model aggregate travels in the child's response, so a killed child
+    takes it with it. What survives is what the child logged -- the block
+    counter and the fallback lines -- which is why those are logged at all
+    (issues #229 and #230).
+    """
+    tail = child_log.tail()
+    return ProcessorError(ErrorClass.NETWORK, f"{detail}: {tail}" if tail else detail)
 
 
 def run_processor(
@@ -172,12 +213,10 @@ def run_processor(
             selector.register(proc.stderr, selectors.EVENT_READ)
             while selector.get_map():
                 if cancelled.is_set():
-                    raise ProcessorError(ErrorClass.NETWORK, "processor cancelled")
+                    raise _unreported("processor cancelled", child_log)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ProcessorError(
-                        ErrorClass.NETWORK, "processor deadline expired"
-                    )
+                    raise _unreported("processor deadline expired", child_log)
                 for key, _ in selector.select(min(remaining, 0.05)):
                     if key.fileobj is proc.stdin:
                         count = os.write(key.fd, pending[:65536])
@@ -202,14 +241,10 @@ def run_processor(
                             )
         while proc.poll() is None:
             if cancelled.is_set() or time.monotonic() >= deadline:
-                raise ProcessorError(
-                    ErrorClass.NETWORK, "processor cancelled or deadline expired"
-                )
+                raise _unreported("processor cancelled or deadline expired", child_log)
             cancelled.wait(min(0.05, max(0, deadline - time.monotonic())))
         if proc.returncode != 0:
-            raise ProcessorError(
-                ErrorClass.NETWORK, "processor exited without a result"
-            )
+            raise _unreported("processor exited without a result", child_log)
         try:
             response = json.loads(output)
             _collect_events(response, report)
@@ -285,6 +320,12 @@ def _child_main() -> None:
         format="%(levelname)s %(name)s %(message)s",
         force=True,
     )
+    # The child is not a debugging proxy: httpx logs one INFO line per request,
+    # and that housekeeping would crowd out the processor's own lines -- and the
+    # tail the host keeps for a killed row (issue #230). The processor's logs are
+    # the point of this channel.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     # The row's deadline goes into the context the processor reads, not only
     # into the watchdog that kills it: a processor that cannot see its budget
     # can only discover it by being killed, and a kill discards whatever the
