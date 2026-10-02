@@ -3995,7 +3995,7 @@
     },
     "/v1/sources/{source_id}:retry-enrichments": {
       "post": {
-        "description": "Requeue failed enrichment rows for one source.\n\nThis is the manual/agent re-trigger the retry policy stops at: rows that\nexhausted their attempts, or failed non-transiently (auth after a key\nrotation, parse on a content shape since fixed), come back as queued and\nthe worker charges the provider again. A write for that reason.",
+        "description": "Requeue this source's failed chain rows -- as one job, selected here.\n\nThe manual/agent re-trigger the retry policy stops at: rows that exhausted\ntheir attempts, or failed non-transiently (auth after a key rotation, parse\non a content shape since fixed), come back as queued and the worker charges\nthe provider again.\n\n**The selection stays on this side, because the caller cannot make it**:\nnaming the failed rows would mean paging the chain and holding the list,\nwhich is the caller-side loop ADR 0046 rejects. What changed (issue #199) is\nwhat the answer *is* -- a work handle, not a count. The count the old\nresponse carried is `counts.total` on the handle, and the per-row outcomes\nare `GET /v1/works/{id}/units`: a query, so they survive a timeout the\ninline count did not.\n\nNothing to requeue is an answer rather than an error: the end state the\ncaller asked for is already true, so no work is submitted and `work_id` is\nnull with zero counts (200 rather than 202).",
         "operationId": "retryEnrichments",
         "parameters": [
           {
@@ -4025,7 +4025,7 @@
           }
         ],
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {}

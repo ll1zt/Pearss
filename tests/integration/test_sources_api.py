@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
 from app.middleware import CorrelationAndAuditMiddleware
+from tests.integration.conftest import sweep_until_terminal
 from tests.migrated_schema import migrated_database
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1379,17 +1380,31 @@ async def test_enrichment_visibility_and_agent_retry(
     filtered = await writer.get(f"/v1/sources/{source_id}/enrichments?status=queued")
     assert filtered.json()["data"] == []
 
-    # Retry: failed rows requeue with the attempt budget reset.
+    # Retry: the failed rows become one job, selected by the endpoint.
     retry = await writer.post(
         f"/v1/sources/{source_id}:retry-enrichments",
         headers={"Idempotency-Key": "enrich-retry-1"},
     )
-    assert retry.status_code == 200, retry.text
-    assert retry.json()["requeued"] == 1
+    assert retry.status_code == 202, retry.text
+    handle = retry.json()
+    assert handle["counts"]["total"] == 1, handle
 
-    after = await writer.get(f"/v1/sources/{source_id}/enrichments?status=queued")
-    assert after.json()["data"][0]["attempt_count"] == 0
-    assert after.json()["data"][0]["detail"] is None
+    # Nothing is requeued until the work runs; then the ledger says what
+    # happened per row, and the row itself is back in the queue waiting for the
+    # *enrichment* worker (a different loop, which this test does not run).
+    waiting = await writer.get(f"/v1/sources/{source_id}/enrichments?status=failed")
+    assert [row["id"] for row in waiting.json()["data"]] == ["enr-vis-1"]
+
+    await sweep_until_terminal(session_factory, handle["work_id"])
+    units = await writer.get(f"/v1/works/{handle['work_id']}/units")
+    assert [
+        (unit["target"], unit["outcome"], unit["detail"])
+        for unit in units.json()["data"]
+    ] == [("enr-vis-1", "ok", "requeued")]
+
+    requeued = await writer.get(f"/v1/sources/{source_id}/enrichments?status=queued")
+    [row] = requeued.json()["data"]
+    assert row["attempt_count"] == 0 and row["detail"] is None
 
     # Idempotent replay: same key answers the same body.
     replay = await writer.post(
@@ -1397,7 +1412,7 @@ async def test_enrichment_visibility_and_agent_retry(
         headers={"Idempotency-Key": "enrich-retry-1"},
     )
     assert replay.headers.get("idempotent-replay") == "true"
-    assert replay.json()["requeued"] == 1
+    assert replay.json() == handle
 
 
 # --------------------------------------------------------------------------
@@ -2176,8 +2191,62 @@ async def test_the_source_scoped_retry_still_clears_every_failed_row(
         headers={"Idempotency-Key": "rowany-all"},
     )
 
+    assert response.status_code == 202, response.text
+    assert response.json()["kind"] == "retry", response.json()
+    assert response.json()["counts"]["total"] == 2, response.json()
+
+    # A second call with a *different* key is still the same command value, so
+    # it answers with the handle that is already in flight rather than queueing
+    # the same rows twice.
+    again = await writer.post(
+        f"/v1/sources/{source_id}:retry-enrichments",
+        headers={"Idempotency-Key": "rowany-all-again"},
+    )
+    assert again.status_code == 202, again.text
+    assert again.json()["work_id"] == response.json()["work_id"]
+    # The selection is the endpoint's, and the ledger is where it shows: exactly
+    # the two failed rows are targets, and the one that was already queued is
+    # not among them.
+    await sweep_until_terminal(session_factory, response.json()["work_id"])
+    units = await writer.get(f"/v1/works/{response.json()['work_id']}/units")
+    assert sorted(unit["target"] for unit in units.json()["data"]) == sorted(
+        [first, second]
+    )
+    assert already not in [unit["target"] for unit in units.json()["data"]]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_retrying_a_source_with_no_failures_submits_no_job(
+    writer: httpx.AsyncClient, session_factory: sessionmaker[Session]
+) -> None:
+    """AC-213: nothing to requeue is an answer, not an empty job.
+
+    The API refuses a work with zero targets, and it should: "run nothing" is a
+    mistake when a *caller* names targets. When the server selects them, an empty
+    selection is ordinary -- the end state the caller asked for is already true --
+    so the answer says so (200, `work_id` null, zero counts) instead of inventing
+    a job nobody could see the point of.
+    """
+    source_id, _ = await _seed_failed_rows(
+        writer, session_factory, slug="rowempty", statuses=["queued"]
+    )
+
+    response = await writer.post(
+        f"/v1/sources/{source_id}:retry-enrichments",
+        headers={"Idempotency-Key": "rowempty-none"},
+    )
+
     assert response.status_code == 200, response.text
-    assert response.json()["requeued"] == 2
-    assert (await _row_state(session_factory, first))[0] == "queued"
-    assert (await _row_state(session_factory, second))[0] == "queued"
-    assert (await _row_state(session_factory, already))[0] == "queued"
+    body = response.json()
+    assert body["work_id"] is None, body
+    assert body["counts"] == {
+        "ok": 0,
+        "skipped": 0,
+        "rejected": 0,
+        "failed": 0,
+        "queued": 0,
+        "total": 0,
+    }
+    with session_factory() as session:
+        assert session.execute(sa.text("select count(*) from work")).scalar_one() == 0

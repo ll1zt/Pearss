@@ -42,7 +42,6 @@ from adapters.repository import (
     list_job_runs,
     list_sources,
     parse_chain,
-    requeue_enrichment,
     timestamp,
 )
 from adapters.repository import (
@@ -68,12 +67,13 @@ from app.api_conventions import (
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import infer_source_type
 from app.scheduler import collect_now
+from app.work_submit import handle_payload, submit_command
 from core.enums import ErrorClass, SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from core.normalize import source_canonical_key
 from core.tenancy import SINGLE_TENANT
-from core.work import command_fingerprint, terminal_status
+from core.work import command_fingerprint, terminal_status, work_counts
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1363,19 +1363,35 @@ def list_source_enrichments(
         )
 
 
-@router.post("/sources/{source_id}:retry-enrichments", operation_id="retryEnrichments")
+@router.post(
+    "/sources/{source_id}:retry-enrichments",
+    operation_id="retryEnrichments",
+    status_code=202,
+)
 def retry_source_enrichments(
     request: Request,
     source_id: str,
     principal: Principal = Depends(write_required),
     key: str = Depends(idempotency_key),
 ) -> JSONResponse:
-    """Requeue failed enrichment rows for one source.
+    """Requeue this source's failed chain rows -- as one job, selected here.
 
-    This is the manual/agent re-trigger the retry policy stops at: rows that
-    exhausted their attempts, or failed non-transiently (auth after a key
-    rotation, parse on a content shape since fixed), come back as queued and
-    the worker charges the provider again. A write for that reason.
+    The manual/agent re-trigger the retry policy stops at: rows that exhausted
+    their attempts, or failed non-transiently (auth after a key rotation, parse
+    on a content shape since fixed), come back as queued and the worker charges
+    the provider again.
+
+    **The selection stays on this side, because the caller cannot make it**:
+    naming the failed rows would mean paging the chain and holding the list,
+    which is the caller-side loop ADR 0046 rejects. What changed (issue #199) is
+    what the answer *is* -- a work handle, not a count. The count the old
+    response carried is `counts.total` on the handle, and the per-row outcomes
+    are `GET /v1/works/{id}/units`: a query, so they survive a timeout the
+    inline count did not.
+
+    Nothing to requeue is an answer rather than an error: the end state the
+    caller asked for is already true, so no work is submitted and `work_id` is
+    null with zero counts (200 rather than 202).
     """
     endpoint = f"POST /v1/sources/{source_id}:retry-enrichments"
     factory = request.app.state.session_factory
@@ -1385,31 +1401,44 @@ def retry_source_enrichments(
 
     with factory() as session:
         _require_source(session, source_id)
-        # Select, then requeue one row at a time through the same function the
-        # row-level endpoint uses: two granularities, one meaning of "requeue".
-        requeued = sum(
-            1
-            for enrichment_id in failed_enrichment_ids_for_source(
-                session, source_id=source_id
+        targets = failed_enrichment_ids_for_source(session, source_id=source_id)
+        if not targets:
+            empty: dict[str, Any] = {
+                "source_id": source_id,
+                "work_id": None,
+                "kind": "retry",
+                "status": None,
+                "counts": work_counts(total_targets=0, outcomes=[]),
+                "correlation_id": current_correlation_id(),
+            }
+            remember(
+                factory,
+                actor=principal.name,
+                endpoint=endpoint,
+                key=key,
+                status_code=200,
+                body=empty,
             )
-            if requeue_enrichment(session, enrichment_id)
-        )
-        session.commit()
+            return JSONResponse(status_code=200, content=empty)
+        work = submit_command(session, kind="retry", targets=targets, params={})
+        payload: dict[str, Any] = {
+            "source_id": source_id,
+            **handle_payload(session, work),
+        }
 
-    payload: dict[str, Any] = {
-        "source_id": source_id,
-        "requeued": requeued,
-        "correlation_id": current_correlation_id(),
-    }
     remember(
         factory,
         actor=principal.name,
         endpoint=endpoint,
         key=key,
-        status_code=200,
+        status_code=202,
         body=payload,
     )
-    return JSONResponse(status_code=200, content=payload)
+    return JSONResponse(
+        status_code=202,
+        content=payload,
+        headers={"Location": f"/v1/works/{payload['work_id']}"},
+    )
 
 
 @router.delete("/sources/{source_id}", operation_id="deleteSource")

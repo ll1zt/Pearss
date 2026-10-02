@@ -275,21 +275,21 @@ def unreadable_model_dir(tmp_path: Path) -> Iterator[Path]:
 TERMINAL_WORK_STATUSES = frozenset({"succeeded", "partial", "failed"})
 
 
-async def run_work_to_completion(
-    env: dict[str, str], work_id: str, *, sweeps: int = 10
+async def sweep_until_terminal(
+    factory: sessionmaker[Session], work_id: str, *, sweeps: int = 10
 ) -> None:
     """Run the real worker until `work_id` is terminal.
 
     A sweep claims the *oldest* queued work and these modules share one database,
     so one sweep may run somebody else's work. Sweeping until *this* work is
     terminal is what makes an assertion about "my work" be about my work.
+
+    Async on purpose: the tests that need it are async, and `asyncio.run` cannot
+    be called from inside a running loop.
     """
     from adapters.repository import work_by_id
-    from app.main import create_engine_for
     from app.work_worker import WorkWorker
 
-    engine = create_engine_for(env["PEARSS_DATABASE_URL"])
-    factory = sessionmaker(engine, expire_on_commit=False)
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(599, text="no request belongs to this test")
@@ -305,5 +305,19 @@ async def run_work_to_completion(
             await worker.sweep_once()
     finally:
         client.close()
-        engine.dispose()
     raise AssertionError(f"work {work_id!r} never reached a terminal status")
+
+
+async def run_work_to_completion(
+    env: dict[str, str], work_id: str, *, sweeps: int = 10
+) -> None:
+    """`sweep_until_terminal` for a test that holds an environment, not a factory."""
+    from app.main import create_engine_for
+
+    engine = create_engine_for(env["PEARSS_DATABASE_URL"])
+    try:
+        await sweep_until_terminal(
+            sessionmaker(engine, expire_on_commit=False), work_id, sweeps=sweeps
+        )
+    finally:
+        engine.dispose()

@@ -553,8 +553,10 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         description=(
             "Requeue failed processing-chain rows (e.g. after fixing the "
             "provider key). Requires confirmation: the attempt budget restarts "
-            "and the provider charges again. Pass enrichment_id to retry one "
-            "row, or source_id for every failed row of that source."
+            "and the provider charges again. Pass enrichment_id to retry one row "
+            "and get a receipt back, or source_id to retry every failed row of "
+            "that source and get a job handle (read the per-row outcomes with "
+            "work_units)."
         ),
     )
     async def retry_enrichments(
@@ -593,6 +595,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             fields=fields,
             method="POST",
             path=path,
+            # 200 when the source has nothing to requeue (no job to submit) and
+            # 202 when it does; both are answers.
+            ok=(200, 202),
         )
 
     @server.tool(
