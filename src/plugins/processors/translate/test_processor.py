@@ -1866,3 +1866,89 @@ def test_the_per_attempt_ceiling_comes_from_the_environment(
     )
 
     assert [timeout.read for timeout in handed] == [5.0]
+
+
+def _provider_with_a_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], dict[str, str]]:
+    """A provider that answers everything except chunks matching a needle.
+
+    The needle is mutable so one test can make the same document succeed
+    partially and then succeed fully: the shape a retry actually sees.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    asked: list[str] = []
+    state = {"fail_on": ""}
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url, json=kwargs.get("json"))
+        text = json.loads(request.read())["messages"][1]["content"]
+        asked.append(text)
+        if state["fail_on"] and state["fail_on"] in text:
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"[{text}]"}}]}
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return asked, state
+
+
+def test_a_retry_translates_only_the_blocks_that_are_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """AC-234: what a previous attempt translated is not paid for again.
+
+    A document that died with most of its blocks already translated used to
+    start from block one on the next attempt -- the same outage, paid for once
+    per block. What the cache holds is the *first attempt's* work, so this
+    asserts both halves: the missing blocks are asked for, and the result is the
+    document a single successful pass would have produced.
+    """
+    cache = tmp_path / "cache"
+    body = "<p>prose one.</p><p>prose two.</p><p>prose three.</p>"
+    asked, state = _provider_with_a_flag(monkeypatch)
+    state["fail_on"] = "prose two"
+
+    stored: list[str] = []
+    with pytest.raises(ProcessorError):
+        process(
+            _ctx(body, cache_dir=str(cache)),
+            target_lang="zh",
+            store=lambda content: stored.append(content) and "cas://product",
+        )
+    assert stored == [], "a failed pass stores nothing"
+    (cached_block,) = list(cache.glob("*"))
+    assert cached_block.read_text(), "the block that did succeed was kept"
+
+    first_attempt = list(asked)
+    state["fail_on"] = ""
+    del asked[:]
+
+    process(
+        _ctx(body, cache_dir=str(cache)),
+        target_lang="zh",
+        store=lambda content: stored.append(content) and "cas://product",
+    )
+
+    assert first_attempt, "sanity: the first attempt did reach the provider"
+    assert any("prose one" in text for text in first_attempt)
+    assert not any("prose one" in text for text in asked), (
+        f"the retry asked again for a block it already had: {asked}"
+    )
+    assert any("prose two" in text for text in asked)
+
+    # The product of the retry is the product of one clean pass, byte for byte.
+    fresh: list[str] = []
+    process(
+        _ctx(body, cache_dir=str(tmp_path / "fresh")),
+        target_lang="zh",
+        store=lambda content: fresh.append(content) and "cas://product",
+    )
+    assert stored == fresh

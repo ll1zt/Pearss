@@ -272,6 +272,11 @@ class CollectorSpec(Protocol):
 DEADLINE_KEY: Final = "deadline"
 MODEL_POLICY_KEY: Final = "model_policy"
 MODEL_EVENTS_KEY: Final = "model_events"
+# A directory the processor may keep *partial* work in, so that a row which ran
+# out of budget does not pay for the same blocks again on the next attempt
+# (ADR 0052). The runtime provides it, keyed per plugin/language/item, and
+# removes it once the row succeeds -- a processor that ignores it is unaffected.
+CACHE_DIR_KEY: Final = "cache_dir"
 
 # A processor that wants a *killed* row to say where it died logs progress under
 # this logger: the runtime keeps the child's last log lines and attaches them to
