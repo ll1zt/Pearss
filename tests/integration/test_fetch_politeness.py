@@ -240,13 +240,21 @@ def test_user_backlog_is_fetched_spaced_and_capped_per_sweep(
         gaps = [later - earlier for earlier, later in pairwise(arrivals)]
         # The pacer bounds *dispatch* times; the origin timestamps *arrivals*,
         # and between the two sit a child-process spawn and a file read whose
-        # duration varies per row (the first is slowest). So the observed gap
-        # is the interval plus a latency difference of up to ~100ms, and the
-        # honest bound carries that tolerance. It still separates this from
-        # the bug decisively: un-paced, the same five fetches arrived 0.02s
-        # apart (measured), i.e. an order of magnitude below the bound.
-        assert all(gap >= 0.85 for gap in gaps), (
-            f"fetches to one host must be spaced by the interval; gaps={gaps}"
+        # duration varies per row and with machine load. So the honest bounds
+        # are (1) the whole span, which load can only lengthen, and (2) a
+        # coarse per-pair floor. Both still separate this from the bug
+        # decisively: un-paced, the same five fetches arrived 0.02s apart
+        # (measured) -- an order of magnitude below either bound. A per-pair
+        # bound alone was the flake: a single slow row shifted the *next*
+        # arrival earlier relative to its predecessor and dipped under it
+        # (issue #213).
+        interval = 1.0
+        span = arrivals[-1] - arrivals[0]
+        assert span >= (len(arrivals) - 1) * interval * 0.9, (
+            f"five fetches must span four intervals; arrivals={arrivals}"
+        )
+        assert all(gap >= interval * 0.5 for gap in gaps), (
+            f"fetches to one host must be spaced, not fired together; gaps={gaps}"
         )
 
         with factory() as session:
