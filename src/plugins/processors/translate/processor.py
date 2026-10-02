@@ -326,7 +326,7 @@ class _RowPlan:
         if error_class not in _TRANSIENT_CHAIN_CLASSES:
             # A permanent class will be refused again -- a rejected key, a model
             # name the provider does not know -- so the row stops asking it now
-            # and spends what is left on the fallback (issue #228's AC-227).
+            # and spends what is left on the fallback (issue #228's AC-228).
             self.attempts[model] = max(self.attempts[model], self.budget or 1)
 
     def answered(self, model: str) -> None:
@@ -430,7 +430,7 @@ def process(
         candidates = plan.candidates(models)
         if not candidates:
             # Every model is cooling down. That is local backpressure, not a
-            # provider verdict: transient, and nothing is asked (AC-228).
+            # provider verdict: transient, and nothing is asked (AC-229).
             raise ProcessorError(
                 ErrorClass.NETWORK,
                 "every configured model is cooling down; retrying later",
@@ -1120,7 +1120,7 @@ def _translate_one(
     for index, model in enumerate(models):
         if plan.exhausted(model):
             # This row has already paid for this model twice: the rest of the
-            # chain is the better use of what is left (AC-224).
+            # chain is the better use of what is left (AC-225).
             continue
         seconds = (
             None
