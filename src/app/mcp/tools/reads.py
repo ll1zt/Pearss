@@ -96,9 +96,9 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             "relevance — use it when the words may be in the article rather "
             "than its headline. `url` matches an item's canonical url exactly: "
             'the way to ask "is this address already stored?" A miss is an '
-            "empty list. Pass one of the three, not several. `source_id`, "
+            "empty list. Pass one, not several. `source_id`, "
             "`since`, `until` and `publish_status` narrow the query, and "
-            "`fields` is the single biggest saving (see the instructions)."
+            "`fields` is the biggest saving (see the instructions)."
         ),
     )
     async def search_items(

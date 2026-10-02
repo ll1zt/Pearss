@@ -3520,7 +3520,7 @@
     },
     "/v1/sources/{source_id}/items:delete": {
       "post": {
-        "description": "Delete a source's items, keeping the source itself.\n\nThe \"this crawl was wrong, keep collecting\" case. The source keeps its\ncursor, so the subscription resumes rather than re-sampling history\n(ADR 0021).\n\n`include_published` defaults true: the caller has explicitly asked to\nclear this source's contents, and silently keeping the items every client\nhas already cached would leave a source that looks emptied while its\narticles are still everywhere.",
+        "description": "Delete a source's items, keeping the source itself -- as one job.\n\nThe \"this crawl was wrong, keep collecting\" case. The source keeps its\ncursor, so the subscription resumes rather than re-sampling history\n(ADR 0021).\n\n`include_published` defaults true: the caller has explicitly asked to clear\nthis source's contents, and silently keeping the items every client has\nalready cached would leave a source that looks emptied while its articles\nare still everywhere.\n\n**The selection stays on this side**: naming the items would mean paging the\nsource's list and holding it, which is the caller-side loop ADR 0046\nrejects. It uses `items_for_source`, which is the same predicate the\ndeletion itself applies -- one meaning of \"which items does this touch\",\nwhich is the property that keeps a preview, a count and a job from\ndisagreeing. What changed (issue #199) is the answer: a work handle\n(`kind=delete`) whose `counts.total` is how many items were selected;\n`GET /v1/works/{id}/units` says what happened to each, and the files are\nreclaimed by the worker once each row is committed.\n\nA source with nothing matching is an answer rather than an error: 200 with\n`work_id: null` and zero counts.",
         "operationId": "deleteSourceItems",
         "parameters": [
           {
@@ -3567,7 +3567,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {}

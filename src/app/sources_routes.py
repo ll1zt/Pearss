@@ -38,6 +38,7 @@ from adapters.repository import (
     failed_enrichments_for_source,
     finish_work,
     get_source,
+    items_for_source,
     items_missing_chain,
     job_for_source,
     list_job_runs,
@@ -47,9 +48,6 @@ from adapters.repository import (
 )
 from adapters.repository import (
     delete_source as repository_delete_source,
-)
-from adapters.repository import (
-    delete_source_items as repository_delete_source_items,
 )
 
 # The API-wide conventions live in app.api_conventions; they are re-exported
@@ -1542,7 +1540,11 @@ def delete_source(
     return JSONResponse(status_code=200, content=payload)
 
 
-@router.post("/sources/{source_id}/items:delete", operation_id="deleteSourceItems")
+@router.post(
+    "/sources/{source_id}/items:delete",
+    operation_id="deleteSourceItems",
+    status_code=202,
+)
 def delete_source_items(
     request: Request,
     source_id: str,
@@ -1550,16 +1552,29 @@ def delete_source_items(
     key: str = Depends(idempotency_key),
     payload: DeleteSourceItemsRequest | None = None,
 ) -> JSONResponse:
-    """Delete a source's items, keeping the source itself.
+    """Delete a source's items, keeping the source itself -- as one job.
 
     The "this crawl was wrong, keep collecting" case. The source keeps its
     cursor, so the subscription resumes rather than re-sampling history
     (ADR 0021).
 
-    `include_published` defaults true: the caller has explicitly asked to
-    clear this source's contents, and silently keeping the items every client
-    has already cached would leave a source that looks emptied while its
-    articles are still everywhere.
+    `include_published` defaults true: the caller has explicitly asked to clear
+    this source's contents, and silently keeping the items every client has
+    already cached would leave a source that looks emptied while its articles
+    are still everywhere.
+
+    **The selection stays on this side**: naming the items would mean paging the
+    source's list and holding it, which is the caller-side loop ADR 0046
+    rejects. It uses `items_for_source`, which is the same predicate the
+    deletion itself applies -- one meaning of "which items does this touch",
+    which is the property that keeps a preview, a count and a job from
+    disagreeing. What changed (issue #199) is the answer: a work handle
+    (`kind=delete`) whose `counts.total` is how many items were selected;
+    `GET /v1/works/{id}/units` says what happened to each, and the files are
+    reclaimed by the worker once each row is committed.
+
+    A source with nothing matching is an answer rather than an error: 200 with
+    `work_id: null` and zero counts.
     """
     endpoint = f"POST /v1/sources/{source_id}/items:delete"
     factory = request.app.state.session_factory
@@ -1570,33 +1585,54 @@ def delete_source_items(
     body = payload or DeleteSourceItemsRequest()
     with factory() as session:
         _require_source(session, source_id)
-        outcome = repository_delete_source_items(
-            session,
-            source_id,
-            since=body.since,
-            until=body.until,
-            include_published=body.include_published,
-        )
-        session.commit()
+        targets = [
+            item.id
+            for item in items_for_source(
+                session,
+                source_id,
+                since=body.since,
+                until=body.until,
+                include_published=body.include_published,
+            )
+        ]
+        if not targets:
+            empty: dict[str, Any] = {
+                "source_id": source_id,
+                "work_id": None,
+                "kind": "delete",
+                "status": None,
+                "counts": work_counts(total_targets=0, outcomes=[]),
+                "correlation_id": current_correlation_id(),
+            }
+            remember(
+                factory,
+                actor=principal.name,
+                endpoint=endpoint,
+                key=key,
+                status_code=200,
+                body=empty,
+            )
+            return JSONResponse(status_code=200, content=empty)
 
-    # Files after the commit: an unlink cannot be rolled back, and rows can.
-    removed = outcome.reclaim.reclaim()
+        work = submit_command(session, kind="delete", targets=targets, params={})
+        result: dict[str, Any] = {
+            "source_id": source_id,
+            **handle_payload(session, work),
+        }
 
-    result: dict[str, Any] = {
-        "source_id": source_id,
-        **outcome.counts,
-        "files_removed": removed,
-        "correlation_id": current_correlation_id(),
-    }
     remember(
         factory,
         actor=principal.name,
         endpoint=endpoint,
         key=key,
-        status_code=200,
+        status_code=202,
         body=result,
     )
-    return JSONResponse(status_code=200, content=result)
+    return JSONResponse(
+        status_code=202,
+        content=result,
+        headers={"Location": f"/v1/works/{result['work_id']}"},
+    )
 
 
 @router.post("/sources/{source_id}:trigger", operation_id="triggerSource")
