@@ -171,7 +171,7 @@ fetch → post_fetch → normalize → [enrich 处理器链] → 发布闸门 �
 
 - **已实现（22 个，与 `tests/contract/mcp_tools.json` 同源）**：
   - 读：`list_sources`、`get_source`、`search_items`、`get_item`、`get_item_body`（截断取正文，ADR 0013）、`get_system_snapshot`、`list_jobs` / `list_runs`、`list_enrichments`、`list_plugins`
-  - 写⚠：`add_source`、`update_schedule_policy`、`set_source_status`（暂停/恢复）、`set_source_folder`、`remove_source`、`delete_items`、`delete_source_items`、`trigger_job`、`backfill_source`、`retry_enrichments`、`set_plugin_status`、`submit_items`
+  - 写⚠：`add_source`、`update_schedule_policy`、`set_source_status`（暂停/恢复）、`set_source_folder`、`remove_source`、`delete_items`、`delete_source_items`、`set_item_read_state`（标记已读/星标；只写消费状态行）、`trigger_job`、`backfill_source`、`retry_enrichments`、`set_plugin_status`、`submit_items`
   - 正文优先走 `item://{item_id}` Resource
 - **暂缓，尚无对应 Core API**：`discover_feed(url)`（A5，已决定暂不做）、`import_opml`⚠ / `export_opml`（A6，**有意不做**，见 ADR 0041）、`create_feed`⚠（FeedOut 随 ADR 0016 移除公开 RSS 输出而失去对象）
 - ⚠ = 需 elicitation 用户确认。工具经 `/v1` 调用而非直调仓储，理由见 ADR 0010

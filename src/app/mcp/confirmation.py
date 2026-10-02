@@ -466,6 +466,45 @@ def _set_source_folder_confirmation(source_id: str, folder: str) -> Elicit[Any]:
     )
 
 
+def _read_state_change(
+    is_read: bool | None, is_starred: bool | None
+) -> dict[str, bool]:
+    """The fields a read-state call actually asks to change.
+
+    A read-state write is *partial*: an omitted field keeps its value, so the
+    change is a subset of {is_read, is_starred} rather than two booleans. Both
+    the confirmation and the request body derive from this one function, so
+    "what was confirmed" and "what executes" cannot drift.
+    """
+    pairs = (("is_read", is_read), ("is_starred", is_starred))
+    return {name: value for name, value in pairs if value is not None}
+
+
+def _set_item_read_state_fields(
+    item_id: str, is_read: bool | None, is_starred: bool | None
+) -> dict[str, Any]:
+    """What set_item_read_state confirms and executes, derived in one place.
+
+    The change travels as its canonical JSON text: an elicitation schema
+    renders primitives only, and `None` has no primitive spelling that does not
+    also erase the difference between "leave it alone" and "set it false".
+    """
+    return {
+        "item_id": item_id,
+        "change": _render(_read_state_change(is_read, is_starred)),
+    }
+
+
+def _set_item_read_state_confirmation(
+    item_id: str, is_read: bool | None, is_starred: bool | None
+) -> Elicit[Any]:
+    fields = _set_item_read_state_fields(item_id, is_read, is_starred)
+    return _confirm_resolver(
+        _summary=f"Set item {fields['item_id']} read state to {fields['change']}?",
+        _fields=fields,
+    )
+
+
 def _trigger_job_fields(source_id: str) -> dict[str, Any]:
     """What trigger_job confirms and executes, derived in one place."""
     return {"source_id": source_id}

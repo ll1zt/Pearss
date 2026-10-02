@@ -301,6 +301,10 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # or name exact items.
         "delete_items",
         "delete_source_items",
+        # Consumption state (ADR 0046 D-E, issue #218): the /v1 atom is
+        # first-class, and this is its write side. Read state is what a Reader
+        # writes, so an agent without it could not mark anything read.
+        "set_item_read_state",
         "trigger_job",
         # P3 processor chain (ADR 0018): one-off backfill for legacy items,
         # plus chain visibility and the agent re-trigger the retry policy
@@ -643,6 +647,9 @@ async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> Non
         ),
         ("trigger_job", {"source_id": "src-1"}),
         ("retry_enrichments", {"source_id": "src-1"}),
+        # Consumption state (issue #218): the item's own columns are frozen,
+        # but the state itself is a write and confirms like every other.
+        ("set_item_read_state", {"item_id": "it-1", "is_read": True}),
         # Every write tool belongs here: a tool left out is a tool whose
         # confirmation requirement is unverified.
         ("backfill_source", {"source_id": "src-1"}),
@@ -1261,6 +1268,9 @@ async def test_every_write_tool_aborts_on_a_tampered_confirmation(
         ("trigger_job", {"source_id": "src-1"}, "source_id"),
         ("retry_enrichments", {"source_id": "src-1"}, "source_id"),
         ("backfill_source", {"source_id": "src-1"}, "source_id"),
+        # `item_id` is this tool's only string argument; the change it confirms
+        # is derived from the booleans beside it.
+        ("set_item_read_state", {"item_id": "it-1", "is_read": True}, "item_id"),
         ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}, "status"),
         ("remove_source", {"source_id": "src-1"}, "source_id"),
         (

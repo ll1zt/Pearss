@@ -45,6 +45,15 @@ behind -- rather than that some method was called.
     Given 一个源, 其处理链没有失败行
     When agent 确认后调用 retry_enrichments
     Then 返回 200 形状的结果, 带 audit_id
+
+  AC-220 读状态在工具面上是一等公民, 且不碰条目事实 (#218)
+    Given 一个 ready 条目
+    When  agent 确认后调用 set_item_read_state(is_read=true)
+    Then  get_item 同一次调用读回 is_read=true (读侧不新增工具)
+    And   省略的字段保留原值 (只传 is_starred 时 is_read 仍为 true)
+    And   条目自身列 (guid/content_hash/publish_status/content_ref) 不变
+    And   一个变化都没点名的调用被拒 (empty_patch), 且不落库
+    And   不存在的 item 被拒 (item_not_found), 且不落库
 """
 
 from __future__ import annotations
@@ -58,6 +67,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from mcp.client._transport import Transport
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -364,3 +374,137 @@ async def test_retry_enrichments_succeeds_with_nothing_to_requeue(
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert "error" not in result, result
     assert result["audit_id"], result
+
+
+# --------------------------------------------------------------------------
+# Consumption state (AC-220, issue #218)
+# --------------------------------------------------------------------------
+
+
+def _item_facts(url: str, item_id: str) -> tuple[Any, ...]:
+    """The item's own columns -- the ones a read-state write must not touch.
+
+    Read from the database rather than through the tool that writes them: a
+    tool that stopped selecting one of them would hide the regression.
+    """
+    engine = create_engine_for(url)
+    try:
+        with engine.connect() as conn:
+            return tuple(
+                conn.execute(
+                    sa.text(
+                        "select guid, content_hash, publish_status, content_ref,"
+                        " updated_at from item where id = :id"
+                    ),
+                    {"id": item_id},
+                ).one()
+            )
+    finally:
+        engine.dispose()
+
+
+def _read_state_row(url: str, item_id: str) -> tuple[Any, ...] | None:
+    engine = create_engine_for(url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                sa.text(
+                    "select is_read, is_starred from read_state where item_id = :id"
+                ),
+                {"id": item_id},
+            ).one_or_none()
+        return None if row is None else tuple(row)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_set_item_read_state_marks_read_and_leaves_the_item_alone(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """AC-220: the agent can mark read, and the item keeps every fact of its own.
+
+    Both halves are asserted here because the capability is whole or absent.
+    The read side: `get_item` answers "what is this item and what is my state
+    with it" in one call -- the two are one user intent, and a second read tool
+    would cost every conversation ~400 characters. The write side: consumption
+    state is a row in a different table, so "mark it read" must leave `guid`,
+    `content_hash`, `publish_status` and `content_ref` exactly as they were (a
+    published item's content is frozen, ADR 0008).
+    """
+    url = mcp_env["PEARSS_DATABASE_URL"]
+    item_id = (await _call(mcp_url, "search_items", {"limit": 5}))["data"][0]["id"]
+
+    before = await _call(mcp_url, "get_item", {"item_id": item_id})
+    assert before["is_read"] is False, before
+    assert before["is_starred"] is False, before
+    facts = _item_facts(url, item_id)
+    assert facts[2] == "ready", facts
+
+    written = await _call(
+        mcp_url,
+        "set_item_read_state",
+        {"item_id": item_id, "is_read": True},
+        confirm=True,
+    )
+    assert written["is_read"] is True, written
+    assert written["audit_id"], written
+
+    after = await _call(mcp_url, "get_item", {"item_id": item_id})
+    assert after["is_read"] is True, after
+    assert after["is_starred"] is False, after
+    assert after["id"] == item_id and after["title"] == "A tool-coverage post"
+    assert _item_facts(url, item_id) == facts
+    assert _read_state_row(url, item_id) == (1, 0)
+
+    # An omitted field keeps its value: starring does not un-read.
+    starred = await _call(
+        mcp_url,
+        "set_item_read_state",
+        {"item_id": item_id, "is_starred": True},
+        confirm=True,
+    )
+    assert starred["is_starred"] is True, starred
+    assert starred["is_read"] is True, starred
+    assert _item_facts(url, item_id) == facts
+
+
+@pytest.mark.asyncio
+async def test_set_item_read_state_refuses_a_change_that_names_nothing(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """A call that names no change is refused before anyone is asked to confirm.
+
+    The code is the one `/v1` answers with, so an agent branches on one
+    vocabulary; it is raised before elicitation because a dialog about a no-op
+    spends a human round trip on nothing. Nothing reaches the table either --
+    the refusal is the whole outcome.
+    """
+    url = mcp_env["PEARSS_DATABASE_URL"]
+    item_id = (await _call(mcp_url, "search_items", {"limit": 5}))["data"][0]["id"]
+    rows_before = _read_state_row(url, item_id)
+
+    payload = await _call(
+        mcp_url, "set_item_read_state", {"item_id": item_id}, confirm=True
+    )
+
+    assert payload["error"] == "empty_patch", payload
+    assert _read_state_row(url, item_id) == rows_before
+
+
+@pytest.mark.asyncio
+async def test_set_item_read_state_reports_a_missing_item(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """A state for an id nobody has is not a state: refused, and nothing written."""
+    url = mcp_env["PEARSS_DATABASE_URL"]
+
+    payload = await _call(
+        mcp_url,
+        "set_item_read_state",
+        {"item_id": "does-not-exist", "is_read": True},
+        confirm=True,
+    )
+
+    assert payload["error"] == "item_not_found", payload
+    assert _read_state_row(url, "does-not-exist") is None

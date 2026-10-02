@@ -6,7 +6,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL against the collectors; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
+    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -65,7 +65,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units, where an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
+    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units; an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -159,7 +159,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Permanently delete specific items by id. Requires confirmation: the bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible. Returns a job handle -- read each id's outcome with work_units, where one that was already gone is `skipped`.",
+    "description": "Permanently delete specific items by id. Requires confirmation: the bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible. Returns a job handle -- read each id's outcome with work_units; one already gone is `skipped`.",
     "input_schema": {
       "properties": {
         "item_ids": {
@@ -243,7 +243,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately -- the work keeps running after this call, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
+    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately: the work keeps running, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
     "input_schema": {
       "properties": {
         "batch_size": {
@@ -283,7 +283,7 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "One item's metadata by id: title, url, author, published_at, publish_status and the timing fields. No body \u2014 that is the item://{item_id} Resource or get_item_body. Read-only.\n\nUse it when you already hold an id: `search_items` cannot filter by id, so this is the only way to read one row without a search that might match nothing.",
+    "description": "One item's metadata by id: title, url, author, published_at, publish_status, the timing fields, and your own read/star state (is_read, is_starred). No body \u2014 that is the item://{item_id} Resource or get_item_body. Read-only.\n\nUse it when you already hold an id: `search_items` cannot filter by id, so this is the only way to read one row without a search that might match nothing.",
     "input_schema": {
       "properties": {
         "fields": {
@@ -589,7 +589,7 @@
       "open_world_hint": false,
       "read_only_hint": true
     },
-    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies and ranks by relevance \u2014 use it when the words may be in the article rather than its headline. `url` matches an item's canonical url exactly: the way to ask \"is this address already stored?\" A miss is an empty list. Pass one, not several. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the biggest saving (see the instructions).",
+    "description": "Search collected items. `q` searches the title only, as a substring; `full_text` searches titles and bodies, ranked \u2014 use it when the words may be in the article rather than its headline. `url` matches an item's canonical url exactly: the way to ask \"is this address already stored?\" A miss is an empty list. Pass one, not several. `source_id`, `since`, `until` and `publish_status` narrow the query, and `fields` is the biggest saving (see the instructions).",
     "input_schema": {
       "properties": {
         "fields": {
@@ -691,6 +691,52 @@
       "type": "object"
     }
   },
+  "set_item_read_state": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false,
+      "read_only_hint": false
+    },
+    "description": "Mark one item read/unread or starred/unstarred. Requires confirmation. Pass at least one of is_read/is_starred; an omitted field keeps its value. The item's content, guid and publish status are untouched, and the Reader API reports the same state.",
+    "input_schema": {
+      "properties": {
+        "is_read": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Read"
+        },
+        "is_starred": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Starred"
+        },
+        "item_id": {
+          "title": "Item Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id"
+      ],
+      "title": "set_item_read_stateArguments",
+      "type": "object"
+    }
+  },
   "set_plugin_status": {
     "annotations": {
       "destructive_hint": false,
@@ -752,7 +798,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Set a source's processing chain, and its target language with it. Requires confirmation: items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none, which is what the confirmation says. Run backfill_source afterwards for already-stored items; use add_source to set a chain on a new source.",
+    "description": "Set a source's processing chain, and its target language with it. Requires confirmation: items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none. Run backfill_source afterwards for already-stored items; use add_source to set a chain on a new source.",
     "input_schema": {
       "properties": {
         "pipeline_chain": {
@@ -815,7 +861,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's provenance. Requires confirmation: this adds content to the corpus, and the chain can make real outbound requests to the submitted URLs and spend provider budget. Returns a job handle; read each item's outcome with work_units.",
+    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's. Requires confirmation: this adds content to the corpus, and its chain spends provider budget on the submitted URLs. Returns a job handle; read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "items": {

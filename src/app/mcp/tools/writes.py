@@ -38,10 +38,13 @@ from app.mcp.confirmation import (
     _delete_source_items_fields,
     _fetch_work_confirmation,
     _fetch_work_fields,
+    _read_state_change,
     _remove_source_confirmation,
     _remove_source_fields,
     _retry_enrichments_confirmation,
     _retry_enrichments_fields,
+    _set_item_read_state_confirmation,
+    _set_item_read_state_fields,
     _set_plugin_status_confirmation,
     _set_plugin_status_fields,
     _set_source_folder_confirmation,
@@ -125,8 +128,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "{type: fixed, interval: '30m'} or "
             "{type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed "
             "URL), 'web' (a page a login-type collector serves, e.g. "
-            "zhihu/telegram) or 'auto' (default: inferred from the URL "
-            "against the collectors; pass it when auto would guess wrong). "
+            "zhihu/telegram) or 'auto' (default: inferred from the URL; "
+            "pass it when auto would guess wrong). "
             "pipeline_chain plus target_lang gate items until the chain "
             "completes -- see set_source_pipeline_chain."
         ),
@@ -177,7 +180,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "sources make real outbound requests to a third party. Options apply "
             "to the whole batch; `type` 'auto' resolves per URL as add_source "
             "does. Returns a job handle -- read each URL's "
-            "outcome with work_units, where an unusable one fails alone. Use "
+            "outcome with work_units; an unusable one fails alone. Use "
             "add_source for a single source, where the dialog names it exactly."
         ),
     )
@@ -235,8 +238,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "Fetch a list of article addresses into an existing source. "
             "Requires confirmation: the deployment makes real outbound requests "
             "for every address. Returns a job handle (work_id, status, counts) "
-            "immediately -- the work keeps running after this call, and the "
-            "response does not grow with the list. Read per-address results "
+            "immediately: the work keeps running, and the response does not "
+            "grow with the list. Read per-address results "
             "with work_units. Each address must be on the source's own host "
             "(off-host ones come back `rejected`); the collector must be able "
             "to fetch one address (rss can). Use this for addresses to fetch; "
@@ -364,7 +367,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "completes, and its processors can make real outbound requests and "
             "spend provider budget per item. An empty list clears the chain, so "
             "items publish as soon as they are stored; passing no target_lang "
-            "sets it to none, which is what the confirmation says. Run "
+            "sets it to none. Run "
             "backfill_source afterwards for already-stored items; use "
             "add_source to set a chain on a new source."
         ),
@@ -434,8 +437,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "the bodies, read state and processor products go with them. Use "
             "this to clean up items that were fetched wrongly or are no longer "
             "wanted; ids come from search_items. Not reversible. Returns a job "
-            "handle -- read each id's outcome with work_units, where one that "
-            "was already gone is `skipped`."
+            "handle -- read each id's outcome with work_units; one already gone "
+            "is `skipped`."
         ),
     )
     async def delete_items(
@@ -497,6 +500,49 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             # 200 when nothing matches the selection (no job to submit) and 202
             # when something does; both are answers.
             ok=(200, 202),
+        )
+
+    @server.tool(
+        annotations=write_annotations(destructive=False, open_world=False),
+        description=(
+            "Mark one item read/unread or starred/unstarred. Requires "
+            "confirmation. Pass at least one of is_read/is_starred; an omitted "
+            "field keeps its value. The item's content, guid and publish "
+            "status are untouched, and the Reader API reports the same state."
+        ),
+    )
+    async def set_item_read_state(
+        item_id: str,
+        ctx: Context,
+        is_read: bool | None = None,
+        is_starred: bool | None = None,
+        confirmed: Annotated[
+            Confirmation | None, Resolve(_set_item_read_state_confirmation)
+        ] = None,
+    ) -> dict[str, Any]:
+        change = _read_state_change(is_read, is_starred)
+        if not change:
+            # Refused before elicitation: a dialog asking a human to confirm a
+            # no-op spends a round trip to learn what `/v1` would say anyway.
+            # Same code, so an agent branches on one vocabulary (issue #218).
+            return {
+                "error": "empty_patch",
+                "message": (
+                    "Nothing to change: is_read and is_starred are both absent."
+                ),
+                "suggestion": (
+                    "Pass is_read, is_starred, or both. An omitted field keeps "
+                    "its current value."
+                ),
+            }
+        fields = _set_item_read_state_fields(item_id, is_read, is_starred)
+        return await _guarded_write(
+            core,
+            confirmed=confirmed,
+            fields=fields,
+            method="PATCH",
+            path=f"/v1/items/{item_id}/read-state",
+            body=change,
         )
 
     @server.tool(
@@ -644,11 +690,10 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "same pipeline as collected items. The target must be a source of "
             "type 'agent' — create one with add_source and a url like "
             "'agent://newsletter-intake'; pushing into an rss or web source is "
-            "refused, which would mix one origin's content into another's "
-            "provenance. Requires confirmation: this adds content to the corpus, "
-            "and the chain can make real outbound requests to the submitted URLs "
-            "and spend provider budget. Returns a job handle; read each item's "
-            "outcome with work_units."
+            "refused, which would mix one origin's content into another's. "
+            "Requires confirmation: this adds content to the corpus, "
+            "and its chain spends provider budget on the submitted URLs. Returns "
+            "a job handle; read each item's outcome with work_units."
         ),
     )
     async def submit_items(

@@ -107,6 +107,7 @@ AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认�
 | `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆；确认文本说明会删掉什么） |
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文）：返回**作业句柄**，逐 id 结果查 `work_units`（已消失的 id 是 `skipped`） |
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
+| `set_item_read_state` | 标记条目的**消费状态**（已读/未读、星标/取消）：只写 `read_state` 行，**不碰条目本体**（content_hash / guid / publish_status / content_ref 都不动，已发布内容冻结）；省略的字段保留原值；`/v1/items/{id}/read-state` 与 Reader API 报同一状态（同一领域函数） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
 | `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数）：返回**作业句柄**，逐条结果查 `work_units` |
 | `retry_enrichments` | 重排队失败的处理器链产物：`enrichment_id` 只重排**一行**（`POST /v1/enrichments/{id}:retry`），`source_id` 重排该源全部失败行 |
@@ -134,6 +135,12 @@ issue #193 的两个读原语**并入既有工具**（不新增工具名：工�
 - `diagnose_source` 的 `chain` 块里带队列四计数 + `rate_per_min`（由窗口内完成时间戳推导、**不落库**）
   + `rate_window_minutes`。只要队列、不要诊断时用 `GET /v1/sources/{id}:queue`：O(1)、常数大小，
   计数与 `/v1/sources/{id}/enrichments` 的逐行结果对账一致。
+
+issue #218 的读状态读侧同样**并入既有工具**：`get_item` 的默认响应带 `is_read` / `is_starred`
+（从 `/v1/items/{id}/read-state` 取，空行 = `false`），因为「这个条目是什么」与「我和它的状态」
+是同一个问题、同一次调用；显式传 `fields` 时仍是**只要请求的字段**（收窄请求）。写侧无法折叠
+（写不能塞进读工具：注解与确认都不同），所以新工具 `set_item_read_state` 是工具面上的一等原子，
+代价记在 `tests/unit/test_mcp_tool_guide.py` 的预算注释里。
 
 ## 四、错误返回
 
