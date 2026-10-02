@@ -2125,3 +2125,38 @@ def test_every_audit_table_read_waits_for_the_audit_worker() -> None:
         "AUDIT_READ_EXEMPTIONS lists functions that no longer read the audit "
         f"table, so the entry excuses nothing while hiding a future read: {stale}"
     )
+
+
+# --------------------------------------------------------------------------
+# AC-218: the consumption-state rule has one caller
+# --------------------------------------------------------------------------
+#
+# `merge_state` is the domain rule (last-write-wins per flag; a field you did not
+# mention keeps its value) and `apply_read_state` is the only place that reads the
+# current row, merges and writes it back. The Reader compatibility layer and
+# `PATCH /v1/items/{id}/read-state` both come through it, so this guard reads the
+# *caller* set: a second module calling `merge_state` directly would be a second
+# implementation of the same write (issue #202).
+
+
+def test_the_read_state_rule_has_exactly_one_caller() -> None:
+    """AC-218: one module merges consumption state, and it is the repository's.
+
+    The rule itself is pure and lives in `core.reader_state`. What this pins is
+    that nobody re-implements the *write* around it: both entry points have to
+    land in `adapters/repository/reader.py::apply_read_state`, or "mark this
+    read" means two things depending on which vocabulary asked (issue #202).
+    """
+    callers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if "__pycache__" not in path.parts
+        and path.name != "reader_state.py"
+        and re.search(r"\bmerge_state\(", path.read_text(encoding="utf-8"))
+    )
+    assert callers == ["src/adapters/repository/reader.py"], (
+        "consumption state must be merged in exactly one place "
+        "(adapters/repository/reader.py::apply_read_state); found "
+        f"{callers}. A second caller is a second implementation of the same "
+        "write (issue #202)."
+    )

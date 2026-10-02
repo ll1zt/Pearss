@@ -29,6 +29,7 @@ from adapters.db_models import ItemEnrichment
 from adapters.filestore import read_body
 from adapters.repository import (
     ItemFilter,
+    apply_read_state,
     count_matching,
     enrichment_status,
     get_item,
@@ -37,7 +38,6 @@ from adapters.repository import (
     read_states_for,
     requeue_enrichment,
     timestamp,
-    upsert_read_state,
 )
 from adapters.repository import (
     delete_items as repository_delete_items,
@@ -57,7 +57,7 @@ from core.enrichment import EnrichmentStatus
 from core.enums import PublishStatus
 from core.models import Item
 from core.normalize import canonicalize_url
-from core.reader_state import TagChange, merge_state
+from core.reader_state import TagChange
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
@@ -688,16 +688,14 @@ def patch_item_read_state(
     with factory() as session:
         if get_item(session, item_id) is None:
             raise _item_not_found(item_id)
-        current = read_states_for(session, [item_id], tenant_id=SINGLE_TENANT).get(
-            item_id
-        )
-        merged = merge_state(
+        # One rule, one implementation (issue #202): the Reader compatibility
+        # layer's edit-tag path calls this same function.
+        merged = apply_read_state(
+            session,
             item_id=item_id,
-            current=current,
             change=TagChange(is_read=body.is_read, is_starred=body.is_starred),
             at=datetime.now(UTC),
         )
-        upsert_read_state(session, merged, tenant_id=SINGLE_TENANT)
         session.commit()
 
     payload = _read_state_payload(item_id, merged)

@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.timestamps import fixed_width_utc as timestamp
-from core.reader_state import TagChange, merge_state
+from core.reader_state import TagChange
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
@@ -338,25 +338,17 @@ def apply_tag_change(
     replayed produces the same state, because every write is last-write-wins on
     a fixed pair of flags.
     """
-    from adapters.repository import (
-        read_states_for,
-        resolve_reader_ids,
-        upsert_read_state,
-    )
+    from adapters.repository import apply_read_state, resolve_reader_ids
 
     with session_factory() as session:
         item_ids = list(resolve_reader_ids(session, external_ids).values())
         rows = session.query(ItemRow).filter(ItemRow.id.in_(item_ids)).all()
         known = {row.id for row in rows}
-        states = read_states_for(session, list(known), tenant_id=SINGLE_TENANT)
+        # The same function `PATCH /v1/items/{id}/read-state` calls (issue #202):
+        # this layer owns Google Reader's vocabulary, not the rule about what a
+        # state change means.
         for item_id in sorted(known):
-            merged = merge_state(
-                item_id=item_id,
-                current=states.get(item_id),
-                change=change,
-                at=at,
-            )
-            upsert_read_state(session, merged, tenant_id=SINGLE_TENANT)
+            apply_read_state(session, item_id=item_id, change=change, at=at)
         session.commit()
     return len(known)
 
