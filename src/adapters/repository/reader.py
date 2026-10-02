@@ -17,6 +17,8 @@ from adapters.db_models import Source as SourceRow
 from adapters.repository._shared import _parse, visible_item_rows
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.reader_state import ReadState as ReadStateDomain
+from core.reader_state import TagChange, merge_state
+from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
 
@@ -299,6 +301,35 @@ def read_states_for(
         )
     ).scalars()
     return {row.item_id: _read_state_to_domain(row) for row in rows}
+
+
+def apply_read_state(
+    session: Session,
+    *,
+    item_id: str,
+    change: TagChange,
+    at: datetime,
+    tenant_id: str = SINGLE_TENANT,
+) -> ReadStateDomain:
+    """Change one item's consumption state, through the rule that defines it.
+
+    The domain merge decides what the new state *is* (`core.reader_state`:
+    last-write-wins per flag, and a field the caller did not mention keeps its
+    value), and this is the one place that reads the current row, merges and
+    writes it back. The Reader compatibility layer and
+    `PATCH /v1/items/{id}/read-state` both come through here, which is what keeps
+    "mark this read" meaning one thing in Google Reader's vocabulary and in
+    first-class terms (issue #202).
+
+    The bulk path is deliberately not this: `mark_all_read` writes the same rule
+    set-based, one statement for a whole scope, because a library-wide
+    "mark all as read" is thousands of items and looping them would be a request
+    per item.
+    """
+    current = read_states_for(session, [item_id], tenant_id=tenant_id).get(item_id)
+    merged = merge_state(item_id=item_id, current=current, change=change, at=at)
+    upsert_read_state(session, merged, tenant_id=tenant_id)
+    return merged
 
 
 def upsert_read_state(

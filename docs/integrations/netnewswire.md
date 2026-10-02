@@ -88,6 +88,9 @@ FreshRSS API。
 | `/reader/api/0/stream/items/ids` | GET | 条目 ID 流，`xt` 排除、`it` 包含（均在 SQL 中生效），带 `continuation` 翻页 |
 | `/reader/api/0/stream/items/contents` | POST | 条目正文 |
 | `/reader/api/0/edit-tag` | POST | 已读 / 星标回写 |
+
+> 已读/星标的**写入规则**与 `/v1/items/{id}/read-state` 是同一个领域函数（`apply_read_state`，issue #202）：
+> 这一层只负责 Google Reader 的词汇（stream id、`com.google` 标签），规则不在这里。
 | `/reader/api/0/mark-all-as-read` | POST | 批量标记已读 |
 | `/reader/api/0/subscription/quickadd` | POST | 按 URL 订阅（Read You 加订阅） |
 | `/reader/api/0/rename-tag` | POST | 重命名分组（Read You） |

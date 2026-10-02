@@ -1400,3 +1400,63 @@ async def test_fulltext_and_translation_stack_in_contents(
     assert translation_at < fulltext_at, "translation leads the stack"
     assert 'data-pearss="fulltext-separator"' in body
     assert 'data-pearss="translation-separator"' in body
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_ac218_reader_and_v1_write_consumption_state_through_one_rule(
+    reader_client: httpx.AsyncClient,
+    reader_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-218: edit-tag and PATCH /v1/items/{id}/read-state are one rule.
+
+    Both come through `apply_read_state`, so a change made in Google Reader's
+    vocabulary and one made in first-class terms land as the same row -- and,
+    the part a merge exists for, neither clobbers the flag the other set. The
+    Reader's own view of the state is read back too, because the compatibility
+    layer's observable answer is what must not change (AC-219).
+    """
+    from adapters.reader_api import reader_id
+
+    monkeypatch.setenv("PEARSS_API_TOKEN", "ac218-api-token")
+    api_headers = {"Authorization": "Bearer ac218-api-token"}
+    token = await login(reader_client)
+
+    listed = await reader_client.get(
+        "/v1/items", params={"limit": 1}, headers=api_headers
+    )
+    assert listed.status_code == 200, listed.text
+    internal = listed.json()["data"][0]["id"]
+    # The Reader's ids travel as decimal strings, which is the form its own
+    # endpoints exchange.
+    external = str(reader_id(internal))
+
+    # Google Reader's vocabulary: mark it read.
+    marked = await edit(reader_client, token, [external], add=[READ_TAG])
+    assert marked.status_code == 200, marked.text
+
+    # First-class vocabulary: star it, without claiming to know whether it is
+    # read -- which is what the merge is for.
+    starred = await reader_client.patch(
+        f"/v1/items/{internal}/read-state",
+        headers={**api_headers, "Idempotency-Key": "ac218-star"},
+        json={"is_starred": True},
+    )
+    assert starred.status_code == 200, starred.text
+    assert starred.json()["is_read"] is True, starred.json()
+    assert starred.json()["is_starred"] is True, starred.json()
+
+    # One row, both flags: the two paths are the same write, not two that happen
+    # to agree today.
+    with reader_app.state.session_factory() as session:
+        rows = session.execute(
+            sa.text("select is_read, is_starred from read_state where item_id = :i"),
+            {"i": internal},
+        ).all()
+    assert [tuple(row) for row in rows] == [(1, 1)]
+
+    # And the Reader still reports both tags in its own vocabulary.
+    categories = await categories_for(reader_client, token, external)
+    assert READ_TAG in categories, categories
+    assert "user/-/state/com.google/starred" in categories, categories

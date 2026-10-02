@@ -91,6 +91,7 @@ from adapters.repository.plugins import (
 )
 from adapters.repository.rawfetch import record_raw_fetch
 from adapters.repository.reader import (
+    apply_read_state,
     mark_all_read,
     read_states_for,
     reader_credential,
@@ -143,6 +144,7 @@ __all__ = [
     "ReclaimPlan",
     "StoreOutcome",
     "append_unit",
+    "apply_read_state",
     "backfill_chain",
     "backlog_for_source",
     "chain_for_source",
