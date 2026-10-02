@@ -161,6 +161,12 @@ issue #218 的读状态读侧同样**并入既有工具**：`get_item` 的默认
 - `next_actions` 是**建议**，不是自动执行；agent 自行决定
 - **诊断类返回不得自动触发写操作**（`error-taxonomy.md`：诊断不应自动启用插件、
   改采集规则、降低安全限制或 force publish）
+- **工具侧的本地拒绝（不经过 Core API 的那些）用同一形状**：`list_enrichments` 与
+  `retry_enrichments` 在没给目标时返回 `{"error": "missing_target", "suggestion": ...,
+  "next_actions": [...]}`——`error` 是码字符串，`next_actions` 指向能给 id 的工具。
+  这个形状由 `tests/unit/test_structure_guards.py` 的
+  `test_no_mcp_tool_writes_its_own_error_envelope` 机械守住（issue #216：这里曾经
+  手写过嵌套的 `{"error": {"code": ...}}`，而没有测试发现）
 
 ## 五、安全
 

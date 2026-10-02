@@ -330,19 +330,18 @@ def register_reads(server: MCPServer, core: CoreAPIClient) -> None:
             path = f"/v1/sources/{source_id}/enrichments"
         else:
             # Not a protocol error: the model can fix this by calling a tool it
-            # already has, and the message says which one gives it the id.
+            # already has, and the suggestion says which one gives it the id.
+            # Flat, like every other tool error (`_error_from`): `error` is the
+            # code, and a nested envelope here made callers branch on the type
+            # of the one field that exists to be the branch (issue #216).
             return {
-                "error": {
-                    "code": "missing_target",
-                    "message": (
-                        "Pass item_id (one item's chain rows) or source_id "
-                        "(every item of one source)."
-                    ),
-                    "suggestion": (
-                        "search_items returns item ids; list_sources returns "
-                        "source ids."
-                    ),
-                }
+                "error": "missing_target",
+                "suggestion": (
+                    "Pass item_id (one item's chain rows) or source_id (every "
+                    "item of one source). search_items returns item ids; "
+                    "list_sources returns source ids."
+                ),
+                "next_actions": ["search_items", "list_sources"],
             }
         http_status, payload, _ = await core.get(path, **params)
         if http_status != 200:
