@@ -147,7 +147,7 @@ def _rows(factory: sessionmaker[Session]) -> list[tuple[str, str, str | None]]:
 def test_a_failed_model_is_skipped_on_the_next_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-224, AC-226: the first model is preferred; a failed one waits it out.
+    """AC-225, AC-227: the first model is preferred; a failed one waits it out.
 
     Live shape of the defect (issue #227's journal): the broken model was
     asked first on every row, every sweep, forever -- the healthy fallback only
@@ -172,7 +172,7 @@ def test_a_failed_model_is_skipped_on_the_next_row(
 def test_a_model_is_retried_at_most_twice_per_row_not_per_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-225: the retry budget counts rows, not the blocks inside one.
+    """AC-226: the retry budget counts rows, not the blocks inside one.
 
     A document whose every block retried the broken model would pay for the
     same outage once per paragraph.
@@ -192,7 +192,7 @@ def test_a_model_is_retried_at_most_twice_per_row_not_per_block(
 def test_a_rejected_key_is_not_retried_within_the_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-228: a permanent class demotes immediately instead of spending retries."""
+    """AC-229: a permanent class demotes immediately instead of spending retries."""
     rejected = {PRIMARY: (401, {"error": {"message": "invalid api key"}})}
     with _provider(monkeypatch, rejected) as asked:
         factory = _world(tmp_path, monkeypatch, {"doc": THREE_BLOCKS})
@@ -205,7 +205,7 @@ def test_a_rejected_key_is_not_retried_within_the_row(
 def test_a_wholly_cooling_chain_fails_transiently_without_asking(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-229: nothing to ask is local backpressure, not a provider verdict.
+    """AC-230: nothing to ask is local backpressure, not a provider verdict.
 
     The row must stay retryable -- `network`, never `parse` -- because the
     models are merely cooling down, and no request may go out meanwhile.

@@ -1643,7 +1643,7 @@ def test_a_stalled_model_is_abandoned_inside_the_budget(
 
 
 # --------------------------------------------------------------------------
-# The row's model policy and its per-model report (AC-224..228)
+# The row's model policy and its per-model report (AC-225..228)
 #
 # The health itself lives in the worker (`app/model_health`): this processor
 # runs in a child spawned per row, so it cannot outlive one. What crosses the
@@ -1693,7 +1693,7 @@ THREE_BLOCKS = (
 
 
 def test_a_cooling_model_is_not_asked(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AC-226: the row's policy decides which models are candidates at all."""
+    """AC-227: the row's policy decides which models are candidates at all."""
     asked = _model_provider(monkeypatch, {})
     events: list[tuple[str, str | None]] = []
 
@@ -1714,7 +1714,7 @@ def test_a_cooling_model_is_not_asked(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_wholly_cooling_chain_asks_nothing_and_fails_transiently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-229: no candidate left is local backpressure, not a provider verdict."""
+    """AC-230: no candidate left is local backpressure, not a provider verdict."""
     asked = _model_provider(monkeypatch, {})
     events: list[tuple[str, str | None]] = []
 
@@ -1741,7 +1741,7 @@ def test_a_wholly_cooling_chain_asks_nothing_and_fails_transiently(
 def test_a_broken_model_is_retried_at_most_twice_per_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-225: the budget counts rows, not the blocks inside one."""
+    """AC-226: the budget counts rows, not the blocks inside one."""
     asked = _model_provider(
         monkeypatch, {"primary": (503, {"error": {"message": "overloaded"}})}
     )
@@ -1763,7 +1763,7 @@ def test_a_broken_model_is_retried_at_most_twice_per_row(
 def test_a_permanent_rejection_does_not_spend_the_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-228: a 401 demotes the model at once; asking again is pure waste."""
+    """AC-229: a 401 demotes the model at once; asking again is pure waste."""
     asked = _model_provider(
         monkeypatch, {"primary": (401, {"error": {"message": "invalid api key"}})}
     )
@@ -1785,7 +1785,7 @@ def test_a_permanent_rejection_does_not_spend_the_retry_budget(
 def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-224, AC-227: the worker's registry acts on this report, nothing else."""
+    """AC-225, AC-228: the worker's registry acts on this report, nothing else."""
     _model_provider(
         monkeypatch, {"primary": (503, {"error": {"message": "overloaded"}})}
     )
@@ -1807,7 +1807,7 @@ def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
 def test_each_block_announces_itself_on_the_progress_logger(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC-231: the block counter is what a killed row is diagnosed from.
+    """AC-232: the block counter is what a killed row is diagnosed from.
 
     A killed child never reports its aggregate, so the host keeps the child's
     last log lines instead; this is the line that says where the chain had got
