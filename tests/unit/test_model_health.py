@@ -41,7 +41,7 @@ def _cooling_span(health: ModelHealth, clock: _Clock, model: str) -> float:
 
 
 def test_a_healthy_process_prefers_the_configured_order() -> None:
-    """AC-224: nothing is excluded while nothing has failed."""
+    """AC-225: nothing is excluded while nothing has failed."""
     assert ModelHealth(clock=_Clock()).policy() == {
         "skip": [],
         "attempts_per_model": 2,
@@ -49,7 +49,7 @@ def test_a_healthy_process_prefers_the_configured_order() -> None:
 
 
 def test_a_failed_model_is_skipped_for_five_minutes() -> None:
-    """AC-226: the first cooldown is the floor, and recovery is automatic."""
+    """AC-227: the first cooldown is the floor, and recovery is automatic."""
     clock = _Clock()
     health = ModelHealth(clock=clock)
     health.record([("primary", "network")])
@@ -61,7 +61,7 @@ def test_a_failed_model_is_skipped_for_five_minutes() -> None:
 
 
 def test_each_returning_episode_doubles_the_cooldown_up_to_hour() -> None:
-    """AC-226: 5 -> 10 -> 20 -> 40 -> 60 (capped) minutes."""
+    """AC-227: 5 -> 10 -> 20 -> 40 -> 60 (capped) minutes."""
     clock = _Clock()
     health = ModelHealth(clock=clock)
     spans = []
@@ -72,7 +72,7 @@ def test_each_returning_episode_doubles_the_cooldown_up_to_hour() -> None:
 
 
 def test_a_model_that_answers_again_starts_from_the_floor() -> None:
-    """AC-227: a success resets the escalation, not merely the cooldown."""
+    """AC-228: a success resets the escalation, not merely the cooldown."""
     clock = _Clock()
     health = ModelHealth(clock=clock)
     health.record([("primary", "network")])
@@ -87,7 +87,7 @@ def test_a_model_that_answers_again_starts_from_the_floor() -> None:
 
 
 def test_only_the_model_that_failed_cools_down() -> None:
-    """AC-226: the fallback answering does not excuse the primary's failure."""
+    """AC-227: the fallback answering does not excuse the primary's failure."""
     health = ModelHealth(clock=_Clock())
     health.record([("primary", "blocked"), ("fallback", None)])
     assert health.policy()["skip"] == ["primary"]
@@ -96,7 +96,7 @@ def test_only_the_model_that_failed_cools_down() -> None:
 def test_the_row_budget_and_cooldowns_come_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-225: the operator can widen the budget without a code change."""
+    """AC-226: the operator can widen the budget without a code change."""
     monkeypatch.setenv("PEARSS_MODEL_ATTEMPTS_PER_MODEL", "3")
     monkeypatch.setenv("PEARSS_MODEL_COOLDOWN_SECONDS", "60")
     monkeypatch.setenv("PEARSS_MODEL_COOLDOWN_MAX_SECONDS", "120")

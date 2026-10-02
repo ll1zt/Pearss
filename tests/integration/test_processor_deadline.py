@@ -33,7 +33,7 @@ def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
 
     The cooldown is switched off here on purpose: this test is about the row
     budget, and with one model a failed row legitimately parks the chain for
-    the cooldown (AC-228), which would make the later row fail for a reason
+    the cooldown (AC-229), which would make the later row fail for a reason
     that is not this test's subject. Model health has its own tests.
     """
     from tests.migrated_schema import migrated_database
@@ -362,7 +362,7 @@ def test_user_sees_which_model_failed_when_the_budget_runs_out(
 def test_a_killed_row_keeps_what_the_chain_had_learned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC-231: a killed row says where it died and what the models had said.
+    """AC-232: a killed row says where it died and what the models had said.
 
     Before this, a killed row read exactly `processor deadline expired`: the
     child's stderr -- where the block counter and the fallback line both live --

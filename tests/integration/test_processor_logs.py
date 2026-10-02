@@ -114,7 +114,7 @@ def test_the_processor_s_fallback_line_reaches_the_host_log(
     caplog: pytest.LogCaptureFixture,
     _provider: None,
 ) -> None:
-    """AC-230: which model failed, why, and where it fell back to is in the log.
+    """AC-231: which model failed, why, and where it fell back to is in the log.
 
     This is the real processor, not a fixture that logs: the line under test is
     the one the deployed journal never had.
