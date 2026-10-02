@@ -166,3 +166,41 @@ def test_rows_running_in_parallel_do_not_lose_each_other_failures() -> None:
         thread.join(5)
 
     assert sorted(health.policy()["skip"]) == ["fallback", "primary"]
+
+
+def test_the_snapshot_reports_the_cooling_episode_and_what_is_preferred() -> None:
+    """AC-233: the cell `:diagnose` projects, asserted exactly.
+
+    Only what is currently cooling appears under `models`: a model that answered
+    is healthy, and reporting a cleared episode would send an operator after a
+    failure that is over.
+    """
+    clock = _Clock()
+    health = ModelHealth(clock=clock)
+    health.record([("primary", "network"), ("secondary", None)])
+    clock.advance(60.0)
+
+    snapshot = health.snapshot()
+
+    assert snapshot["preferred"] == "secondary", "the first model that is not cooling"
+    assert snapshot["skipped"] == ["primary"]
+    assert snapshot["attempts_per_model"] == 2
+    assert snapshot["models"] == {
+        "primary": {
+            "cooling_seconds": 240.0,
+            "cooldown_seconds": 300.0,
+            "failures": 1,
+            "last_failure_class": "network",
+            "since_last_failure_seconds": 60.0,
+        }
+    }
+
+
+def test_a_recovered_model_leaves_the_snapshot() -> None:
+    """A cleared episode must not look like a live one."""
+    health = ModelHealth(clock=_Clock())
+    health.record([("primary", "network")])
+    health.record([("primary", None)])
+
+    assert health.snapshot()["models"] == {}
+    assert health.snapshot()["preferred"] == "primary"

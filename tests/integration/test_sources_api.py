@@ -8,8 +8,11 @@ scope separation between the read and write tokens.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import threading
 from collections.abc import AsyncIterator, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +25,12 @@ from alembic.config import Config
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.repository import parse_chain
+from app import enrichment_worker
 from app.main import create_app, create_engine_for
 from app.middleware import CorrelationAndAuditMiddleware
+from app.pipeline import normalise_and_store
+from core.models import ItemDraft
 from tests.integration.conftest import sweep_until_terminal
 from tests.migrated_schema import migrated_database
 
@@ -2328,3 +2335,123 @@ async def test_backfilling_a_source_without_a_chain_is_refused_before_selecting(
     assert response.json()["detail"]["error"]["code"] == "no_pipeline_chain"
     with session_factory() as session:
         assert session.execute(sa.text("select count(*) from work")).scalar_one() == 0
+
+
+@contextlib.contextmanager
+def _failing_primary(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """A provider whose first model refuses and whose second answers."""
+    asked: list[str] = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            model = str(body["model"])
+            asked.append(model)
+            if model == "primary":
+                raw = json.dumps({"error": {"message": "overloaded"}}).encode()
+                self.send_response(503)
+            else:
+                raw = json.dumps(
+                    {"choices": [{"message": {"content": f"[{model}] translated"}}]}
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    monkeypatch.setenv(
+        "PEARSS_TRANSLATE_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+    )
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", "primary,secondary")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    try:
+        yield asked
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_diagnose_answers_which_model_is_cooling_down(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-233: the diagnostic view carries the model dimension.
+
+    The registry lives in the worker's memory (ADR 0048), so this cell is a
+    read-only projection of it: which model the next row would ask, which are
+    cooling and for how long, and what each failed with. Without it, "why is
+    this chain slow?" is answered by reading the journal and guessing.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "diagnose-models-1"},
+        json={
+            "url": "https://cooling.example/feed",
+            "schedule_policy": policy(),
+            "pipeline_chain": [
+                {
+                    "plugin_id": "translate",
+                    "kind": "translation",
+                    "lang": "zh",
+                    "required": True,
+                }
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+    with session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source_id,
+                    external_id="cooling",
+                    title="Cooling article",
+                    canonical_url="https://cooling.example/article",
+                    published_at=None,
+                    content="<p>English prose that needs translating.</p>",
+                )
+            ],
+            chain=parse_chain(
+                '[{"plugin_id":"translate","kind":"translation","lang":"zh","required":true}]',
+                target_lang=None,
+            ),
+        )
+        session.commit()
+
+    with _failing_primary(monkeypatch) as asked, session_factory() as session:
+        enrichment_worker.sweep_queue(
+            session,
+            processors=enrichment_worker.default_processors(),
+            concurrency=1,
+            max_attempts=1,
+            row_session_factory=session_factory,
+        )
+    assert asked[:2] == ["primary", "secondary"], (
+        f"sanity: the chain was walked {asked}"
+    )
+
+    response = await writer.get(f"/v1/sources/{source_id}:diagnose")
+
+    assert response.status_code == 200, response.text
+    health = response.json()["model_health"]
+    assert health["preferred"] == "secondary", "a cooling model is not preferred"
+    assert health["skipped"] == ["primary"]
+    primary = health["models"]["primary"]
+    assert primary["last_failure_class"] == "network"
+    assert primary["failures"] == 1
+    assert primary["cooling_seconds"] > 0
+    assert primary["cooldown_seconds"] == 300.0, "the first episode is five minutes"
+    assert "secondary" not in health["models"], "a model that answered is not cooling"
