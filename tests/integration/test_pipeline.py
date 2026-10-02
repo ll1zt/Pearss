@@ -971,8 +971,15 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
         # is exactly the mutation this guards.
         expected = BACKOFF_BASE_SECONDS * (2**attempt)
         scheduled = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
+        # `before` is taken before the sweep, so the delay carries the sweep's
+        # own duration as well as the backoff -- and that duration is what load
+        # moves. The lower bound is therefore exact (the schedule is at least
+        # the computed backoff) and the upper one scales with it: a fixed +5s
+        # was the flake, since the sweep can take longer than that on a busy
+        # machine (measured 126.08s against a 120s backoff, issue #213).
         delay = (scheduled - before).total_seconds()
-        assert expected <= delay <= expected + 5, (attempt, delay, expected)
+        slack = max(5.0, expected * 0.1)
+        assert expected <= delay <= expected + slack, (attempt, delay, expected)
         observed_delays.append(delay)
 
         # Clear the schedule so the next sweep can claim the row immediately;
@@ -983,7 +990,10 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     # Doubling is the property, not merely "some non-zero wait": each attempt
     # waits about twice as long as the one before.
     assert len(observed_delays) == 2
-    assert observed_delays[1] >= observed_delays[0] * 1.8, observed_delays
+    # 1.5 rather than 2.0: the same sweep-duration slack above rides on both
+    # values, so a busy machine compresses the ratio (issue #213). Still far
+    # from the 1.0 that "no doubling" would produce.
+    assert observed_delays[1] >= observed_delays[0] * 1.5, observed_delays
 
     # The MAX_ATTEMPTS-th failure exceeds the retries: the row stops failed.
     report = sweep_queue(

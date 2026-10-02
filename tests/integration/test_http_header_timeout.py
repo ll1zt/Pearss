@@ -237,7 +237,17 @@ def test_an_idle_keep_alive_connection_survives_and_is_reused(
     The idle period is longer than the deadline, so a timer that was not
     disarmed must fire during it.
     """
-    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "1")
+    # Both periods scaled together (issue #213): the deadline must stay clear
+    # of the time the server needs to answer the first request on a loaded
+    # machine, and the idle period must stay clear of the deadline -- which is
+    # the property, and it is unchanged.
+    # 2s deadline, 3.5s idle: the idle period must still exceed the deadline
+    # (the property), and it must stay *under* the server's own keep-alive idle
+    # timeout (uvicorn's 5s default), or the connection closes for a reason
+    # this test is not about. Doubling the deadline and keeping the gap
+    # proportional is what stops a loaded machine from making the first
+    # response look like an idle timer firing (issue #213).
+    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "2")
     with _server() as (host, port):
         sock = socket.create_connection((host, port), timeout=15)
         try:
@@ -247,7 +257,7 @@ def test_an_idle_keep_alive_connection_survives_and_is_reused(
             assert b"200" in first, first[:120]
 
             # Idle past the deadline, keeping the socket open the whole time.
-            idle_until = time.monotonic() + 3.0
+            idle_until = time.monotonic() + 3.5
             while time.monotonic() < idle_until:
                 time.sleep(min(0.25, max(0.0, idle_until - time.monotonic())))
 
@@ -383,7 +393,13 @@ def test_a_slow_but_progressing_request_is_not_killed(
     longer than the deadline while every gap stays inside it, so the request
     must be served. A deadline that is never reset fails this.
     """
-    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "1")
+    # 3s, with gaps of 0.35s: the margin between one gap and the deadline is
+    # what keeps this stable on a loaded machine, because the *sender* is a
+    # thread the scheduler may stall -- and a stall longer than the deadline
+    # would look exactly like the bug this test is about (issue #213). The
+    # property is unchanged: every gap inside the deadline, the total beyond
+    # it.
+    monkeypatch.setenv("PEARSS_HTTP_HEADER_TIMEOUT_SECONDS", "3")
     with _server() as (host, port):
         sock = socket.create_connection((host, port), timeout=10)
         try:
@@ -397,7 +413,7 @@ def test_a_slow_but_progressing_request_is_not_killed(
                 # deadline, long enough that the whole header exceeds it. Wait
                 # by polling so the interval does not depend on one sleep
                 # returning on time.
-                gap_until = time.monotonic() + 0.4
+                gap_until = time.monotonic() + 0.35
                 while time.monotonic() < gap_until:
                     time.sleep(min(0.05, max(0.0, gap_until - time.monotonic())))
             sock.settimeout(15)
