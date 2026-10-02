@@ -17,7 +17,11 @@ from typing import Any
 
 from app.plugin_runtime import child_environment
 from core.enums import ErrorClass
-from core.plugins.hooks import ProcessorError
+from core.plugins.hooks import (
+    DEADLINE_KEY,
+    MODEL_EVENTS_KEY,
+    ProcessorError,
+)
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 REAP_SECONDS = 1.0
@@ -33,11 +37,17 @@ def run_processor(
     target_lang: str,
     deadline: float,
     cancelled: threading.Event,
+    report: list[tuple[str, str | None]] | None = None,
 ) -> str:
     """Return artifact text, after the child has exited and been reaped.
 
     Modules and module-level classes with static process hooks are importable;
     closures/instances are refused rather than silently run without a deadline.
+
+    `report`, when given, collects the processor's per-model outcome for this
+    row -- `(model, error_class)` for a model that failed, `(model, None)` for
+    one that answered. It is filled on the failure path too, which is the path
+    the caller's health registry most needs (ADR 0048).
     """
     if isinstance(processor, ModuleType):
         module, name = processor.__name__, ""
@@ -114,6 +124,7 @@ def run_processor(
             )
         try:
             response = json.loads(output)
+            _collect_events(response, report)
             if "error_class" in response:
                 raise ProcessorError(
                     ErrorClass(response["error_class"]), response["detail"]
@@ -145,6 +156,27 @@ def run_processor(
                     stream.close()
 
 
+def _collect_events(response: Any, report: list[tuple[str, str | None]] | None) -> None:
+    """Append the child's per-model report to the caller's list.
+
+    Defensive on shape: the child is ours, but a malformed entry must not turn
+    a diagnosable row failure into a crash on the parent's result path.
+    """
+    if report is None or not isinstance(response, dict):
+        return
+    events = response.get(MODEL_EVENTS_KEY)
+    if not isinstance(events, list):
+        return
+    for event in events:
+        if (
+            isinstance(event, list)
+            and len(event) == 2
+            and isinstance(event[0], str)
+            and (event[1] is None or isinstance(event[1], str))
+        ):
+            report.append((event[0], event[1]))
+
+
 def _child_main() -> None:
     request = json.loads(sys.stdin.buffer.read(MAX_MESSAGE_BYTES + 1))
     # Parent death must not leave a normally scheduled Python child running
@@ -155,6 +187,16 @@ def _child_main() -> None:
     watchdog.daemon = True
     watchdog.start()
     body: str | None = None
+    # The row's deadline goes into the context the processor reads, not only
+    # into the watchdog that kills it: a processor that cannot see its budget
+    # can only discover it by being killed, and a kill discards whatever the
+    # processor had learned (issue #227). The report channel is created here so
+    # that a processor which knows nothing about it is unaffected (ADR 0048).
+    item_ctx: dict[str, Any] = {
+        **request["item_ctx"],
+        DEADLINE_KEY: request["deadline"],
+        MODEL_EVENTS_KEY: [],
+    }
 
     def store(content: str) -> str:
         nonlocal body
@@ -169,12 +211,8 @@ def _child_main() -> None:
             processor = importlib.import_module(request["module"])
             for part in filter(None, request["name"].split(".")):
                 processor = getattr(processor, part)
-            # The row's deadline goes into the context the processor reads, not
-            # only into the watchdog that kills it: a processor that cannot see
-            # its budget can only discover it by being killed, and a kill
-            # discards whatever the processor had learned (issue #227).
             result = processor.process(
-                {**request["item_ctx"], "deadline": request["deadline"]},
+                item_ctx,
                 target_lang=request["target_lang"],
                 store=store,
             )
@@ -182,13 +220,18 @@ def _child_main() -> None:
             raise ProcessorError(
                 ErrorClass.PARSE, "processor did not return its stored artifact"
             )
-        response = {"body": body}
+        response = {"body": body, MODEL_EVENTS_KEY: item_ctx[MODEL_EVENTS_KEY]}
     except ProcessorError as exc:
-        response = {"error_class": exc.error_class.value, "detail": exc.detail[:500]}
+        response = {
+            "error_class": exc.error_class.value,
+            "detail": exc.detail[:500],
+            MODEL_EVENTS_KEY: item_ctx[MODEL_EVENTS_KEY],
+        }
     except Exception:
         response = {
             "error_class": ErrorClass.NETWORK.value,
             "detail": "processor execution failed",
+            MODEL_EVENTS_KEY: item_ctx[MODEL_EVENTS_KEY],
         }
     sys.stdout.write(json.dumps(response))
     sys.stdout.flush()

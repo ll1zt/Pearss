@@ -1639,3 +1639,200 @@ def test_a_stalled_model_is_abandoned_inside_the_budget(
     assert [timeout.read for timeout in handed] == [1.0], "half the row budget"
     assert excinfo.value.detail.startswith("primary: "), excinfo.value.detail
     assert "unreachable" in excinfo.value.detail, excinfo.value.detail
+
+
+# --------------------------------------------------------------------------
+# The row's model policy and its per-model report (AC-223..228)
+#
+# The health itself lives in the worker (`app/model_health`): this processor
+# runs in a child spawned per row, so it cannot outlive one. What crosses the
+# boundary is data -- a policy in, a report out.
+# --------------------------------------------------------------------------
+
+
+def _model_provider(
+    monkeypatch: pytest.MonkeyPatch, answers: dict[str, tuple[int, dict[str, object]]]
+) -> list[str]:
+    """A provider that records the model each call names, answering per model."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", "primary,fallback")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    asked: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url, json=kwargs.get("json"))
+        model = json.loads(request.read())["model"]
+        asked.append(model)
+        status, payload = answers.get(
+            model, (200, {"choices": [{"message": {"content": f"[{model}]"}}]})
+        )
+        return httpx.Response(status, json=payload)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return asked
+
+
+def _ctx(content: str, **context: object) -> dict[str, object]:
+    return {
+        "item_id": "i-228",
+        "title": "T",
+        "content": content,
+        "url": "https://b.example/p",
+        **context,
+    }
+
+
+THREE_BLOCKS = (
+    "<p>English prose one.</p><p>English prose two.</p><p>English prose three.</p>"
+)
+
+
+def test_a_cooling_model_is_not_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AC-225: the row's policy decides which models are candidates at all."""
+    asked = _model_provider(monkeypatch, {})
+    events: list[tuple[str, str | None]] = []
+
+    process(
+        _ctx(
+            "<p>English prose.</p>",
+            model_policy={"skip": ["primary"], "attempts_per_model": 2},
+            model_events=events,
+        ),
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
+
+    assert asked == ["fallback"]
+    assert events == [("fallback", None)]
+
+
+def test_a_wholly_cooling_chain_asks_nothing_and_fails_transiently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-228: no candidate left is local backpressure, not a provider verdict."""
+    asked = _model_provider(monkeypatch, {})
+    events: list[tuple[str, str | None]] = []
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            _ctx(
+                "<p>English prose.</p>",
+                model_policy={
+                    "skip": ["primary", "fallback"],
+                    "attempts_per_model": 2,
+                },
+                model_events=events,
+            ),
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert excinfo.value.error_class is ErrorClass.NETWORK
+    assert "cooling" in excinfo.value.detail, excinfo.value.detail
+    assert asked == [], "a cooling chain must not be asked again"
+    assert events == [], "nothing was asked, so nothing is reported"
+
+
+def test_a_broken_model_is_retried_at_most_twice_per_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-224: the budget counts rows, not the blocks inside one."""
+    asked = _model_provider(
+        monkeypatch, {"primary": (503, {"error": {"message": "overloaded"}})}
+    )
+
+    process(
+        _ctx(
+            THREE_BLOCKS,
+            model_policy={"skip": [], "attempts_per_model": 2},
+            model_events=[],
+        ),
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
+
+    assert asked.count("primary") == 2, asked
+    assert asked.count("fallback") == 3, asked
+
+
+def test_a_permanent_rejection_does_not_spend_the_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-227: a 401 demotes the model at once; asking again is pure waste."""
+    asked = _model_provider(
+        monkeypatch, {"primary": (401, {"error": {"message": "invalid api key"}})}
+    )
+
+    process(
+        _ctx(
+            THREE_BLOCKS,
+            model_policy={"skip": [], "attempts_per_model": 2},
+            model_events=[],
+        ),
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
+
+    assert asked.count("primary") == 1, asked
+    assert asked.count("fallback") == 3, asked
+
+
+def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-223, AC-226: the worker's registry acts on this report, nothing else."""
+    _model_provider(
+        monkeypatch, {"primary": (503, {"error": {"message": "overloaded"}})}
+    )
+    events: list[tuple[str, str | None]] = []
+
+    process(
+        _ctx(
+            "<p>English one.</p><p>English two.</p>",
+            model_policy={"skip": [], "attempts_per_model": 2},
+            model_events=events,
+        ),
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
+
+    assert events == [("primary", "network"), ("fallback", None)]
+
+
+def test_the_per_attempt_ceiling_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider that legitimately takes minutes must not be cut at 60s.
+
+    The default cap is 60s -- one slow model must not own a six-minute row --
+    and the case it would otherwise break is real: a relayed gemini-flash reply
+    was measured at 126s end to end (issue #228, ADR 0047).
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.setenv("PEARSS_TRANSLATE_ATTEMPT_SECONDS", "5")
+    handed: list[httpx.Timeout] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        handed.append(timeout)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    process(
+        _ctx("<p>English prose.</p>", deadline=time.monotonic() + 4000.0),
+        target_lang="zh",
+        store=lambda content: "cas://product",
+    )
+
+    assert [timeout.read for timeout in handed] == [5.0]

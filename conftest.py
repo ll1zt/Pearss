@@ -28,10 +28,24 @@ def _hermetic_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         pearss_http, "resolve_host", lambda host, *, deadline=None: {_HERMETIC_ADDRESS}
     )
-
     # A sandboxed collector runs in a separate interpreter, where the patch
     # above does not reach: it resolves for itself. Without this the child
     # answered real DNS, `t.me` came back as a private address, and every
     # sandboxed collector's fixture test failed as `blocked`. The variable is
     # read by resolve_host in the child and is on the child env allowlist.
     monkeypatch.setenv("PEARSS_TEST_DNS", json.dumps({"*": [_HERMETIC_ADDRESS]}))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_model_health() -> None:
+    """The model-health registry is process-wide, so a test must not inherit it.
+
+    The worker is one process for a whole deployment, which is exactly why the
+    registry is not per-row (ADR 0048: a processor's child cannot outlive its
+    row). The suite runs many deployments in one process, so each test starts
+    from a clean one -- without this, a test that makes a model fail leaves the
+    next test's chain cooling down and answering nothing.
+    """
+    from app.model_health import reset_health
+
+    reset_health()
