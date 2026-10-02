@@ -169,8 +169,14 @@ def _child_main() -> None:
             processor = importlib.import_module(request["module"])
             for part in filter(None, request["name"].split(".")):
                 processor = getattr(processor, part)
+            # The row's deadline goes into the context the processor reads, not
+            # only into the watchdog that kills it: a processor that cannot see
+            # its budget can only discover it by being killed, and a kill
+            # discards whatever the processor had learned (issue #227).
             result = processor.process(
-                request["item_ctx"], target_lang=request["target_lang"], store=store
+                {**request["item_ctx"], "deadline": request["deadline"]},
+                target_lang=request["target_lang"],
+                store=store,
             )
         if result != "processor-artifact" or body is None:
             raise ProcessorError(

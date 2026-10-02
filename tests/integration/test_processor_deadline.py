@@ -234,3 +234,119 @@ async def test_user_shutdown_terminates_active_processor_before_returning(
         await worker.stop()
         listener.close()
         engine.dispose()
+
+
+# --------------------------------------------------------------------------
+# The row's remaining budget reaches the processor (AC-221, AC-222)
+#
+# Before this, the processor had no idea how long it was allowed to take: one
+# provider attempt was bounded at 300s regardless of the row's budget, so a
+# stalled model spent the whole budget, the parent killed the child, and the
+# kill discarded the per-model reasons the chain had collected.
+#
+# The factor itself (`min(60s, remaining/2)`) is pinned where it is
+# deterministic, in the processor's own unit test. What is asserted here is the
+# consequence: a stalled model cannot own the row, because an attempt that spent
+# the whole budget would end in the parent's kill and the row would read
+# "processor deadline expired". Measured while writing this on a box running
+# another agent's builds: an httpx timeout is precise to 0.02s even under load,
+# but the *child's* wall clock slips 1-2s under scheduling pressure -- so an
+# attempt's duration asserted from out here would measure the scheduler, not the
+# budget (issue #213). The budget below therefore leaves that jitter room.
+# --------------------------------------------------------------------------
+
+
+def test_user_sees_which_model_failed_when_the_budget_runs_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-221: the row's failure names the model and its reason, not the kill.
+
+    Measured live on the deployed code: the row read
+    `network / processor deadline expired`, which names neither the model that
+    stalled nor what it did, and reads the same whether one model or five were
+    asked.
+    """
+    from tests.migrated_schema import migrated_database
+
+    reached = threading.Event()
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            reached.set()
+            self.connection.recv(1)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.start()
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv(
+        "PEARSS_TRANSLATE_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+    )
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "fixture")
+    monkeypatch.setattr(enrichment_worker, "DEFAULT_CALL_TIMEOUT", 10.0)
+    engine = sa.create_engine(migrated_database(tmp_path, "reason.db"))
+    factory = sessionmaker(engine, expire_on_commit=False)
+    chain = (
+        '[{"plugin_id":"translate","kind":"translation","lang":"zh","required":true}]'
+    )
+    with factory() as session:
+        source = create_source(
+            session,
+            source_type="rss",
+            url="https://reason.example/feed",
+            canonical_url="https://reason.example/feed",
+            tenant_id="default",
+            schedule_policy='{"type":"fixed","interval":"30m"}',
+            pipeline_chain=chain,
+            at="2026-09-17T00:00:00.000000Z",
+        )
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source.id,
+                    external_id="stalled",
+                    title="Stalled article",
+                    canonical_url="https://reason.example/stalled",
+                    published_at=None,
+                    content="<p>An English article that needs translating.</p>",
+                )
+            ],
+            chain=parse_chain(chain, target_lang=None),
+        )
+        session.commit()
+    try:
+        with factory() as session:
+            enrichment_worker.sweep_queue(
+                session,
+                processors=enrichment_worker.default_processors(),
+                concurrency=1,
+                max_attempts=1,
+                row_session_factory=factory,
+            )
+        assert reached.is_set(), "the provider was not reached"
+        with factory() as session:
+            status, error_class, detail, payload_ref, publish_status = session.execute(
+                sa.select(
+                    ItemEnrichment.status,
+                    ItemEnrichment.error_class,
+                    ItemEnrichment.detail,
+                    ItemEnrichment.payload_ref,
+                    Item.publish_status,
+                ).join(Item, Item.id == ItemEnrichment.item_id)
+            ).one()
+        assert (status, error_class) == ("failed", "network")
+        assert payload_ref is None, "a failed row stores no artifact"
+        assert publish_status == "pending", "the gate stays shut"
+        assert "fixture:" in detail, detail
+        assert "deadline expired" not in detail, detail
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(5)
+        engine.dispose()

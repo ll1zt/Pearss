@@ -305,6 +305,9 @@ class ProcessorSpec(Protocol):
         """Produce the artifact; return its storage reference.
 
         `item_ctx` carries the fields the processor may read (title,
-        content HTML, url, lang hints); `store` is the file-store callable.
+        content HTML, url, lang hints) and, when the caller enforces a
+        deadline, `deadline`: the absolute `time.monotonic()` instant by which
+        `process` must return. The runtime adds it (ADR 0047); an in-process
+        call has none. `store` is the file-store callable.
         """
         ...

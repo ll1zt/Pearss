@@ -94,7 +94,7 @@
 | AC-183..185 | #188 `POST /v1/works`：响应 O(1)（句柄 + 折叠 counts，无逐条结果）／同一命令值在飞时复用同一 work（不产生第二批）／大提交不阻塞 | issue #188 | 已合并 | `tests/integration/test_works_api.py` |
 | AC-186..188 | #189 读一个作业：句柄回环（账本覆盖每个 target 恰好一次）／逐目标归因（rejected 与 failed 分开计数）／账本分页与过滤稳定 | issue #189 | 已合并 | `tests/integration/test_works_read.py` |
 | AC-189..192 | #190 抓取执行器：同源地址抓取入库且身份落在已有条目上（再抓一次不新增行）／跨源地址拒绝且 origin 零请求／一条失败不拖垮整批（partial）／origin 拒绝后中止本轮、其余只记 rejected 不再发请求；断点续跑按账本跳过已有行 | issue #190 | 已合并 | `tests/integration/test_work_fetch.py`、`tests/unit/test_work_fold.py` |
-| AC-221..222 | #227 翻译管线的预算传递：处理器拿到行 deadline、单次尝试 ≤ `min(60s, 剩余/2)`（不足 0.5s 不发起）、预算耗尽主动以 transient 失败并保留逐模型原因 | issue #227 | 保留 |  |
+| AC-221..222 | #227 翻译管线的预算传递：运行时把行 deadline 放进处理器上下文（`item_ctx["deadline"]`，绝对 monotonic）、单次尝试 ≤ `min(60s, 剩余/2)` 且不足 0.5s 不发起、预算耗尽主动以 transient 失败并保留逐模型原因（不再只剩 `processor deadline expired`） | issue #227 / ADR 0047 | 已合并 | `tests/integration/test_processor_deadline.py`、`src/plugins/processors/translate/test_processor.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

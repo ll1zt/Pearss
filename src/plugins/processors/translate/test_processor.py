@@ -4,8 +4,10 @@ model fallback chain."""
 from __future__ import annotations
 
 import gzip
+import importlib
 import json
 import pathlib
+import time
 
 import httpx
 import pytest
@@ -14,8 +16,10 @@ from core.enums import ErrorClass
 from core.language import prose_text
 from core.plugins.hooks import ProcessorError
 from plugins.processors.translate.processor import (
+    MAX_ATTEMPT_SECONDS,
     MAX_CHARS,
     _segment,
+    attempt_timeout,
     process,
     processor_id,
 )
@@ -1497,3 +1501,141 @@ def test_a_block_that_is_not_split_is_byte_identical(
 
     assert len(seen) == 1, "a short block is one request"
     assert stored[0] == "<p>Short English prose here.</p>", stored[0]
+
+
+# --------------------------------------------------------------------------
+# The row's remaining budget (AC-221, AC-222)
+# --------------------------------------------------------------------------
+
+
+def test_a_single_attempt_never_spends_more_than_half_the_remaining_budget() -> None:
+    """AC-222: one attempt gets min(60s, remaining/2), or no attempt at all.
+
+    An attempt allowed to spend what is left is an attempt the parent kills at
+    the row's deadline, and a killed child loses every model's reason. Halving
+    also leaves the next model in the chain a share of what remains instead of
+    a budget already spent by the first (issue #227).
+    """
+    assert attempt_timeout(4_000.0) == MAX_ATTEMPT_SECONDS
+    assert attempt_timeout(200.0) == MAX_ATTEMPT_SECONDS
+    assert attempt_timeout(10.0) == 5.0
+    assert attempt_timeout(2.0) == 1.0
+    # Below the floor nothing can come back in time, so the attempt is not
+    # started at all: starting it only races the parent's kill.
+    assert attempt_timeout(1.0) is None
+    assert attempt_timeout(0.2) is None
+
+
+def test_a_spent_budget_fails_the_row_without_asking_any_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-221: a budget already gone is reported, not spent on a doomed call."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+
+    def never(url: str, **kwargs: object) -> httpx.Response:
+        raise AssertionError(f"a model was asked with no budget left: {url}")
+
+    monkeypatch.setattr(httpx, "post", never)
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            {
+                "title": "T",
+                "content": "<p>An English article.</p>",
+                "deadline": time.monotonic() - 1.0,
+            },
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert excinfo.value.error_class is ErrorClass.NETWORK
+    assert "budget" in excinfo.value.detail
+
+
+class _Clock:
+    """A monotonic clock the test advances, so nothing waits in real time.
+
+    The processor reads `time.monotonic()` through one module attribute, so a
+    stalled attempt can be simulated by advancing the clock by exactly the
+    budget that attempt was given. The chain's arithmetic then holds still
+    under test instead of depending on how busy the machine is (issue #213).
+    """
+
+    def __init__(self, start: float) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _stalling_provider(
+    monkeypatch: pytest.MonkeyPatch, clock: _Clock, models: str
+) -> list[httpx.Timeout]:
+    """A provider that burns each attempt's whole budget, and its fallback.
+
+    Returns the timeouts the processor handed to the HTTP boundary, in order.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", models)
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    monkeypatch.setattr(
+        importlib.import_module("plugins.processors.translate.processor"),
+        "time",
+        clock,
+    )
+    handed: list[httpx.Timeout] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        timeout = kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        handed.append(timeout)
+        clock.advance(timeout.read or 0.0)
+        raise httpx.ReadTimeout("provider never replied")
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return handed
+
+
+def test_a_stalled_model_is_abandoned_inside_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-221/AC-222: the attempt is bounded by the budget, and its reason survives.
+
+    The chain reports what it collected instead of being killed: with 2s of row
+    budget the first model gets 1s (half of what is left, and under the 60s
+    cap), and once that is spent the second model is not asked at all -- asking
+    it is what would end in the parent's kill with nothing to show. This is the
+    in-process half of the contract; the same expectations through the real
+    child live in `tests/integration/test_processor_deadline.py`, which the
+    parent's coverage cannot see because the child is a separate process.
+    """
+    clock = _Clock(start=1000.0)
+    handed = _stalling_provider(monkeypatch, clock, models="primary,fallback")
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            {
+                "title": "T",
+                "content": "<p>An English article.</p>",
+                "deadline": clock.monotonic() + 2.0,
+            },
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert excinfo.value.error_class is ErrorClass.NETWORK
+    assert [timeout.read for timeout in handed] == [1.0], "half the row budget"
+    assert excinfo.value.detail.startswith("primary: "), excinfo.value.detail
+    assert "unreachable" in excinfo.value.detail, excinfo.value.detail
