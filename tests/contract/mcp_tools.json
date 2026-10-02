@@ -137,7 +137,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. Requires confirmation: it spends provider budget per item. The source must have a pipeline_chain configured.",
+    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. Requires confirmation: it spends provider budget per item, and the source must have a pipeline_chain configured. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "source_id": {

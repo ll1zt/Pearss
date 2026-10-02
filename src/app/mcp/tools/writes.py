@@ -527,8 +527,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         description=(
             "Queue processing-chain products (e.g. translations) for items "
             "stored before the chain was enabled. Requires confirmation: it "
-            "spends provider budget per item. The source must have a "
-            "pipeline_chain configured."
+            "spends provider budget per item, and the source must have a "
+            "pipeline_chain configured. Returns a job handle -- read each item's "
+            "outcome with work_units."
         ),
     )
     async def backfill_source(
@@ -545,7 +546,9 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             fields=fields,
             method="POST",
             path=f"/v1/sources/{source_id}:backfill-chain",
-            ok=(200, 201),
+            # 200 when the source has nothing stored (no job to submit) and 202
+            # when it does; both are answers.
+            ok=(200, 202),
         )
 
     @server.tool(

@@ -13,7 +13,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -266,6 +266,47 @@ def requeue_enrichment(session: Session, enrichment_id: str) -> bool:
         ),
     )
     return int(result.rowcount or 0) > 0
+
+
+def items_missing_chain(
+    session: Session,
+    *,
+    source_id: str,
+    chain: tuple[EnrichmentSpec, ...],
+    limit: int | None = None,
+) -> list[str]:
+    """The newest items that are missing at least one of the chain's products.
+
+    The half of `backfill_chain` that *selects*: a selection-shaped command has
+    to name its targets before it can submit them as a work (issue #199), and
+    `backfill_chain` is the per-item half that queues them.
+
+    "Missing" uses the identity `enqueue_chain` uses -- (plugin, kind, lang, and
+    the item's *current* content hash) -- so an item whose content changed is
+    missing its product again, and an item that has everything is not selected.
+    That is what makes "call it with a limit, repeat until it stops" advance,
+    instead of re-selecting the same newest rows forever.
+    """
+    if not chain:
+        return []
+    conditions = [
+        ~exists().where(
+            ItemEnrichment.item_id == ItemRow.id,
+            ItemEnrichment.plugin_id == spec.plugin_id,
+            ItemEnrichment.kind == spec.kind,
+            ItemEnrichment.lang == spec.lang,
+            ItemEnrichment.input_hash == ItemRow.content_hash,
+        )
+        for spec in chain
+    ]
+    query = (
+        select(ItemRow.id)
+        .where(ItemRow.source_id == source_id, or_(*conditions))
+        .order_by(ItemRow.published_at.desc(), ItemRow.id)
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    return list(session.execute(query).scalars())
 
 
 def failed_enrichment_ids_for_source(session: Session, *, source_id: str) -> list[str]:
