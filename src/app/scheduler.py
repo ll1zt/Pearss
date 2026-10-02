@@ -46,6 +46,7 @@ from adapters.repository import (
     last_collect_at,
     last_failure_error_class,
     prune_audit_log,
+    prune_work_ledger,
     reap_orphaned_runs,
     update_gaps_for_source,
 )
@@ -114,6 +115,23 @@ REAP_GRACE_SECONDS = 3600.0
 def audit_retention_days() -> int:
     """How long audit rows are kept (ADR 0016). `0` disables pruning."""
     raw = os.environ.get("PEARSS_AUDIT_RETENTION_DAYS", "").strip()
+    if not raw:
+        return 30
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 30
+
+
+def work_retention_days() -> int:
+    """How long finished ledger rows are kept (ADR 0046 D-F). `0` disables it.
+
+    The same shape as the audit window on purpose: an operator who wants an
+    append-only trail sets one variable, and one that is malformed means the
+    default rather than "keep nothing" or "keep forever" -- a typo must not
+    change what is deleted.
+    """
+    raw = os.environ.get("PEARSS_WORK_RETENTION_DAYS", "").strip()
     if not raw:
         return 30
     try:
@@ -469,6 +487,7 @@ class Scheduler:
         # long outage is exactly when stale rows should go. The same holds for
         # reaping orphaned runs - see _reap_orphaned_runs_if_due.
         self._next_prune_at = 0.0
+        self._next_work_prune_at = 0.0
         self._next_reap_at = 0.0
         self._next_optimize_at = 0.0
         self._next_index_at = 0.0
@@ -551,6 +570,7 @@ class Scheduler:
                 await self._check_health_and_alert()
                 await self._reap_orphaned_runs_if_due()
                 await self._prune_audit_if_due()
+                await self._prune_work_ledger_if_due()
                 await self._optimize_if_due()
                 await self._index_if_due()
             except OperationalError:
@@ -706,6 +726,39 @@ class Scheduler:
         self._next_prune_at = self._monotonic() + self._prune_every
         if pruned:
             LOGGER.info("audit retention pruned %d row(s) older than %dd", pruned, days)
+
+    async def _prune_work_ledger_if_due(self) -> None:
+        """Enforce the ledger's retention window (ADR 0046 D-F, issue #203).
+
+        Separate from the audit window even though both default to 30 days: they
+        are different records with different reasons to be kept, and an operator
+        tuning one must not silently move the other. The *interval* is shared
+        (`prune_every`), which is what keeps this from being a second schedule.
+        """
+        now = self._monotonic()
+        if now < self._next_work_prune_at:
+            return
+        days = work_retention_days()
+        if days <= 0:
+            return
+
+        def prune() -> int:
+            with self._session_factory() as session:
+                pruned = prune_work_ledger(
+                    session, older_than=datetime.now(UTC) - timedelta(days=days)
+                )
+                session.commit()
+            return pruned
+
+        # Same rule as reaping and the audit window: spend the interval only on
+        # a committed pass, so a locked database retries on the next poll rather
+        # than an interval later.
+        pruned = await asyncio.to_thread(prune)
+        self._next_work_prune_at = self._monotonic() + self._prune_every
+        if pruned:
+            LOGGER.info(
+                "ledger retention pruned %d work(s) older than %dd", pruned, days
+            )
 
     async def _optimize_if_due(self) -> None:
         """Let SQLite refresh the planner's statistics (issue #77).

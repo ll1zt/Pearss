@@ -128,6 +128,7 @@ from adapters.repository.work import (
     create_work,
     finish_work,
     live_work_by_fingerprint,
+    prune_work_ledger,
     units_for_work,
     work_by_id,
 )
@@ -198,6 +199,7 @@ __all__ = [
     "plugin_status",
     "promote_to_ready",
     "prune_audit_log",
+    "prune_work_ledger",
     "query_items",
     "read_states_for",
     "reader_credential",
