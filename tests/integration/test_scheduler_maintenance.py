@@ -16,6 +16,12 @@ gap that makes this file necessary: `reap_orphaned_runs` and `prune_audit_log`
 can be correct while the loop never calls them, and deleting either call from
 `_loop` would have broken nothing that was watching.
 
+There is a third pass now: `_prune_work_ledger_if_due` enforces the ledger's
+retention window (ADR 0046 D-F, issue #203). It sits here for the same reason as
+the other two -- the repository function underneath can be correct while the
+loop never calls it -- and its scenario also pins what the window must *not*
+reach: a work with no end, and every table that is not the ledger.
+
 Both are gated on elapsed monotonic time, so the clock is injected rather than
 waited on. Sleeping an hour to observe a scheduling decision is not a test --
 it is a slow, flaky way of asserting nothing. `Scheduler(monotonic=...)` is the
@@ -40,14 +46,29 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.audit import record
-from adapters.db_models import AuditLog
+from adapters.db_models import AuditLog, Work
 from adapters.repository import (
+    append_unit,
     claim_job_run,
     create_job_run,
     create_source,
+    create_work,
+    enqueue_chain,
     ensure_collect_job,
+    finish_work,
+    timestamp,
 )
-from core.enums import AuditOutcome, JobRunStatus, SourceStatus
+from app.pipeline import normalise_and_store
+from app.scheduler import PRUNE_INTERVAL_SECONDS
+from core.enrichment import EnrichmentKind, EnrichmentSpec
+from core.enums import (
+    AuditOutcome,
+    JobRunStatus,
+    SourceStatus,
+    UnitOutcome,
+    WorkStatus,
+)
+from core.models import ItemDraft
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -394,6 +415,48 @@ async def test_user_abandoned_runs_close_and_expired_audits_disappear_in_the_loo
                 correlation_id=audit_id,
                 occurred_at=occurred,
             )
+        # The ledger's own window, in the same pass: one finished work past it
+        # and one *unfinished* work of the same age. The second is the point --
+        # the loop must not delete a row a running executor is writing to.
+        expired_work = create_work(
+            session,
+            kind="delete",
+            targets=["it-loop-expired"],
+            params={},
+            fingerprint="fp-loop-expired",
+            tenant_id="default",
+        )
+        append_unit(
+            session,
+            work_id=expired_work.id,
+            target="it-loop-expired",
+            outcome=UnitOutcome.OK,
+        )
+        finish_work(
+            session,
+            expired_work.id,
+            status=WorkStatus.SUCCEEDED,
+            now=datetime.now(UTC) - timedelta(days=40),
+        )
+        live_work = create_work(
+            session,
+            kind="fetch",
+            targets=["https://live-work.example/post"],
+            params={},
+            fingerprint="fp-loop-live",
+            tenant_id="default",
+        )
+        append_unit(
+            session,
+            work_id=live_work.id,
+            target="https://live-work.example/post",
+            outcome=UnitOutcome.SKIPPED,
+        )
+        session.execute(
+            sa.update(Work)
+            .where(Work.id == live_work.id)
+            .values(created_at=timestamp(datetime.now(UTC) - timedelta(days=40)))
+        )
         session.commit()
 
     clock = _Clock()
@@ -416,3 +479,308 @@ async def test_user_abandoned_runs_close_and_expired_audits_disappear_in_the_loo
     with session_factory() as session:
         remaining = session.scalars(sa.select(AuditLog.id)).all()
     assert remaining == ["retained"]
+
+    works_after, units_after = _ledger_rows(session_factory)
+    assert expired_work.id not in works_after, (
+        "the loop must enforce the ledger window, not only the pass when called"
+    )
+    assert f"{expired_work.id}:it-loop-expired" not in units_after
+    assert live_work.id in works_after, "an unfinished work is live, not stale"
+    assert f"{live_work.id}:https://live-work.example/post" in units_after
+
+
+# --------------------------------------------------------------------------
+# Scenario: the ledger's retention window, and what it must not reach
+# --------------------------------------------------------------------------
+
+
+def _ledger_rows(session_factory: sessionmaker[Session]) -> tuple[set[str], set[str]]:
+    """Every work id and every `work:target` unit currently in the ledger."""
+    with session_factory() as session:
+        works = {str(row[0]) for row in session.execute(sa.text("select id from work"))}
+        units = {
+            f"{row[0]}:{row[1]}"
+            for row in session.execute(sa.text("select work_id, target from work_unit"))
+        }
+    return works, units
+
+
+def _fact_counts(session_factory: sessionmaker[Session]) -> tuple[int, int]:
+    """Rows in the two fact-source tables retention must not reach."""
+    with session_factory() as session:
+        items = session.execute(sa.text("select count(*) from item")).scalar_one()
+        enrichments = session.execute(
+            sa.text("select count(*) from item_enrichment")
+        ).scalar_one()
+    return int(items), int(enrichments)
+
+
+def _item_row(session_factory: sessionmaker[Session], item_id: str) -> tuple[Any, ...]:
+    """One item's own columns, as AC-204 pins them."""
+    with session_factory() as session:
+        return tuple(
+            session.execute(
+                sa.text(
+                    "select guid, content_hash, publish_status, content_ref"
+                    " from item where id = :id"
+                ),
+                {"id": item_id},
+            ).one()
+        )
+
+
+@pytest.mark.integration
+def test_the_ledger_window_prunes_finished_work_and_leaves_live_rows_alone(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-224: 30 days of ledger, and the three things age must not delete.
+
+    The ledger answers "what happened to this target" and is written per target,
+    so it grows with every command; ADR 0046 D-F gives it a 30-day window and
+    says what it is not -- a fact source. Two halves of that are asserted here,
+    and the second is the one with teeth:
+
+    - a *finished* work older than the window goes, taking its units with it
+      (the units are that work's record, not separate evidence);
+    - a work with **no end** stays, however old, because a queued or running work
+      is live: its row is what a running executor writes its units against, and
+      deleting it would make a job that is still running look like it vanished;
+    - nothing outside the ledger moves. The item and enrichment counts and the
+      item's own row are compared before and after -- retention that reached
+      into the corpus would be deleting facts to save space.
+
+    The rows come from the repository (`create_work` / `finish_work` /
+    `append_unit`), so this reproduces the production write path; the timestamps
+    are the scenario, and they are set on the model rather than inserted.
+    """
+    monkeypatch.setenv("PEARSS_WORK_RETENTION_DAYS", "30")
+
+    now = datetime.now(UTC)
+    stale = now - timedelta(days=40)
+    fresh = now - timedelta(hours=1)
+
+    with session_factory() as session:
+        # A fact-source row and a derived row, so "unchanged" is not vacuous.
+        source = create_source(
+            session,
+            source_type="rss",
+            url="https://retention.example/feed",
+            canonical_url="https://retention.example/feed",
+            schedule_policy="{}",
+            tenant_id="default",
+            at=timestamp(now),
+        )
+        item = normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source.id,
+                    external_id="retention-1",
+                    title="Kept across the prune",
+                    canonical_url="https://retention.example/post-1",
+                    published_at=None,
+                    content="<p>Body.</p>",
+                )
+            ],
+            tenant_id="default",
+        )[0].result.item
+        enqueue_chain(
+            session,
+            item_id=item.id,
+            content_hash="hash-retention-1",
+            chain=(EnrichmentSpec(plugin_id="fulltext", kind=EnrichmentKind.FULLTEXT),),
+        )
+
+        # Three works: old and finished, fresh and finished, old and *unfinished*.
+        old_work = create_work(
+            session,
+            kind="delete",
+            targets=["it-retention-old"],
+            params={},
+            fingerprint="fp-retention-old",
+            tenant_id="default",
+        )
+        append_unit(
+            session,
+            work_id=old_work.id,
+            target="it-retention-old",
+            outcome=UnitOutcome.OK,
+        )
+        finish_work(session, old_work.id, status=WorkStatus.SUCCEEDED, now=stale)
+
+        fresh_work = create_work(
+            session,
+            kind="delete",
+            targets=["it-retention-fresh"],
+            params={},
+            fingerprint="fp-retention-fresh",
+            tenant_id="default",
+        )
+        append_unit(
+            session,
+            work_id=fresh_work.id,
+            target="it-retention-fresh",
+            outcome=UnitOutcome.OK,
+        )
+        finish_work(session, fresh_work.id, status=WorkStatus.SUCCEEDED, now=fresh)
+
+        live_work = create_work(
+            session,
+            kind="fetch",
+            targets=["https://retention.example/post-1"],
+            params={},
+            fingerprint="fp-retention-live",
+            tenant_id="default",
+        )
+        append_unit(
+            session,
+            work_id=live_work.id,
+            target="https://retention.example/post-1",
+            outcome=UnitOutcome.SKIPPED,
+            detail="still going",
+        )
+        # An old *unfinished* work: the case where age alone would be wrong.
+        session.execute(
+            sa.update(Work)
+            .where(Work.id == live_work.id)
+            .values(created_at=timestamp(stale))
+        )
+        session.commit()
+
+    facts_before = _fact_counts(session_factory)
+    item_before = _item_row(session_factory, item.id)
+    works_before, units_before = _ledger_rows(session_factory)
+    assert {old_work.id, fresh_work.id, live_work.id} <= works_before
+
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    works_after, units_after = _ledger_rows(session_factory)
+
+    assert old_work.id not in works_after, "a finished work past 30 days goes"
+    assert not {row for row in units_after if row.startswith(f"{old_work.id}:")}, (
+        "its units are that work's record and go with it"
+    )
+
+    assert fresh_work.id in works_after, "a finished work inside the window stays"
+    assert f"{fresh_work.id}:it-retention-fresh" in units_after, units_after
+
+    assert live_work.id in works_after, (
+        "a work with no end is live, not stale: age alone must never delete it, "
+        "because a running executor writes its units against that row"
+    )
+    assert f"{live_work.id}:https://retention.example/post-1" in units_after
+
+    assert works_after == works_before - {old_work.id}, works_after ^ works_before
+    assert units_after == units_before - (units_before - units_after), (
+        units_after,
+        units_before,
+    )
+    assert _fact_counts(session_factory) == facts_before, (
+        "retention may not reach outside the ledger"
+    )
+    assert _item_row(session_factory, item.id) == item_before, (
+        "the item's own row is untouched"
+    )
+
+
+def _seed_finished_work(
+    session: Session, *, fingerprint: str, target: str, finished_days_ago: float
+) -> str:
+    """A finished work with one unit, through the repository's own write path."""
+    work = create_work(
+        session,
+        kind="delete",
+        targets=[target],
+        params={},
+        fingerprint=fingerprint,
+        tenant_id="default",
+    )
+    append_unit(session, work_id=work.id, target=target, outcome=UnitOutcome.OK)
+    finish_work(
+        session,
+        work.id,
+        status=WorkStatus.SUCCEEDED,
+        now=datetime.now(UTC) - timedelta(days=finished_days_ago),
+    )
+    session.flush()
+    return work.id
+
+
+@pytest.mark.integration
+def test_ledger_retention_of_zero_keeps_every_row(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`PEARSS_WORK_RETENTION_DAYS=0` means keep the ledger forever.
+
+    The same escape hatch the audit window has, for the same reason: an operator
+    who wants the whole history must be able to say so. The setting has to reach
+    the *pass* rather than only the parser -- a window read as zero that still
+    deleted rows would be the worst possible reading of "keep everything".
+    """
+    monkeypatch.setenv("PEARSS_WORK_RETENTION_DAYS", "0")
+    with session_factory() as session:
+        work_id = _seed_finished_work(
+            session,
+            fingerprint="fp-retention-forever",
+            target="it-retention-forever",
+            finished_days_ago=400,
+        )
+        session.commit()
+
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    works_after, units_after = _ledger_rows(session_factory)
+    assert work_id in works_after, "0 days means keep everything"
+    assert f"{work_id}:it-retention-forever" in units_after
+
+
+@pytest.mark.integration
+def test_the_ledger_pass_is_throttled_between_calls(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window is enforced once per maintenance interval, not every tick.
+
+    Asserted on the ledger rather than on the timer field: an expired work that
+    appears *after* a pass survives the next call, because that call is inside
+    the interval and must not run the delete. A pass per tick would be a delete
+    against the ledger every few seconds, which is the cost the interval exists
+    to avoid.
+    """
+    monkeypatch.setenv("PEARSS_WORK_RETENTION_DAYS", "30")
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    with session_factory() as session:
+        work_id = _seed_finished_work(
+            session,
+            fingerprint="fp-retention-throttled",
+            target="it-retention-throttled",
+            finished_days_ago=40,
+        )
+        session.commit()
+
+    # The clock has not moved, so this call is inside the interval.
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+
+    works_after, _ = _ledger_rows(session_factory)
+    assert work_id in works_after, (
+        "a second pass inside the interval must not run the delete"
+    )
+
+    # Past the interval it does run: the assertion above is about the throttle,
+    # not about the row being unreachable.
+    clock.advance(PRUNE_INTERVAL_SECONDS + 1)
+    asyncio.run(scheduler._prune_work_ledger_if_due())
+    works_final, _ = _ledger_rows(session_factory)
+    assert work_id not in works_final

@@ -42,6 +42,9 @@ HOST_SIDE: frozenset[str] = frozenset(
         # widen the allowlist for a value with no consumer.
         "PEARSS_HTTP_HEADER_TIMEOUT_SECONDS",
         "PEARSS_AUDIT_RETENTION_DAYS",
+        # The ledger's window (ADR 0046 D-F): read by the scheduler, the same
+        # way the audit window is, and just as meaningless to a collector.
+        "PEARSS_WORK_RETENTION_DAYS",
         "PEARSS_SCHEDULER_ENABLED",
         "PEARSS_TICK_SECONDS",
         "PEARSS_AUTH_RATELIMIT_MAX",

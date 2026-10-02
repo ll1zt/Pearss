@@ -240,6 +240,41 @@ def finish_work(
     return _work_record(row)
 
 
+def prune_work_ledger(session: Session, *, older_than: datetime) -> int:
+    """Delete finished work recorded before `older_than`, its units with it.
+
+    The ledger is an operational record rather than a fact source (ADR 0046
+    D-F), so it has a retention window -- 30 days by default
+    (`PEARSS_WORK_RETENTION_DAYS`) -- because a table that only grows is a
+    second database.
+
+    `finished_at is not null` is the load-bearing half of the predicate. A work
+    with no end is *live*: its row is what a running executor writes its units
+    against, and deleting it would make a job still in progress look like one
+    that vanished. Age alone therefore cannot delete it -- a queued work is
+    never stale, however old, and a row that somehow reached a terminal status
+    without a finish stamp leaks rather than risks being deleted mid-run.
+
+    The comparison is lexicographic on the fixed-width stamp
+    (`adapters.timestamps.fixed_width_utc`), which is what makes `<` on a Text
+    column mean "earlier" at all.
+
+    The units are deliberately not deleted here: `work_unit.work_id` is
+    `ON DELETE CASCADE`, so one statement says what belongs to a work instead of
+    two that can drift apart. Returns the number of works deleted.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            sa.delete(WorkRow).where(
+                WorkRow.finished_at.is_not(None),
+                WorkRow.finished_at < timestamp(older_than),
+            )
+        ),
+    )
+    return int(result.rowcount or 0)
+
+
 def _work_record(row: WorkRow) -> WorkRecord:
     return WorkRecord(
         id=row.id,

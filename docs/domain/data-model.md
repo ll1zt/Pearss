@@ -251,6 +251,23 @@ Reader API 的登录。单用户，故一行。
 
 AuditLog 是事实源；修正错误需新写一条事件，不得原地篡改旧事件。
 
+### Work 与 WorkUnit（作业账本，ADR 0046）
+
+一条「命令」的记录：`work` 是命令本身（kind / targets / params / fingerprint / status /
+created_at / finished_at），`work_unit` 是逐目标的结果（outcome / error_class / detail / ref）。
+逐条结果从这里读（`work_units` / `just work units`），响应因此不随目标数增长。
+
+账本是**运维记录**，不是事实源：它回答「这个目标当时发生了什么」，用于诊断与续跑，
+**不进事实源备份语义**，到期即清——默认 30 天（`PEARSS_WORK_RETENTION_DAYS`，设 `0` 永久保留）。
+`counts` 不落库（ADR 0046：`counts == fold(units)`），所以清理之后不保留聚合副本；
+长期统计从事实源（Item / ItemEnrichment）重导，而不是从账本。
+
+清理的两条边界（`adapters/repository/work.py::prune_work_ledger`）：
+
+- **没有 `finished_at` 的 work 永不清理**：那代表作业仍是活的（queued / running），
+  它的行正是运行中的执行者写入 unit 的地方；按年龄删它会让「正在跑」看起来像「凭空消失」。
+- **只动账本两张表**：unit 随 work 走（`ON DELETE CASCADE`），Item / ItemEnrichment 一行不碰。
+
 ## 关系概览
 
 ```text
@@ -273,5 +290,6 @@ Plugin 1 --- N ItemEnrichment
 | 事实源 | Source、Item、FeedOut、Job、Plugin、ReadState、AuditLog | 定时备份、恢复演练、迁移严格管理 |
 | 可重建运行记录 | RawFetch、JobRun | 配置保留期；近期保留用于诊断，不进入常规长期备份 |
 | 可重建派生物 | ItemEnrichment、处理器产物 | 从 Item + pipeline 配置重放；可按成本选择保留，不视为唯一事实源 |
+| 运维记录 | Work、WorkUnit（作业账本） | 默认 30 天保留窗口后清理（`PEARSS_WORK_RETENTION_DAYS`，ADR 0046 D-F）；**不进备份**；未结束的作业永不清理 |
 
 注意：如果某个外部内容以后无法再次获取，而原始 payload 又是唯一副本，应通过来源配置将该 RawFetch/payload 提升为备份对象，不能机械执行“RawFetch 不备份”。
