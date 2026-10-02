@@ -1620,3 +1620,34 @@ async def test_the_row_level_retry_says_what_it_needs(mcp_url: str) -> None:
     assert isinstance(result.get("error"), str), result
     assert result["error"] == "missing_target"
     assert "list_enrichments" in result["next_actions"]
+
+
+@pytest.mark.asyncio
+async def test_a_confirmed_source_level_retry_submits_a_job(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """AC-213 through the tool face: the whole-source retry answers with a handle.
+
+    The selection is the server's -- the caller cannot name the failed rows
+    without paging the chain -- so the tool's job is to hand back the handle and
+    let `work_units` answer per row. Asserted on the unit for *this* row, because
+    the module's database is shared and other tests may leave failures behind.
+    """
+    [enrichment_id] = _seed_retry_rows(
+        mcp_env, slug="mcp-src-retry", statuses=["failed"]
+    )
+
+    result = await _call(
+        mcp_url, "retry_enrichments", {"source_id": "src-1"}, confirm=True
+    )
+
+    assert result.get("error") is None, result
+    assert result["work_id"], result
+    assert result["counts"]["total"] >= 1, result
+
+    await run_work_to_completion(mcp_env, result["work_id"])
+
+    units = await _call(mcp_url, "work_units", {"work_id": result["work_id"]})
+    by_target = {unit["target"]: unit for unit in units["data"]}
+    assert by_target[enrichment_id]["outcome"] == "ok", by_target[enrichment_id]
+    assert by_target[enrichment_id]["detail"] == "requeued"

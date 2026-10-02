@@ -25,13 +25,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import IntegrityError
 
 from adapters.correlation import current as current_correlation_id
 from adapters.repository import (
     counts_for_work,
-    create_work,
-    live_work_by_fingerprint,
     timestamp,
     units_for_work,
     work_by_id,
@@ -45,9 +42,9 @@ from app.api_conventions import (
     replay_or_none,
 )
 from app.auth import Principal, read_required, write_required
+from app.work_submit import handle_payload, submit_command
 from core.enums import ErrorClass, UnitOutcome
-from core.tenancy import SINGLE_TENANT
-from core.work import UnitRecord, command_fingerprint
+from core.work import UnitRecord
 
 router = APIRouter(prefix="/v1", tags=["core-api"])
 
@@ -116,54 +113,12 @@ def submit_work(
     if replayed is not None:
         return replayed
 
-    fingerprint = command_fingerprint(
-        kind=kind, targets=body.targets, params=body.params
-    )
     with factory() as session:
-        work = live_work_by_fingerprint(session, fingerprint)
-        if work is None:
-            try:
-                work = create_work(
-                    session,
-                    kind=kind,
-                    targets=body.targets,
-                    params=body.params,
-                    fingerprint=fingerprint,
-                    tenant_id=SINGLE_TENANT,
-                    correlation_id=current_correlation_id(),
-                )
-                session.commit()
-            except IntegrityError:
-                # Two submissions of the same command raced and the index picked
-                # one. Answering with the winner is the whole point of the
-                # command-value fingerprint: the caller asked for one batch.
-                session.rollback()
-                work = live_work_by_fingerprint(session, fingerprint)
-                if work is None:
-                    # The winning work finished between the collision and this
-                    # read, so the command is new again. Submitting it once more
-                    # is correct; a second collision here would mean a third
-                    # submission in the same instant, which is a genuine error.
-                    work = create_work(
-                        session,
-                        kind=kind,
-                        targets=body.targets,
-                        params=body.params,
-                        fingerprint=fingerprint,
-                        tenant_id=SINGLE_TENANT,
-                        correlation_id=current_correlation_id(),
-                    )
-                    session.commit()
-        counts = counts_for_work(session, work.id)
-        work_id, status = work.id, work.status.value
+        work = submit_command(
+            session, kind=kind, targets=body.targets, params=body.params
+        )
+        payload = handle_payload(session, work)
 
-    payload: dict[str, Any] = {
-        "work_id": work_id,
-        "kind": kind,
-        "status": status,
-        "counts": counts,
-        "correlation_id": current_correlation_id(),
-    }
     remember(
         factory,
         actor=principal.name,
@@ -175,7 +130,7 @@ def submit_work(
     return JSONResponse(
         status_code=202,
         content=payload,
-        headers={"Location": f"/v1/works/{work_id}"},
+        headers={"Location": f"/v1/works/{payload['work_id']}"},
     )
 
 
