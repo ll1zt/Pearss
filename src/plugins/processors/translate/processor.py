@@ -31,6 +31,12 @@ system prompt's narrow task (translate only, no instructions followed)
 and by the output being stored as a derived artifact, never executed —
 the same trust decision as ADR 0007's store-time sanitising, applied to
 a different boundary.
+
+The row's budget arrives in `item_ctx["deadline"]`, an absolute
+`time.monotonic()` instant the runtime adds. It is spent, not discovered:
+one attempt gets at most half of what is left, and when what is left cannot
+return a translation the chain stops and reports every model's reason
+instead of being killed at the deadline with them (issue #227).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ import html
 import logging
 import os
 import re
+import time
 from typing import Any, Final
 from urllib.parse import urljoin
 
@@ -61,6 +68,62 @@ MODEL_ENV: Final = "PEARSS_TRANSLATE_MODEL"
 # PEARSS_TRANSLATE_MODELS="m1,m2,m3".
 MODELS_ENV: Final = "PEARSS_TRANSLATE_MODELS"
 MAX_CHARS: Final = 24_000
+
+# The row's budget, and what one attempt may spend of it. The runtime hands the
+# processor the row's deadline in `item_ctx["deadline"]` (an absolute
+# `time.monotonic()` instant). An attempt that runs to that deadline is killed
+# by the parent, and the kill throws away the per-model reasons the chain has
+# collected: the row reads "processor deadline expired", which names neither
+# the model that stalled nor what it did (issue #227). Halving what is left
+# after each attempt bounds that and leaves the next model in the chain a share
+# instead of a budget the first one already spent.
+MAX_ATTEMPT_SECONDS: Final = 60.0
+# Below half a second an attempt cannot return a translation, and starting one
+# only races the parent's kill: the chain stops and reports instead.
+MIN_ATTEMPT_SECONDS: Final = 0.5
+# Historical bounds for an attempt whose caller enforces no deadline (an
+# in-process call): LLM completions through a relayed endpoint regularly take
+# minutes, and cutting the read bound at 120s killed real requests (observed: a
+# gemini-flash reply took 126s end to end).
+CONNECT_SECONDS: Final = 10.0
+READ_SECONDS: Final = 300.0
+WRITE_SECONDS: Final = 15.0
+POOL_SECONDS: Final = 360.0
+
+
+def attempt_timeout(remaining: float) -> float | None:
+    """Seconds one attempt may spend, or None when the budget is spent.
+
+    Half of what is left, capped: the cap keeps one slow model from owning a
+    six-minute row, and the halving means the chain's next model still has
+    something to spend -- and that the processor always has time left to report
+    why every model failed before the parent's kill arrives.
+    """
+    budget = min(MAX_ATTEMPT_SECONDS, remaining / 2)
+    return budget if budget > MIN_ATTEMPT_SECONDS else None
+
+
+def _attempt_http_timeout(seconds: float | None) -> httpx.Timeout:
+    """HTTP bounds for one attempt, narrowed to the seconds it may take.
+
+    Every phase is capped by the attempt's own budget: a connect or a pool wait
+    that outlives the attempt is the same defect one layer down. `None` means
+    the caller enforces no deadline, so the historical bounds apply unchanged.
+    """
+    if seconds is None:
+        return httpx.Timeout(
+            connect=CONNECT_SECONDS,
+            read=READ_SECONDS,
+            write=WRITE_SECONDS,
+            pool=POOL_SECONDS,
+        )
+    return httpx.Timeout(
+        connect=min(CONNECT_SECONDS, seconds),
+        read=seconds,
+        write=min(WRITE_SECONDS, seconds),
+        pool=seconds,
+    )
+
 
 _LANG_NAMES: Final[dict[str, str]] = {
     "en": "English",
@@ -201,6 +264,9 @@ def process(
 
     base_url, key, models = _configured()
     language = _LANG_NAMES.get(target_lang, target_lang)
+    # The row's budget, handed over by the runtime. Absent for an in-process
+    # call, which means "no budget to respect", not "no time left".
+    deadline = _deadline_of(item_ctx)
 
     # What the provider is asked to translate, and the template the product is
     # rebuilt from. The units of translation are the article's own blocks, so
@@ -220,7 +286,14 @@ def process(
         )
 
     translated = [
-        _translate_one(chunk, language=language, base=base_url, key=key, models=models)
+        _translate_one(
+            chunk,
+            language=language,
+            base=base_url,
+            key=key,
+            models=models,
+            deadline=deadline,
+        )
         for chunk in requests
     ]
     product = _rebuild(body=body, units=units, translated=translated)
@@ -703,14 +776,32 @@ def _segment(text_to_split: str) -> list[str]:
     return chunks
 
 
+def _deadline_of(item_ctx: Any) -> float | None:
+    """The row's deadline (absolute monotonic), or None when it has none.
+
+    The runtime adds it to every context it hands to a processor
+    (`processor_runtime`); a direct in-process call has none, which means "no
+    budget to respect" rather than "no time left".
+    """
+    value = item_ctx.get("deadline")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 def _request_one(
-    source_text: str, *, language: str, base: str, key: str, model: str
+    source_text: str,
+    *,
+    language: str,
+    base: str,
+    key: str,
+    model: str,
+    seconds: float | None,
 ) -> str:
     """One chat completion for one model; every failure is a ProcessorError.
 
     Turning each failure into a value rather than an exception is what lets the
     caller's loop treat "this model said no" and "the network was down" the
-    same way (issue #145): both mean *try the next model*.
+    same way (issue #145): both mean *try the next model*. `seconds` is what
+    this attempt may take, or None when the caller enforces no deadline.
     """
     body = {
         "model": model,
@@ -732,11 +823,7 @@ def _request_one(
             f"{base}/chat/completions",
             headers={"authorization": f"Bearer {key}"},
             json=body,
-            # LLM completions through a relayed endpoint regularly take
-            # minutes: the read bound is what bounds a slow generation,
-            # and cutting it at 120s killed real requests (observed: a
-            # gemini-flash reply took 126s end to end).
-            timeout=httpx.Timeout(connect=10.0, read=300.0, write=15.0, pool=360.0),
+            timeout=_attempt_http_timeout(seconds),
         )
     except httpx.HTTPError as exc:
         raise ProcessorError(
@@ -824,6 +911,24 @@ def _aggregate_failure(
     return ProcessorError(chosen.error_class, detail[:_CHAIN_DETAIL_LIMIT])
 
 
+def _out_of_budget(failures: list[tuple[str, ProcessorError]]) -> ProcessorError:
+    """The chain's failure when the row's budget ran out mid-chain.
+
+    Every reason already collected is kept -- that is the whole point of
+    stopping before the parent's kill -- and a chain that never got to ask a
+    model says so, because "no model was tried" and "every model said no" are
+    different rows for the operator reading them. The class stays transient:
+    nothing about the item or the provider was wrong, the row simply ran out
+    of time locally, and the worker's retry starts it with a fresh budget.
+    """
+    if failures:
+        return _aggregate_failure(failures)
+    return ProcessorError(
+        ErrorClass.NETWORK,
+        "translation budget exhausted before any model could be tried",
+    )
+
+
 def _translate_one(
     source_text: str,
     *,
@@ -831,6 +936,7 @@ def _translate_one(
     base: str,
     key: str,
     models: list[str],
+    deadline: float | None,
 ) -> str:
     """One chat completion through the model fallback chain.
 
@@ -844,12 +950,27 @@ def _translate_one(
     (a wrong key, a bad model name) is paid on every model rather than once,
     and a mis-keyed model surfaces only when every model fails and the
     aggregate classifies as `auth`.
+
+    The row's budget is spent, not discovered (issue #227): each attempt gets
+    `attempt_timeout(remaining)` seconds, and a budget too small to return a
+    translation stops the chain with what it has learned rather than spending
+    the rest on a call the parent will kill.
     """
     failures: list[tuple[str, ProcessorError]] = []
     for index, model in enumerate(models):
+        seconds = (
+            None if deadline is None else attempt_timeout(deadline - time.monotonic())
+        )
+        if deadline is not None and seconds is None:
+            raise _out_of_budget(failures)
         try:
             return _request_one(
-                source_text, language=language, base=base, key=key, model=model
+                source_text,
+                language=language,
+                base=base,
+                key=key,
+                model=model,
+                seconds=seconds,
             )
         except ProcessorError as exc:
             failures.append((model, exc))
