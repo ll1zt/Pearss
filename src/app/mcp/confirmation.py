@@ -25,11 +25,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any
+from typing import Annotated, Any, Literal
 
+from mcp.server.elicitation import ElicitationResult
 from mcp.server.mcpserver.context import Context
-from mcp.server.mcpserver.resolve import Elicit
-from pydantic import BaseModel, Field
+from mcp.server.mcpserver.resolve import Elicit, Resolve
+from pydantic import BaseModel, Field, create_model
 
 from app.collector_registry import infer_source_type
 from core.folders import DEFAULT_FOLDER
@@ -271,7 +272,7 @@ def _add_source_fields(
     }
 
 
-def _add_source_confirmation(
+def _add_source_marker(
     url: str,
     schedule_policy: dict[str, Any],
     type: str = "auto",
@@ -362,7 +363,7 @@ def _add_sources_fields(
     }
 
 
-def _add_sources_confirmation(
+def _add_sources_marker(
     urls: list[str],
     schedule_policy: dict[str, Any],
     type: str = "auto",
@@ -447,7 +448,7 @@ def _fetch_work_fields(
     }
 
 
-def _fetch_work_confirmation(
+def _fetch_work_marker(
     source_id: str,
     urls: list[str],
     batch_size: int = 0,
@@ -485,7 +486,7 @@ def _update_schedule_policy_fields(
     }
 
 
-def _update_schedule_policy_confirmation(
+def _update_schedule_policy_marker(
     source_id: str, schedule_policy: dict[str, Any]
 ) -> _Confirmation:
     fields = _update_schedule_policy_fields(source_id, schedule_policy)
@@ -501,7 +502,7 @@ def _set_source_status_fields(source_id: str, status: str) -> dict[str, Any]:
     return {"source_id": source_id, "status": status}
 
 
-def _set_source_status_confirmation(source_id: str, status: str) -> _Confirmation:
+def _set_source_status_marker(source_id: str, status: str) -> _Confirmation:
     fields = _set_source_status_fields(source_id, status)
     return _confirm_resolver(
         _summary=f"Set source {fields['source_id']} status to {fields['status']}?",
@@ -515,7 +516,7 @@ def _set_source_folder_fields(source_id: str, folder: str) -> dict[str, Any]:
     return {"source_id": source_id, "folder": folder}
 
 
-def _set_source_folder_confirmation(source_id: str, folder: str) -> _Confirmation:
+def _set_source_folder_marker(source_id: str, folder: str) -> _Confirmation:
     fields = _set_source_folder_fields(source_id, folder)
     return _confirm_resolver(
         _summary=f"Move source {fields['source_id']} to folder {fields['folder']}?",
@@ -553,7 +554,7 @@ def _set_item_read_state_fields(
     }
 
 
-def _set_item_read_state_confirmation(
+def _set_item_read_state_marker(
     item_id: str, is_read: bool | None, is_starred: bool | None
 ) -> _Confirmation:
     fields = _set_item_read_state_fields(item_id, is_read, is_starred)
@@ -569,7 +570,7 @@ def _trigger_job_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _trigger_job_confirmation(source_id: str) -> _Confirmation:
+def _trigger_job_marker(source_id: str) -> _Confirmation:
     fields = _trigger_job_fields(source_id)
     return _confirm_resolver(
         _summary=f"Fetch source {fields['source_id']} now?",
@@ -583,7 +584,7 @@ def _backfill_source_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _backfill_source_confirmation(source_id: str) -> _Confirmation:
+def _backfill_source_marker(source_id: str) -> _Confirmation:
     fields = _backfill_source_fields(source_id)
     return _confirm_resolver(
         _summary=f"Backfill processing products for source {fields['source_id']}?",
@@ -604,7 +605,7 @@ def _retry_enrichments_fields(
     return {"enrichment_id": enrichment_id, "source_id": source_id}
 
 
-def _retry_enrichments_confirmation(
+def _retry_enrichments_marker(
     enrichment_id: str = "", source_id: str = ""
 ) -> _Confirmation:
     fields = _retry_enrichments_fields(enrichment_id, source_id)
@@ -665,9 +666,7 @@ def ingest_targets(items: list[dict[str, Any]]) -> list[str]:
     return [json.dumps(item, separators=(",", ":"), sort_keys=True) for item in items]
 
 
-def _submit_items_confirmation(
-    source_id: str, items: list[dict[str, Any]]
-) -> _Confirmation:
+def _submit_items_marker(source_id: str, items: list[dict[str, Any]]) -> _Confirmation:
     """The submit_items question: names the target and what will land in it.
 
     Item titles are listed rather than bodies: a prompt the user cannot read
@@ -709,7 +708,7 @@ def _set_source_pipeline_chain_fields(
     }
 
 
-def _set_source_pipeline_chain_confirmation(
+def _set_source_pipeline_chain_marker(
     source_id: str,
     pipeline_chain: list[dict[str, Any]],
     target_lang: str = "",
@@ -741,7 +740,7 @@ def _set_plugin_status_fields(plugin_id: str, status: str) -> dict[str, Any]:
     return {"plugin_id": plugin_id, "status": status}
 
 
-def _set_plugin_status_confirmation(plugin_id: str, status: str) -> _Confirmation:
+def _set_plugin_status_marker(plugin_id: str, status: str) -> _Confirmation:
     fields = _set_plugin_status_fields(plugin_id, status)
     return _confirm_resolver(
         _summary=f"Set plugin {fields['plugin_id']} status to {fields['status']}?",
@@ -755,7 +754,7 @@ def _remove_source_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _remove_source_confirmation(source_id: str) -> _Confirmation:
+def _remove_source_marker(source_id: str) -> _Confirmation:
     """The source-deletion question.
 
     Every other confirmation here can be "do X?" with the arguments prefilled,
@@ -796,7 +795,7 @@ def _delete_items_fields(item_ids: list[str]) -> dict[str, Any]:
     }
 
 
-def _delete_items_confirmation(item_ids: list[str]) -> _Confirmation:
+def _delete_items_marker(item_ids: list[str]) -> _Confirmation:
     listed = ", ".join(item_ids[:5])
     if len(item_ids) > 5:
         listed += f", and {len(item_ids) - 5} more"
@@ -825,7 +824,7 @@ def _delete_source_items_fields(
     }
 
 
-def _delete_source_items_confirmation(
+def _delete_source_items_marker(
     source_id: str,
     since: str = "",
     until: str = "",
@@ -883,6 +882,11 @@ def _confirmation_verdict(answer: Any) -> dict[str, Any] | None:
     return values if values.get("confirmed") else None
 
 
+def _aborted() -> dict[str, Any]:
+    """The one spelling of the `aborted` refusal (AC-76 keeps it to one place)."""
+    return {"aborted": True, "reason": _ABORTED_REASON}
+
+
 def _write_verdict(confirmed: Any, fields: dict[str, Any]) -> dict[str, Any] | None:
     """The refusal to return instead of running, or None to proceed.
 
@@ -907,8 +911,1040 @@ def _write_verdict(confirmed: Any, fields: dict[str, Any]) -> dict[str, Any] | N
     invents is not read at all. `fields` stays in the signature because the
     *edit* path (#252) does compare the one value the user supplied.
     """
+    if isinstance(_answer_data(confirmed), _Aborted):
+        return _aborted()
     values = _confirmation_verdict(confirmed)
     if values is None:
         return {"declined": True, "reason": _DECLINED_REASON}
     del fields
     return None
+
+
+# --------------------------------------------------------------------------
+# The edit path (#252): choose a field, give it a value, confirm the result
+# --------------------------------------------------------------------------
+#
+# Four resolvers per tool, because a resolver cannot see its own answer: the
+# framework injects an answer into its *consumer*, so each question needs its own
+# resolver and the chain is what carries the answers forward.
+#
+#   1. choose  -- acknowledge, and name at most one field to change
+#   2. value   -- that field's new value (skipped when nothing was chosen)
+#   3. confirm -- the composed request, shown and echoed (skipped likewise)
+#   4. compose -- check the echo against what was shown, then build the request
+#
+# Stage 4 exists because the check in stage 3 needs both answers at once, and a
+# resolver only sees its dependencies. The default path still costs one round.
+
+
+class _NoEdit:
+    """Round 1 chose to change nothing."""
+
+
+class _Aborted:
+    """Round 3 answered something other than the request it was shown (AC-244)."""
+
+
+class _Resolved(Confirmation):
+    """The effective request: the acknowledgement plus any edited values.
+
+    A `Confirmation` so every write tool's parameter type is unchanged; the
+    overrides are applied in one place (`_guarded_write`), which also checks that
+    each names a field of the body about to be sent.
+    """
+
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+def _answer_data(outcome: Any) -> Any | None:
+    """The accepted data of an outcome, or None for a decline/cancel.
+
+    `None` means "not confirmed" all the way to the tool: the dependency
+    parameters are annotated as `ElicitationResult` (so a refusal arrives as a
+    refusal rather than as a `ToolError`), and every stage passes it along.
+    """
+    if outcome is None:
+        return None
+    if getattr(outcome, "action", "accept") in ("decline", "cancel"):
+        return None
+    data = getattr(outcome, "data", None)
+    if data is None:
+        return outcome
+    if hasattr(data, "confirmed") and not data.confirmed:
+        # The box is the answer: a round where the user unchecked it is a refusal,
+        # even though the client "accepted" the dialog to send it.
+        return None
+    return data
+
+
+def _scalar_type(value: Any) -> Any:
+    """The primitive type an elicitation schema can render for `value`."""
+    return type(value) if isinstance(value, (bool, int, float)) else str
+
+
+def _edit_choice_schema(editable: dict[str, Any]) -> type[Confirmation]:
+    """Round 1's form: acknowledge, and name one field to change.
+
+    The field names are a closed enum, never free text: a typo in a text field
+    would silently change nothing, and a name that is not editable must have no
+    spelling that reaches the server.
+    """
+    choices = ("none", *editable)
+    return create_model(
+        "EditChoice",
+        __base__=Confirmation,
+        edit=(
+            Literal[tuple(choices)],
+            Field(default="none", description="Field to change, or 'none'."),
+        ),
+    )
+
+
+def _value_schema(field: str, current: Any) -> type[BaseModel]:
+    """Round 2's form: the chosen field, prefilled with the value it has today.
+
+    The type follows the value: a boolean stays a checkbox, a number a number,
+    and a structured value (a schedule policy, a chain) travels as its canonical
+    JSON text, because an elicitation schema renders primitives only.
+    """
+    kind: Any = str
+    shown: Any = str(current)
+    if isinstance(current, bool):
+        kind, shown = bool, current
+    elif isinstance(current, int):
+        kind, shown = int, current
+    elif isinstance(current, float):
+        kind, shown = float, current
+    elif isinstance(current, (dict, list)):
+        shown = _render(current)
+    return create_model(
+        "EditValue",
+        field=(str, Field(default=field)),
+        value=(kind, Field(default=shown)),
+    )
+
+
+def _edit_confirm_schema(field: str, value: Any) -> type[BaseModel]:
+    """Round 3's form: the composed request, shown and echoed.
+
+    The value is a field of the schema on purpose: the last stage compares what
+    the client echoed against what this dialog displayed, so a client that
+    answers something else is refused rather than trusted (AC-244).
+    """
+    return create_model(
+        "EditConfirm",
+        __base__=Confirmation,
+        field=(str, Field(default=field)),
+        value=(_scalar_type(value), Field(default=value)),
+    )
+
+
+def _parsed_edit(current: Any, answered: Any) -> Any:
+    """The answered text of a structured field, parsed back to its shape."""
+    if isinstance(current, (dict, list)) and isinstance(answered, str):
+        return json.loads(answered)
+    return answered
+
+
+def _ask_choice(marker: _Confirmation) -> _Confirmation:
+    """Round 1: the summary, the acknowledgement, and which field to change.
+
+    A `_Confirmation` rather than a bare `Elicit` so the structural guards can
+    still read the derived fields and the editable set off the round-1 resolver.
+    """
+    return _Confirmation(
+        marker.message,
+        _edit_choice_schema(marker.editable),
+        marker.fields,
+        marker.editable,
+    )
+
+
+def _ask_value(choice: Any, marker: _Confirmation) -> Any:
+    """Round 2: the chosen field's new value, asked only if one was chosen."""
+    picked = _answer_data(choice)
+    if picked is None:
+        return None
+    field = str(getattr(picked, "edit", "none"))
+    if field == "none":
+        return _NoEdit()
+    if field not in marker.editable:
+        # A name the dialog never offered: the client answered a question that
+        # does not exist, so the request is refused rather than half-applied.
+        return _Aborted()
+    return Elicit(
+        f"{marker.message} New value for {field}:",
+        _value_schema(field, marker.editable[field]),
+    )
+
+
+def _ask_confirm(value: Any, marker: _Confirmation) -> Any:
+    """Round 3: show the composed request and have it acknowledged."""
+    if value is None:
+        return None
+    if isinstance(value, _Aborted):
+        return value
+    if isinstance(value, _NoEdit):
+        return _Resolved(confirmed=True)
+    answered = _answer_data(value)
+    if answered is None:
+        return None
+    field = str(getattr(answered, "field", ""))
+    raw = getattr(answered, "value", None)
+    if field not in marker.editable:
+        return _Aborted()
+    try:
+        edited = _parsed_edit(marker.editable[field], raw)
+    except ValueError:
+        return _Aborted()
+    return Elicit(
+        f"{marker.message} Change {field} to {raw}?",
+        _edit_confirm_schema(field, edited),
+    )
+
+
+def _compose_edit(
+    choice: Any, value: Any, confirmed: Any, marker: _Confirmation
+) -> Any:
+    """Round 4: verify round 3 echoed the request it showed, then compose it.
+
+    `_matches` is the check AC-244 asks for: round 3 displayed a value and the
+    client echoed one, and the two must be the same. A client that answers
+    something else is refused in turn rather than trusted to have sent what it
+    was shown.
+    """
+    if isinstance(value, _Aborted):
+        return _Aborted()
+    picked = _answer_data(choice)
+    if picked is None:
+        return None
+    field = str(getattr(picked, "edit", "none"))
+    if field == "none":
+        return _Resolved(confirmed=True)
+    if field not in marker.editable:
+        return _Aborted()
+    answered = _answer_data(value)
+    if answered is None:
+        return None
+    shown = getattr(answered, "value", None)
+    final = _answer_data(confirmed)
+    if final is None:
+        return None
+    if not _matches(getattr(final, "value", None), shown):
+        return _Aborted()
+    try:
+        edited = _parsed_edit(marker.editable[field], shown)
+    except ValueError:
+        return _Aborted()
+    return _Resolved(confirmed=True, overrides={field: edited})
+
+
+def _overrides(confirmed: Any, body: dict[str, Any] | None) -> dict[str, Any]:
+    """The edited values to overlay on the request body, or an empty mapping.
+
+    Parsed against the body's own value: what the body holds for that key says
+    whether the answered text stands for a dict, a list or a scalar, so the
+    override needs no second type declaration to drift from.
+    """
+    data = _answer_data(confirmed)
+    if data is None or body is None:
+        return {}
+    overrides = getattr(data, "overrides", None)
+    if not isinstance(overrides, dict) or not overrides:
+        return {}
+    parsed: dict[str, Any] = {}
+    for field, answered in overrides.items():
+        if field not in body:
+            raise ValueError(f"edited field {field!r} is not part of this request")
+        parsed[field] = _parsed_edit(body[field], answered)
+    return parsed
+
+
+def _add_source_edit_choice(
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    ctx: Context | None = None,
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(
+        _add_source_marker(
+            url, schedule_policy, type, pipeline_chain, target_lang, folder, ctx
+        )
+    )
+
+
+def _add_source_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_add_source_edit_choice)],
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    ctx: Context | None = None,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice,
+        _add_source_marker(
+            url, schedule_policy, type, pipeline_chain, target_lang, folder, ctx
+        ),
+    )
+
+
+def _add_source_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_add_source_edit_value)],
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    ctx: Context | None = None,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value,
+        _add_source_marker(
+            url, schedule_policy, type, pipeline_chain, target_lang, folder, ctx
+        ),
+    )
+
+
+def _add_source_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_add_source_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_add_source_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_add_source_edit_confirm)],
+    url: str,
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    ctx: Context | None = None,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _add_source_marker(
+            url, schedule_policy, type, pipeline_chain, target_lang, folder, ctx
+        ),
+    )
+
+
+def _add_sources_edit_choice(
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(
+        _add_sources_marker(
+            urls,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            trust_level,
+            parser_plugin_id,
+        )
+    )
+
+
+def _add_sources_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_add_sources_edit_choice)],
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice,
+        _add_sources_marker(
+            urls,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            trust_level,
+            parser_plugin_id,
+        ),
+    )
+
+
+def _add_sources_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_add_sources_edit_value)],
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value,
+        _add_sources_marker(
+            urls,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            trust_level,
+            parser_plugin_id,
+        ),
+    )
+
+
+def _add_sources_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_add_sources_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_add_sources_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_add_sources_edit_confirm)],
+    urls: list[str],
+    schedule_policy: dict[str, Any],
+    type: str = "auto",
+    pipeline_chain: list[dict[str, Any]] | None = None,
+    target_lang: str = "",
+    folder: str = "",
+    trust_level: str = "standard",
+    parser_plugin_id: str = "",
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _add_sources_marker(
+            urls,
+            schedule_policy,
+            type,
+            pipeline_chain,
+            target_lang,
+            folder,
+            trust_level,
+            parser_plugin_id,
+        ),
+    )
+
+
+def _backfill_source_edit_choice(source_id: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_backfill_source_marker(source_id))
+
+
+def _backfill_source_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_backfill_source_edit_choice)],
+    source_id: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _backfill_source_marker(source_id))
+
+
+def _backfill_source_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_backfill_source_edit_value)],
+    source_id: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _backfill_source_marker(source_id))
+
+
+def _backfill_source_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_backfill_source_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_backfill_source_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_backfill_source_edit_confirm)
+    ],
+    source_id: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(choice, value, confirmed, _backfill_source_marker(source_id))
+
+
+def _delete_items_edit_choice(item_ids: list[str]) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_delete_items_marker(item_ids))
+
+
+def _delete_items_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_delete_items_edit_choice)],
+    item_ids: list[str],
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _delete_items_marker(item_ids))
+
+
+def _delete_items_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_delete_items_edit_value)],
+    item_ids: list[str],
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _delete_items_marker(item_ids))
+
+
+def _delete_items_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_delete_items_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_delete_items_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_delete_items_edit_confirm)],
+    item_ids: list[str],
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(choice, value, confirmed, _delete_items_marker(item_ids))
+
+
+def _delete_source_items_edit_choice(
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(
+        _delete_source_items_marker(source_id, since, until, include_published)
+    )
+
+
+def _delete_source_items_edit_value(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_delete_source_items_edit_choice)
+    ],
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice, _delete_source_items_marker(source_id, since, until, include_published)
+    )
+
+
+def _delete_source_items_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_delete_source_items_edit_value)],
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value, _delete_source_items_marker(source_id, since, until, include_published)
+    )
+
+
+def _delete_source_items_confirmation(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_delete_source_items_edit_choice)
+    ],
+    value: Annotated[ElicitationResult[Any], Resolve(_delete_source_items_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_delete_source_items_edit_confirm)
+    ],
+    source_id: str,
+    since: str = "",
+    until: str = "",
+    include_published: bool = True,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _delete_source_items_marker(source_id, since, until, include_published),
+    )
+
+
+def _fetch_work_edit_choice(
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(
+        _fetch_work_marker(source_id, urls, batch_size, min_interval_seconds)
+    )
+
+
+def _fetch_work_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_fetch_work_edit_choice)],
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice, _fetch_work_marker(source_id, urls, batch_size, min_interval_seconds)
+    )
+
+
+def _fetch_work_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_fetch_work_edit_value)],
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value, _fetch_work_marker(source_id, urls, batch_size, min_interval_seconds)
+    )
+
+
+def _fetch_work_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_fetch_work_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_fetch_work_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_fetch_work_edit_confirm)],
+    source_id: str,
+    urls: list[str],
+    batch_size: int = 0,
+    min_interval_seconds: float = 0.0,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _fetch_work_marker(source_id, urls, batch_size, min_interval_seconds),
+    )
+
+
+def _remove_source_edit_choice(source_id: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_remove_source_marker(source_id))
+
+
+def _remove_source_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_remove_source_edit_choice)],
+    source_id: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _remove_source_marker(source_id))
+
+
+def _remove_source_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_remove_source_edit_value)],
+    source_id: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _remove_source_marker(source_id))
+
+
+def _remove_source_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_remove_source_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_remove_source_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_remove_source_edit_confirm)],
+    source_id: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(choice, value, confirmed, _remove_source_marker(source_id))
+
+
+def _retry_enrichments_edit_choice(enrichment_id: str = "", source_id: str = "") -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_retry_enrichments_marker(enrichment_id, source_id))
+
+
+def _retry_enrichments_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_retry_enrichments_edit_choice)],
+    enrichment_id: str = "",
+    source_id: str = "",
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _retry_enrichments_marker(enrichment_id, source_id))
+
+
+def _retry_enrichments_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_retry_enrichments_edit_value)],
+    enrichment_id: str = "",
+    source_id: str = "",
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _retry_enrichments_marker(enrichment_id, source_id))
+
+
+def _retry_enrichments_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_retry_enrichments_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_retry_enrichments_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_retry_enrichments_edit_confirm)
+    ],
+    enrichment_id: str = "",
+    source_id: str = "",
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice, value, confirmed, _retry_enrichments_marker(enrichment_id, source_id)
+    )
+
+
+def _set_item_read_state_edit_choice(
+    item_id: str, is_read: bool | None, is_starred: bool | None
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_set_item_read_state_marker(item_id, is_read, is_starred))
+
+
+def _set_item_read_state_edit_value(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_set_item_read_state_edit_choice)
+    ],
+    item_id: str,
+    is_read: bool | None,
+    is_starred: bool | None,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _set_item_read_state_marker(item_id, is_read, is_starred))
+
+
+def _set_item_read_state_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_set_item_read_state_edit_value)],
+    item_id: str,
+    is_read: bool | None,
+    is_starred: bool | None,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value, _set_item_read_state_marker(item_id, is_read, is_starred)
+    )
+
+
+def _set_item_read_state_confirmation(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_set_item_read_state_edit_choice)
+    ],
+    value: Annotated[ElicitationResult[Any], Resolve(_set_item_read_state_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_set_item_read_state_edit_confirm)
+    ],
+    item_id: str,
+    is_read: bool | None,
+    is_starred: bool | None,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _set_item_read_state_marker(item_id, is_read, is_starred),
+    )
+
+
+def _set_plugin_status_edit_choice(plugin_id: str, status: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_set_plugin_status_marker(plugin_id, status))
+
+
+def _set_plugin_status_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_plugin_status_edit_choice)],
+    plugin_id: str,
+    status: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _set_plugin_status_marker(plugin_id, status))
+
+
+def _set_plugin_status_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_set_plugin_status_edit_value)],
+    plugin_id: str,
+    status: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _set_plugin_status_marker(plugin_id, status))
+
+
+def _set_plugin_status_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_plugin_status_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_set_plugin_status_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_set_plugin_status_edit_confirm)
+    ],
+    plugin_id: str,
+    status: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice, value, confirmed, _set_plugin_status_marker(plugin_id, status)
+    )
+
+
+def _set_source_folder_edit_choice(source_id: str, folder: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_set_source_folder_marker(source_id, folder))
+
+
+def _set_source_folder_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_source_folder_edit_choice)],
+    source_id: str,
+    folder: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _set_source_folder_marker(source_id, folder))
+
+
+def _set_source_folder_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_set_source_folder_edit_value)],
+    source_id: str,
+    folder: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _set_source_folder_marker(source_id, folder))
+
+
+def _set_source_folder_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_source_folder_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_set_source_folder_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_folder_edit_confirm)
+    ],
+    source_id: str,
+    folder: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice, value, confirmed, _set_source_folder_marker(source_id, folder)
+    )
+
+
+def _set_source_pipeline_chain_edit_choice(
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(
+        _set_source_pipeline_chain_marker(source_id, pipeline_chain, target_lang)
+    )
+
+
+def _set_source_pipeline_chain_edit_value(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_pipeline_chain_edit_choice)
+    ],
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice,
+        _set_source_pipeline_chain_marker(source_id, pipeline_chain, target_lang),
+    )
+
+
+def _set_source_pipeline_chain_edit_confirm(
+    value: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_pipeline_chain_edit_value)
+    ],
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value, _set_source_pipeline_chain_marker(source_id, pipeline_chain, target_lang)
+    )
+
+
+def _set_source_pipeline_chain_confirmation(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_pipeline_chain_edit_choice)
+    ],
+    value: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_pipeline_chain_edit_value)
+    ],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_pipeline_chain_edit_confirm)
+    ],
+    source_id: str,
+    pipeline_chain: list[dict[str, Any]],
+    target_lang: str = "",
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _set_source_pipeline_chain_marker(source_id, pipeline_chain, target_lang),
+    )
+
+
+def _set_source_status_edit_choice(source_id: str, status: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_set_source_status_marker(source_id, status))
+
+
+def _set_source_status_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_source_status_edit_choice)],
+    source_id: str,
+    status: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _set_source_status_marker(source_id, status))
+
+
+def _set_source_status_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_set_source_status_edit_value)],
+    source_id: str,
+    status: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _set_source_status_marker(source_id, status))
+
+
+def _set_source_status_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_set_source_status_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_set_source_status_edit_value)],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_set_source_status_edit_confirm)
+    ],
+    source_id: str,
+    status: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice, value, confirmed, _set_source_status_marker(source_id, status)
+    )
+
+
+def _submit_items_edit_choice(source_id: str, items: list[dict[str, Any]]) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_submit_items_marker(source_id, items))
+
+
+def _submit_items_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_submit_items_edit_choice)],
+    source_id: str,
+    items: list[dict[str, Any]],
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _submit_items_marker(source_id, items))
+
+
+def _submit_items_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_submit_items_edit_value)],
+    source_id: str,
+    items: list[dict[str, Any]],
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _submit_items_marker(source_id, items))
+
+
+def _submit_items_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_submit_items_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_submit_items_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_submit_items_edit_confirm)],
+    source_id: str,
+    items: list[dict[str, Any]],
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice, value, confirmed, _submit_items_marker(source_id, items)
+    )
+
+
+def _trigger_job_edit_choice(source_id: str) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_trigger_job_marker(source_id))
+
+
+def _trigger_job_edit_value(
+    choice: Annotated[ElicitationResult[Any], Resolve(_trigger_job_edit_choice)],
+    source_id: str,
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(choice, _trigger_job_marker(source_id))
+
+
+def _trigger_job_edit_confirm(
+    value: Annotated[ElicitationResult[Any], Resolve(_trigger_job_edit_value)],
+    source_id: str,
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(value, _trigger_job_marker(source_id))
+
+
+def _trigger_job_confirmation(
+    choice: Annotated[ElicitationResult[Any], Resolve(_trigger_job_edit_choice)],
+    value: Annotated[ElicitationResult[Any], Resolve(_trigger_job_edit_value)],
+    confirmed: Annotated[ElicitationResult[Any], Resolve(_trigger_job_edit_confirm)],
+    source_id: str,
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(choice, value, confirmed, _trigger_job_marker(source_id))
+
+
+def _update_schedule_policy_edit_choice(
+    source_id: str, schedule_policy: dict[str, Any]
+) -> Any:
+    """Round 1: acknowledge, and say which field (if any) to change."""
+    return _ask_choice(_update_schedule_policy_marker(source_id, schedule_policy))
+
+
+def _update_schedule_policy_edit_value(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_update_schedule_policy_edit_choice)
+    ],
+    source_id: str,
+    schedule_policy: dict[str, Any],
+) -> Any:
+    """Round 2: the chosen field's new value -- asked only if one was chosen."""
+    return _ask_value(
+        choice, _update_schedule_policy_marker(source_id, schedule_policy)
+    )
+
+
+def _update_schedule_policy_edit_confirm(
+    value: Annotated[
+        ElicitationResult[Any], Resolve(_update_schedule_policy_edit_value)
+    ],
+    source_id: str,
+    schedule_policy: dict[str, Any],
+) -> Any:
+    """Round 3: the composed request, shown and echoed -- asked only if editing."""
+    return _ask_confirm(
+        value, _update_schedule_policy_marker(source_id, schedule_policy)
+    )
+
+
+def _update_schedule_policy_confirmation(
+    choice: Annotated[
+        ElicitationResult[Any], Resolve(_update_schedule_policy_edit_choice)
+    ],
+    value: Annotated[
+        ElicitationResult[Any], Resolve(_update_schedule_policy_edit_value)
+    ],
+    confirmed: Annotated[
+        ElicitationResult[Any], Resolve(_update_schedule_policy_edit_confirm)
+    ],
+    source_id: str,
+    schedule_policy: dict[str, Any],
+) -> Any:
+    """Round 4: verify the echo, then compose what executes (AC-243..245)."""
+    return _compose_edit(
+        choice,
+        value,
+        confirmed,
+        _update_schedule_policy_marker(source_id, schedule_policy),
+    )

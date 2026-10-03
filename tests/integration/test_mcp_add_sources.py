@@ -188,7 +188,10 @@ async def test_the_dialog_asks_about_the_batch_once(base_url: str) -> None:
     assert "3" in message, message
     for url in urls:
         assert url in message, message
-    assert set(only["params"]["requestedSchema"]["properties"]) == {"confirmed"}, only
+    assert set(only["params"]["requestedSchema"]["properties"]) == {
+        "confirmed",
+        "edit",
+    }, only
 
 
 def _payload(reply: dict[str, Any]) -> dict[str, Any]:

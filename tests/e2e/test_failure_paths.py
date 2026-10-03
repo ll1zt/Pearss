@@ -23,6 +23,7 @@ changed shape while the behaviour stayed correct.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -342,12 +343,11 @@ async def test_a_declined_confirmation_writes_nothing(
 
     The happy path covers a client that *cannot* be asked (the SDK raises
     `-32021` before the tool runs); this covers one that was asked and said no,
-    which is a different path. What the SDK does with a decline is not obvious
-    -- it surfaces as a tool-level error rather than reaching the tool's own
-    `{"declined": True}` return -- so the test pins the observable facts: the
-    call fails, the message says the elicitation was declined, and the database
-    is untouched. A server that treated a decline as "proceed with defaults"
-    would be invisible to every other test in this suite.
+    which is a different path. Since the edit path (#252) the refusal reaches the
+    tool's own `{"declined": True}` answer rather than surfacing as a protocol
+    error -- the confirmation ladder reports a refusal as a refusal -- so the test
+    pins that answer and the database. A server that treated a decline as
+    "proceed with defaults" would be invisible to every other test in this suite.
     """
     from mcp import types
 
@@ -365,11 +365,10 @@ async def test_a_declined_confirmation_writes_nothing(
             },
         )
 
-    assert result.is_error is True, result
-    text = " ".join(
-        getattr(block, "text", "") or "" for block in result.content
-    ).lower()
-    assert "decline" in text, text
+    assert result.is_error is False, result
+    payload = json.loads(result.content[0].text)
+    assert payload.get("declined") is True, payload
+    assert "declin" in payload["reason"].lower(), payload
 
     assert _count(session_factory, "source") == 0, "a declined write stored a source"
 

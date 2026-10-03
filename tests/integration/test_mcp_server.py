@@ -1653,3 +1653,127 @@ async def test_a_confirmed_source_items_delete_submits_a_job(
     source = await _call(mcp_url, "get_source", {"source_id": source_id})
     assert source["id"] == source_id, "the subscription survives the clear"
     assert source["status"] == "active", source
+
+
+# --------------------------------------------------------------------------
+# AC-243..245: the edit path -- choose a field, give it a value, confirm
+# --------------------------------------------------------------------------
+
+
+def _answer_rounds(
+    rounds: list[dict[str, Any]],
+) -> tuple[Any, dict[str, int]]:
+    """A client that answers each elicitation with the next scripted round.
+
+    The rounds are what the user does: round 1 accepts and names a field, round 2
+    gives the new value, round 3 confirms the composed request the server showed.
+    """
+    seen = {"rounds": 0}
+
+    async def _cb(_ctx: Any, params: Any) -> Any:
+        from mcp import types
+
+        index = min(seen["rounds"], len(rounds) - 1)
+        seen["rounds"] += 1
+        return types.ElicitResult(action="accept", content=rounds[index])
+
+    return _cb, seen
+
+
+@pytest.mark.asyncio
+async def test_editing_one_field_changes_only_that_field(mcp_url: str) -> None:
+    """AC-243: three rounds, one change, and everything else stays.
+
+    The request asks for folder `阅读`; the user then edits that same field to
+    `blog`. The dialog is about the *edited* request, so `blog` is what must land,
+    and every parameter nobody touched must equal what the tool was called with.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+    callback, seen = _answer_rounds(
+        [
+            {"confirmed": True, "edit": "folder"},
+            {"field": "folder", "value": "blog"},
+            {"confirmed": True, "field": "folder", "value": "blog"},
+        ]
+    )
+
+    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
+            )
+        )
+
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+    assert seen["rounds"] == 3, seen
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["folder"] == "blog", after
+    assert after["status"] == before["status"], after
+
+
+@pytest.mark.asyncio
+async def test_round_three_answering_something_else_is_aborted(mcp_url: str) -> None:
+    """AC-244: the value that executes is the one the dialog showed.
+
+    Round 3 displayed `blog` and the client echoed `evil`. Nothing was executed:
+    the last stage compares the echo against what the dialog carried, so a client
+    cannot get a value executed that the user never saw.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+    callback, _ = _answer_rounds(
+        [
+            {"confirmed": True, "edit": "folder"},
+            {"field": "folder", "value": "blog"},
+            {"confirmed": True, "field": "folder", "value": "evil"},
+        ]
+    )
+
+    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
+            )
+        )
+
+    assert payload.get("aborted") is True, payload
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["folder"] == before["folder"], after
+
+
+@pytest.mark.asyncio
+async def test_cancelling_an_edit_round_writes_nothing(mcp_url: str) -> None:
+    """AC-245: a cancel in any later round is a refusal, not a partial write.
+
+    The user picks the field and then changes their mind: the same request must
+    end as `declined`, with nothing changed. Asserted on the folder and on the
+    audit trail, because "nothing reached the API" is what makes the audit row
+    mean "something happened".
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+    seen = {"rounds": 0}
+
+    async def _cancels_at_the_value(_ctx: Any, params: Any) -> Any:
+        from mcp import types
+
+        seen["rounds"] += 1
+        if seen["rounds"] == 1:
+            return types.ElicitResult(
+                action="accept", content={"confirmed": True, "edit": "folder"}
+            )
+        return types.ElicitResult(action="cancel")
+
+    async with mcp_session(
+        mcp_url, elicitation_callback=_cancels_at_the_value
+    ) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
+            )
+        )
+
+    assert payload.get("declined") is True, payload
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["folder"] == before["folder"], after

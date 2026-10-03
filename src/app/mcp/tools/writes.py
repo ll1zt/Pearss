@@ -26,6 +26,7 @@ from mcp.server.mcpserver.resolve import Resolve
 
 from app.mcp.confirmation import (
     Confirmation,
+    _aborted,
     _add_source_confirmation,
     _add_source_fields,
     _add_sources_confirmation,
@@ -38,6 +39,7 @@ from app.mcp.confirmation import (
     _delete_source_items_fields,
     _fetch_work_confirmation,
     _fetch_work_fields,
+    _overrides,
     _read_state_change,
     _remove_source_confirmation,
     _remove_source_fields,
@@ -103,6 +105,14 @@ async def _guarded_write(
     verdict = _write_verdict(confirmed, fields)
     if verdict is not None:
         return verdict
+    if body is not None:
+        # One place applies an edited value, and it checks that the field it names
+        # is a field of the request about to be sent: an override that landed
+        # nowhere would be a dialog that changed nothing (issue #252).
+        try:
+            body = {**body, **_overrides(confirmed, body)}
+        except ValueError:
+            return _aborted()
     status, payload, audit_id = await core.request(
         method, path, json_body=body, idempotency_key=_fresh_key()
     )
