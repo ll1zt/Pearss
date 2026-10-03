@@ -180,9 +180,15 @@ async def test_the_dialog_asks_about_the_batch_once(base_url: str) -> None:
     result = reply["result"]
     assert len(result["inputRequests"]) == 1, result
     only = next(iter(result["inputRequests"].values()))
-    assert "3" in only["params"]["message"], only["params"]["message"]
-    properties = only["params"]["requestedSchema"]["properties"]
-    assert "urls_fingerprint" in properties, properties
+    message = only["params"]["message"]
+    # The batch is named in words: the count and the addresses themselves. The
+    # form is one acknowledgement since #250, so the fingerprint -- the field
+    # that covers addresses past the preview's fifth -- is asserted where the
+    # derived fields are readable (tests/unit/test_write_guard.py).
+    assert "3" in message, message
+    for url in urls:
+        assert url in message, message
+    assert set(only["params"]["requestedSchema"]["properties"]) == {"confirmed"}, only
 
 
 def _payload(reply: dict[str, Any]) -> dict[str, Any]:

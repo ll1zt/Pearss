@@ -357,20 +357,22 @@ async def test_an_identical_retry_executes(base_url: str, env: dict[str, str]) -
 
 
 @pytest.mark.asyncio
-async def test_a_tampered_fingerprint_answer_is_refused(
+async def test_a_foreign_answer_does_not_change_the_batch(
     base_url: str, env: dict[str, str]
 ) -> None:
-    """AC-44: an answer whose fingerprint does not match the batch aborts.
+    """AC-240: the batch that executes is the batch the tool was called with.
 
-    Round 2 sends the *same* arguments, so the framework's binding accepts the
-    call -- which makes this the one path that reaches `submit_items`' own
-    comparison. Answering with a fingerprint for some other batch is what a
-    client that swapped content would look like, and the tool must refuse
-    rather than write. Removing that comparison turns this red.
+    Round 2 used to have to answer with the fingerprint of the batch it was shown
+    (AC-44's local half), so an answer carrying a different digest was refused.
+    Since #250 the dialog is one acknowledgement and the values come from the
+    server, so an answer that invents fields is not read at all: the batch is
+    stored, and the assertion that matters is *which* batch -- the one the tool
+    was called with, bodies included. What still refuses a retry with different
+    arguments is the framework's digest (AC-44 and AC-46, above).
     """
     asked = [
-        _item("Tamper A", "tamper-a", "<p>x</p>"),
-        _item("Tamper B", "tamper-b", "<p>x</p>"),
+        _item("Foreign A", "foreign-a", "<p>x</p>"),
+        _item("Foreign B", "foreign-b", "<p>x</p>"),
     ]
 
     reply = await _ask_then_replay(
@@ -378,41 +380,17 @@ async def test_a_tampered_fingerprint_answer_is_refused(
         env["PEARSS_DATABASE_URL"],
         asked=asked,
         replayed=asked,
-        # A well-formed digest for a different batch: the schema validates it,
-        # so only the tool's own comparison can catch it.
-        answer_overrides={"items_fingerprint": "0" * 64},
+        # A well-formed digest for some other batch, and a count that matches
+        # nothing: neither is a field of the dialog any more.
+        answer_overrides={"items_fingerprint": "0" * 64, "item_count": "99"},
     )
 
     assert "error" not in reply, reply
     body = json.loads(reply["result"]["content"][0]["text"])
-    assert body.get("aborted") is True, body
-    assert "Tamper A" not in _stored_titles(env["PEARSS_DATABASE_URL"])
-
-
-@pytest.mark.asyncio
-async def test_a_tampered_count_answer_is_still_refused(
-    base_url: str, env: dict[str, str]
-) -> None:
-    """The count remains the cheap first gate; this pins that it was not dropped.
-
-    The fingerprint covers the count as well, so this is about keeping the
-    cheap check rather than about a distinct hole -- if it were removed the
-    fingerprint would still refuse, which is exactly why the assertion is on the
-    refusal and not on which check produced it.
-    """
-    asked = [
-        _item("Count A", "count-a", "<p>x</p>"),
-        _item("Count B", "count-b", "<p>x</p>"),
-    ]
-
-    reply = await _ask_then_replay(
-        base_url,
-        env["PEARSS_DATABASE_URL"],
-        asked=asked,
-        replayed=asked,
-        answer_overrides={"item_count": "99"},
-    )
-
-    body = json.loads(reply["result"]["content"][0]["text"])
-    assert body.get("aborted") is True, body
-    assert "Count A" not in _stored_titles(env["PEARSS_DATABASE_URL"])
+    assert body.get("aborted") is None, body
+    # The write is a work now, so the batch lands when the worker runs it -- and
+    # *which* batch it is, is what this asserts.
+    assert body.get("work_id"), body
+    await run_work_to_completion(env, body["work_id"])
+    stored = _stored_titles(env["PEARSS_DATABASE_URL"])
+    assert "Foreign A" in stored and "Foreign B" in stored, stored
