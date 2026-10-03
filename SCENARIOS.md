@@ -109,6 +109,7 @@
 | AC-241..242 | #251 每个写工具**显式声明可编辑字段集**（`_Confirmation.editable`，由确认构造器的必填参数承载，所以漏声明会在守卫处失败而不是靠人读代码）：可编辑集 ⊆ 该工具的执行参数集；身份/目标类参数（`url`/`urls`/`type`/`items`/`item_ids`/`item_id`/`source_id`/`plugin_id`/`enrichment_id` 与 `*_fingerprint`）不得出现在任何可编辑集里——想改身份/目标的调用方重新发起请求；破坏性工具（`remove_source`/`delete_items`/`delete_source_items`）的确认摘要仍保留不可逆后果表述（**already correct, pinned**） | issue #251 | 已合并 | `tests/unit/test_write_guard.py` |
 | AC-243..245 | #252 写确认的**修改路径**（B1，两段式 + 最终确认）：第 1 轮 = `confirmed` + `edit`（受控单选 enum，`none` ∪ 该工具可编辑集）；第 2 轮（仅当选了字段）只问该字段新值（按值类型渲染：布尔=勾选、数字=数字、结构化值=canonical JSON 文本）；第 3 轮展示**组合后的请求**并把该值回显给客户端，服务端用 `_matches` 校验「回显 == 将要执行」，不符即 `aborted` 且零写入；执行的 fields = 派生默认覆盖被编辑字段（其余逐项等于默认）；任意一轮取消/拒绝 → `declined` 且零写入、零 Core API 审计行；默认路径（不修改）仍是 1 轮 | issue #252 | 已合并 | `tests/integration/test_mcp_server.py` |
 | AC-231 | #229 处理器子进程的日志进 journal：子进程 stderr 成为日志通道（`<LEVEL> <logger> <message>`）、宿主在子进程运行**期间**排空并按原级别重记（带 `[plugin_id item_id]` 前缀）、无级别前缀的行（traceback）按 warning 转发、转发有界（200 行 / 每行 1000 字符）；翻译链的回落行首次可在 journal 里看到 | issue #229 / ADR 0049 | 已合并 | `tests/integration/test_processor_logs.py` |
+| AC-246..248 | #257 结构化可编辑字段的解析与拒绝形状：可编辑项声明自己是否为结构化（JSON 文本），所以编辑一个**当前为空**的结构化字段仍按 list/dict 解析（不再把原始文本泄漏进请求体、变成 422），且非法 JSON 在**展示确认对话框之前**被拒为 `aborted` 且零写入（不再先给用户看一个无法构造的确认、再在执行期才失败）；合法编辑的结构化值以 list 落到源上、其余字段逐项不变 | issue #257 | 已合并 | `tests/integration/test_mcp_server.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

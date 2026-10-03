@@ -1777,3 +1777,129 @@ async def test_cancelling_an_edit_round_writes_nothing(mcp_url: str) -> None:
     assert payload.get("declined") is True, payload
     after = await _call(mcp_url, "get_source", {"source_id": source_id})
     assert after["folder"] == before["folder"], after
+
+
+@pytest.mark.asyncio
+async def test_structured_field_with_invalid_json_is_refused_before_it_is_confirmed(
+    mcp_url: str,
+) -> None:
+    """AC-246: malformed JSON for a structured field costs no confirmation round.
+
+    A structured field travels through the dialog as canonical JSON text (an
+    elicitation schema carries primitives only), so the answered text has to be
+    parsed back before anything can execute. When it is not JSON the request is
+    refused at that point: the user is never shown, and never asked to confirm,
+    a request the server already knows is malformed. The refusal is the
+    branchable `aborted` shape (AC-223) and the source is untouched.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+    callback, seen = _answer_rounds(
+        [
+            {"confirmed": True, "edit": "pipeline_chain"},
+            {"field": "pipeline_chain", "value": "{not json"},
+            {"confirmed": True, "field": "pipeline_chain", "value": "{not json"},
+        ]
+    )
+
+    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_pipeline_chain",
+                {
+                    "source_id": source_id,
+                    "pipeline_chain": [
+                        {"plugin_id": "translate", "kind": "translation"}
+                    ],
+                },
+            )
+        )
+
+    assert payload.get("aborted") is True, payload
+    assert seen["rounds"] == 2, (
+        "the malformed value is refused where it is given; a third round would "
+        f"be a confirmation dialog for a request that cannot be built: {seen}"
+    )
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["pipeline_chain"] == before["pipeline_chain"], after
+    assert after["target_lang"] == before["target_lang"], after
+
+
+@pytest.mark.asyncio
+async def test_editing_an_absent_structured_field_applies_the_parsed_list(
+    mcp_url: str,
+) -> None:
+    """AC-247: a structured field is parsed as its own kind, even when unset.
+
+    `add_source` without a chain leaves `pipeline_chain` null. Editing it is
+    still editing a *list*: the answered JSON text has to become the list the
+    API validates, not a string that reads as an invalid chain. The value the
+    dialog offers is the field's kind, not the current value's type.
+    """
+    chain = [{"plugin_id": "fulltext", "kind": "fulltext"}]
+    url = "https://absent-chain.example.test/feed.xml"
+    callback, seen = _answer_rounds(
+        [
+            {"confirmed": True, "edit": "pipeline_chain"},
+            {"field": "pipeline_chain", "value": json.dumps(chain)},
+            {"confirmed": True, "field": "pipeline_chain", "value": json.dumps(chain)},
+        ]
+    )
+
+    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
+        payload = _payload(
+            await session.call_tool(
+                "add_source",
+                {
+                    "url": url,
+                    "schedule_policy": {"type": "fixed", "interval": "30m"},
+                },
+            )
+        )
+
+    assert payload.get("error") is None, payload
+    assert seen["rounds"] == 3, seen
+    source = await _call(mcp_url, "get_source", {"source_id": payload["id"]})
+    assert source["url"] == url, source
+    assert source["pipeline_chain"] == chain, source
+
+
+@pytest.mark.asyncio
+async def test_editing_a_present_structured_field_applies_the_parsed_list(
+    mcp_url: str,
+) -> None:
+    """AC-248: a valid structured edit lands the list, and the source is otherwise.
+
+    The chain a source already has is edited to a different one: the JSON text
+    the user gave becomes the list the API validates and the request executes.
+    This is the happy path of the parse the refusal above guards.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+    chain = [{"plugin_id": "fulltext", "kind": "fulltext"}]
+    callback, seen = _answer_rounds(
+        [
+            {"confirmed": True, "edit": "pipeline_chain"},
+            {"field": "pipeline_chain", "value": json.dumps(chain)},
+            {"confirmed": True, "field": "pipeline_chain", "value": json.dumps(chain)},
+        ]
+    )
+
+    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_pipeline_chain",
+                {
+                    "source_id": source_id,
+                    "pipeline_chain": [
+                        {"plugin_id": "translate", "kind": "translation"}
+                    ],
+                },
+            )
+        )
+
+    assert payload.get("error") is None and payload.get("aborted") is None, payload
+    assert seen["rounds"] == 3, seen
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["pipeline_chain"] == chain, after
+    assert after["url"] == before["url"], after
