@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from mcp.server.elicitation import ElicitationResult
@@ -68,6 +69,35 @@ class Confirmation(BaseModel):
     )
 
 
+@dataclass(frozen=True)
+class _Editable:
+    """One field the user may change, and how it travels through the dialog.
+
+    `structured` says the value is a dict or list, which an elicitation schema
+    can only carry as canonical JSON text -- so the answered text has to be
+    parsed back, and parsing is what can fail. Recording the *kind* here, rather
+    than reading it off the current value, keeps that honest when the value is
+    absent: an unset `pipeline_chain` is still a list, so editing it must produce
+    a list rather than the raw text (issue #257).
+    """
+
+    value: Any
+    structured: bool = False
+
+
+def _editables(editable: dict[str, Any]) -> dict[str, _Editable]:
+    """Normalise a declared editable set to `_Editable` entries.
+
+    A tool names a scalar by its value (`{"folder": "blog"}`) and a structured
+    field by wrapping it (`{"pipeline_chain": _Editable(chain, structured=True)}`),
+    so the ladder reads one shape either way.
+    """
+    return {
+        name: entry if isinstance(entry, _Editable) else _Editable(entry)
+        for name, entry in editable.items()
+    }
+
+
 class _Confirmation(Elicit[Any]):
     """An `Elicit` that also carries the fields it was derived from.
 
@@ -82,11 +112,11 @@ class _Confirmation(Elicit[Any]):
         message: str,
         schema: type[Confirmation],
         fields: dict[str, Any],
-        editable: dict[str, Any],
+        editable: dict[str, _Editable],
     ) -> None:
         super().__init__(message, schema)
         self.fields = fields
-        # Name -> current value for the parameters the user may change on the
+        # Name -> editable entry for the parameters the user may change on the
         # edit path (#252). A subset of the fields by construction: it is built
         # from them, and the guard checks it stays inside the arguments.
         self.editable = editable
@@ -205,7 +235,7 @@ def _asked(
     framework passes to it by name. That is the reason each resolver below is a
     small function of the arguments rather than a closure over local state.
     """
-    return _Confirmation(message, model, dict(fields or {}), dict(editable or {}))
+    return _Confirmation(message, model, dict(fields or {}), _editables(editable or {}))
 
 
 def _confirm_resolver(**kwargs: Any) -> _Confirmation:
@@ -307,8 +337,8 @@ def _add_source_marker(
         ),
         _fields=fields,
         _editable={
-            "schedule_policy": fields["schedule_policy"],
-            "pipeline_chain": fields["pipeline_chain"],
+            "schedule_policy": _Editable(schedule_policy, structured=True),
+            "pipeline_chain": _Editable(pipeline_chain, structured=True),
             "target_lang": fields["target_lang"],
             "folder": fields["folder"],
         },
@@ -399,9 +429,9 @@ def _add_sources_marker(
         ),
         _fields=fields,
         _editable={
-            "schedule_policy": fields["schedule_policy"],
+            "schedule_policy": _Editable(schedule_policy, structured=True),
             "folder": fields["folder"],
-            "pipeline_chain": fields["pipeline_chain"],
+            "pipeline_chain": _Editable(pipeline_chain, structured=True),
             "target_lang": fields["target_lang"],
             "trust_level": fields["trust_level"],
             "parser_plugin_id": fields["parser_plugin_id"],
@@ -493,7 +523,7 @@ def _update_schedule_policy_marker(
     return _confirm_resolver(
         _summary=f"Set source {source_id} schedule to {fields['schedule_policy']}?",
         _fields=fields,
-        _editable={"schedule_policy": fields["schedule_policy"]},
+        _editable={"schedule_policy": _Editable(schedule_policy, structured=True)},
     )
 
 
@@ -729,7 +759,7 @@ def _set_source_pipeline_chain_marker(
         ),
         _fields=fields,
         _editable={
-            "pipeline_chain": fields["pipeline_chain"],
+            "pipeline_chain": _Editable(pipeline_chain, structured=True),
             "target_lang": fields["target_lang"],
         },
     )
@@ -1000,7 +1030,7 @@ def _edit_choice_schema(editable: dict[str, Any]) -> type[Confirmation]:
     )
 
 
-def _value_schema(field: str, current: Any) -> type[BaseModel]:
+def _value_schema(field: str, entry: _Editable) -> type[BaseModel]:
     """Round 2's form: the chosen field, prefilled with the value it has today.
 
     The type follows the value: a boolean stays a checkbox, a number a number,
@@ -1008,15 +1038,15 @@ def _value_schema(field: str, current: Any) -> type[BaseModel]:
     JSON text, because an elicitation schema renders primitives only.
     """
     kind: Any = str
-    shown: Any = str(current)
-    if isinstance(current, bool):
-        kind, shown = bool, current
-    elif isinstance(current, int):
-        kind, shown = int, current
-    elif isinstance(current, float):
-        kind, shown = float, current
-    elif isinstance(current, (dict, list)):
-        shown = _render(current)
+    shown: Any = str(entry.value)
+    if entry.structured:
+        shown = _render(entry.value)
+    elif isinstance(entry.value, bool):
+        kind, shown = bool, entry.value
+    elif isinstance(entry.value, int):
+        kind, shown = int, entry.value
+    elif isinstance(entry.value, float):
+        kind, shown = float, entry.value
     return create_model(
         "EditValue",
         field=(str, Field(default=field)),
@@ -1039,9 +1069,14 @@ def _edit_confirm_schema(field: str, value: Any) -> type[BaseModel]:
     )
 
 
-def _parsed_edit(current: Any, answered: Any) -> Any:
-    """The answered text of a structured field, parsed back to its shape."""
-    if isinstance(current, (dict, list)) and isinstance(answered, str):
+def _parsed_edit(entry: _Editable, answered: Any) -> Any:
+    """The answered text of a structured field, parsed back to its shape.
+
+    The one place a structured edit is parsed, and therefore the one place it
+    can fail: every caller maps a `ValueError` (a bad JSON text) to `_Aborted`,
+    so the refusal has the one shape a client branches on (issue #257).
+    """
+    if entry.structured and isinstance(answered, str):
         return json.loads(answered)
     return answered
 
@@ -1079,7 +1114,14 @@ def _ask_value(choice: Any, marker: _Confirmation) -> Any:
 
 
 def _ask_confirm(value: Any, marker: _Confirmation) -> Any:
-    """Round 3: show the composed request and have it acknowledged."""
+    """Round 3: show the composed request and have it acknowledged.
+
+    A structured field's text is parsed here to decide whether a request can be
+    built at all: invalid JSON is refused as `aborted` *before* the dialog, so
+    the user is never asked to confirm something the server already rejects
+    (issue #257). The dialog itself echoes the text the client sent, which is
+    what round 4 compares against, so the parsed value is not needed yet.
+    """
     if value is None:
         return None
     if isinstance(value, _Aborted):
@@ -1094,12 +1136,12 @@ def _ask_confirm(value: Any, marker: _Confirmation) -> Any:
     if field not in marker.editable:
         return _Aborted()
     try:
-        edited = _parsed_edit(marker.editable[field], raw)
+        _parsed_edit(marker.editable[field], raw)
     except ValueError:
         return _Aborted()
     return Elicit(
         f"{marker.message} Change {field} to {raw}?",
-        _edit_confirm_schema(field, edited),
+        _edit_confirm_schema(field, raw),
     )
 
 
@@ -1142,9 +1184,11 @@ def _compose_edit(
 def _overrides(confirmed: Any, body: dict[str, Any] | None) -> dict[str, Any]:
     """The edited values to overlay on the request body, or an empty mapping.
 
-    Parsed against the body's own value: what the body holds for that key says
-    whether the answered text stands for a dict, a list or a scalar, so the
-    override needs no second type declaration to drift from.
+    The values were already parsed when the ladder showed them, and a failure
+    there was answered as `aborted`; this checks only that each names a field of
+    the request about to be sent. An override that landed nowhere would be a
+    dialog that changed nothing (issue #252), and a structured override has to
+    be the list/dict the field expects, not the text the user typed (issue #257).
     """
     data = _answer_data(confirmed)
     if data is None or body is None:
@@ -1152,12 +1196,10 @@ def _overrides(confirmed: Any, body: dict[str, Any] | None) -> dict[str, Any]:
     overrides = getattr(data, "overrides", None)
     if not isinstance(overrides, dict) or not overrides:
         return {}
-    parsed: dict[str, Any] = {}
-    for field, answered in overrides.items():
-        if field not in body:
-            raise ValueError(f"edited field {field!r} is not part of this request")
-        parsed[field] = _parsed_edit(body[field], answered)
-    return parsed
+    unknown = sorted(field for field in overrides if field not in body)
+    if unknown:
+        raise ValueError(f"edited fields {unknown!r} are not part of this request")
+    return dict(overrides)
 
 
 def _add_source_edit_choice(
