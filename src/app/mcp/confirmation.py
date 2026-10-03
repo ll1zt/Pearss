@@ -77,10 +77,18 @@ class _Confirmation(Elicit[Any]):
     """
 
     def __init__(
-        self, message: str, schema: type[Confirmation], fields: dict[str, Any]
+        self,
+        message: str,
+        schema: type[Confirmation],
+        fields: dict[str, Any],
+        editable: dict[str, Any],
     ) -> None:
         super().__init__(message, schema)
         self.fields = fields
+        # Name -> current value for the parameters the user may change on the
+        # edit path (#252). A subset of the fields by construction: it is built
+        # from them, and the guard checks it stays inside the arguments.
+        self.editable = editable
 
 
 def _render(value: Any) -> str:
@@ -177,7 +185,10 @@ def _confirmation_schema(fields: dict[str, Any]) -> type[Confirmation]:
 
 
 def _asked(
-    model: type[Confirmation], message: str, fields: dict[str, Any] | None = None
+    model: type[Confirmation],
+    message: str,
+    fields: dict[str, Any] | None = None,
+    editable: dict[str, Any] | None = None,
 ) -> _Confirmation:
     """The confirmation question, as a resolver result.
 
@@ -193,7 +204,7 @@ def _asked(
     framework passes to it by name. That is the reason each resolver below is a
     small function of the arguments rather than a closure over local state.
     """
-    return _Confirmation(message, model, dict(fields or {}))
+    return _Confirmation(message, model, dict(fields or {}), dict(editable or {}))
 
 
 def _confirm_resolver(**kwargs: Any) -> _Confirmation:
@@ -208,7 +219,11 @@ def _confirm_resolver(**kwargs: Any) -> _Confirmation:
     """
     summary = kwargs.pop("_summary")
     fields = kwargs.pop("_fields")
-    return _asked(_confirmation_schema(fields), summary, fields)
+    # Required, not defaulted: a tool that does not say what the user may edit
+    # would have to be discovered by reading it, and the edit path (#252) would
+    # silently offer nothing.
+    editable = kwargs.pop("_editable")
+    return _asked(_confirmation_schema(fields), summary, fields, editable)
 
 
 def _registry_from_context(ctx: Context | None) -> Any:
@@ -290,6 +305,12 @@ def _add_source_confirmation(
             f"{fields['folder'] or DEFAULT_FOLDER}?"
         ),
         _fields=fields,
+        _editable={
+            "schedule_policy": fields["schedule_policy"],
+            "pipeline_chain": fields["pipeline_chain"],
+            "target_lang": fields["target_lang"],
+            "folder": fields["folder"],
+        },
     )
 
 
@@ -376,6 +397,14 @@ def _add_sources_confirmation(
             f"parser {fields['parser_plugin_id'] or 'auto'}. {fields['urls']}"
         ),
         _fields=fields,
+        _editable={
+            "schedule_policy": fields["schedule_policy"],
+            "folder": fields["folder"],
+            "pipeline_chain": fields["pipeline_chain"],
+            "target_lang": fields["target_lang"],
+            "trust_level": fields["trust_level"],
+            "parser_plugin_id": fields["parser_plugin_id"],
+        },
     )
 
 
@@ -439,6 +468,10 @@ def _fetch_work_confirmation(
             f"{fields['min_interval_seconds']}s apart. {fields['urls']}"
         ),
         _fields=fields,
+        _editable={
+            "batch_size": fields["batch_size"],
+            "min_interval_seconds": fields["min_interval_seconds"],
+        },
     )
 
 
@@ -459,6 +492,7 @@ def _update_schedule_policy_confirmation(
     return _confirm_resolver(
         _summary=f"Set source {source_id} schedule to {fields['schedule_policy']}?",
         _fields=fields,
+        _editable={"schedule_policy": fields["schedule_policy"]},
     )
 
 
@@ -472,6 +506,7 @@ def _set_source_status_confirmation(source_id: str, status: str) -> _Confirmatio
     return _confirm_resolver(
         _summary=f"Set source {fields['source_id']} status to {fields['status']}?",
         _fields=fields,
+        _editable={"status": fields["status"]},
     )
 
 
@@ -485,6 +520,7 @@ def _set_source_folder_confirmation(source_id: str, folder: str) -> _Confirmatio
     return _confirm_resolver(
         _summary=f"Move source {fields['source_id']} to folder {fields['folder']}?",
         _fields=fields,
+        _editable={"folder": fields["folder"]},
     )
 
 
@@ -524,6 +560,7 @@ def _set_item_read_state_confirmation(
     return _confirm_resolver(
         _summary=f"Set item {fields['item_id']} read state to {fields['change']}?",
         _fields=fields,
+        _editable={"is_read": is_read, "is_starred": is_starred},
     )
 
 
@@ -537,6 +574,7 @@ def _trigger_job_confirmation(source_id: str) -> _Confirmation:
     return _confirm_resolver(
         _summary=f"Fetch source {fields['source_id']} now?",
         _fields=fields,
+        _editable={},
     )
 
 
@@ -550,6 +588,7 @@ def _backfill_source_confirmation(source_id: str) -> _Confirmation:
     return _confirm_resolver(
         _summary=f"Backfill processing products for source {fields['source_id']}?",
         _fields=fields,
+        _editable={},
     )
 
 
@@ -589,6 +628,7 @@ def _retry_enrichments_confirmation(
             "provider again for whatever it retries."
         ),
         _fields=fields,
+        _editable={},
     )
 
 
@@ -647,6 +687,7 @@ def _submit_items_confirmation(
             f"{fields['titles']} (fingerprint {fields['items_fingerprint']})"
         ),
         _fields=fields,
+        _editable={},
     )
 
 
@@ -688,6 +729,10 @@ def _set_source_pipeline_chain_confirmation(
             "until it completes, and its processors can spend provider budget."
         ),
         _fields=fields,
+        _editable={
+            "pipeline_chain": fields["pipeline_chain"],
+            "target_lang": fields["target_lang"],
+        },
     )
 
 
@@ -701,6 +746,7 @@ def _set_plugin_status_confirmation(plugin_id: str, status: str) -> _Confirmatio
     return _confirm_resolver(
         _summary=f"Set plugin {fields['plugin_id']} status to {fields['status']}?",
         _fields=fields,
+        _editable={"status": fields["status"]},
     )
 
 
@@ -729,6 +775,7 @@ def _remove_source_confirmation(source_id: str) -> _Confirmation:
             "the same feed starts over with no history. This cannot be undone."
         ),
         _fields=_remove_source_fields(source_id),
+        _editable={},
     )
 
 
@@ -759,6 +806,7 @@ def _delete_items_confirmation(item_ids: list[str]) -> _Confirmation:
             "bodies, read state and translations go too. This cannot be undone."
         ),
         _fields=_delete_items_fields(item_ids),
+        _editable={},
     )
 
 
@@ -798,6 +846,11 @@ def _delete_source_items_confirmation(
             "resumes. This cannot be undone."
         ),
         _fields=_delete_source_items_fields(source_id, since, until, include_published),
+        _editable={
+            "since": since,
+            "until": until,
+            "include_published": include_published,
+        },
     )
 
 
