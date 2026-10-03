@@ -1,7 +1,7 @@
 """Unit-layer coverage for the batch fingerprint used by submit_items.
 
 The scenarios themselves are registered in
-`tests/integration/test_submit_items_confirmation.py` (AC-44..AC-46, issue #67);
+`tests/integration/test_submit_items_edit_choice.py` (AC-44..AC-46, issue #67);
 this file pins the pure function and the resolver wiring they rest on, at the
 fast tier. No new AC numbers are claimed here.
 
@@ -23,7 +23,7 @@ import pytest
 
 from app.mcp.confirmation import (
     _items_fingerprint,
-    _submit_items_confirmation,
+    _submit_items_edit_choice,
 )
 
 pytestmark = pytest.mark.unit
@@ -79,8 +79,8 @@ def test_the_fingerprint_tells_two_batches_apart_in_the_confirmation() -> None:
     confirmed = _batch("<p>one</p>", "<p>two</p>")
     drifted = _batch("<p>EVIL</p>", "<p>EVIL</p>")
 
-    marker = _submit_items_confirmation("src-1", confirmed)
-    other = _submit_items_confirmation("src-1", drifted)
+    marker = _submit_items_edit_choice("src-1", confirmed)
+    other = _submit_items_edit_choice("src-1", drifted)
 
     assert marker.fields["items_fingerprint"] == _items_fingerprint(confirmed)
     assert marker.fields["items_fingerprint"] != other.fields["items_fingerprint"]
@@ -147,7 +147,7 @@ def test_the_confirmation_carries_both_the_human_titles_and_the_fingerprint() ->
     alone is not a confirmation anyone can read.
     """
     batch = _batch("<p>one</p>", "<p>two</p>")
-    marker = _submit_items_confirmation("src-1", batch)
+    marker = _submit_items_edit_choice("src-1", batch)
 
     assert marker.fields["titles"] == "T0; T1"
     assert marker.fields["items_fingerprint"] == _items_fingerprint(batch)

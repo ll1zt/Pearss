@@ -131,6 +131,47 @@ def _write_tools() -> dict[str, Any]:
     return tools
 
 
+def _round_one(resolver: Any) -> Any:
+    """The tool's round-1 resolver: one `Resolve` hop back from its own.
+
+    The tool's parameter points at the last stage (the composed confirmation),
+    whose first dependency is round 1 -- the rung that builds the summary, derives
+    the fields and decides the editable set (issue #252). Read from the annotations
+    rather than a name table, so a new write tool is covered without anyone
+    remembering to add it.
+    """
+    fn = resolver
+    for _ in range(1):
+        hints = typing.get_type_hints(fn, include_extras=True)
+        fn = next(
+            meta.fn
+            for hint in hints.values()
+            for meta in getattr(hint, "__metadata__", ())
+            if isinstance(meta, Resolve)
+        )
+    return fn
+
+
+def _dialog(resolver: Any, arguments: dict[str, Any]) -> Any:
+    """Round 1's result: the summary, the derived fields and the editable set.
+
+    Asking round 1 is asking the one source: it builds the summary out of the
+    derived fields, and it is the rung that decides the editable set.
+    """
+    stage_one = _round_one(resolver)
+    return stage_one(**{p: arguments[p] for p in _arguments_of(stage_one)})
+
+
+def _round_one_arguments(resolver: Any) -> list[str]:
+    """The tool's own arguments, as round 1 sees them.
+
+    Round 1's signature carries the tool's parameters plus nothing else, while the
+    tool's own resolver (the last stage) carries the three dependency parameters
+    too -- so the sweeps ask this rather than filtering the wrong signature.
+    """
+    return _arguments_of(_round_one(resolver))
+
+
 def _arguments_of(fn: Any) -> list[str]:
     """The tool's own arguments: not `ctx`, and not the confirmed value."""
     return [
@@ -139,20 +180,13 @@ def _arguments_of(fn: Any) -> list[str]:
 
 
 def _derived_fields(resolver: Any, arguments: dict[str, Any]) -> dict[str, Any]:
-    """What the tool derives from its arguments, as name to value.
-
-    Carried on the resolver's result (`confirmation._Confirmation.fields`) rather
-    than read out of the dialog: since #250 the schema is one acknowledgement, so
-    the fields are what the summary is built from and what the guard checks the
-    coverage of -- asking the resolver is asking the one source, with no
-    hand-written table of which function belongs to which tool.
-    """
-    return dict(resolver(**arguments).fields)
+    """What the tool derives from its arguments, as name to value."""
+    return dict(_dialog(resolver, arguments).fields)
 
 
 def _summary(resolver: Any, arguments: dict[str, Any]) -> str:
     """The human-readable line the dialog shows above its checkbox."""
-    return str(resolver(**arguments).message)
+    return str(_dialog(resolver, arguments).message)
 
 
 def _perturbed(value: Any) -> Any:
@@ -208,7 +242,7 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     )
 
     for name, resolver in tools.items():
-        parameters = _arguments_of(resolver)
+        parameters = _round_one_arguments(resolver)
         baseline = {p: ARGUMENTS[p] for p in parameters}
         confirmed = _derived_fields(resolver, baseline)
         assert confirmed, f"{name} derives nothing at all"
@@ -287,18 +321,21 @@ def test_every_write_confirmation_is_one_acknowledgement() -> None:
     """
     shapes = {
         name: sorted(
-            resolver(
-                **{p: ARGUMENTS[p] for p in _arguments_of(resolver)}
+            _dialog(
+                resolver, {p: ARGUMENTS[p] for p in _round_one_arguments(resolver)}
             ).schema.model_fields
         )
         for name, resolver in _write_tools().items()
     }
     surprising = {
-        name: fields for name, fields in shapes.items() if fields != ["confirmed"]
+        name: fields
+        for name, fields in shapes.items()
+        if fields != ["confirmed", "edit"]
     }
     assert not surprising, (
-        "every write confirmation is one acknowledgement (issue #250); these "
-        f"carry more than `confirmed`: {surprising}"
+        "round 1 is an acknowledgement plus a closed choice of one field to "
+        "change (issues #250, #252); these carry something else: "
+        f"{surprising}"
     )
 
 
@@ -350,12 +387,6 @@ IRREVERSIBLE = re.compile(
 )
 
 
-def _marker_for(name: str) -> Any:
-    """The confirmation a tool would raise, with its arguments and its fields."""
-    resolver = _write_tools()[name]
-    return resolver(**{p: ARGUMENTS[p] for p in _arguments_of(resolver)})
-
-
 def test_every_write_tool_declares_what_the_user_may_edit() -> None:
     """AC-241: the editable set exists, is inside the executed set, and is small.
 
@@ -368,8 +399,8 @@ def test_every_write_tool_declares_what_the_user_may_edit() -> None:
     outside: list[str] = []
     read_only: list[str] = []
     for name, resolver in _write_tools().items():
-        arguments = {p: ARGUMENTS[p] for p in _arguments_of(resolver)}
-        marker = resolver(**arguments)
+        arguments = {p: ARGUMENTS[p] for p in _round_one_arguments(resolver)}
+        marker = _dialog(resolver, arguments)
         for field in marker.editable:
             if field not in arguments:
                 outside.append(f"{name}({field})")
@@ -396,7 +427,7 @@ def test_destructive_confirmations_still_say_what_cannot_be_undone() -> None:
     """
     missing: list[str] = []
     for name in ("remove_source", "delete_items", "delete_source_items"):
-        message = str(_marker_for(name).message)
+        message = _summary(_write_tools()[name], ARGUMENTS)
         if not IRREVERSIBLE.search(message):
             missing.append(f"{name}: {message!r}")
     assert not missing, (

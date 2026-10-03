@@ -321,7 +321,10 @@ async def test_the_dialog_names_the_list_once(
     assert "2" in message, message
     for url in ASKED:
         assert url in message, message
-    assert set(only["params"]["requestedSchema"]["properties"]) == {"confirmed"}, only
+    assert set(only["params"]["requestedSchema"]["properties"]) == {
+        "confirmed",
+        "edit",
+    }, only
 
 
 @pytest.mark.asyncio
