@@ -106,6 +106,7 @@ docs/adr/
 | [0050](0050-a-killed-row-keeps-its-diagnosis.md) | 被击杀的行保留诊断：宿主另存子进程最后 3 行（从最新往回拼、≤320 字符）并附到「没来得及上报」的失败 detail；处理器用 `pearss.progress` logger 记块进度（约定即 API）；子进程静掉 httpx/httpcore 的 INFO；击杀时向子进程索取聚合、把进度塞进 item_ctx、解析 detail 文本均被否决 | accepted（**建立在 ADR 0049 的通道上**） | 2026-10-02 |
 | [0051](0051-diagnose-projects-the-model-registry.md) | `:diagnose` 的模型健康格是登记表的只读投影：报 `preferred`/`skipped`/`attempts_per_model` 与**当前冷却中**模型的冷却剩余、本次冷却时长、失败次数、最近失败类别与距今秒数；只报冷却中、`preferred` 由 report 的首次出现顺序推导、不落库不缓存、时间报相对秒；落库、用配置链序、报已恢复模型、另开端点均被否决 | accepted（**ADR 0048 的出口**） | 2026-10-02 |
 | [0052](0052-block-level-progress-on-disk.md) | 块级进度落盘：运行时给每行一个 scratch 目录（`<storage>/processor-cache/<plugin>/<lang>/<item>`，经 `item_ctx["cache_dir"]`）、处理器每块成功后原子写入并在下一块前查缓存、成功后运行时删除+失败时保留；缓存的是块不是产物（净化路径照走、产物逐字节一致）、缓存不是事实源（不建表不加列）、写失败不是失败、块级并发推迟（带触发条件）；缓存做成表/由处理器自定路径/按 attempt 建目录/缓存产物/成功后保留均被否决 | accepted（**ADR 0047/0048 的续集**） | 2026-10-02 |
+| [0053](0053-write-confirmation-shape.md) | 写确认的形状：默认路径 = 1 轮（schema 只有 `confirmed`，执行值只来自服务端派生、客户端回传字段不读）、修改路径 = 两段式（受控单选 `edit` → 该字段新值 → 展示组合请求并回显，`_matches` 不符即 `aborted` 零写入）、每工具显式声明可编辑集（身份/目标不可编辑）；四段 resolver 与 `ElicitationResult` 注解让任一轮取消成为 `declined`；AC-75 判据迁移为「任一入参变化都会改变摘要」；一次改多字段、自由文本字段名、改协议、逐字段展开均被否决 | accepted（**取代 mcp-tool-guide §3 的旧呈现规则**；记录 #250/#251/#252） | 2026-10-03 |
 
 ## 翻译管线战役（#227..#233）的阅读顺序
 
