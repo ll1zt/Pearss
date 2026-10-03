@@ -54,6 +54,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urljoin
@@ -497,6 +498,11 @@ def process(
                 ErrorClass.NETWORK,
                 "every configured model is cooling down; retrying later",
             )
+        # Configured models the policy is skipping (cooling). They are not asked,
+        # so their answer is missing from the aggregate; a verdict read only from
+        # the models that *were* tried is evidence the row never gathered, and it
+        # must stay retryable (#258).
+        skipped = [model for model in models if model not in candidates]
         translated: list[str] = []
         for index, chunk in enumerate(requests, start=1):
             remembered = _cached(cache_dir, chunk)
@@ -511,6 +517,7 @@ def process(
                 base=base_url,
                 key=key,
                 models=candidates,
+                skipped=skipped,
                 deadline=deadline,
                 cap=_attempt_cap(),
                 plan=plan,
@@ -1110,8 +1117,10 @@ _CHAIN_DETAIL_LIMIT: Final = 500
 
 def _aggregate_failure(
     failures: list[tuple[str, ProcessorError]],
+    *,
+    untried: Sequence[str] = (),
 ) -> ProcessorError:
-    """The chain's failure once every model has said no.
+    """The chain's failure once every candidate has said no.
 
     Classification (issue #145): if any model's failure was transient
     (`network`/`blocked`), the chain takes the *last* transient failure's class,
@@ -1119,21 +1128,39 @@ def _aggregate_failure(
     instead of being pinned permanent by a later unrelated 400. With no
     transient failure it takes the last failure's class.
 
-    The detail names every model and its reason, in the order they were tried:
-    "which models did this run actually ask, and what did each say?" is the
-    question an operator has, and the last model's reason alone answers half.
+    `untried` names the configured models this call never asked -- skipped by the
+    row's policy (cooling), or spent on its per-model budget. A chain that was
+    not fully evaluated cannot yield a *permanent* verdict (#258): those models'
+    cooldowns expire and the retry asks them again, so the class stays transient
+    and the worker requeues instead of pinning the row. Same reasoning as AC-230's
+    whole-chain cooling, applied to the partial case that first cut missed.
+
+    The detail names every model and its reason, in the order they were tried,
+    plus what was not tried: "which models did this run actually ask, and what
+    did each say?" is the question an operator has, and the last model's reason
+    alone answers half.
     """
     transient = [
         failure
         for _, failure in failures
         if failure.error_class in _TRANSIENT_CHAIN_CLASSES
     ]
-    chosen = transient[-1] if transient else failures[-1][1]
-    detail = "; ".join(
+    if untried:
+        chosen = ErrorClass.NETWORK
+    elif transient:
+        chosen = transient[-1].error_class
+    else:
+        chosen = failures[-1][1].error_class
+    reasons = "; ".join(
         f"{model}: {failure.detail}"[:_CHAIN_DETAIL_PER_MODEL]
         for model, failure in failures
     )
-    return ProcessorError(chosen.error_class, detail[:_CHAIN_DETAIL_LIMIT])
+    if untried:
+        # First, so a long reason cannot truncate the one fact explaining the
+        # class away (`detail` is capped at `_CHAIN_DETAIL_LIMIT`).
+        note = f"not tried: {', '.join(untried)}"
+        reasons = f"{note}; {reasons}" if reasons else note
+    return ProcessorError(chosen, reasons[:_CHAIN_DETAIL_LIMIT])
 
 
 def _out_of_budget(failures: list[tuple[str, ProcessorError]]) -> ProcessorError:
@@ -1161,6 +1188,7 @@ def _translate_one(
     base: str,
     key: str,
     models: list[str],
+    skipped: list[str],
     deadline: float | None,
     cap: float,
     plan: _RowPlan,
@@ -1186,10 +1214,15 @@ def _translate_one(
     it, whatever is left of the document (issue #228).
     """
     failures: list[tuple[str, ProcessorError]] = []
+    # Configured models this call never asked: skipped by the row's policy
+    # (cooling), or spent on the row's per-model budget. A chain that was not
+    # fully evaluated cannot yield a permanent verdict (#258).
+    untried: list[str] = list(skipped)
     for index, model in enumerate(models):
         if plan.exhausted(model):
             # This row has already paid for this model twice: the rest of the
             # chain is the better use of what is left (AC-226).
+            untried.append(model)
             continue
         seconds = (
             None
@@ -1234,4 +1267,4 @@ def _translate_one(
         )
     # `models` is non-empty by construction (`_configured` raises otherwise),
     # so reaching here means every model contributed a failure.
-    raise _aggregate_failure(failures)
+    raise _aggregate_failure(failures, untried=untried)

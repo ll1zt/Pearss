@@ -1968,3 +1968,132 @@ def test_a_retry_translates_only_the_blocks_that_are_missing(
         store=_store_into(fresh),
     )
     assert stored == fresh
+
+
+# --------------------------------------------------------------------------
+# A chain that never asked every configured model (issue #258)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #258):
+#
+#   AC-249 部分模型冷却时，链未走完的失败保持可重试（network，不把行钉死）
+#   AC-250 链走完且全是永久失败时，判决仍是 parse（钉住现状，AC-137 不变）
+#
+# The live row: both gemini models were cooling, hy3 was the only candidate, and
+# its 200-with-empty-body classified `parse` -- so the row was pinned failed and
+# the source's chain could never finish (#258). A model that was *skipped* is
+# not a model that said no: its cooldown expires, so a verdict read from the
+# models that were asked is evidence the row never gathered.
+# --------------------------------------------------------------------------
+
+
+def test_a_failure_that_skipped_cooling_models_stays_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-249: a chain that never asked every model cannot be permanent.
+
+    The empty completion is a parse failure on its own (AC-139), but here it is
+    the *last* candidate's failure while `primary` was skipped: the aggregate
+    must stay transient so the worker requeues the row instead of pinning it.
+    """
+    asked = _model_provider(
+        monkeypatch,
+        {"fallback": (200, {"choices": [{"message": {"content": ""}}]})},
+    )
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            _ctx(
+                "<p>English prose.</p>",
+                model_policy={"skip": ["primary"], "attempts_per_model": 2},
+                model_events=[],
+            ),
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert asked == ["fallback"], "a cooling model must not be asked"
+    assert excinfo.value.error_class is ErrorClass.NETWORK, excinfo.value.detail
+    assert "primary" in excinfo.value.detail, excinfo.value.detail
+    assert "empty completion content" in excinfo.value.detail, excinfo.value.detail
+
+
+def test_a_fully_tried_chain_keeps_its_permanent_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-250: with nothing skipped, a policy must not soften a real rejection.
+
+    AC-137 already pins the no-policy case; this pins that a *present* policy
+    whose skip list is empty changes nothing -- the aggregate is still read from
+    every model's answer.
+    """
+    asked = _model_provider(
+        monkeypatch,
+        {
+            "primary": (400, {"error": {"message": "unknown model"}}),
+            "fallback": (400, {"error": {"message": "unknown model"}}),
+        },
+    )
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            _ctx(
+                "<p>English prose.</p>",
+                model_policy={"skip": [], "attempts_per_model": 2},
+                model_events=[],
+            ),
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert asked == ["primary", "fallback"]
+    assert excinfo.value.error_class is ErrorClass.PARSE, excinfo.value.detail
+
+
+def test_a_model_the_row_budget_spent_counts_as_untried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-249: the other half of "not asked" is this row's per-model budget.
+
+    A model is skipped after two failures (AC-226), so a later block's verdict is
+    read from a chain that is just as incomplete as one truncated by a cooldown.
+    Without the untried models, the last block's permanent 400 alone would pin
+    the row even though the earlier blocks failed transiently.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", "primary,fallback")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    asked: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        body = kwargs.get("json")
+        model = str(body["model"]) if isinstance(body, dict) else ""
+        asked.append(model)
+        if model == "primary":
+            return httpx.Response(503, json={"error": {"message": "overloaded"}})
+        # The fallback serves the first two blocks, then refuses permanently.
+        if asked.count("fallback") <= 2:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "译文"}}]}
+            )
+        return httpx.Response(400, json={"error": {"message": "unknown model"}})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    with pytest.raises(ProcessorError) as excinfo:
+        process(
+            _ctx(
+                THREE_BLOCKS,
+                model_policy={"skip": [], "attempts_per_model": 2},
+                model_events=[],
+            ),
+            target_lang="zh",
+            store=lambda content: "cas://product",
+        )
+
+    assert asked == ["primary", "fallback", "primary", "fallback", "fallback"], asked
+    assert excinfo.value.error_class is ErrorClass.NETWORK, excinfo.value.detail
+    assert "not tried: primary" in excinfo.value.detail, excinfo.value.detail
