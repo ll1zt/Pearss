@@ -6,7 +6,8 @@ issue #76).
   AC-75 每个写工具的确认覆盖全部执行参数
     Given 任一写工具的调用参数集合
     When  只改动其中一个参数的值
-    Then  确认字段里至少有一项随之变化(漂移可被发现)
+    Then  派生字段里至少有一项随之变化(漂移可被发现)
+    And   对话框的**摘要**也随之变化(用户看得见的面上不留暗参数)
     And   这条断言对所有写工具成立(从真实注册表机械遍历, 不是逐个手写)
 
   AC-76 守卫只存在一份
@@ -52,6 +53,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.resolve import Resolve
 
+from app.mcp import confirmation
 from app.mcp.core_client import CoreAPIClient
 from app.mcp.tools.writes import register_writes
 
@@ -122,10 +124,21 @@ def _arguments_of(fn: Any) -> list[str]:
     ]
 
 
-def _confirmed(resolver: Any, arguments: dict[str, Any]) -> dict[str, Any]:
-    """The fields the dialog would carry, as name to prefilled value."""
-    elicit = resolver(**arguments)
-    return {name: field.default for name, field in elicit.schema.model_fields.items()}
+def _derived_fields(resolver: Any, arguments: dict[str, Any]) -> dict[str, Any]:
+    """What the tool derives from its arguments, as name to value.
+
+    Carried on the resolver's result (`confirmation._Confirmation.fields`) rather
+    than read out of the dialog: since #250 the schema is one acknowledgement, so
+    the fields are what the summary is built from and what the guard checks the
+    coverage of -- asking the resolver is asking the one source, with no
+    hand-written table of which function belongs to which tool.
+    """
+    return dict(resolver(**arguments).fields)
+
+
+def _summary(resolver: Any, arguments: dict[str, Any]) -> str:
+    """The human-readable line the dialog shows above its checkbox."""
+    return str(resolver(**arguments).message)
 
 
 def _perturbed(value: Any) -> Any:
@@ -171,6 +184,7 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     to confirm.
     """
     invisible: list[str] = []
+    silent: list[str] = []
     tools = _write_tools()
     # The count is a claim, not a property: a new write tool has to change this
     # line, which is where someone notices that the confirmation surface grew.
@@ -182,18 +196,27 @@ def test_every_write_argument_would_show_up_in_the_confirmation() -> None:
     for name, resolver in tools.items():
         parameters = _arguments_of(resolver)
         baseline = {p: ARGUMENTS[p] for p in parameters}
-        confirmed = _confirmed(resolver, baseline)
-        assert confirmed, f"{name} confirms nothing at all"
+        confirmed = _derived_fields(resolver, baseline)
+        assert confirmed, f"{name} derives nothing at all"
+        summary = _summary(resolver, baseline)
 
         for parameter in parameters:
             drifted = {**baseline, parameter: _perturbed(baseline[parameter])}
-            if _confirmed(resolver, drifted) == confirmed:
+            if _derived_fields(resolver, drifted) == confirmed:
                 invisible.append(f"{name}({parameter})")
+            if _summary(resolver, drifted) == summary:
+                silent.append(f"{name}({parameter})")
 
     assert not invisible, (
         "these arguments could be changed without changing anything the user "
         "confirms, so a tampered client would execute what was never shown "
         f"(issue #76): {invisible}"
+    )
+    assert not silent, (
+        "these arguments are part of what executes but never appear in the "
+        "confirmation's summary, so the user is asked to accept a value they "
+        "cannot see (issue #250 moved the visible surface from the schema's "
+        f"fields to the summary): {silent}"
     )
 
 
@@ -215,11 +238,15 @@ def test_the_write_guard_is_written_once() -> None:
     # a tool is answering for itself.
     whole_path = source + CONFIRMATION.read_text(encoding="utf-8")
 
-    for literal in ('"declined": True', '"aborted": True'):
-        assert whole_path.count(literal) == 1, (
-            f"{literal} appears {whole_path.count(literal)} times across the "
-            "write path; the refusal belongs to the one guard, not to each tool"
-        )
+    assert whole_path.count('"declined": True') == 1, (
+        "the declined refusal must be produced by the one guard, not by a tool"
+    )
+    # `aborted` is the *edit* path's refusal (issue #252): on the default path
+    # there is no field to drift, so the literal has no producer between #250 and
+    # #252. At most once, so a tool that starts answering for itself still fails.
+    assert whole_path.count('"aborted": True') <= 1, (
+        "the aborted refusal belongs to the one guard, not to each tool"
+    )
 
     assert source.count("_matches(") == 0, (
         "a tool is comparing confirmed arguments by hand again; hand over the "
@@ -232,3 +259,50 @@ def test_the_write_guard_is_written_once() -> None:
         f"guard but {len(_write_tools())} are registered: every mutating tool "
         "must confirm, compare, execute and attribute in that order"
     )
+
+
+def test_every_write_confirmation_is_one_acknowledgement() -> None:
+    """AC-238: one checkbox, for every write tool -- including a new one.
+
+    The structural half of "accepting means execute what the server derived". If
+    a tool's dialog carried a field again, the user would be back to
+    re-supplying values the tool already has, and a client could substitute
+    them. Read from the live registry, so a seventeenth write tool is covered
+    without anyone remembering to add it here (the same reason AC-75 reads the
+    registry rather than a list).
+    """
+    shapes = {
+        name: sorted(
+            resolver(
+                **{p: ARGUMENTS[p] for p in _arguments_of(resolver)}
+            ).schema.model_fields
+        )
+        for name, resolver in _write_tools().items()
+    }
+    surprising = {
+        name: fields for name, fields in shapes.items() if fields != ["confirmed"]
+    }
+    assert not surprising, (
+        "every write confirmation is one acknowledgement (issue #250); these "
+        f"carry more than `confirmed`: {surprising}"
+    )
+
+
+def test_the_list_fingerprint_covers_addresses_the_summary_cannot_show() -> None:
+    """AC-238's coverage half: a truncated preview is not the request.
+
+    The dialog names a list by its count and its first few addresses, so two
+    lists that agree on those read as the same dialog. The derived fingerprint is
+    what tells them apart -- and since #250 that is its whole job here: nobody
+    echoes it back, so nothing compares it, and it exists so the confirmation is
+    *of* that list (the comparison comes back with the edit path, #252).
+    """
+    shared = [f"https://x.example/{index}" for index in range(6)]
+    one = confirmation._fetch_work_fields("src-1", shared)
+    other = confirmation._fetch_work_fields(
+        "src-1", [*shared[:5], "https://x.example/other"]
+    )
+
+    assert one["urls"] == other["urls"], "the preview is identical by construction"
+    assert one["count"] == other["count"]
+    assert one["urls_fingerprint"] != other["urls_fingerprint"]

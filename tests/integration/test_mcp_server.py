@@ -1011,46 +1011,44 @@ async def test_confirmed_trigger_records_a_run(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_confirmation_that_does_not_match_the_request_is_aborted(
+async def test_a_client_cannot_substitute_the_source_it_asked_for(
     mcp_url: str,
 ) -> None:
-    """A confirmation of one thing must not authorise another.
+    """AC-240: the identity in the request is the identity that executes.
 
-    The client here accepts but returns a different url, which is what a
-    tampered or buggy client would do.
+    The client accepts the dialog and answers with a *different* URL, which is
+    what a tampered or buggy client looks like. Since #250 the dialog offers no
+    URL field to answer with, so there is nothing to honour: the request's own URL
+    is what gets stored. Asserted on the sources -- the invented one must not
+    exist, and the requested one must.
     """
 
-    async def _tampered(_ctx: Any, params: Any) -> Any:
+    async def _lies_about_the_url(_ctx: Any, params: Any) -> Any:
         from mcp import types
 
-        properties = (params.requested_schema or {}).get("properties", {})
-        content = {
-            name: (
-                "https://evil.example/feed"
-                if name == "url"
-                else spec.get("default", False if spec.get("type") == "boolean" else "")
-            )
-            for name, spec in properties.items()
-        }
-        return types.ElicitResult(action="accept", content=content)
-
-    async with mcp_session(mcp_url, elicitation_callback=_tampered) as session:
-        result = await session.call_tool(
-            "add_source",
-            {
-                "url": "https://honest.example/feed.xml",
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
+        return types.ElicitResult(
+            action="accept",
+            content={"confirmed": True, "url": "https://evil.example/feed"},
         )
-    payload = _payload(result)
-    assert payload.get("aborted") is True
-    assert "differ" in payload["reason"]
 
-    # Neither the honest nor the evil URL was added.
-    sources = await _call(mcp_url, "list_sources", {"limit": 50})
+    async with mcp_session(
+        mcp_url, elicitation_callback=_lies_about_the_url
+    ) as session:
+        payload = _payload(
+            await session.call_tool(
+                "add_source",
+                {
+                    "url": "https://honest.example/feed.xml",
+                    "schedule_policy": {"type": "fixed", "interval": "30m"},
+                },
+            )
+        )
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+
+    sources = await _call(mcp_url, "list_sources", {"limit": 100})
     urls = [row["canonical_url"] for row in sources["data"]]
-    assert "https://honest.example/feed.xml" not in urls
-    assert "https://evil.example/feed" not in urls
+    assert "https://evil.example/feed" not in urls, urls
+    assert "https://honest.example/feed.xml" in urls, urls
 
 
 @pytest.mark.asyncio
@@ -1230,175 +1228,95 @@ async def test_backfill_source_executes_and_reports_queued(
 
 
 @pytest.mark.asyncio
-async def test_every_write_tool_aborts_on_a_tampered_confirmation(
-    mcp_url: str,
-) -> None:
-    """A confirmation of one request must not authorise another -- for every
-    write tool, not just add_source.
+async def test_a_write_accepts_without_supplying_any_field(mcp_url: str) -> None:
+    """AC-238: accepting the dialog is the whole confirmation.
 
-    Every tool hands its confirmed fields to the same guard
-    (`app.mcp.tools.writes._guarded_write`). What this pins is a tool that stops
-    doing so, which would let a tampered client execute something the user never
-    saw. The tamper rewrites the first string field the tool asks about, so the
-    comparison for that tool is exercised; the tools share one implementation,
-    so this is a sweep over the arguments rather than over one copy per tool.
-    Like the refusal sweep, it checks its list against the live registry so a
-    new write tool cannot be left out (issue #125).
+    The form used to echo every derived field back for the user to read and
+    re-supply; the default path now asks one question and executes what the
+    server derived (issue #250). `set_source_folder` is the observable here: the
+    requested folder is what a later read must report, and the audit row still
+    names the endpoint and the actor -- the same two facts as before.
     """
-    # (tool, args, field the tamper will flip)
-    cases: list[tuple[str, dict[str, Any], str]] = [
-        (
-            "add_source",
-            {
-                "url": "https://tamper-add.example/feed",
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-            "url",
-        ),
-        (
-            "update_schedule_policy",
-            {
-                "source_id": "src-1",
-                "schedule_policy": {"type": "fixed", "interval": "1h"},
-            },
-            "source_id",
-        ),
-        ("set_source_status", {"source_id": "src-1", "status": "paused"}, "status"),
-        ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}, "folder"),
-        ("trigger_job", {"source_id": "src-1"}, "source_id"),
-        ("retry_enrichments", {"source_id": "src-1"}, "source_id"),
-        ("backfill_source", {"source_id": "src-1"}, "source_id"),
-        # `item_id` is this tool's only string argument; the change it confirms
-        # is derived from the booleans beside it.
-        ("set_item_read_state", {"item_id": "it-1", "is_read": True}, "item_id"),
-        ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}, "status"),
-        ("remove_source", {"source_id": "src-1"}, "source_id"),
-        (
-            "add_sources",
-            {
-                "urls": ["https://tamper-batch.example/feed"],
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-            "urls",
-        ),
-        (
-            "fetch_source_items",
-            {"source_id": "src-1", "urls": ["https://tamper-items.example/1"]},
-            "urls",
-        ),
-        (
-            "set_source_pipeline_chain",
-            {
-                "source_id": "src-1",
-                "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
-            },
-            "source_id",
-        ),
-        ("delete_items", {"item_ids": ["it-1"]}, "item_ids"),
-        ("delete_source_items", {"source_id": "src-1"}, "source_id"),
-        (
-            "submit_items",
-            {"source_id": "src-1", "items": [_submitted_item()]},
-            "source_id",
-        ),
-    ]
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
 
-    # Same completeness check as the refusal sweep above: a write tool missing
-    # from this list would never be shown to abort under a tampered
-    # confirmation, and the hand-written list had already drifted (issue #125).
-    async with mcp_session(mcp_url) as session:
-        registered = {tool.name: tool for tool in (await session.list_tools()).tools}
-    writes = {
-        name
-        for name, tool in registered.items()
-        if tool.annotations is not None and tool.annotations.read_only_hint is False
-    }
-    swept = {tool for tool, _, _ in cases}
-    assert swept == writes, (
-        "the sweep must cover exactly the tools the server registers as writes: "
-        f"missing {sorted(writes - swept)}, not writes {sorted(swept - writes)}"
-    )
-
-    def _tampering(field: str) -> Any:
-        async def _cb(_ctx: Any, params: Any) -> Any:
-            from mcp import types
-
-            properties = (params.requested_schema or {}).get("properties", {})
-            content = {
-                name: (
-                    "tampered-value"
-                    if name == field and spec.get("type") != "boolean"
-                    else spec.get(
-                        "default", False if spec.get("type") == "boolean" else ""
-                    )
-                )
-                for name, spec in properties.items()
-            }
-            return types.ElicitResult(action="accept", content=content)
-
-        return _cb
-
-    for tool, args, field in cases:
-        async with mcp_session(
-            mcp_url, elicitation_callback=_tampering(field)
-        ) as session:
-            result = await session.call_tool(tool, args)
-        payload = _payload(result)
-        assert payload.get("aborted") is True, (tool, payload)
-        assert "differ" in payload["reason"], (tool, payload)
-
-    # And nothing was applied: src-1 is still active, the tampered URLs were
-    # not added, and rss is still enabled. Asserted per-item rather than by
-    # exact list, because the module database is shared and other tests leave
-    # sources behind.
-    sources = await _call(mcp_url, "list_sources", {"limit": 50})
-    src1 = next(row for row in sources["data"] if row["id"] == "src-1")
-    assert src1["status"] == "active", src1
-    assert not any("tamper-add" in row["canonical_url"] for row in sources["data"]), (
-        "the tampered URL must not have been added"
-    )
-    plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
-    assert next(r for r in plugins["data"] if r["id"] == "rss")["status"] == "enabled"
-
-
-@pytest.mark.asyncio
-async def test_add_source_can_file_the_subscription_into_a_folder(
-    mcp_url: str,
-) -> None:
-    """One call subscribes and files it, instead of add-then-move.
-
-    Categorising a batch of subscriptions is an agent's job, and every extra
-    round trip is a second confirmation dialog for the same intent.
-    """
     payload = await _call(
         mcp_url,
-        "add_source",
-        {
-            "url": "https://plain.example/foldered.xml",
-            "schedule_policy": {"type": "fixed", "interval": "30m"},
-            "folder": "阅读",
-        },
+        "set_source_folder",
+        {"source_id": source_id, "folder": "阅读"},
         confirm=True,
     )
     assert payload.get("declined") is None and payload.get("aborted") is None, payload
-    assert payload["folder"] == "阅读", payload
-    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+
+    source = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert source["folder"] == "阅读", source
 
 
 @pytest.mark.asyncio
-async def test_add_source_without_a_folder_uses_the_default(mcp_url: str) -> None:
-    """Omitting it is not "no folder": the API's default applies."""
-    payload = await _call(
-        mcp_url,
-        "add_source",
-        {
-            "url": "https://plain.example/unfoldered.xml",
-            "schedule_policy": {"type": "fixed", "interval": "30m"},
-        },
-        confirm=True,
-    )
-    assert payload["folder"] == "default", payload
-    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+async def test_extra_fields_do_not_change_what_executes(mcp_url: str) -> None:
+    """AC-240: a client cannot substitute values the dialog never offered.
+
+    The schema carries one acknowledgement, so a client that answers with
+    additional "fields" is answering a form that does not exist: the tool
+    executes the values it derived from its own arguments. Asserted on the
+    effect, not on the response -- `folder` must be the requested one and the
+    status untouched, whatever the client claimed.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+
+    async def _answers_with_junk(_ctx: Any, params: Any) -> Any:
+        from mcp import types
+
+        return types.ElicitResult(
+            action="accept",
+            content={
+                "confirmed": True,
+                "folder": "evil",
+                "status": "paused",
+                "source_id": "somebody-elses-source",
+            },
+        )
+
+    async with mcp_session(mcp_url, elicitation_callback=_answers_with_junk) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
+            )
+        )
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+
+    source = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert source["folder"] == "阅读", source
+    assert source["status"] == before["status"], source
+
+
+@pytest.mark.asyncio
+async def test_unchecking_the_acknowledgement_declines_the_write(mcp_url: str) -> None:
+    """AC-239: the checkbox is the answer, so unchecking it is a refusal.
+
+    A client that accepts the dialog but answers `confirmed: false` has declined,
+    and the write must not happen: no folder change, and no Core API row for the
+    endpoint (the refusal is answered at the tool layer, which is what makes
+    "there is an audit row" mean "something reached the API").
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+
+    async def _unchecked(_ctx: Any, params: Any) -> Any:
+        from mcp import types
+
+        return types.ElicitResult(action="accept", content={"confirmed": False})
+
+    async with mcp_session(mcp_url, elicitation_callback=_unchecked) as session:
+        payload = _payload(
+            await session.call_tool(
+                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
+            )
+        )
+    assert payload.get("declined") is True, payload
+
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["folder"] == before["folder"], after
 
 
 # --------------------------------------------------------------------------
@@ -1465,33 +1383,37 @@ async def test_delete_items_takes_the_ids_it_was_given(
 
 
 @pytest.mark.asyncio
-async def test_delete_items_aborts_when_the_ids_drift(mcp_url: str) -> None:
-    """The confirmation is a check, not a formality.
+async def test_a_client_cannot_add_ids_to_a_delete(
+    mcp_url: str, mcp_env: dict[str, str]
+) -> None:
+    """AC-240: the ids that execute are the ids the tool was called with.
 
-    A client returning different ids than the tool was called with must not
-    have those substituted for the request -- that is how a confirmation
-    dialog becomes an injection point into a destructive call.
+    A client answering the dialog with ids of its own choosing is answering a form
+    that no longer exists (issue #250). The ledger is the observable: the work's
+    targets are exactly the requested ones, so an invented id was never looked at
+    -- which is the injection this used to guard against with a field comparison.
     """
-    from mcp import types
 
-    async def _lie(_ctx: Any, params: Any) -> Any:
-        properties = (params.requested_schema or {}).get("properties", {})
-        content = {
-            name: (
-                spec.get("default", False)
-                if spec.get("type") == "boolean"
-                else spec.get("default", "")
-            )
-            for name, spec in properties.items()
-        }
-        content["item_ids"] = "someone-elses-item"
-        return types.ElicitResult(action="accept", content=content)
+    async def _adds_an_id(_ctx: Any, params: Any) -> Any:
+        from mcp import types
 
-    async with mcp_session(mcp_url, elicitation_callback=_lie) as session:
-        result = _payload(
+        return types.ElicitResult(
+            action="accept",
+            content={"confirmed": True, "item_ids": "someone-elses-item"},
+        )
+
+    async with mcp_session(mcp_url, elicitation_callback=_adds_an_id) as session:
+        payload = _payload(
             await session.call_tool("delete_items", {"item_ids": ["it-1"]})
         )
-    assert result.get("aborted") is True, result
+    assert payload.get("declined") is None and payload.get("aborted") is None, payload
+    assert payload.get("work_id"), payload
+
+    # The targets are the ledger's, and the ledger is written by the worker: run
+    # the work the tool answered with before reading it.
+    await run_work_to_completion(mcp_env, payload["work_id"])
+    units = await _call(mcp_url, "work_units", {"work_id": payload["work_id"]})
+    assert [row["target"] for row in units["data"]] == ["it-1"], units
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,6 @@ import pytest
 
 from app.mcp.confirmation import (
     _items_fingerprint,
-    _matches,
     _submit_items_confirmation,
 )
 
@@ -66,21 +65,28 @@ def test_a_body_only_change_produces_a_different_fingerprint() -> None:
 
 
 @pytest.mark.unit
-def test_the_fingerprint_is_what_would_refuse_the_drift() -> None:
-    """The pair the tool actually runs: compare the confirmed value to the batch.
+def test_the_fingerprint_tells_two_batches_apart_in_the_confirmation() -> None:
+    """The batches that look identical by title are different requests.
 
-    Mirrors `submit_items`' check without invoking the tool: the value the
-    resolver put in the schema (what the user saw) against the fingerprint of
-    the batch about to execute.
+    And they are shown as different ones.
+
+    Before #250 the fingerprint was the value the *client* echoed back and
+    `_matches` refused the drifted batch. The default path has no field to echo
+    any more (issue #250), so there is nothing to refuse: what the fingerprint
+    has to do now is make the two batches *visible* as different requests,
+    because the user cannot read the bodies.
     """
     confirmed = _batch("<p>one</p>", "<p>two</p>")
     drifted = _batch("<p>EVIL</p>", "<p>EVIL</p>")
 
     marker = _submit_items_confirmation("src-1", confirmed)
-    seen = marker.schema.model_fields["items_fingerprint"].default
+    other = _submit_items_confirmation("src-1", drifted)
 
-    assert _matches(seen, _items_fingerprint(confirmed)), "the same batch must pass"
-    assert not _matches(seen, _items_fingerprint(drifted)), "drift must be refused"
+    assert marker.fields["items_fingerprint"] == _items_fingerprint(confirmed)
+    assert marker.fields["items_fingerprint"] != other.fields["items_fingerprint"]
+    assert marker.message != other.message, (
+        "two batches whose bodies differ must not read as the same request"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -141,9 +147,13 @@ def test_the_confirmation_carries_both_the_human_titles_and_the_fingerprint() ->
     alone is not a confirmation anyone can read.
     """
     batch = _batch("<p>one</p>", "<p>two</p>")
-    fields = _submit_items_confirmation("src-1", batch).schema.model_fields
+    marker = _submit_items_confirmation("src-1", batch)
 
-    assert fields["titles"].default == "T0; T1"
-    assert fields["items_fingerprint"].default == _items_fingerprint(batch)
+    assert marker.fields["titles"] == "T0; T1"
+    assert marker.fields["items_fingerprint"] == _items_fingerprint(batch)
     # The count remains, as the cheap first gate.
-    assert fields["item_count"].default == "2"
+    assert marker.fields["item_count"] == "2"
+    # And the two that the digest exists for are in the line the user reads:
+    # #250 moved the visible surface from the schema's fields to the summary.
+    assert "T0; T1" in marker.message
+    assert _items_fingerprint(batch) in marker.message

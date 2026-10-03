@@ -25,11 +25,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, cast
+from typing import Any
 
 from mcp.server.mcpserver.context import Context
 from mcp.server.mcpserver.resolve import Elicit
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field
 
 from app.collector_registry import infer_source_type
 from core.folders import DEFAULT_FOLDER
@@ -47,17 +47,40 @@ _ABORTED_REASON = "confirmed arguments differ from requested"
 
 
 class Confirmation(BaseModel):
-    """The elicited acknowledgement for a write.
+    """The elicited acknowledgement for a write: one value, no field-by-field echo.
 
-    The fields mirror the real arguments so the confirmation is of the same
-    request that gets executed. A confirmation that merely says "are you sure"
-    while executing different values is a rubber stamp, not a check.
+    It used to carry every derived field, and the user had to read (and
+    implicitly re-supply) each one. That put the whole shape of the request in
+    front of the user every time, and the values were never theirs to edit on
+    this path anyway: the tool executes what the server derived. One
+    acknowledgement says the same thing in one round (issue #250).
+
+    The default is `true` so that accepting the dialog without touching it means
+    proceed, and only an explicit uncheck cancels. The values that execute are
+    not part of this schema: they come from the tool's own `_<tool>_fields`, and
+    the summary above the checkbox names them.
     """
 
     confirmed: bool = Field(
-        default=False,
-        description="Set true to proceed. Anything else cancels the operation.",
+        default=True,
+        description="Leave checked to proceed. Uncheck to cancel the operation.",
     )
+
+
+class _Confirmation(Elicit[Any]):
+    """An `Elicit` that also carries the fields it was derived from.
+
+    The schema no longer echoes them (issue #250), so this is how the structural
+    guard can still ask "does the confirmation cover what executes?" without a
+    second, hand-written table of which function derives which tool's fields --
+    the same reason the guard reads the registry instead of a list.
+    """
+
+    def __init__(
+        self, message: str, schema: type[Confirmation], fields: dict[str, Any]
+    ) -> None:
+        super().__init__(message, schema)
+        self.fields = fields
 
 
 def _render(value: Any) -> str:
@@ -130,38 +153,32 @@ def _comma_join(values: list[str]) -> str:
 
 
 def _confirmation_schema(fields: dict[str, Any]) -> type[Confirmation]:
-    """Build an elicitation schema prefilled with the values about to run.
+    """The elicitation schema for a write: the acknowledgement, nothing else.
 
-    Elicitation sends a *schema*, not values: the client returns whatever the
-    user filled in. Seeding each field with the real argument means the user
-    confirms or edits the actual request rather than retyping it, and the
-    `_matches` check downstream still refuses anything that drifted.
+    Elicitation sends a *schema*, and the client returns what the user filled
+    in. Rendering every derived field meant the user read the whole request back
+    on every write (issue #250); the fields that execute are named in the
+    `message` above this checkbox instead, and the edit path (#252) asks about
+    one field at a time.
 
-    Fields are primitives only. MCP renders an elicitation schema from primitive
-    types, and a nested object there raises TypeError at render time — which is
-    why a schedule policy travels as its canonical JSON text.
+    `fields` is still the argument the confirmation is *about*: the same dict the
+    tool's `_<tool>_fields` produced, which the summary is built from and which
+    the guard checks the coverage of. It is no longer rendered, and it is not
+    compared field-by-field any more either -- see `_write_verdict` for why that
+    comparison has nothing left to protect.
+
+    Fields are primitives only, when they are rendered at all: MCP renders an
+    elicitation schema from primitive types, and a nested object there raises
+    TypeError at render time — which is why a schedule policy travels as its
+    canonical JSON text.
     """
-    # `confirmed` is prefilled true so that accepting the dialog without
-    # editing means proceed, and unchecking it means decline. Left at the
-    # base's default of false, a client that echoes the schema back — which is
-    # what "the user just pressed accept" looks like — would always be read as
-    # a refusal.
-    schema: dict[str, Any] = {
-        "confirmed": (bool, Field(default=True)),
-        **{
-            name: ((str if isinstance(value, str) else bool), Field(default=value))
-            for name, value in fields.items()
-        },
-    }
-    # Cast because mypy resolves `create_model`'s overloads against literal
-    # keyword arguments and cannot see through `**schema`.
-    return cast(
-        "type[Confirmation]",
-        create_model("WriteConfirmation", __base__=Confirmation, **schema),
-    )
+    del fields
+    return Confirmation
 
 
-def _asked(model: type[Confirmation], message: str) -> Elicit[Any]:
+def _asked(
+    model: type[Confirmation], message: str, fields: dict[str, Any] | None = None
+) -> _Confirmation:
     """The confirmation question, as a resolver result.
 
     Returned from a `Resolve`d parameter so the framework decides how to ask:
@@ -176,24 +193,22 @@ def _asked(model: type[Confirmation], message: str) -> Elicit[Any]:
     framework passes to it by name. That is the reason each resolver below is a
     small function of the arguments rather than a closure over local state.
     """
-    return Elicit(message, model)
+    return _Confirmation(message, model, dict(fields or {}))
 
 
-def _confirm_resolver(**kwargs: Any) -> Elicit[Any]:
-    """Ask for confirmation of one write, with the arguments prefilled.
+def _confirm_resolver(**kwargs: Any) -> _Confirmation:
+    """Ask for confirmation of one write, with the request named in words.
 
-    Every write tool's confirmation runs through this: the message names the
-    write and the schema carries the values about to execute, so the user
-    confirms the actual request rather than retyping it. `_matches` still
-    refuses anything that drifted, which is what makes the dialog a
-    confirmation rather than a formality.
-
-    `_summary` and `_fields` are computed by each tool's own resolver from the
-    tool arguments; they are popped here so they never reach the schema.
+    Every write tool's confirmation runs through this: the summary names the
+    write and the values about to execute, and the schema carries the one
+    acknowledgement that accepts them. `_summary` and `_fields` are computed by
+    each tool's own resolver from the tool arguments; the fields travel on the
+    result (`_Confirmation`) rather than in the dialog, so a structural guard can
+    still check that the summary covers everything that executes.
     """
     summary = kwargs.pop("_summary")
     fields = kwargs.pop("_fields")
-    return _asked(_confirmation_schema(fields), summary)
+    return _asked(_confirmation_schema(fields), summary, fields)
 
 
 def _registry_from_context(ctx: Context | None) -> Any:
@@ -249,7 +264,7 @@ def _add_source_confirmation(
     target_lang: str = "",
     folder: str = "",
     ctx: Context | None = None,
-) -> Elicit[Any]:
+) -> _Confirmation:
     """The add_source question: names the source and prefills every argument.
 
     `ctx` is injected by the SDK, and is how the "auto" type inference asks the
@@ -335,7 +350,7 @@ def _add_sources_confirmation(
     folder: str = "",
     trust_level: str = "standard",
     parser_plugin_id: str = "",
-) -> Elicit[Any]:
+) -> _Confirmation:
     """The add_sources question: one dialog for the whole batch."""
     fields = _add_sources_fields(
         urls,
@@ -351,7 +366,14 @@ def _add_sources_confirmation(
         _summary=(
             f"Add {fields['count']} source(s) as {fields['type']} with policy "
             f"{fields['schedule_policy']} and folder "
-            f"{fields['folder'] or DEFAULT_FOLDER}? {fields['urls']}"
+            f"{fields['folder'] or DEFAULT_FOLDER}?"
+            # The batch options are part of what executes, so they are part of
+            # what the user is shown: a dialog that named only the count and the
+            # policy asked the user to accept a chain and a trust level unseen
+            # (issue #250's sweep found exactly this).
+            f" Chain {fields['pipeline_chain']}, lang "
+            f"{fields['target_lang'] or 'none'}, trust {fields['trust_level']}, "
+            f"parser {fields['parser_plugin_id'] or 'auto'}. {fields['urls']}"
         ),
         _fields=fields,
     )
@@ -401,7 +423,7 @@ def _fetch_work_confirmation(
     urls: list[str],
     batch_size: int = 0,
     min_interval_seconds: float = 0.0,
-) -> Elicit[Any]:
+) -> _Confirmation:
     """The fetch_source_items question: one dialog for the whole batch.
 
     The summary says *job* because that is what the caller is agreeing to: the
@@ -432,7 +454,7 @@ def _update_schedule_policy_fields(
 
 def _update_schedule_policy_confirmation(
     source_id: str, schedule_policy: dict[str, Any]
-) -> Elicit[Any]:
+) -> _Confirmation:
     fields = _update_schedule_policy_fields(source_id, schedule_policy)
     return _confirm_resolver(
         _summary=f"Set source {source_id} schedule to {fields['schedule_policy']}?",
@@ -445,7 +467,7 @@ def _set_source_status_fields(source_id: str, status: str) -> dict[str, Any]:
     return {"source_id": source_id, "status": status}
 
 
-def _set_source_status_confirmation(source_id: str, status: str) -> Elicit[Any]:
+def _set_source_status_confirmation(source_id: str, status: str) -> _Confirmation:
     fields = _set_source_status_fields(source_id, status)
     return _confirm_resolver(
         _summary=f"Set source {fields['source_id']} status to {fields['status']}?",
@@ -458,7 +480,7 @@ def _set_source_folder_fields(source_id: str, folder: str) -> dict[str, Any]:
     return {"source_id": source_id, "folder": folder}
 
 
-def _set_source_folder_confirmation(source_id: str, folder: str) -> Elicit[Any]:
+def _set_source_folder_confirmation(source_id: str, folder: str) -> _Confirmation:
     fields = _set_source_folder_fields(source_id, folder)
     return _confirm_resolver(
         _summary=f"Move source {fields['source_id']} to folder {fields['folder']}?",
@@ -497,7 +519,7 @@ def _set_item_read_state_fields(
 
 def _set_item_read_state_confirmation(
     item_id: str, is_read: bool | None, is_starred: bool | None
-) -> Elicit[Any]:
+) -> _Confirmation:
     fields = _set_item_read_state_fields(item_id, is_read, is_starred)
     return _confirm_resolver(
         _summary=f"Set item {fields['item_id']} read state to {fields['change']}?",
@@ -510,7 +532,7 @@ def _trigger_job_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _trigger_job_confirmation(source_id: str) -> Elicit[Any]:
+def _trigger_job_confirmation(source_id: str) -> _Confirmation:
     fields = _trigger_job_fields(source_id)
     return _confirm_resolver(
         _summary=f"Fetch source {fields['source_id']} now?",
@@ -523,7 +545,7 @@ def _backfill_source_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _backfill_source_confirmation(source_id: str) -> Elicit[Any]:
+def _backfill_source_confirmation(source_id: str) -> _Confirmation:
     fields = _backfill_source_fields(source_id)
     return _confirm_resolver(
         _summary=f"Backfill processing products for source {fields['source_id']}?",
@@ -545,7 +567,7 @@ def _retry_enrichments_fields(
 
 def _retry_enrichments_confirmation(
     enrichment_id: str = "", source_id: str = ""
-) -> Elicit[Any]:
+) -> _Confirmation:
     fields = _retry_enrichments_fields(enrichment_id, source_id)
     if fields["enrichment_id"]:
         target = f"processing-chain row {fields['enrichment_id']}"
@@ -558,9 +580,13 @@ def _retry_enrichments_confirmation(
         # is wrong rather than claiming to retry "source ''".
         target = "nothing: no enrichment_id and no source_id were given"
     return _confirm_resolver(
+        # Both ids, because both are what the tool was given: when they are, the
+        # row wins and the source is ignored, and a dialog that showed only the
+        # winner would let a caller accept a value it cannot see (issue #250).
         _summary=(
-            f"Requeue {target}? The worker charges the provider again for "
-            "whatever it retries."
+            f"Requeue {target}? (enrichment_id={fields['enrichment_id'] or '-'}, "
+            f"source_id={fields['source_id'] or '-'}) The worker charges the "
+            "provider again for whatever it retries."
         ),
         _fields=fields,
     )
@@ -601,7 +627,7 @@ def ingest_targets(items: list[dict[str, Any]]) -> list[str]:
 
 def _submit_items_confirmation(
     source_id: str, items: list[dict[str, Any]]
-) -> Elicit[Any]:
+) -> _Confirmation:
     """The submit_items question: names the target and what will land in it.
 
     Item titles are listed rather than bodies: a prompt the user cannot read
@@ -614,7 +640,11 @@ def _submit_items_confirmation(
     return _confirm_resolver(
         _summary=(
             f"Push {len(items)} item(s) into agent source {source_id}? "
-            f"{fields['titles']}"
+            # The fingerprint is the field that covers the bodies: two batches
+            # can share a count and every title, so a summary that stopped at the
+            # titles would ask the user to accept content it never showed
+            # (issue #250's sweep found exactly this).
+            f"{fields['titles']} (fingerprint {fields['items_fingerprint']})"
         ),
         _fields=fields,
     )
@@ -642,7 +672,7 @@ def _set_source_pipeline_chain_confirmation(
     source_id: str,
     pipeline_chain: list[dict[str, Any]],
     target_lang: str = "",
-) -> Elicit[Any]:
+) -> _Confirmation:
     """The chain question: says what will run, because that is what it costs.
 
     Unlike a status or a folder, this decides whether items are held at the gate
@@ -666,7 +696,7 @@ def _set_plugin_status_fields(plugin_id: str, status: str) -> dict[str, Any]:
     return {"plugin_id": plugin_id, "status": status}
 
 
-def _set_plugin_status_confirmation(plugin_id: str, status: str) -> Elicit[Any]:
+def _set_plugin_status_confirmation(plugin_id: str, status: str) -> _Confirmation:
     fields = _set_plugin_status_fields(plugin_id, status)
     return _confirm_resolver(
         _summary=f"Set plugin {fields['plugin_id']} status to {fields['status']}?",
@@ -679,7 +709,7 @@ def _remove_source_fields(source_id: str) -> dict[str, Any]:
     return {"source_id": source_id}
 
 
-def _remove_source_confirmation(source_id: str) -> Elicit[Any]:
+def _remove_source_confirmation(source_id: str) -> _Confirmation:
     """The source-deletion question.
 
     Every other confirmation here can be "do X?" with the arguments prefilled,
@@ -719,7 +749,7 @@ def _delete_items_fields(item_ids: list[str]) -> dict[str, Any]:
     }
 
 
-def _delete_items_confirmation(item_ids: list[str]) -> Elicit[Any]:
+def _delete_items_confirmation(item_ids: list[str]) -> _Confirmation:
     listed = ", ".join(item_ids[:5])
     if len(item_ids) > 5:
         listed += f", and {len(item_ids) - 5} more"
@@ -752,7 +782,7 @@ def _delete_source_items_confirmation(
     since: str = "",
     until: str = "",
     include_published: bool = True,
-) -> Elicit[Any]:
+) -> _Confirmation:
     window = ""
     if since or until:
         window = f" published between {since or 'the start'} and {until or 'now'}"
@@ -817,12 +847,15 @@ def _write_verdict(confirmed: Any, fields: dict[str, Any]) -> dict[str, Any] | N
     A missing or null confirmed field counts as drift rather than raising: the
     answer came from a client, and a client that omits a field has not confirmed
     it.
+
+    There is no field comparison left on this path (issue #250): the values that
+    execute are the ones the server derived, so a client cannot substitute
+    different ones -- the dialog offers no field to substitute, and anything it
+    invents is not read at all. `fields` stays in the signature because the
+    *edit* path (#252) does compare the one value the user supplied.
     """
     values = _confirmation_verdict(confirmed)
     if values is None:
         return {"declined": True, "reason": _DECLINED_REASON}
-    for name, executed in fields.items():
-        confirmed_value = values.get(name)
-        if confirmed_value is None or not _matches(confirmed_value, executed):
-            return {"aborted": True, "reason": _ABORTED_REASON}
+    del fields
     return None

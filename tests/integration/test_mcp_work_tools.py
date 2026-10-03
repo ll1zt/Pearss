@@ -313,47 +313,15 @@ async def test_the_dialog_names_the_list_once(
     result = reply["result"]
     assert len(result["inputRequests"]) == 1, result
     only = next(iter(result["inputRequests"].values()))
-    assert "2" in only["params"]["message"], only["params"]["message"]
-    properties = only["params"]["requestedSchema"]["properties"]
-    # The list itself cannot ride a form, so the fingerprint is what makes the
-    # dialog a confirmation *of* that list rather than of its length.
-    assert "urls_fingerprint" in properties, properties
-    assert properties["urls_fingerprint"]["default"] != properties["count"]["default"]
-
-
-@pytest.mark.asyncio
-async def test_the_fingerprint_changes_when_any_address_changes(
-    base_url: str, env: dict[str, str]
-) -> None:
-    """AC-176: the dialog's fingerprint covers the list, not its length.
-
-    Both lists have the same count and the same first address, so anything
-    that pinned only those would show identical dialogs for two different
-    requests. The fingerprint is asserted to differ -- the falsifiable half of
-    "the user was shown *this* list".
-    """
-    source_id = _seed_source(env["PEARSS_DATABASE_URL"])
-
-    async def asked_fingerprint(urls: list[str]) -> str:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            reply = await _rpc(
-                client,
-                base_url,
-                {
-                    "name": "fetch_source_items",
-                    "arguments": _arguments(source_id, urls),
-                },
-                rid=1,
-            )
-        only = next(iter(reply["result"]["inputRequests"].values()))
-        properties = only["params"]["requestedSchema"]["properties"]
-        return str(properties["urls_fingerprint"]["default"])
-
-    original = await asked_fingerprint(ASKED)
-    edited = await asked_fingerprint(EDITED)
-
-    assert len(ASKED) == len(EDITED) and ASKED[0] == EDITED[0]
-    assert original != edited
+    message = only["params"]["message"]
+    # The list is named in words (count and addresses), because the form is one
+    # acknowledgement since #250. The fingerprint, which is what covers the
+    # addresses the preview truncates, is asserted against the derived fields in
+    # tests/unit/test_write_guard.py.
+    assert "2" in message, message
+    for url in ASKED:
+        assert url in message, message
+    assert set(only["params"]["requestedSchema"]["properties"]) == {"confirmed"}, only
 
 
 @pytest.mark.asyncio
