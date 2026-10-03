@@ -10,6 +10,19 @@ issue #76).
     And   对话框的**摘要**也随之变化(用户看得见的面上不留暗参数)
     And   这条断言对所有写工具成立(从真实注册表机械遍历, 不是逐个手写)
 
+  AC-241 每个写工具显式声明可编辑集, 且可编辑集 ⊆ 执行集
+    Given 真实注册表里的每个写工具
+    When  取它的可编辑集与执行参数集
+    Then  可编辑集 ⊆ 执行参数集(声明不是另写一份值)
+    And   只读参数(url/urls/type/items/item_ids/source_id/… 与 *_fingerprint)
+          不在任何可编辑集里
+    And   没有声明的工具在这里失败(声明是确认构造器的必填参数)
+
+  AC-242 破坏性工具的确认摘要保留不可逆后果
+    Given remove_source / delete_items / delete_source_items
+    When  渲染它们的确认摘要
+    Then  摘要里有明确的不可逆表述(删除内容/不可恢复)
+
   AC-76 守卫只存在一份
     Given src/app/mcp/tools/writes.py
     When  搜索 declined/aborted 的字面文本与手写比对
@@ -45,6 +58,7 @@ the shape, not a behaviour.
 from __future__ import annotations
 
 import inspect
+import re
 import typing
 from pathlib import Path
 from typing import Any
@@ -306,3 +320,86 @@ def test_the_list_fingerprint_covers_addresses_the_summary_cannot_show() -> None
     assert one["urls"] == other["urls"], "the preview is identical by construction"
     assert one["count"] == other["count"]
     assert one["urls_fingerprint"] != other["urls_fingerprint"]
+
+
+# --------------------------------------------------------------------------
+# AC-241 / AC-242: what the user may edit, and what must stay uneditable
+# --------------------------------------------------------------------------
+
+# The arguments that name the request rather than configure it: an identity or a
+# target. Changing one of those is a different request, not an edit of this one,
+# so the caller re-issues -- which is why no tool may offer them for editing
+# (issue #251). `type` is in the list because it is inferred from the URL.
+READ_ONLY_ARGUMENTS = frozenset(
+    {
+        "kind",
+        "url",
+        "urls",
+        "type",
+        "items",
+        "item_ids",
+        "item_id",
+        "source_id",
+        "plugin_id",
+        "enrichment_id",
+    }
+)
+
+IRREVERSIBLE = re.compile(
+    r"cannot be undone|not reversible|permanent|不可逆", re.IGNORECASE
+)
+
+
+def _marker_for(name: str) -> Any:
+    """The confirmation a tool would raise, with its arguments and its fields."""
+    resolver = _write_tools()[name]
+    return resolver(**{p: ARGUMENTS[p] for p in _arguments_of(resolver)})
+
+
+def test_every_write_tool_declares_what_the_user_may_edit() -> None:
+    """AC-241: the editable set exists, is inside the executed set, and is small.
+
+    The default path is one acknowledgement (issue #250); the *edit* path (#252)
+    needs to know which parameters it may offer, and a tool that forgot to say
+    would have to be found by reading it. Declaring is therefore not optional: it
+    is a required argument of the one confirmation builder, so a tool that omits
+    it fails here rather than in review.
+    """
+    outside: list[str] = []
+    read_only: list[str] = []
+    for name, resolver in _write_tools().items():
+        arguments = {p: ARGUMENTS[p] for p in _arguments_of(resolver)}
+        marker = resolver(**arguments)
+        for field in marker.editable:
+            if field not in arguments:
+                outside.append(f"{name}({field})")
+            if field in READ_ONLY_ARGUMENTS or field.endswith("_fingerprint"):
+                read_only.append(f"{name}({field})")
+    assert not outside, (
+        "these editable fields are not arguments of their tool, so editing them "
+        f"would execute something the caller never sent: {outside}"
+    )
+    assert not read_only, (
+        "these are identities or targets, not settings: changing one is a "
+        f"different request, so the caller re-issues instead of editing: {read_only}"
+    )
+
+
+def test_destructive_confirmations_still_say_what_cannot_be_undone() -> None:
+    """AC-242: a shorter dialog must not be a softer one.
+
+    Already correct when this was written, and pinned as such: the three
+    destructive tools' summaries say "cannot be undone" and name what goes with
+    the rows. The risk is a future simplification pass -- this one (#250) cut the
+    form, not the wording -- quietly dropping the sentence that makes the
+    consequence legible.
+    """
+    missing: list[str] = []
+    for name in ("remove_source", "delete_items", "delete_source_items"):
+        message = str(_marker_for(name).message)
+        if not IRREVERSIBLE.search(message):
+            missing.append(f"{name}: {message!r}")
+    assert not missing, (
+        "the destructive confirmations must name the consequence they cannot "
+        f"take back: {missing}"
+    )
