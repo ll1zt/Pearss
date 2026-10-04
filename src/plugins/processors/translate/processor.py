@@ -877,15 +877,28 @@ _MARKER = re.compile(r"\[\[(?P<index>\d+)\]\](?P<inner>[^\[\]]*)\[\[/(?P=index)\
 # whose shell has an empty close tag and leaves the rest for the paired pass.
 _VOID_MARKER = re.compile(r"\[\[(\d+)\]\]")
 
+# The one void element whose loss is content loss rather than a lost tag
+# (ADR 0054): an `<img>` a provider dropped is appended to the block, while a
+# dropped `br`/`wbr`/`hr` marker still loses only layout.
+_IMG_TAG = re.compile(r"<img\b", re.IGNORECASE)
+
 
 def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
     """Wrap each marked span in its original tag, and re-place void elements.
 
-    A marker the provider dropped, duplicated or unbalanced is dropped from the
-    output rather than guessed at: the translated *text* is the part that
-    matters, and a misplaced link is worse than a missing tag. The prose
+    A *paired* marker the provider dropped, duplicated or unbalanced is dropped
+    from the output rather than guessed at: the translated *text* is the part
+    that matters, and a misplaced link is worse than a missing tag. The prose
     survives either way, and this is the only failure mode here -- it cannot
     corrupt the text.
+
+    An `img` is the exception (ADR 0054). It is content, not a tag wrapped
+    around text, so a dropped image marker does not take the picture with it:
+    the element is appended to the block, which keeps both the translation and
+    the image. Where it belonged cannot be known -- the provider translated the
+    text around it away -- and the end of the block is where a void element can
+    sit without cutting a sentence. The other voids (`br`/`wbr`/`hr`) carry
+    layout, so a dropped marker still loses them (ADR 0031 section 47, AC-146).
 
     Void elements (`br`/`wbr`/`img`/`hr`) are restored from the same `shells`
     table as paired markers; the empty close tag is the only thing telling the
@@ -895,6 +908,10 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
     if not shells:
         return text
     result = text
+    # Which void shells were actually emitted, so the fallback below appends
+    # only the ones the provider left out -- and never a second copy of one it
+    # kept.
+    emitted: set[int] = set()
     # Each pass resolves the innermost markers only, so a nested pair
     # (`<a><strong>x</strong></a>`) needs one pass per level; 8 levels of
     # inline nesting is far past anything a feed produces. The void pass runs
@@ -913,6 +930,10 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
                 return inner
             open_tag, close_tag = shells[index]
             replaced = True
+            if close_tag == "":
+                # The provider closed a void marker: the element is emitted
+                # here, so the fallback must not add a second one.
+                emitted.add(index)
             return f"{open_tag}{inner}{close_tag}"
 
         result = _MARKER.sub(_sub, result)
@@ -922,6 +943,7 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
             index = int(match.group(1))
             if index < len(shells) and shells[index][1] == "":
                 replaced = True
+                emitted.add(index)
                 return shells[index][0]
             # A paired marker's opening (close tag non-empty): leave it for
             # the paired pass, or for the final strip when its close never came.
@@ -932,7 +954,14 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
             break
     # Any marker left over (unbalanced, or an index the provider invented) is
     # stripped so no `[[0]]` reaches the reader.
-    return _LEFTOVER_MARKER.sub("", result)
+    result = _LEFTOVER_MARKER.sub("", result)
+    return result + "".join(
+        open_tag
+        for index, (open_tag, close_tag) in enumerate(shells)
+        if close_tag == ""
+        and index not in emitted
+        and _IMG_TAG.match(open_tag) is not None
+    )
 
 
 _LEFTOVER_MARKER = re.compile(r"\[\[/?\d+\]\]")

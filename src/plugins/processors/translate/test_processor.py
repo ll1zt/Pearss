@@ -2246,3 +2246,145 @@ def test_a_marker_only_segment_of_an_oversized_block_is_not_sent(
     # `译1` is the only reply, and the image is still there: the marker-only
     # segment was skipped on the way out and put back on the way in.
     assert product == ('<p>译1\n\n<img src="https://img.example/i.png"></p>'), product
+
+
+# --------------------------------------------------------------------------
+# A void marker the provider dropped (issue #265, ADR 0054)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #265):
+#
+#   AC-255 模型丢掉 img 标记时图片追加到块尾; 排版类 void (br/wbr/hr) 不变;
+#          已保留的标记不重复
+#
+# ADR 0031 section 47 drops a marker the provider lost rather than guessing at
+# it, and AC-146 pins that for a `<br>`. An `<img>` is not a tag wrapped around
+# text but content of its own, so dropping it deletes the picture with nothing
+# said. Measured before this change, `<p>See <img src="x.png"/> above</p>` with
+# a reply that omitted `[[0]]` produced `<p>看上面</p>`. ADR 0054 splits the two
+# kinds: an `img` the provider dropped is appended to the block, and the layout
+# voids (`br`/`wbr`/`hr`) are still dropped.
+# --------------------------------------------------------------------------
+
+
+def _reply_provider(monkeypatch: pytest.MonkeyPatch, reply: str) -> list[str]:
+    """Configure a provider that answers every request with `reply`."""
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    seen: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        body = kwargs.get("json")
+        user = body["messages"][1]["content"] if isinstance(body, dict) else ""
+        seen.append(str(user))
+        return httpx.Response(200, json={"choices": [{"message": {"content": reply}}]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return seen
+
+
+def _product_for(
+    monkeypatch: pytest.MonkeyPatch, body: str, reply: str
+) -> tuple[str, list[str]]:
+    """Run the processor with a fixed reply; return the product and the asks."""
+    seen = _reply_provider(monkeypatch, reply)
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    ref = process(
+        {
+            "item_id": "i-265",
+            "title": "T",
+            "content": body,
+            "url": "https://blog.example/post",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+    assert ref == "cas://product"
+    return stored[0], seen
+
+
+def test_a_dropped_image_marker_keeps_the_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-255: the picture survives a reply that dropped its marker.
+
+    Measured before this change: the reply `看上面` for
+    `<p>See <img src="..."/> above</p>` produced `<p>看上面</p>` -- the image was
+    gone and nothing in the product said so.
+    """
+    product, seen = _product_for(
+        monkeypatch,
+        '<p>See <img src="https://img.example/i.png" alt="pic"/> above</p>',
+        "看上面",
+    )
+
+    assert seen == ["See [[0]] above"], seen
+    assert product == (
+        '<p>看上面<img src="https://img.example/i.png" alt="pic"></p>'
+    ), product
+
+
+def test_an_image_marker_the_provider_kept_is_not_duplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-255: the appended element is a fallback, not an addition."""
+    product, _ = _product_for(
+        monkeypatch,
+        '<p>See <img src="https://img.example/i.png" alt="pic"/> above</p>',
+        "看 [[0]] 上面",
+    )
+
+    assert product.count("<img") == 1, product
+    assert product == (
+        '<p>看 <img src="https://img.example/i.png" alt="pic"> 上面</p>'
+    ), product
+
+
+def test_a_dropped_line_break_is_still_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-255: only the *content* void is kept; the layout voids are not.
+
+    A `<br>` carries no content, so a dropped marker loses the break and keeps
+    the translation -- ADR 0031 section 47, and AC-146, unchanged by ADR 0054.
+    """
+    product, seen = _product_for(
+        monkeypatch,
+        '<p>a<br/>b<img src="https://img.example/i.png"/></p>',
+        "ab",
+    )
+
+    assert seen == ["a[[0]]b[[1]]"], seen
+    assert "<br" not in product, product
+    assert product == ('<p>ab<img src="https://img.example/i.png"></p>'), product
+
+
+def test_a_void_marker_the_provider_closed_is_not_duplicated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-255: a mangled "closed" void marker still yields one image.
+
+    A provider that writes `[[0]]text[[/0]]` around an image gives the paired
+    pass something to resolve, so the element is already in the output; the
+    fallback must not read that as "the marker was dropped" and append a second
+    copy of the same image.
+    """
+    product, _ = _product_for(
+        monkeypatch,
+        '<p>See <img src="https://img.example/i.png" alt="pic"/> above</p>',
+        "看 [[0]] 上面[[/0]]",
+    )
+
+    assert product.count("<img") == 1, product
+    assert product == (
+        '<p>看 <img src="https://img.example/i.png" alt="pic"> 上面</p>'
+    ), product

@@ -107,6 +107,7 @@ docs/adr/
 | [0051](0051-diagnose-projects-the-model-registry.md) | `:diagnose` 的模型健康格是登记表的只读投影：报 `preferred`/`skipped`/`attempts_per_model` 与**当前冷却中**模型的冷却剩余、本次冷却时长、失败次数、最近失败类别与距今秒数；只报冷却中、`preferred` 由 report 的首次出现顺序推导、不落库不缓存、时间报相对秒；落库、用配置链序、报已恢复模型、另开端点均被否决 | accepted（**ADR 0048 的出口**） | 2026-10-02 |
 | [0052](0052-block-level-progress-on-disk.md) | 块级进度落盘：运行时给每行一个 scratch 目录（`<storage>/processor-cache/<plugin>/<lang>/<item>`，经 `item_ctx["cache_dir"]`）、处理器每块成功后原子写入并在下一块前查缓存、成功后运行时删除+失败时保留；缓存的是块不是产物（净化路径照走、产物逐字节一致）、缓存不是事实源（不建表不加列）、写失败不是失败、块级并发推迟（带触发条件）；缓存做成表/由处理器自定路径/按 attempt 建目录/缓存产物/成功后保留均被否决 | accepted（**ADR 0047/0048 的续集**） | 2026-10-02 |
 | [0053](0053-write-confirmation-shape.md) | 写确认的形状：默认路径 = 1 轮（schema 只有 `confirmed`，执行值只来自服务端派生、客户端回传字段不读）、修改路径 = 两段式（受控单选 `edit` → 该字段新值 → 展示组合请求并回显，`_matches` 不符即 `aborted` 零写入）、每工具显式声明可编辑集（身份/目标不可编辑）；四段 resolver 与 `ElicitationResult` 注解让任一轮取消成为 `declined`；AC-75 判据迁移为「任一入参变化都会改变摘要」；一次改多字段、自由文本字段名、改协议、逐字段展开均被否决 | accepted（**取代 mcp-tool-guide §3 的旧呈现规则**；记录 #250/#251/#252） | 2026-10-03 |
+| [0054](0054-a-dropped-image-marker-keeps-the-image.md) | provider 丢掉的 void 标记按「内容 / 排版」分开：`img` 追加到块尾（已保留的不重复追加），`br`/`wbr`/`hr` 仍按 ADR 0031 §47 丢弃；「整块保留原文」与「按原位插回」被否决 | accepted（**部分取代 ADR 0031 §47**；记录 #265） | 2026-10-04 |
 
 ## 翻译管线战役（#227..#233）的阅读顺序
 
