@@ -17,7 +17,10 @@ tables are copied through verbatim rather than translated — a provider asked
 to translate `bpftrace -e 'kprobe:do_sys_open'` can only mangle it, and
 whitespace inside `<pre>` is code semantics that a prose round-trip destroys.
 Flattening the article to paragraphs was what left readers a wall of text with
-no headings, diagram, code or links beside an intact original (#33).
+no headings, diagram, code or links beside an intact original (#33). A block
+with no text at all -- an image-only `<p>`, a `<div>` holding only whitespace --
+is not sent either: there is nothing to translate, and asking anyway invites a
+meta-reply that lands in the product in place of the image (#264).
 
 The processor never touches the database; the worker owns the row's
 lifecycle. Failures are ProcessorError values with the standard taxonomy:
@@ -478,9 +481,15 @@ def process(
     body, units = _split_blocks(prose=source_text, markup=item_ctx.get("content", ""))
     requests: list[str] = []
     for unit in units:
-        unit_text = str(unit["text"])
-        if unit_text:
-            requests.extend(_segment(unit_text))
+        # Only the segments that carry prose are asked for. `_flatten_inline`
+        # writes a void element as a marker (#150), so an image-only block is
+        # the string `[[0]]` -- truthy, but nothing to translate; asking for it
+        # gets a meta-reply ("please provide the text") that the product then
+        # shows in place of the image (#264). Whitespace-only blocks are the
+        # same, and `_segment` can cut one out of a block that does have prose.
+        requests.extend(
+            segment for segment in _segment(str(unit["text"])) if _has_prose(segment)
+        )
     if len(requests) > 1:
         LOGGER.info(
             "item %s: %d blocks split into %d segments for translation",
@@ -791,12 +800,23 @@ def _rebuild(
     """
     cursor = 0
     for unit in units:
-        if not unit["text"]:
-            continue  # preserved node: image, code block -- left untouched
-        count = max(1, len(_segment(unit["text"])))
-        replies = translated[cursor : cursor + count]
-        cursor += count
-        _fill_unit(unit, replies)
+        if not _has_prose(unit["text"]):
+            # Nothing to translate -- an image-only or whitespace-only block
+            # (#264). No reply was asked for, so the element keeps its original
+            # content rather than being replaced by an answer to an empty
+            # question.
+            continue
+        pieces: list[str] = []
+        for segment in _segment(unit["text"]):
+            if not _has_prose(segment):
+                # A marker-only segment of an oversized block: its markers were
+                # not asked for, so they are put back verbatim. Dropping them
+                # would delete the void element they stand for.
+                pieces.append(segment)
+                continue
+            pieces.append(translated[cursor] if cursor < len(translated) else "")
+            cursor += 1
+        _fill_unit(unit, pieces)
     if body is None:
         # The fallback path: no tree to rebuild, so the replies are the
         # paragraphs and the units list holds exactly one of them.
@@ -806,22 +826,25 @@ def _rebuild(
     )
 
 
-def _fill_unit(unit: dict[str, Any], replies: list[str]) -> None:
+def _fill_unit(unit: dict[str, Any], pieces: list[str]) -> None:
     """Put one unit's translation into its element, in place.
 
-    Inline markers are restored first, so the block's links and emphasis are
-    inside the translation. A block the provider did not answer for keeps its
-    original text: that is the only outcome that cannot mislead, since a
-    borrowed neighbour's translation reads as plausible output.
+    `pieces` holds one entry per segment `_segment` produced for the unit: the
+    provider's reply for a segment with prose, and the segment's own text for a
+    marker-only one that was never asked for (#264). Blank entries are dropped,
+    which leaves a block the provider did not answer for with its original
+    text: that is the only outcome that cannot mislead, since a borrowed
+    neighbour's translation reads as plausible output.
 
-    A unit's replies are one per segment `_segment` produced, and `_segment`
-    splits on `\n\n` (its contract is that the chunks rejoin with `\n\n`);
-    joining them with `""` consumed that separator and welded the halves of an
-    oversized block into one run (issue #151). Joining with the same `\n\n`
-    puts the boundary back -- it is re-inserted here rather than trusted to the
-    provider, which trims -- and a one-reply unit is unchanged.
+    Inline markers are restored after the join, so the block's links, emphasis
+    and void elements sit inside the translation. `_segment` splits on `\n\n`
+    (its contract is that the chunks rejoin with `\n\n`); joining the pieces
+    with `""` consumed that separator and welded the halves of an oversized
+    block into one run (issue #151). Joining with the same `\n\n` puts the
+    boundary back -- it is re-inserted here rather than trusted to the provider,
+    which trims -- and a one-piece unit is unchanged.
     """
-    text = "\n\n".join(reply.strip() for reply in replies if reply.strip())
+    text = "\n\n".join(piece.strip() for piece in pieces if piece.strip())
     if not text:
         # unreachable: `_parse_reply` rejects an empty completion, so a block's
         # replies are never all-blank. This is the guard for a provider whose
@@ -913,6 +936,20 @@ def _restore_inline(text: str, shells: list[tuple[str, str]]) -> str:
 
 
 _LEFTOVER_MARKER = re.compile(r"\[\[/?\d+\]\]")
+
+
+def _has_prose(text: str) -> bool:
+    """Whether a unit or segment carries text a provider can translate.
+
+    Markers are stripped before the test. `_flatten_inline` writes a void
+    element as a one-sided marker (#150), so a block whose only content is an
+    image or a line break flattens to `[[0]]` or `[[0]][[1]]` -- truthy as a
+    string, and yet nothing to translate. Whitespace-only blocks
+    (`<div>   </div>`, `<p>&nbsp;</p>`) are the same shape. Both used to be sent,
+    and a provider asked to translate nothing answers with a meta-reply that
+    the product then showed in the block's place (#264).
+    """
+    return bool(_LEFTOVER_MARKER.sub("", text).strip())
 
 
 def _paragraphs(text: str) -> str:

@@ -2097,3 +2097,152 @@ def test_a_model_the_row_budget_spent_counts_as_untried(
     assert asked == ["primary", "fallback", "primary", "fallback", "fallback"], asked
     assert excinfo.value.error_class is ErrorClass.NETWORK, excinfo.value.detail
     assert "not tried: primary" in excinfo.value.detail, excinfo.value.detail
+
+
+# --------------------------------------------------------------------------
+# A block with nothing to translate (issue #264)
+#
+# Cross-module register (normative source: SCENARIOS.md, owned by issue #264):
+#
+#   AC-251 只有内联标记的块不被发送, 图片留在产物里
+#   AC-252 只有空白的块不被发送, 结构留在产物里
+#   AC-253 混排文档里每个正文块拿到自己的译文 (游标不错位)
+#   AC-254 超长块的纯标记分段不被发送, 该分段的元素仍在产物里
+#
+# `_flatten_inline` turns a void element into a one-sided marker (#150), so
+# `<p><img src="..."/></p>` flattens to the string `[[0]]` -- truthy, and
+# therefore sent: the guard was `if unit_text:` (`processor.py:482`). A provider
+# asked to translate nothing answers with a meta-reply ("please provide the
+# text"), `_parse_reply` rejects only an *empty* answer, and `_fill_unit` writes
+# that reply into the block. The image is deleted, and the filler text is
+# published in its place.
+#
+# Measured on 41 published items across the 11 translate sources: 51 of the
+# 1369 blocks actually sent carried no prose at all, and 14 of the 41 items
+# were affected.
+# --------------------------------------------------------------------------
+
+
+def _numbered_provider(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A provider that answers `译1`, `译2`, ... and records every request.
+
+    Numbered rather than echoing, so a drifted reply is visible: an echo of a
+    block's own text looks correct wherever the cursor happens to have landed.
+    """
+    from plugins.processors.translate.processor import _reset_config_cache
+
+    _reset_config_cache()
+    monkeypatch.setenv("PEARSS_TRANSLATE_BASE_URL", "https://llm.example/v1")
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "k")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODEL", "m")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODELS", raising=False)
+    seen: list[str] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        body = kwargs.get("json")
+        user = body["messages"][1]["content"] if isinstance(body, dict) else ""
+        seen.append(str(user))
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"译{len(seen)}"}}]}
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return seen
+
+
+def _product(monkeypatch: pytest.MonkeyPatch, body: str) -> tuple[str, list[str]]:
+    """Run the processor over `body`; return the product and what was asked."""
+    seen = _numbered_provider(monkeypatch)
+    stored: list[str] = []
+
+    def fake_store(content: str) -> str:
+        stored.append(content)
+        return "cas://product"
+
+    ref = process(
+        {
+            "item_id": "i-264",
+            "title": "T",
+            "content": body,
+            "url": "https://blog.example/post",
+        },
+        target_lang="zh",
+        store=fake_store,
+    )
+    assert ref == "cas://product"
+    return stored[0], seen
+
+
+def test_a_block_that_is_only_inline_markup_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-251: an image-only block is not a translation unit.
+
+    Measured before the fix: the provider was asked twice --
+    `['Introduction.', '[[0]]']` -- and the product was `<p>译1</p><p>译2</p>`.
+    The second question had no text to translate, so the answer was filler, and
+    it took the image's place.
+    """
+    product, seen = _product(
+        monkeypatch,
+        '<p>Introduction.</p><p><img src="https://img.example/i.png" alt="pic"/></p>',
+    )
+
+    assert seen == ["Introduction."], seen
+    assert product == (
+        '<p>译1</p><p><img src="https://img.example/i.png" alt="pic"></p>'
+    ), product
+
+
+def test_a_block_that_is_only_whitespace_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-252: `<div>   </div>` and `<p>&nbsp;</p>` are not translation units.
+
+    Measured before the fix: three requests for a one-word body
+    (`['Hi.', '   ', '\\xa0']`), with both empty blocks coming back holding
+    filler text as their content.
+    """
+    product, seen = _product(monkeypatch, "<p>Hi.</p><div>   </div><p>&nbsp;</p>")
+
+    assert seen == ["Hi."], seen
+    assert product == "<p>译1</p><div>   </div><p>&nbsp;</p>", product
+
+
+def test_each_prose_block_keeps_its_own_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-253: replies stay aligned with the blocks that were sent.
+
+    The numbering is what makes a shift visible: with the image-only block
+    skipped on both sides, `Two.` must be `译2`, not `译3`.
+    """
+    product, seen = _product(
+        monkeypatch,
+        '<p>One.</p><p><img src="https://img.example/i.png"/></p><p>Two.</p>',
+    )
+
+    assert seen == ["One.", "Two."], seen
+    assert product == (
+        '<p>译1</p><p><img src="https://img.example/i.png"></p><p>译2</p>'
+    ), product
+
+
+def test_a_marker_only_segment_of_an_oversized_block_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-254: the filter is per *segment*, and the skipped marker comes back.
+
+    A block over MAX_CHARS is sent in segments, and a trailing `<img>` can be
+    one such segment on its own. Skipping it must not drop its marker with it:
+    the segment is put back into the rebuilt block, so the image stays where
+    the original had it.
+    """
+    prose = "A" * MAX_CHARS
+    body = f'<p>{prose}\n\n<img src="https://img.example/i.png"/></p>'
+    product, seen = _product(monkeypatch, body)
+
+    assert seen == [prose], seen
+    # `译1` is the only reply, and the image is still there: the marker-only
+    # segment was skipped on the way out and put back on the way in.
+    assert product == ('<p>译1\n\n<img src="https://img.example/i.png"></p>'), product
