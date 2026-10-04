@@ -112,6 +112,7 @@
 | AC-246..248 | #257 结构化可编辑字段的解析与拒绝形状：可编辑项声明自己是否为结构化（JSON 文本），所以编辑一个**当前为空**的结构化字段仍按 list/dict 解析（不再把原始文本泄漏进请求体、变成 422），且非法 JSON 在**展示确认对话框之前**被拒为 `aborted` 且零写入（不再先给用户看一个无法构造的确认、再在执行期才失败）；合法编辑的结构化值以 list 落到源上、其余字段逐项不变 | issue #257 | 已合并 | `tests/integration/test_mcp_server.py` |
 | AC-249..250 | #258 部分模型冷却时**链未走完**的失败不得是永久类：聚合在「有配置的模型未被本次询问」（策略跳过=冷却中，或行内预算已用尽）时取 `network`（瞬时、可重试），detail 以 `not tried: <模型列表>` 开头点名未尝试者；链**走完**（无跳过）时维持原判（全永久→`parse`，AC-137/139 不变） | issue #258 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-251..254 | #264 「无正文」的块/分段不进 provider 请求：判据是先剥掉 `[[n]]`/`[[/n]]` 标记再 `strip()` 非空（`_flatten_inline` 把 void 元素变成标记后，`<p><img/></p>` 的文本就是 `[[0]]`——truthy，被 `if unit_text:` 放行）；发送侧与重建侧用**同一谓词**，否则回复游标错位；被跳过的块保留原文、被跳过的分段原样回填（否则它代表的 void 元素会被删掉）。只有内联标记的块、只有空白的块、混排文档的对齐、超长块的纯标记分段 | issue #264 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
+| AC-255 | #265 provider 丢掉的 `img` 标记保留图片（追加到该块译文末尾，已保留的标记不重复追加）；`br`/`wbr`/`hr` 维持 ADR 0031 §47 的「丢弃」（AC-146 不变） | issue #265 / ADR 0054 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
