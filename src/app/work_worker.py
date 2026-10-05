@@ -675,6 +675,10 @@ class WorkWorker:
             )
             session.commit()
         if work is None:
+            # DEBUG, not INFO: an empty sweep is the normal state, and a line
+            # per poll at the default level is exactly the flood issue #297
+            # forbids (issue #296).
+            LOGGER.debug("no work to claim")
             return {"works": 0, "units": 0}
         units = self._run_work(work, registry)
         return {"works": 1, "units": units}

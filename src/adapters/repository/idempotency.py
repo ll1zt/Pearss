@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
@@ -9,6 +11,8 @@ from sqlalchemy.orm import Session
 from adapters.db_models import IdempotencyRecord as IdempotencyRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.raw_payload import ConditionalState
+
+LOGGER = logging.getLogger(__name__)
 
 
 def find_idempotent(
@@ -99,13 +103,24 @@ def reserve_idempotent(
             where=(IdempotencyRow.status_code != 0) & (IdempotencyRow.expires_at < now),
         )
     )
-    return session.execute(
+    row = session.execute(
         select(IdempotencyRow).where(
             IdempotencyRow.actor == actor,
             IdempotencyRow.endpoint == endpoint,
             IdempotencyRow.key == key,
         )
     ).scalar_one()
+    if row.owner_token != owner_token:
+        # The key already had an owner: this is the conflict path that answers
+        # the caller with the stored response instead of running the write
+        # again. DEBUG because a retrying client hits it by design (issue
+        # #296).
+        LOGGER.debug(
+            "idempotency key %s reused on %s; returning the stored response",
+            key,
+            endpoint,
+        )
+    return row
 
 
 def complete_idempotent(

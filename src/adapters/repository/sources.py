@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +13,8 @@ from core.enums import (
     SourceStatus,
 )
 from core.folders import DEFAULT_FOLDER
+
+LOGGER = logging.getLogger(__name__)
 
 
 def derive_source_id(*, tenant_id: str, source_type: str, canonical_url: str) -> str:
@@ -58,6 +61,9 @@ def create_source(
     )
     existing = session.get(SourceRow, source_id)
     if existing is not None:
+        # DEBUG: "add this feed" is idempotent, and a retrying client asks
+        # again by design (issue #296).
+        LOGGER.debug("source %s already exists; returning it", source_id)
         return existing
 
     row = SourceRow(
@@ -78,6 +84,7 @@ def create_source(
     )
     session.add(row)
     session.flush()
+    LOGGER.debug("created source %s (%s)", source_id, source_type)
     return row
 
 
