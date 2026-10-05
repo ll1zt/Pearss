@@ -36,6 +36,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters import correlation
 from adapters.db_models import Source as SourceRow
 from adapters.log_limits import rate_limited_logger
 from adapters.repository import (
@@ -357,6 +358,12 @@ def run_tick(
     writes from collection do not block readers.
     """
     moment = now or datetime.now(UTC)
+    # One tick is one job: its lines -- from the pool's threads and from this
+    # one -- group under a single id (AC-306). Set here for the calling thread;
+    # `evaluate_and_collect` sets it again in each pool thread, which does not
+    # inherit a contextvar.
+    tick_correlation_id = correlation.new_correlation_id()
+    correlation.set_correlation_id(tick_correlation_id)
     raw = str(os.environ.get("PEARSS_TICK_CONCURRENCY", "")).strip()
     if concurrency is None:
         try:
@@ -377,6 +384,11 @@ def run_tick(
         source_id: str, policy_json: str
     ) -> tuple[str, datetime | None]:
         """One source's due-check + collection. Returns outcome and next due."""
+        # Installed per call rather than reset at the end: a pool thread's
+        # context survives between tasks, and every call overwrites it, so the
+        # value is correct for the whole call -- and the pool is per-tick
+        # anyway (AC-306).
+        correlation.set_correlation_id(tick_correlation_id)
         try:
             with session_factory() as session:
                 decision = evaluate_source(
