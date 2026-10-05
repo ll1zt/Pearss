@@ -736,3 +736,41 @@ def test_a_redirect_loop_is_classified_and_logged_once(
         )
         == 1
     )
+
+
+@pytest.mark.unit
+def test_a_pre_flight_refusal_also_leaves_its_debug_line(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-313: the socket-boundary refusal was the one silent exit.
+
+    The guard runs before the client is used, so the line has to be emitted
+    where the refusal is raised -- every other ``_request`` exit already had
+    one, which is what "per request, one line" means.
+    """
+    monkeypatch.delenv("PEARSS_ALLOW_PRIVATE_FETCH", raising=False)
+    # The resolver is the SSRF boundary, and the suite stubs it everywhere (the
+    # real one would need a private address to resolve to us); what this test
+    # asserts is the *line*, not the classification.
+    from adapters import http as http_adapter
+
+    monkeypatch.setattr(
+        http_adapter,
+        "resolve_host",
+        lambda host, *, deadline=None: {"127.0.0.1"},
+    )
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="adapters.http"),
+        client_for(ok_transport()) as client,
+        pytest.raises(FetchError) as raised,
+    ):
+        fetch("http://internal.example/rss", client=client)
+
+    assert raised.value.error_class is ErrorClass.BLOCKED
+    lines = [
+        record
+        for record in caplog.records
+        if record.name == "adapters.http" and record.levelno == logging.DEBUG
+    ]
+    assert len(lines) == 1, [record.getMessage() for record in lines]

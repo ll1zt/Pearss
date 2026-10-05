@@ -240,3 +240,32 @@ def test_a_foreign_journal_writer_is_replaced_not_duplicated(
     logging.getLogger("app.example").info("once")
 
     assert journal.getvalue().count("once") == 1, journal.getvalue()
+
+
+def test_the_banner_reports_the_level_in_force(
+    restore_root_logger: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-313: the banner names the level the process is using, not the env's.
+
+    A caller that passes `level=` (a CLI flag, a test) left the banner naming
+    whatever `PEARSS_LOG_LEVEL` happened to say -- or the INFO default -- so the
+    one line whose job is "what is in force" reported a level that was not.
+    """
+    monkeypatch.delenv("PEARSS_LOG_LEVEL", raising=False)
+    stream = io.StringIO()
+    log_setup.configure_logging(level="DEBUG", stream=stream)
+
+    log_setup.log_startup_banner()
+
+    assert "level=DEBUG" in stream.getvalue(), stream.getvalue()
+
+
+def test_an_empty_log_level_is_a_missing_value_not_a_bad_one(
+    restore_root_logger: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-313: `PEARSS_LOG_LEVEL=` raised ValueError out of setLevel("")."""
+    monkeypatch.setenv("PEARSS_LOG_LEVEL", "")
+
+    log_setup.configure_logging(stream=io.StringIO())
+
+    assert logging.getLogger().level == logging.INFO

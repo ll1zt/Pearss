@@ -164,7 +164,8 @@ class TickReport:
     skipped: list[str]
     # The earliest next-due time among the sources this pass skipped, so an
     # idle tick can say when it will next have something to do (issue #293).
-    # None when every considered source was collected (or there were none).
+    # None when no source reported one this pass -- every source considered
+    # ran (collected or failed), or none was considered at all.
     next_due_at: datetime | None = None
 
     @property
