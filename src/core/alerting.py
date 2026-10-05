@@ -290,8 +290,14 @@ def alert_body(verdict: HealthVerdict) -> str:
     # shared dependency, a stuck chain needs the retry entry point, and a stopped
     # loop is not something an operator inspects the network for.
     if verdict.exhausted_sources:
+        # The retry entry points that actually exist: the MCP tool and the `/v1`
+        # endpoint. This line used to point at a `just` recipe that was never in
+        # the justfile -- so the one line written to tell the operator what to do
+        # next told them to run a command that fails (#260).
         lines.append(
-            "action: fix the cause, then retry the chain (just retry-enrichments)"
+            "action: fix the cause, then retry the chain "
+            "(MCP tool retry_enrichments, or POST "
+            "/v1/sources/{source_id}:retry-enrichments)"
         )
     elif verdict.dead_loops:
         lines.append(
