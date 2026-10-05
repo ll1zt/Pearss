@@ -30,7 +30,7 @@ from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters import filestore
+from adapters import correlation, filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.repository import timestamp
@@ -817,6 +817,8 @@ class EnrichmentWorker:
             return report
 
     def _sweep(self, session_factory: sessionmaker[Session]) -> dict[str, int]:
+        # One sweep is one job: its lines group under a single id (AC-306).
+        correlation.set_correlation_id(correlation.new_correlation_id())
         with session_factory() as session:
             return sweep_queue(
                 session,

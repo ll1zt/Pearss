@@ -40,6 +40,7 @@ import httpx
 from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters import correlation
 from adapters.db_models import Source as SourceRow
 from adapters.log_safety import escape_control_characters
 from adapters.redaction import redact_url_for_log
@@ -702,6 +703,12 @@ class WorkWorker:
             # forbids (issue #296).
             LOGGER.debug("no work to claim")
             return {"works": 0, "units": 0}
+        # One claimed work is one job: the executors' per-unit lines and this
+        # worker's own lines group under a single id (AC-306). Fresh per work
+        # because `WorkRecord` carries no correlation id from the request that
+        # created it -- a limitation worth its own issue, not a reason to leave
+        # every background line with an id of its own.
+        correlation.set_correlation_id(correlation.new_correlation_id())
         units = self._run_work(work, registry)
         return {"works": 1, "units": units}
 
