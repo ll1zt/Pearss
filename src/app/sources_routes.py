@@ -439,6 +439,13 @@ def diagnose_source(
     in-memory registry (ADR 0048, ADR 0051) -- a table for it would be a second
     fact source beside the provider's own behaviour.
 
+    Its `window` cell is the other half of the same question (issue #269): a
+    model that fails part of every row is below the demotion gate, so it never
+    cools and never appears under `models` -- while the journal fills with
+    fallbacks. The window counts the recent rows per model (attempts, failures,
+    fallbacks, rate, last class), so "the chain keeps switching away from this
+    model" is answerable from the diagnostic surface instead of by reading logs.
+
     `get_source` remains the full single row; this is the diagnostic view.
     """
     del _

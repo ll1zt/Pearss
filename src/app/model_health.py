@@ -41,6 +41,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterable
 from typing import Any, Final
 
@@ -65,6 +66,12 @@ DEFAULT_ATTEMPTS_PER_MODEL: Final = 2
 # The gate is what separates a blip (leave the chain order alone) from a chronic
 # half-failure (demote, and escalate while it keeps happening, #268).
 DEFAULT_FAILURE_RATIO: Final = 0.5
+# How many recent rows the diagnostic projection folds into its per-model
+# window (#269). Ten sweeps is enough to see a trend and few enough that the
+# cell stays small; it is a display window, not a rule, so it is a constant
+# rather than a knob -- changing it changes what an operator reads, not what the
+# chain does.
+HEALTH_WINDOW_SAMPLES: Final = 10
 
 COOLDOWN_ENV: Final = "PEARSS_MODEL_COOLDOWN_SECONDS"
 COOLDOWN_MAX_ENV: Final = "PEARSS_MODEL_COOLDOWN_MAX_SECONDS"
@@ -150,6 +157,9 @@ class ModelHealth:
         # answer "which model would the next row ask?" without the worker
         # knowing the deployment's configured chain.
         self._order: list[str] = []
+        # The recent rows each model was asked in, for the diagnostic window
+        # (#269): a bounded fold of (asked, failed) samples per model.
+        self._window: dict[str, deque[tuple[int, int]]] = {}
 
     @classmethod
     def from_env(cls, *, clock: Callable[[], float] = time.monotonic) -> ModelHealth:
@@ -202,6 +212,9 @@ class ModelHealth:
                     continue
                 if model not in self._order:
                     self._order.append(model)
+                self._window.setdefault(
+                    model, deque(maxlen=HEALTH_WINDOW_SAMPLES)
+                ).append((asked, failed))
                 if failed > 0 and error_class is not None:
                     self._last_failure[model] = (error_class, self._clock())
                 if failed == 0 or failed / asked < self._failure_ratio:
@@ -227,11 +240,21 @@ class ModelHealth:
                 )
 
     def snapshot(self) -> dict[str, Any]:
-        """A read-only projection for the diagnostic view (ADR 0051).
+        """A read-only projection for the diagnostic view (ADR 0051, ADR 0057).
 
-        Only what is *currently* cooling appears under `models`. A model that
-        answered is healthy and its episode is over, and reporting a cleared
-        episode would send an operator after a failure that no longer exists.
+        Two model dimensions, answering two questions:
+
+        - `models` -- what is cooling *right now*, and why (ADR 0051). A model
+          that answered is healthy and its episode is over, and reporting a
+          cleared episode would send an operator after a failure that no longer
+          exists.
+        - `window` -- the last `HEALTH_WINDOW_SAMPLES` rows each model was asked
+          in, folded to attempts / failures / fallbacks / rate (#269). This is
+          the half-broken model the first cell cannot show: one that fails part
+          of every row is *below* the demotion gate, so it never cools and never
+          appears in `models`, while the journal fills with fallbacks. Only
+          models that failed at least once in the window appear -- a model that
+          never failed has nothing to report.
         """
         with self._lock:
             now = self._clock()
@@ -247,6 +270,32 @@ class ModelHealth:
                     "last_failure_class": failed_class,
                     "since_last_failure_seconds": round(max(0.0, now - failed_at), 1),
                 }
+            window: dict[str, Any] = {}
+            for model, samples in self._window.items():
+                attempts = sum(asked for asked, _ in samples)
+                failures = sum(failed for _, failed in samples)
+                if failures == 0:
+                    continue
+                window_class: str | None = None
+                window_at: float | None = None
+                remembered = self._last_failure.get(model)
+                if remembered is not None:
+                    window_class, window_at = remembered
+                window[model] = {
+                    "attempts": attempts,
+                    "failures": failures,
+                    # One per row the model failed in: how often the chain had to
+                    # move past it, which is what the journal counts as
+                    # "falling back to".
+                    "fallbacks": sum(1 for _, failed in samples if failed),
+                    "failure_rate": round(failures / attempts, 3) if attempts else 0.0,
+                    "last_failure_class": window_class,
+                    "since_last_failure_seconds": (
+                        None
+                        if window_at is None
+                        else round(max(0.0, now - window_at), 1)
+                    ),
+                }
             return {
                 "preferred": next(
                     (model for model in self._order if model not in cooling), None
@@ -254,6 +303,7 @@ class ModelHealth:
                 "skipped": sorted(cooling),
                 "attempts_per_model": self._attempts_per_model,
                 "models": cooling,
+                "window": window,
             }
 
 
@@ -285,6 +335,7 @@ __all__ = [
     "DEFAULT_COOLDOWN_MAX_SECONDS",
     "DEFAULT_COOLDOWN_SECONDS",
     "DEFAULT_FAILURE_RATIO",
+    "HEALTH_WINDOW_SAMPLES",
     "RATIO_ENV",
     "ModelHealth",
     "health",

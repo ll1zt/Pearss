@@ -2379,6 +2379,54 @@ def _failing_primary(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
         thread.join(5)
 
 
+@contextlib.contextmanager
+def _blip_primary(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """A provider whose first model fails once, then answers everything.
+
+    One failure out of three asks is below the demotion gate (#268), so the
+    model neither cools nor escalates -- and the window cell is then the only
+    place the failure shows up (#269).
+    """
+    asked: list[str] = []
+
+    class Provider(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            model = str(body["model"])
+            failed_before = asked.count(model)
+            asked.append(model)
+            if model == "primary" and failed_before == 0:
+                raw = json.dumps({"error": {"message": "overloaded"}}).encode()
+                self.send_response(503)
+            else:
+                raw = json.dumps(
+                    {"choices": [{"message": {"content": f"[{model}] translated"}}]}
+                ).encode()
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    monkeypatch.setenv(
+        "PEARSS_TRANSLATE_BASE_URL", f"http://127.0.0.1:{server.server_port}"
+    )
+    monkeypatch.setenv("PEARSS_TRANSLATE_API_KEY", "fixture-not-secret")
+    monkeypatch.setenv("PEARSS_TRANSLATE_MODELS", "primary,secondary")
+    monkeypatch.delenv("PEARSS_TRANSLATE_MODEL", raising=False)
+    try:
+        yield asked
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_diagnose_answers_which_model_is_cooling_down(
@@ -2455,3 +2503,91 @@ async def test_diagnose_answers_which_model_is_cooling_down(
     assert primary["cooling_seconds"] > 0
     assert primary["cooldown_seconds"] == 300.0, "the first episode is five minutes"
     assert "secondary" not in health["models"], "a model that answered is not cooling"
+
+    window = health["window"]["primary"]
+    assert window["attempts"] == 1
+    assert window["failures"] == 1
+    assert window["fallbacks"] == 1
+    assert window["failure_rate"] == 1.0
+    assert window["last_failure_class"] == "network"
+    assert window["since_last_failure_seconds"] >= 0
+    assert "secondary" not in health["window"], "a model that never failed is noise"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_diagnose_shows_a_half_broken_model_that_is_not_cooling(
+    writer: httpx.AsyncClient,
+    session_factory: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC-259: the window cell answers what the cooling cell cannot.
+
+    The live confusion (#269): the journal had 132 fallbacks in ten hours while
+    this same endpoint read completely healthy. The model was failing *part* of
+    every row -- below the demotion gate, so it never cools -- and nothing on the
+    diagnostic surface said so. The window is what makes it visible.
+    """
+    created = await writer.post(
+        "/v1/sources",
+        headers={"Idempotency-Key": "diagnose-window-1"},
+        json={
+            "url": "https://blip.example/feed",
+            "schedule_policy": policy(),
+            "pipeline_chain": [
+                {
+                    "plugin_id": "translate",
+                    "kind": "translation",
+                    "lang": "zh",
+                    "required": True,
+                }
+            ],
+        },
+    )
+    assert created.status_code == 201, created.text
+    source_id = created.json()["id"]
+    with session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id=source_id,
+                    external_id="blip",
+                    title="Blip article",
+                    canonical_url="https://blip.example/article",
+                    published_at=None,
+                    content=(
+                        "<p>English one.</p><p>English two.</p><p>English three.</p>"
+                    ),
+                )
+            ],
+            chain=parse_chain(
+                '[{"plugin_id":"translate","kind":"translation","lang":"zh","required":true}]',
+                target_lang=None,
+            ),
+        )
+        session.commit()
+
+    with _blip_primary(monkeypatch) as asked, session_factory() as session:
+        enrichment_worker.sweep_queue(
+            session,
+            processors=enrichment_worker.default_processors(),
+            concurrency=1,
+            max_attempts=1,
+            row_session_factory=session_factory,
+        )
+    assert asked.count("primary") == 3, asked
+
+    response = await writer.get(f"/v1/sources/{source_id}:diagnose")
+
+    assert response.status_code == 200, response.text
+    health = response.json()["model_health"]
+    assert health["skipped"] == [], "one ask in three is below the gate"
+    assert health["models"] == {}, "a blip is not a cooldown"
+    window = health["window"]["primary"]
+    assert window["attempts"] == 3
+    assert window["failures"] == 1
+    assert window["fallbacks"] == 1
+    assert window["failure_rate"] == 0.333
+    assert window["last_failure_class"] == "network"
+    assert "secondary" not in health["window"], "a model that never failed is noise"
