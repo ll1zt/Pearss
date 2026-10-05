@@ -436,7 +436,12 @@ def stream_items_ids(
     if xt and not exclude_states:
         return {"itemRefs": [], "continuation": None}
 
-    offset, boundary = _decode_cursor(c)
+    offset, boundary, exhausted = _decode_cursor(c)
+    if exhausted:
+        # The depth cap ends the walk: an empty page and no cursor, so a client
+        # looping `while continuation != null` stops instead of being fed page
+        # one again (issue #275).
+        return {"itemRefs": [], "continuation": None}
     limit = max(1, min(n, 10000))
     page, has_more = operations.select_stream_ids(
         request.app.state.session_factory,
@@ -477,34 +482,38 @@ _MAX_SERVED: Final[int] = 100_000
 _MAX_OFFSET: Final[int] = 100_000
 
 
-def _decode_cursor(cursor: str | None) -> tuple[int, StreamBoundary | None]:
-    """Split a cursor into its served counter and keyset boundary.
+def _decode_cursor(cursor: str | None) -> tuple[int, StreamBoundary | None, bool]:
+    """Split a cursor into its served counter, keyset boundary, and exhaustion.
 
     An unparseable cursor restarts at the beginning rather than erroring:
     the cursor is ours to produce and the client only echoes it, so a
     malformed one means a bug on this side or a hand-written request, and
-    neither is improved by a 500. A cursor at or past the cap yields an
-    empty, terminating walk.
+    neither is improved by a 500.
+
+    The third element is `exhausted`: a keyset cursor at or past the cap ends
+    the walk explicitly. Decoding it to `(0, None)` -- which is what it used to
+    do -- means "page one", so the walk restarted from the top and a client
+    looping `while continuation != null` never finished (issue #275).
     """
     if not cursor:
-        return 0, None
+        return 0, None, False
     served, separator, rest = cursor.partition("|")
     try:
         count = int(served)
     except ValueError:
-        return 0, None
+        return 0, None, False
     if not separator:
         # Legacy bare offset from the previous release.
-        return min(max(0, count), _MAX_OFFSET), None
+        return min(max(0, count), _MAX_OFFSET), None, False
     if count >= _MAX_SERVED:
-        return 0, None
+        return 0, None, True
     published, separator, external = rest.partition("|")
     if not separator:
-        return 0, None
+        return 0, None, False
     internal = reader_api.reader_id_hex(int(external))
     if published == "-":
-        return count, StreamBoundary(internal, None, True)
-    return count, StreamBoundary(internal, published, False)
+        return count, StreamBoundary(internal, None, True), False
+    return count, StreamBoundary(internal, published, False), False
 
 
 def _encode_cursor(served: int, page: list[tuple[str, str | None]]) -> str:
