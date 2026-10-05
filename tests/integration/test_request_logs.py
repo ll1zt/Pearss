@@ -3,6 +3,9 @@
 AC-284..285: every request emits exactly one application access line carrying
 the correlation id and the matched route template; reads stay at DEBUG unless
 the response is an error, so NNW's constant polling is not an INFO stream.
+AC-296: the access line is rendered from an untrusted request target, so a
+control character in the path must not split one record across two physical
+lines -- that is how a forged entry gets into the journal in the first place.
 
 The line is read from a real handler installed by ``configure_logging`` (not
 ``caplog``) because the correlation id reaches the rendered text through the
@@ -74,6 +77,49 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 
 def _access_lines(stream: io.StringIO, route: str) -> list[str]:
     return [line for line in stream.getvalue().splitlines() if f"{route} ->" in line]
+
+
+class _RecordCounter(logging.Handler):
+    """Counts records, so "one record, one physical line" can be asserted.
+
+    A count of emitted records is the only way to state AC-296 without
+    guessing at the escaping: the invariant is that the handler's output has
+    as many lines as it was handed records, whatever the message contains.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.count += 1
+
+
+@pytest.mark.asyncio
+async def test_a_newline_in_an_unmatched_path_cannot_forge_a_log_line(
+    client: httpx.AsyncClient, restore_logging: None
+) -> None:
+    """AC-296: an unmatched route is logged from the raw path, so the path is
+    attacker-controlled; a newline in it must not become a second journal line."""
+    stream = io.StringIO()
+    log_setup.configure_logging(level="INFO", stream=stream)
+    counter = _RecordCounter()
+    root = logging.getLogger()
+    root.addHandler(counter)
+    try:
+        response = await client.get("/v1/%0A1970-01-01%20ERROR%20forged-line")
+    finally:
+        root.removeHandler(counter)
+
+    assert response.status_code == 404, response.text
+    rendered = stream.getvalue()
+    lines = rendered.splitlines()
+    assert counter.count, "the request was not logged at all"
+    assert len(lines) == counter.count, (
+        f"{counter.count} records rendered to {len(lines)} physical lines, so a "
+        f"request can forge one:\n{rendered}"
+    )
+    assert not any(line.startswith("1970-01-01 ERROR") for line in lines), rendered
 
 
 @pytest.mark.asyncio
