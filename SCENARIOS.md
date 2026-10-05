@@ -124,6 +124,7 @@
 | AC-267..269 | #274 Reader 流的分页 tiebreak 与续页谓词同向（`id DESC` 配 `id <`）：时间戳相同且多于一页的组按小于一页的页长走查仍恰好覆盖全集且不重复（AC-267）；无日期的尾部组（`nullslast` 之后的一整个并列组）同样不重不漏（AC-269）；并列组里的已读条目仍能出现在 Read You 形态（`s=reading-list&it=read`）的已读走查里（AC-268） | issue #274 / ADR 0024 | 已合并 | `tests/integration/test_reader_continuation.py` |
 | AC-270 | #275 Reader 流游标到达深度上限（`_MAX_SERVED`）时**走查结束**：新式 `served|published|external` 游标返回空 `itemRefs` 且不给 continuation（此前解码成 「第 1 页」会重启走查）；旧式裸整数游标的夹紧行为与「不可解析 → 从头开始」不变 | issue #275 / ADR 0024 | 已合并 | `tests/integration/test_readyou_compat.py` |
 | AC-271 | #283 走查 helper 有界：`_walk_all` 在 `_MAX_PAGES`（50）页后以明确断言失败（`pagination did not terminate after 50 pages`）——一个不再前进的 continuation 表现为**失败**（点名原因）而不是挂到全局超时 | issue #283 | 已合并 | `tests/integration/test_reader_continuation.py` |
+| AC-272 | #284 深度上限只对**良构**游标生效：形状（十进制 served、两个 `|`、十进制 external id）先于上限判定——`100000|garbage`（缺分隔符）与 `100000|...|xyz`（尾部非整数）一律走「不可解析 → 从头开始」（此前分别被判为「耗尽」返回空页、以及抛 ValueError 变成 500）；**良构**游标达上限仍结束走查（AC-270 不变） | issue #284 | 已合并 | `tests/integration/test_readyou_compat.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

@@ -485,15 +485,25 @@ _MAX_OFFSET: Final[int] = 100_000
 def _decode_cursor(cursor: str | None) -> tuple[int, StreamBoundary | None, bool]:
     """Split a cursor into its served counter, keyset boundary, and exhaustion.
 
-    An unparseable cursor restarts at the beginning rather than erroring:
-    the cursor is ours to produce and the client only echoes it, so a
-    malformed one means a bug on this side or a hand-written request, and
-    neither is improved by a 500.
+    An unparseable cursor restarts at the beginning rather than erroring: the
+    cursor is ours to produce and the client only echoes it, so a malformed one
+    means a bug on this side or a hand-written request, and neither is improved
+    by a 500. "Unparseable" is decided by the **shape** -- a decimal served
+    count, two `|` separators, a decimal external id -- and that check runs
+    before the cap, so the rule holds everywhere instead of being overridden at
+    the cap (issue #284).
 
-    The third element is `exhausted`: a keyset cursor at or past the cap ends
-    the walk explicitly. Decoding it to `(0, None)` -- which is what it used to
-    do -- means "page one", so the walk restarted from the top and a client
-    looping `while continuation != null` never finished (issue #275).
+    The third element is `exhausted`: a **well-formed** keyset cursor at or past
+    the cap ends the walk explicitly. Decoding it to `(0, None)` -- which is
+    what it used to do -- means "page one", so the walk restarted from the top
+    and a client looping `while continuation != null` never finished (issue
+    #275).
+
+    The timestamp field is not validated: it is compared lexicographically
+    against the column, and we mint it from the column itself, so a
+    hand-written value can only reach here by hand. Deciding its shape would
+    mean a second definition of the format that `adapters/timestamps` exists to
+    be the only one of.
     """
     if not cursor:
         return 0, None, False
@@ -505,12 +515,15 @@ def _decode_cursor(cursor: str | None) -> tuple[int, StreamBoundary | None, bool
     if not separator:
         # Legacy bare offset from the previous release.
         return min(max(0, count), _MAX_OFFSET), None, False
-    if count >= _MAX_SERVED:
-        return 0, None, True
     published, separator, external = rest.partition("|")
     if not separator:
         return 0, None, False
-    internal = reader_api.reader_id_hex(int(external))
+    try:
+        internal = reader_api.reader_id_hex(int(external))
+    except ValueError:
+        return 0, None, False
+    if count >= _MAX_SERVED:
+        return 0, None, True
     if published == "-":
         return count, StreamBoundary(internal, None, True), False
     return count, StreamBoundary(internal, published, False), False

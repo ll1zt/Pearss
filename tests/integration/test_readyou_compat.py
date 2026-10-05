@@ -723,6 +723,46 @@ async def test_a_new_style_cursor_at_the_depth_cap_terminates_the_walk(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_a_malformed_cursor_at_the_depth_cap_still_restarts(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """AC-272: the cap applies to well-formed cursors, not to broken ones.
+
+    Given a cursor whose served count is past the cap but whose shape is
+    unparseable
+    When the next page is requested
+    Then it restarts from the first page, like any other unparseable cursor --
+    it is not reported as "the walk is over"
+
+    The cap used to be read first, so `100000|garbage` (no second separator)
+    came back as an empty page: an unparseable cursor was silently promoted to
+    "you have finished", the one answer a client cannot recover from. A
+    non-numeric external id (`...|xyz`) was worse than wrong -- `int()` raised
+    straight through to a 500, which Read You surfaces as a failed sync.
+    Restarting is safe: the reply carries a fresh, well-formed cursor, so the
+    walk moves on. A *well-formed* cursor at the cap still ends the walk
+    (#275, `test_a_new_style_cursor_at_the_depth_cap_terminates_the_walk`).
+    """
+    token = await login(reader_client)
+    everything = await ids_for(reader_client, token, limit=READYOU_LIMIT)
+    assert len(everything) == 3, "this scenario needs the whole feed"
+
+    for cursor in ("100000|garbage", "100000|2026-01-07T00:00:00.000000Z|xyz"):
+        response = await reader_client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params={"output": "json", "s": READING_LIST, "n": "1000", "c": cursor},
+        )
+        assert response.status_code == 200, f"cursor {cursor!r}: {response.text}"
+        got = [ref["id"] for ref in response.json()["itemRefs"]]
+        assert got == everything, (
+            f"cursor {cursor!r} is unparseable, so the walk restarts from the "
+            f"top; got {got}"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_a_malformed_cursor_restarts_rather_than_failing(
     reader_client: httpx.AsyncClient,
 ) -> None:
