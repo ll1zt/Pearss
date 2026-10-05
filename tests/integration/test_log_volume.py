@@ -2,6 +2,8 @@
 
 AC-290..292: the INFO volume does not grow with idle polling or with batch size
 (issue #297's rule: INFO/WARNING is event-driven and O(1) per job or failure).
+AC-301: and neither does a successful enrichment -- one sweep reports its counts
+once, not one line per row it processed.
 AC-299: the same rule on the chain path -- an item the chain itself drops, because
 its text is already in the target language, is not a per-item event either.
 AC-300: the same rule for a source that keeps failing -- "still in backoff" is one
@@ -11,6 +13,7 @@ state, not one event per tick.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -19,6 +22,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from adapters.repository import create_source, parse_chain
 from app.main import create_engine_for
 from app.pipeline import normalise_and_store
 from app.scheduler import run_tick
@@ -278,3 +282,88 @@ def test_a_source_stuck_in_backoff_is_not_a_line_per_tick(
         assert len(failing) == 1, failing
     finally:
         client.close()
+
+
+class TitleSummary:
+    """A local processor: the real contract, no provider.
+
+    A module-level class, not an instance: the worker runs processors through a
+    deadline wrapper that only accepts something it can import (mirrors
+    ``tests/integration/test_enrichment_recovery.py``).
+    """
+
+    @staticmethod
+    def process(
+        item_ctx: dict[str, str], *, target_lang: str, store: Callable[[str], str]
+    ) -> str:
+        return store(f"<p>{item_ctx['title']}</p>")
+
+
+_ENRICH_CHAIN = '[{"plugin_id":"title-summary","kind":"summary","required":true}]'
+
+
+def _enrich_draft(index: int, source_id: str) -> ItemDraft:
+    return ItemDraft(
+        source_id=source_id,
+        external_id=f"enrich{index}",
+        title=f"Enrich {index}",
+        canonical_url=f"https://example.com/enrich/{index}",
+        published_at=NOW,
+        content="<p>body</p>",
+    )
+
+
+@pytest.mark.asyncio
+async def test_enriching_a_batch_does_not_log_a_line_per_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-301: a successful enrichment is a count, not an event per row.
+
+    The sweep already reports "N ran (x ok, y failed, z skipped)"; a line per
+    row on top of it is the INFO volume growing with the queue.
+    """
+    from app.enrichment_worker import EnrichmentWorker
+
+    monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
+    # One sweep must be able to take the whole batch, or the sweep count itself
+    # (one summary line each) would grow with N and the test would be measuring
+    # the wrong thing.
+    monkeypatch.setenv("PEARSS_ENRICHMENT_CONCURRENCY", "64")
+    counts: list[int] = []
+    for label, size in (("one", 1), ("fifty", 50)):
+        engine = create_engine_for(migrated_database(tmp_path, f"enrich-{label}.db"))
+        factory = sessionmaker(engine, expire_on_commit=False)
+        try:
+            with factory() as session:
+                source = create_source(
+                    session,
+                    source_type="rss",
+                    url="https://enrich.example/feed",
+                    canonical_url="https://enrich.example/feed",
+                    schedule_policy='{"type":"fixed","interval":"30m"}',
+                    tenant_id="default",
+                    pipeline_chain=_ENRICH_CHAIN,
+                    at="2026-01-01T00:00:00.000000Z",
+                )
+                normalise_and_store(
+                    session,
+                    [_enrich_draft(i, str(source.id)) for i in range(size)],
+                    chain=parse_chain(_ENRICH_CHAIN, target_lang=None),
+                )
+                session.commit()
+
+            worker = EnrichmentWorker(
+                factory, processors={"title-summary": TitleSummary}
+            )
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger="app.enrichment_worker"):
+                report = await worker.sweep_once()
+
+            assert report["succeeded"] == size, report
+            counts.append(len(_info_records(caplog, "app.enrichment_worker")))
+        finally:
+            engine.dispose()
+
+    assert counts[0] == counts[1], counts
