@@ -28,6 +28,31 @@ journalctl --user -u pearss.service -f
 `pearss starting: level=… db=… tick=…` 的 banner，报出生效配置；db 位置只保留
 scheme + 路径，不含凭据。
 
+### 日志量规则（防持续增长，issue #297）
+
+**INFO/WARNING 必须事件驱动且与输入规模无关**：每个作业 / 每次失败 O(1)，不得随
+poll / tick / item 增长。周期性、空转、成功但无事件的路径一律 DEBUG：
+
+| 级别 | 例子 |
+|---|---|
+| INFO | 一次采集完成（每源一行）、一个 work 的认领与完成、一次失败（含 `error_class`） |
+| DEBUG | 空转 tick、空 work sweep、每条 fetch、每条 draft 的存储结果、每次 dedupe 决策、索引写入 |
+
+高频路径（外部抓取、请求）如需重复告警，用 `adapters.log_limits.rate_limited_logger`：
+同一 key 在窗口内只放行一行，窗口滚动时补一行 `suppressed N`（级别与原行一致，
+DEBUG 路径的汇总不会升到 INFO）。
+
+查看与保留：
+
+```bash
+journalctl --user -u pearss.service --since '1 hour ago' | wc -l    # 实际行数
+journalctl --disk-usage                                             # journal 占用
+systemctl show -p SystemMaxUse -p MaxRetentionSec systemd-journald  # 上限（宿主决定）
+```
+
+上限由宿主的 journald 配置决定（`SystemMaxUse` / `MaxRetentionSec`）；上面这条规则
+正是为了避免轮转把历史挤掉——而不是把上限调大来掩盖洪水。
+
 三个进程内组件共用一个进程：Core API、Reader API、MCP 工具面，外加 asyncio 调度任务。
 `PEARSS_SCHEDULER_ENABLED=0` 可只跑 API 不跑调度；`PEARSS_TICK_SECONDS` 控制轮询间隔。
 

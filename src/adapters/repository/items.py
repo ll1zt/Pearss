@@ -106,7 +106,12 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
             # Stored, but the relationship to its twin is recorded rather than
             # left implicit; a future migration can promote this to a relation
             # table without changing the decision logic.
-            LOGGER.info(
+            #
+            # DEBUG, not INFO (issue #297): this fires once per related draft,
+            # so a batch of them would make INFO grow with the input. The
+            # per-draft line in `normalise_and_store` carries the same fact at
+            # the same level.
+            LOGGER.debug(
                 "related item stored: %s duplicates %s",
                 candidate.id,
                 decision.matched_id,
@@ -132,7 +137,10 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
                 candidate.id,
             )
         else:
-            LOGGER.info(
+            # DEBUG, not INFO (issue #297): one line per deduped draft would
+            # make INFO grow with the batch. `normalise_and_store` reports the
+            # same outcome per draft at the same level.
+            LOGGER.debug(
                 "not stored (%s): %s -> %s",
                 decision.action.value,
                 candidate.id,
