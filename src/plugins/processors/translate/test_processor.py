@@ -636,8 +636,8 @@ def test_a_provider_reply_with_no_content_fails_visibly(
     plausible output while carrying the wrong text under the right heading.
     Driving the provider to return fewer blocks than were asked for shows how
     that is guaranteed here -- an empty `choices[0].message.content` is already
-    a `parse` failure (the existing reply contract), so the item is retried or
-    reported rather than published half-misaligned.
+    a failure (since #259 a transient one), so the item is retried or reported
+    rather than published half-misaligned.
 
     This test exists to pin that interaction, since the block-per-request shape
     (ADR 0031) makes "a reply per block" the expectation a provider could
@@ -677,8 +677,9 @@ def test_a_provider_reply_with_no_content_fails_visibly(
             target_lang="zh",
             store=fake_store,
         )
-    assert excinfo.value.error_class is ErrorClass.PARSE, (
-        "an empty reply is the existing parse failure; classification unchanged"
+    assert excinfo.value.error_class is ErrorClass.NETWORK, (
+        "an empty reply is transient (#259), so the worker can retry the row; "
+        "the product must still never be stored"
     )
     assert stored == [], "no partial product may be stored"
 
@@ -968,7 +969,7 @@ def test_sanitising_an_empty_product_yields_an_empty_artifact() -> None:
 #   AC-136 model #0 的 200 回复不是 JSON 时同样回退
 #   AC-137 全部 model 失败且都非瞬时 → parse, detail 汇总每个 model 的原因
 #   AC-138 全部 model 失败但至少一个瞬时 → 取最后一个瞬时失败的分类
-#   AC-139 单 model 回空正文仍是可见失败 (AC-22 不变, 钉住现状)
+#   AC-139 已退役（#259）：空补全由 parse 改判瞬时（network），见 AC-22 与新 ADR
 #   AC-140 此前零覆盖的 429/5xx 与「连不上」回退 (钉住现状)
 #
 # The chain is the provider client's, not the item's: a model that says no for
@@ -1139,7 +1140,7 @@ def test_all_models_failing_non_transiently_is_parse_with_every_reason(
         monkeypatch,
         {
             "m1": httpx.Response(400, json={"error": {"message": "bad model"}}),
-            "m2": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}),
+            "m2": httpx.Response(400, json={"error": {"message": "unknown model"}}),
         },
     )
     with pytest.raises(ProcessorError) as excinfo:
@@ -1150,7 +1151,7 @@ def test_all_models_failing_non_transiently_is_parse_with_every_reason(
     assert "m1:" in exc.detail, exc.detail
     assert "m2:" in exc.detail, exc.detail
     assert "bad model" in exc.detail, exc.detail
-    assert "empty completion content" in exc.detail, exc.detail
+    assert "unknown model" in exc.detail, exc.detail
 
 
 def test_all_models_failing_with_a_transient_takes_the_last_transient_class(
@@ -1165,7 +1166,7 @@ def test_all_models_failing_with_a_transient_takes_the_last_transient_class(
         monkeypatch,
         {
             "m1": httpx.Response(429, json={"error": {"message": "rate limited"}}),
-            "m2": httpx.Response(200, json={"choices": [{"message": {"content": ""}}]}),
+            "m2": httpx.Response(400, json={"error": {"message": "bad model"}}),
         },
     )
     with pytest.raises(ProcessorError) as excinfo:
@@ -1174,13 +1175,18 @@ def test_all_models_failing_with_a_transient_takes_the_last_transient_class(
     assert excinfo.value.error_class is ErrorClass.BLOCKED
 
 
-def test_a_single_model_answering_nothing_is_still_a_visible_failure(
+def test_a_single_model_answering_nothing_is_a_transient_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC-139: AC-22 is unchanged -- an empty reply is a parse failure, not silence.
+    """#259: an empty reply is transient, so the worker can retry the row.
 
-    Already correct before this change; pinned so the new loop cannot turn the
-    single-model case into an empty artifact that opens the gate on nothing.
+    Supersedes AC-139, which pinned the opposite. The live failure was a
+    single-model chain: the provider answered HTTP 200 with no content, the row
+    classified `parse` (permanent), and nothing could rescue it -- it sat failed
+    until a human re-triggered it. Three such rows succeeded on the next attempt
+    in 1.0s, so `parse` was the wrong verdict; `network` puts the row back in the
+    queue, and it still stops in `failed` with this detail once the retries run
+    out. AC-22 (never a half-misaligned product) is unchanged.
     """
     _chain_provider(
         monkeypatch,
@@ -1190,7 +1196,9 @@ def test_a_single_model_answering_nothing_is_still_a_visible_failure(
     with pytest.raises(ProcessorError) as excinfo:
         _run_chain(monkeypatch)
 
-    assert excinfo.value.error_class is ErrorClass.PARSE
+    exc = excinfo.value
+    assert exc.error_class is ErrorClass.NETWORK, exc.detail
+    assert "empty completion content" in exc.detail, exc.detail
 
 
 def test_the_previously_uncovered_transient_paths_fall_back(
@@ -1991,7 +1999,7 @@ def test_a_failure_that_skipped_cooling_models_stays_retryable(
 ) -> None:
     """AC-249: a chain that never asked every model cannot be permanent.
 
-    The empty completion is a parse failure on its own (AC-139), but here it is
+    The empty completion is transient on its own (#259), but here it is
     the *last* candidate's failure while `primary` was skipped: the aggregate
     must stay transient so the worker requeues the row instead of pinning it.
     """
