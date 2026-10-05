@@ -142,6 +142,7 @@
 | AC-299 | #312 翻译链丢弃 spec 的日志降为 DEBUG：`_specs_needing_work` 对「文本已是目标语言」的行由 INFO 改 DEBUG——中文时间线走 translate→zh 链时**每条**条目都命中，是稳态而非事件；改前存 N 条 draft 的 INFO 行数为 N+1（实测 N=1→2、N=50→51），改后恒为 1 | issue #312 | 已合并 | `tests/integration/test_log_volume.py` |
 | AC-300 | #313 退避中的失败源不再每 tick 一行 INFO：该行改走 `adapters/log_limits.rate_limited_logger`（window=3600s、key=source_id）——「仍在退避」是稳态而非事件，默认 60s tick 下无节流就是每个坏源 1440 行/天；限速后每源每小时最多 1 行，窗口滚动时补一条 suppressed 汇总。限速器自此不再是死代码 | issue #313 | 已合并 | `tests/integration/test_log_volume.py` |
 | AC-301 | #314 enrichment worker 不再逐行 INFO：`enrichment %s succeeded`、`deferring enrichment … is paced`、`enrichment … deferred`、`waiting for the upstream product` 四处逐行 INFO 降为 DEBUG——每 sweep 的 `enrichment sweep: N ran (…)` 汇总行仍在 INFO（O(1)）；改前一次 sweep 的 INFO 行数为 N+1（实测 N=1→2、N=50→51），改后恒为 1 | issue #314 | 已合并 | `tests/integration/test_log_volume.py` |
+| AC-302..303 | #315 早认证拒绝不再每请求一行 INFO + 限速器加固：`EarlyAuthMiddleware` 的 401/403 拒绝行改走**每 app 实例**的 `rate_limited_logger`（按「拒绝种类 + method/principal」每分钟一行）——无凭据探测正是 `AuthFailureRateLimit` 故意不计数的那类（issue #18），此前无人限流（AC-302）；`RateLimitedLogger` 的 key 上界改为按最近使用淘汰（O(1)；此前 `min()` 全表扫描，且会淘汰正活跃的 key），`max_keys=0` 不再抛 `ValueError`（AC-303） | issue #315 | 已合并 | `tests/integration/test_app.py`、`tests/unit/test_log_limits.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
