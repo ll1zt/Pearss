@@ -1,8 +1,8 @@
 # 0010 · MCP 工具面经 Core API 调用，用官方 mcp SDK
 
-- 状态：**部分 superseded**（「工具与 `/v1` endpoint 一一对应」一句已被 [ADR 0036](0036-tool-face-is-a-semantic-projection.md) 修订为「语义投影」；「经 `/v1` 调用、审计与校验不绕过」的部分仍有效）
+- 状态：**部分 superseded**（「工具与 `/v1` endpoint 一一对应」一句已被 [ADR 0036](0036-tool-face-is-a-semantic-projection.md) 修订为「语义投影」；「经 `/v1` 调用、审计与校验不绕过」的部分仍有效。另：「确认在 server 侧」一句已被 [ADR 0058](0058-write-tools-do-not-elicit.md) 修订——写工具不再 elicit，「写操作必须经 user confirmation」的前半段不复存在；「工具经 `/v1`、审计不绕过」仍是硬约束）
 - 日期：2026-09-04
-- 修订：`architecture-spec.md` §9 的「FastMCP 3.x」一行、§8「FastMCP 从 OpenAPI 生成」的执行方式；2026-09-28（标注被 ADR 0036 修订的一句，**不重写原文**）
+- 修订：`architecture-spec.md` §9 的「FastMCP 3.x」一行、§8「FastMCP 从 OpenAPI 生成」的执行方式；2026-09-28（标注被 ADR 0036 修订的一句，**不重写原文**）；2026-10-05（同上，标注被 ADR 0058 修订的一句）
 
 ## 背景
 

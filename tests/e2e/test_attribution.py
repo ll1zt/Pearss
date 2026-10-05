@@ -26,7 +26,6 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.middleware import CorrelationAndAuditMiddleware
-from tests.e2e.conftest import _auto_accept
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 
@@ -78,7 +77,7 @@ async def test_an_added_source_names_the_audit_row_it_created(
     this the audit entry *for this write* rather than merely an entry that
     exists at the same time.
     """
-    async with open_mcp_session(mcp_url, elicitation_callback=_auto_accept) as session:
+    async with open_mcp_session(mcp_url) as session:
         result = await session.call_tool(
             "add_source",
             {
@@ -131,7 +130,7 @@ async def test_the_audit_id_is_per_write_not_shared(
     would also mean the trail could not distinguish the two operations, which
     is the entire point of attribution.
     """
-    async with open_mcp_session(mcp_url, elicitation_callback=_auto_accept) as session:
+    async with open_mcp_session(mcp_url) as session:
         first = _tool_payload(
             await session.call_tool(
                 "add_source",

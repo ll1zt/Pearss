@@ -8,12 +8,12 @@ refused, is the system actually unchanged?
 That distinction is the reason these tests exist rather than being folded into
 the happy path. A refusal that still writes is the worst kind of defect here,
 because the response looks correct and the damage is only visible later: an
-unauthenticated caller who manages to create a source, an unconfirmed MCP
-write that lands anyway, a pending item that leaks into a client's cache
-before its enrichments have run.
+unauthenticated caller who manages to create a source, a write replayed without
+its idempotency key, a pending item that leaks into a client's cache before its
+enrichments have run.
 
 Everything is real: a uvicorn thread, the auth middleware, the MCP session
-manager with its elicitation gate, the repository, the rendered feed. The only
+manager, the repository, the rendered feed. The only
 fixture is the upstream origin. Assertions are against what a client can
 observe (status codes, Reader API output, rendered XML) and against the
 database, never against whether some function was called -- a test that
@@ -22,10 +22,6 @@ changed shape while the behaviour stayed correct.
 """
 
 from __future__ import annotations
-
-import json
-from collections.abc import Callable
-from typing import Any
 
 import httpx
 import pytest
@@ -298,81 +294,6 @@ async def test_an_unauthenticated_request_is_refused_before_the_body_is_parsed(
 # --------------------------------------------------------------------------
 # Scenario: an unconfirmed MCP write does not happen
 # --------------------------------------------------------------------------
-
-
-async def test_an_unconfirmed_mcp_write_leaves_no_trace(
-    served: str,
-    origin_url: str,
-    session_factory: sessionmaker[Session],
-    open_mcp_session: Callable[..., Any],
-) -> None:
-    """Refused for want of elicitation, and nothing was written.
-
-    The happy path already asserts the `-32021` refusal; what it does not show
-    is the database afterwards. A tool that raised *after* inserting would
-    satisfy that assertion and still have created the source.
-    """
-    from tests.e2e.test_full_loop import _call, _rpc_error
-
-    async with open_mcp_session(f"{served}/mcp") as session:
-        with pytest.raises(BaseException) as excinfo:
-            await _call(
-                session,
-                "add_source",
-                {
-                    "url": origin_url,
-                    "schedule_policy": {"type": "fixed", "interval": "30m"},
-                },
-            )
-        error = _rpc_error(excinfo)
-        assert error.code == -32021, error.error
-
-    assert _count(session_factory, "source") == 0, "a refused MCP write stored a source"
-    # The refusal travelled through the HTTP middleware, so it is audited as
-    # rejected. What must not appear is any outcome claiming success.
-    assert "succeeded" not in _outcomes(session_factory), _outcomes(session_factory)
-
-
-async def test_a_declined_confirmation_writes_nothing(
-    served: str,
-    origin_url: str,
-    session_factory: sessionmaker[Session],
-    open_mcp_session: Callable[..., Any],
-) -> None:
-    """Declining at the prompt is refused, and nothing is written.
-
-    The happy path covers a client that *cannot* be asked (the SDK raises
-    `-32021` before the tool runs); this covers one that was asked and said no,
-    which is a different path. Since the edit path (#252) the refusal reaches the
-    tool's own `{"declined": True}` answer rather than surfacing as a protocol
-    error -- the confirmation ladder reports a refusal as a refusal -- so the test
-    pins that answer and the database. A server that treated a decline as
-    "proceed with defaults" would be invisible to every other test in this suite.
-    """
-    from mcp import types
-
-    async def _decline(_ctx: Any, _params: Any) -> Any:
-        return types.ElicitResult(action="decline")
-
-    async with open_mcp_session(
-        f"{served}/mcp", elicitation_callback=_decline
-    ) as session:
-        result = await session.call_tool(
-            "add_source",
-            {
-                "url": origin_url,
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-        )
-
-    assert result.is_error is False, result
-    payload = json.loads(result.content[0].text)
-    assert payload.get("declined") is True, payload
-    assert "declin" in payload["reason"].lower(), payload
-
-    assert _count(session_factory, "source") == 0, "a declined write stored a source"
-
-
 # --------------------------------------------------------------------------
 # Scenario: an item behind the gate is invisible on both output surfaces
 # --------------------------------------------------------------------------

@@ -1,9 +1,9 @@
 # ADR 0053：写确认的形状——一次确认 + 可选单字段编辑（两段式）
 
-- 状态：accepted
+- 状态：superseded（[ADR 0058](0058-write-tools-do-not-elicit.md) 退役了整套写确认：写工具不再 elicit，`Confirmation`、四段 resolver、可编辑集与 `declined`/`aborted` 一并删除。本 ADR 保留为历史记录：#250/#251/#252 的形状决策以及它们当时解决的漂移问题）
 - 日期：2026-10-03
 - issue：#253（记录 #250 / #251 / #252 的决策；本 ADR 是 #253 的交付物）
-- 相关 / 修订：ADR 0010（工具经 `/v1`，确认在 server 侧）、ADR 0036（工具面是 `/v1` 的语义投影）；**取代** `docs/api/mcp-tool-guide.md` 第三节里「每个写工具 elicited 一次，确认参数 == 执行参数」的呈现规则
+- 相关 / 修订：ADR 0010（工具经 `/v1`，确认在 server 侧）、ADR 0036（工具面是 `/v1` 的语义投影）；**取代** `docs/api/mcp-tool-guide.md` 第三节里「每个写工具 elicited 一次，确认参数 == 执行参数」的呈现规则。**本身已被 ADR 0058 整体取代**（写工具不再 elicit）
 
 **场景**：AC-238..245（已登记在 `SCENARIOS.md`，归属 #250 / #251 / #252；本 ADR 记录它们的共同决策，不新声明号段）。
 

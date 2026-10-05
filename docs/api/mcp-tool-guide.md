@@ -16,7 +16,7 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 
 - **工具不直接调用 `adapters/repository`**。AGENTS.md 规定「所有 API 调用方均需经过 Core
   API 审计中间件；不得只在 MCP 层做审计」，直调仓储会绕过审计、鉴权与校验
-- 工具是 Core API 的**薄封装 + 呈现层控制**：负责截断、字段挑选、elicitation 与错误映射
+- 工具是 Core API 的**薄封装 + 呈现层控制**：负责截断、字段挑选与错误映射
 - 因此新增一个动作的正确顺序是：**先有 `/v1` endpoint，再包工具**。反过来做会让契约分裂
 
 ## 二、上下文经济（最重要的取舍）
@@ -52,81 +52,60 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 正文通过 `item://{item_id}` Resource 提供，而不是工具返回值。理由：agent 可以按需取，
 且取到的内容不进每一轮上下文。
 
-## 三、写操作：默认需要用户确认
+## 三、写操作：不确认，直接执行
 
-AGENTS.md：「写工具：默认需要用户确认」；「需要用户确认的 MCP 动作必须走 elicitation」。
+写工具**不走 elicitation**（ADR 0058，issue #270）。这条曾经是硬规则；退役的理由与替代面写在这里，因为「为什么没有确认」是改工具面时最先要能回答的问题。
 
-### 规则
+### 为什么退役
 
-- 所有**改变状态**的工具都必须走 MCP elicitation 由用户确认，确认在 **server 侧**执行，
-  不依赖客户端自觉
-- 确认**展示的必须是实际执行的内容**。默认路径的表单只有一项 `confirmed`
-  （勾选 = 接受），执行值由各工具 `_<tool>_fields()` **单一来源**派生并写在摘要
-  （`message`）里；对话框里没有可替换的字段，因此「客户端确认 A 而 server 执行 B」
-  没有落脚点——客户端回传的多余/异值字段一律不读（issue #250）。
-  两条守卫钉住它：AC-75「任一入参变化都会改变摘要」、AC-238「每个写工具的 schema
-  只有 `confirmed` 一项」
-- **想改一个字段时走两段式**（ADR 0053，AC-243..245）：轮 1 在确认旁给出「改哪个
-  字段？」的**受控单选** `edit`（enum = `none` ∪ 该工具的可编辑集，没有自由文本）；
-  选中后付两轮——轮 2 只问该字段的新值（按值类型渲染：布尔 = 勾选、数字 = 数字、
-  **结构化值 = canonical JSON 文本**），轮 3 展示**组合后的请求**并把该值回显，服务端
-  用 `_matches` 校验「回显 == 将要执行」，不符即 `aborted` 且零写入。默认路径（不改）
-  仍是 1 轮；任一轮取消/拒绝 = `declined` 且零写入。**可编辑集由每个工具显式声明**
-  （确认构造器的必填参数，漏声明会在守卫处失败）：可编辑集 ⊆ 执行参数集，身份/目标类
-  参数不可编辑——想改它们的调用方重新发起请求（AC-241）。`aborted` 只属于这条编辑路径
-- 工具返回值必须带 `audit_id`，让操作可归因、可追溯。Core API 在 `X-Audit-ID`
-  响应头上回显本次写入的审计行 id（审计行由中间件在响应发出**之后**写入，因此
-  id 无法走 body），MCP 层读到后并入工具结果。读操作不被审计，因此不携带该字段
-- **audit id 必须随响应返回，不得存在共享 client 的属性上**。`CoreAPIClient`
-  是**单实例**、由 `MCPServer` 服务所有并发请求，而写工具都是 `async def`；
-  把 id 存在 client 属性上意味着第二个调用者在第一个读取前就覆写了它，
-  于是调用者报出**别人的**审计 id —— 一个精确到足以误导排查的错误答案
-  （issue #64）。因此 `request()` 返回 `(status, payload, audit_id)`，
-  工具用局部变量。
-  注意这个缺陷是**潜伏型**：单纯的 `asyncio.gather` 不会触发（赋值与返回之间
-  没有挂起点），因此回归测试用 **barrier 强制交错**，并用
-  `test_the_shared_client_keeps_no_per_call_result_state` 钉住「client 上不存在
-  per-call 结果状态」这条不变量（实测：只加回属性时，并发场景仍绿，只有这条守卫变红）
-- 每个工具必须声明 `ToolAnnotations`，且**与描述里的副作用陈述同源**。规则按下表
-  读：左边是描述必须说的话，右边是随之而来的注解。**不要按工具类别记**——旧版本这里
-  写「读工具 `openWorldHint=false`」，读起来像「读工具统一为 false」的属性，而它其实
-  是「不发起外部请求、不消耗 provider 预算」的**结论**：真出现一个出网的读工具，
-  照类别记就会把它标错，照下表记则不会（issue #69）
+- **它不承担安全责任**。elicitation 要求*配合的*客户端向用户展示确认；想写入的客户端自己回答「确认」即可。它约束的是误操作，不是对抗——真正的边界是 token（见第五节）。
+- **它的代价落在不能配合的客户端上**。MCP elicitation 是可选、较新的能力，多数客户端与框架没有实现。实测：同一个 agent 通道下 **13 个读工具全部可用、16 个写工具全部不可用**（每个都回 JSON-RPC `-32021 MissingRequiredClientCapability`），只能绕开工具面直接打 `/v1`。对一个自称 agent-first 的项目，这是主路径不可用。
+
+### 那么靠什么约束误操作
+
+1. **token 权限**——真正的边界：`PEARSS_MCP_TOKEN`，独立于 Core API token；
+2. **工具描述与 annotations**——破坏性工具（`remove_source` / `delete_items` / `delete_source_items`）在描述里明写不可逆后果，且 `destructiveHint=true`；出网或消耗 provider 预算的写工具 `openWorldHint=true`。注解是 host 决定是否追加自己的确认界面的依据，所以它和描述同属契约（进 snapshot）；
+3. **幂等**——每次调用新生成 `Idempotency-Key`，重放不重复生效（因此 `idempotentHint=false`：重试是新意图）；
+4. **可审计**——每次写都有 Core API 审计行与 correlation id，事后可追溯。
+
+### 工具面必须保持的性质
+
+- 写工具经 `/v1`（ADR 0010），不直调仓储：审计、鉴权与校验都在那条路上；
+- 工具返回值带 `audit_id`，且该 id 能在 `audit_log` 查到对应行（读工具不带，因为读不被审计）；
+- 每个工具声明 `ToolAnnotations`，且**与描述里的副作用陈述同源**（下表）。规则按下表读：左边是描述必须说的话，右边是随之而来的注解。**不要按工具类别记**——真出现一个出网的读工具，照类别记就会把它标错，照下表记则不会（issue #69）：
 
   | 描述说的 | 注解必须是 |
   |---|---|
-  | 需要用户确认 | `readOnlyHint=false` |
   | 有不可逆后果（删除、force publish） | `destructiveHint=true` |
   | 发起外部请求、或消耗 provider 预算 | `openWorldHint=true` |
-  | （写工具） | `idempotentHint=false`——不接受调用方提供的稳定幂等键（每次新生成），重试即新意图 |
+  | 只改本部署自己的状态 | `openWorldHint=false`、`destructiveHint=false` |
+  | （写工具） | `readOnlyHint=false`、`idempotentHint=false`——不接受调用方提供的稳定幂等键（每次新生成），重试即新意图 |
 
-  三条与描述的一致性由 `tests/unit/test_mcp_tool_guide.py` 机械对账（措辞 ⇔ hint），
-  所以「注解是契约」不只是 snapshot 里的一行 diff。注解是机器可读的副作用声明：
-  host 依据 `destructiveHint` 决定是否追加自己的确认，所以它与描述同属契约（进 snapshot）
-- 破坏性操作（删除、force publish）在描述里显式标注不可逆后果
+  这三条与描述的一致性由 `tests/unit/test_mcp_tool_guide.py` 机械对账（措辞 ⇔ hint）。
+- 入参 schema 里**不得**出现 `confirmed` / `ack` 之类的确认参数：`tests/integration/test_mcp_server.py` 对真实注册表逐个查。
 
-### 需要确认的清单（当前）
+### 写工具（16 个）
 
-| 工具 | 理由 |
+| 工具 | 副作用 |
 |---|---|
-| `add_source` | 引入外部内容源（可同时指定 `folder` 归类，省去 add-then-move 的第二次确认） |
-| `add_sources` | 批量引入外部内容源（ADR 0044）：**一次确认覆盖整批**，返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
-| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；确认文本含条数、URL 预览与**列表指纹**（只比条数会被换掉一个地址的列表骗过）；地址必须在本源 host 上 |
+| `add_source` | 引入外部内容源；`folder` 可在同一次调用里归类 |
+| `add_sources` | 批量引入外部内容源（ADR 0044）：返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
+| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；地址必须在本源 host 上 |
 | `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_source_status` | 暂停/恢复采集，改变采集行为 |
 | `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
 | `set_source_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
-| `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆；确认文本说明会删掉什么） |
+| `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆） |
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文）：返回**作业句柄**，逐 id 结果查 `work_units`（已消失的 id 是 `skipped`） |
 | `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `set_item_read_state` | 标记条目的**消费状态**（已读/未读、星标/取消）：只写 `read_state` 行，**不碰条目本体**（content_hash / guid / publish_status / content_ref 都不动，已发布内容冻结）；省略的字段保留原值；`/v1/items/{id}/read-state` 与 Reader API 报同一状态（同一领域函数） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
-| `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库；确认文本列出条目标题与条数）：返回**作业句柄**，逐条结果查 `work_units` |
+| `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库）：返回**作业句柄**，逐条结果查 `work_units` |
 | `retry_enrichments` | 重排队失败的处理器链产物：`enrichment_id` 只重排**一行**（`POST /v1/enrichments/{id}:retry`），`source_id` 重排该源全部失败行 |
 | `backfill_source` | 对历史条目一次性补跑处理器链：返回**作业句柄**（服务端选择「仍缺该链产物的条目」，带 limit 重复调用会前进）；逐条结果查 `work_units` |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 
-只读工具不需要确认：`list_sources`、`get_source`、`diagnose_source`、`search_items`、`get_item`、
+只读工具（13 个）：`list_sources`、`get_source`、`diagnose_source`、`search_items`、`get_item`、
 `get_item_body`、`list_jobs`、`list_runs`、`list_enrichments`、`list_plugins`、
 `get_work`、`work_units`、`get_system_snapshot`。
 
@@ -151,7 +130,7 @@ issue #193 的两个读原语**并入既有工具**（不新增工具名：工�
 issue #218 的读状态读侧同样**并入既有工具**：`get_item` 的默认响应带 `is_read` / `is_starred`
 （从 `/v1/items/{id}/read-state` 取，空行 = `false`），因为「这个条目是什么」与「我和它的状态」
 是同一个问题、同一次调用；显式传 `fields` 时仍是**只要请求的字段**（收窄请求）。写侧无法折叠
-（写不能塞进读工具：注解与确认都不同），所以新工具 `set_item_read_state` 是工具面上的一等原子，
+（写不能塞进读工具：注解不同），所以新工具 `set_item_read_state` 是工具面上的一等原子，
 代价记在 `tests/unit/test_mcp_tool_guide.py` 的预算注释里。
 
 ## 四、错误返回
@@ -229,9 +208,9 @@ title——**看起来像空壳，但它不是纯浪费**：SDK 只在存在 out
 
 - 工具名 `snake_case`，动词开头，与 `/v1` 的 `operationId` 语义对齐
   （`list_sources` ↔ `listSources`）
-- 每个工具必须有：一句话说明、参数说明、返回结构说明、是否需要确认、失败时的
+- 每个工具必须有：一句话说明、参数说明、返回结构说明、失败时的
   `error_class` 取值范围
-- 描述里写清**副作用**：是否发起外部请求、是否改变状态、是否可逆
+- 描述里写清**副作用**：是否发起外部请求、是否改变状态、是否可逆（写工具不写「需要确认」——ADR 0058）
 
 ### 工具名不带前缀（issue #75）
 
@@ -280,8 +259,10 @@ title——**看起来像空壳，但它不是纯浪费**：SDK 只在存在 out
   登出 Core API，反之亦然。它认证的是**边缘**，不是**行为者**
 - **fail-closed**：未配置时端点返回 503 并拒绝一切，启动记 warning —— 「未配置」不得读作
   「未鉴权」
-- **elicitation 不是安全边界**。它要求*配合的*客户端向用户展示确认；想写入的客户端自己
-  回答「确认」即可。它约束的是误操作，不是对抗 —— 真正的边界是这个 token
+- **elicitation 不是安全边界**（ADR 0058 就是据此退役它的）。它要求*配合的*客户端向用户
+  展示确认；想写入的客户端自己回答「确认」即可。它约束的是误操作，不是对抗 —— 真正的边界
+  是这个 token。既然它不承担安全职责，却让无该能力的客户端一个写工具都调不了，退役它
+  只损失「防误操作」的一层软性提醒，而那一层已由描述/annotations、幂等与审计接住
 
 **出站鉴权（MCP server → `/v1`）**
 
@@ -311,8 +292,7 @@ title——**看起来像空壳，但它不是纯浪费**：SDK 只在存在 out
 1. 工具是否经 `/v1` 而非直调仓储？（审计覆盖）
 2. 返回值是否可能含正文、HTML、token、私有 URL？
 3. 列表是否分页、字符串是否截断、默认字段是否最小？
-4. 写操作是否走 elicitation，且确认覆盖**实际执行的内容**？（默认路径的执行值只来自服务端
-   派生、客户端回传字段不读；编辑路径唯一的用户输入经轮 3 回显比对——ADR 0053）
+4. 写操作是否经 `/v1`、带 `Idempotency-Key`、有 `audit_id`？（写工具**不 elicit**——ADR 0058）
 5. 写操作是否返回 `audit_id`，且该 id 能在 `audit_log` 中查到对应行？
 6. 工具是否声明了与语义相符的 `ToolAnnotations`？
 7. 错误是否用统一结构，`error_class` 是否取自 enum？

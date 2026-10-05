@@ -217,31 +217,12 @@ def _payload(result: CallToolResult) -> dict[str, Any]:
     return {}
 
 
-async def _call(
-    url: str,
-    tool: str,
-    args: dict[str, Any],
-    *,
-    confirm: bool = False,
-) -> dict[str, Any]:
-    """Call a tool; `confirm` echoes the server's own prefilled defaults."""
-    from mcp import types
+async def _call(url: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Call a tool from a client that declares no elicitation capability.
 
-    async def _auto_accept(_ctx: Any, params: Any) -> Any:
-        properties = (params.requested_schema or {}).get("properties", {})
-        content = {
-            name: (
-                spec.get("default", False)
-                if spec.get("type") == "boolean"
-                else spec.get("default", "")
-            )
-            for name, spec in properties.items()
-        }
-        return types.ElicitResult(action="accept", content=content)
-
-    async with mcp_session(
-        url, elicitation_callback=_auto_accept if confirm else None
-    ) as session:
+    That is the client #270 is about: it used to get `-32021` from every write.
+    """
+    async with mcp_session(url) as session:
         return _payload(await session.call_tool(tool, args))
 
 
@@ -306,7 +287,7 @@ async def test_list_jobs_reports_the_job_a_trigger_declares(mcp_url: str) -> Non
     first -- which is also the agent's own path to it.
     """
     source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    await _call(mcp_url, "trigger_job", {"source_id": source_id}, confirm=True)
+    await _call(mcp_url, "trigger_job", {"source_id": source_id})
 
     payload = await _call(mcp_url, "list_jobs", {"limit": 10})
     assert isinstance(payload["data"], list), payload
@@ -335,7 +316,6 @@ async def test_update_schedule_policy_changes_the_stored_policy(
             "source_id": source_id,
             "schedule_policy": {"type": "fixed", "interval": "3h"},
         },
-        confirm=True,
     )
     assert result.get("declined") is None and result.get("aborted") is None, result
 
@@ -354,7 +334,6 @@ async def test_set_source_status_pauses_and_resumes(mcp_url: str) -> None:
         mcp_url,
         "set_source_status",
         {"source_id": source_id, "status": "paused"},
-        confirm=True,
     )
     source = await _call(mcp_url, "get_source", {"source_id": source_id})
     assert source["status"] == "paused", source
@@ -363,7 +342,6 @@ async def test_set_source_status_pauses_and_resumes(mcp_url: str) -> None:
         mcp_url,
         "set_source_status",
         {"source_id": source_id, "status": "active"},
-        confirm=True,
     )
     source = await _call(mcp_url, "get_source", {"source_id": source_id})
     assert source["status"] == "active", source
@@ -378,7 +356,6 @@ async def test_set_source_folder_moves_the_source(mcp_url: str) -> None:
         mcp_url,
         "set_source_folder",
         {"source_id": source_id, "folder": "阅读"},
-        confirm=True,
     )
     assert result.get("declined") is None and result.get("aborted") is None, result
 
@@ -394,9 +371,7 @@ async def test_retry_enrichments_succeeds_with_nothing_to_requeue(
     """AC-52: requeueing on a source with no failed rows is a success, not a 500."""
     source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
 
-    result = await _call(
-        mcp_url, "retry_enrichments", {"source_id": source_id}, confirm=True
-    )
+    result = await _call(mcp_url, "retry_enrichments", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert "error" not in result, result
     assert result["audit_id"], result
@@ -471,7 +446,6 @@ async def test_set_item_read_state_marks_read_and_leaves_the_item_alone(
         mcp_url,
         "set_item_read_state",
         {"item_id": item_id, "is_read": True},
-        confirm=True,
     )
     assert written["is_read"] is True, written
     assert written["audit_id"], written
@@ -488,7 +462,6 @@ async def test_set_item_read_state_marks_read_and_leaves_the_item_alone(
         mcp_url,
         "set_item_read_state",
         {"item_id": item_id, "is_starred": True},
-        confirm=True,
     )
     assert starred["is_starred"] is True, starred
     assert starred["is_read"] is True, starred
@@ -510,9 +483,7 @@ async def test_set_item_read_state_refuses_a_change_that_names_nothing(
     item_id = (await _call(mcp_url, "search_items", {"limit": 5}))["data"][0]["id"]
     rows_before = _read_state_row(url, item_id)
 
-    payload = await _call(
-        mcp_url, "set_item_read_state", {"item_id": item_id}, confirm=True
-    )
+    payload = await _call(mcp_url, "set_item_read_state", {"item_id": item_id})
 
     assert payload["error"] == "empty_patch", payload
     assert _read_state_row(url, item_id) == rows_before
@@ -529,7 +500,6 @@ async def test_set_item_read_state_reports_a_missing_item(
         mcp_url,
         "set_item_read_state",
         {"item_id": "does-not-exist", "is_read": True},
-        confirm=True,
     )
 
     assert payload["error"] == "item_not_found", payload

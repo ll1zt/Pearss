@@ -27,7 +27,6 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp import types
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 from sqlalchemy import text
@@ -66,16 +65,6 @@ def _rpc_error(excinfo: pytest.ExceptionInfo[BaseException]) -> MCPError:
     return found[0]
 
 
-async def _accept(_ctx: Any, params: Any) -> Any:
-    """Confirm by echoing the server's prefilled defaults: 'press confirm'."""
-    properties = (params.requested_schema or {}).get("properties", {})
-    content = {
-        name: spec.get("default", False if spec.get("type") == "boolean" else "")
-        for name, spec in properties.items()
-    }
-    return types.ElicitResult(action="accept", content=content)
-
-
 async def test_subscribe_collect_consume_replay(
     served: str,
     origin_url: str,
@@ -84,23 +73,11 @@ async def test_subscribe_collect_consume_replay(
 ) -> None:
     mcp_endpoint = f"{served}/mcp"
 
-    # -- 3. confirm and add_source (MCP, elicitation) -----------------------
-    # No elicitation capability declared: the resolver refuses with the spec's
-    # MissingRequiredClientCapability, and nothing is written.
+    # -- 3. add_source (MCP) -------------------------------------------------
+    # No elicitation capability is declared, and none is needed: a write does
+    # not elicit (ADR 0058). This step used to assert the `-32021` refusal
+    # first, then redo the call with a callback that accepted the dialog.
     async with open_mcp_session(mcp_endpoint) as session:
-        with pytest.raises(BaseException) as excinfo:
-            await _call(
-                session,
-                "add_source",
-                {
-                    "url": origin_url,
-                    "schedule_policy": {"type": "fixed", "interval": "30m"},
-                },
-            )
-        error = _rpc_error(excinfo)
-        assert error.code == -32021, error.error
-
-    async with open_mcp_session(mcp_endpoint, elicitation_callback=_accept) as session:
         added = await _call(
             session,
             "add_source",
@@ -109,7 +86,6 @@ async def test_subscribe_collect_consume_replay(
                 "schedule_policy": {"type": "fixed", "interval": "30m"},
             },
         )
-        assert added.get("declined") is None and added.get("aborted") is None, added
         source_id = added["id"]
 
         # -- 4. trigger and wait for the run --------------------------------
