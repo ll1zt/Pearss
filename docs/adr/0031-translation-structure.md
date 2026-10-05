@@ -1,6 +1,6 @@
 # 0031: 翻译产物的结构——原标签壳回填，非文本节点不经 provider
 
-Status: accepted（**部分 superseded**：[ADR 0054](0054-a-dropped-image-marker-keeps-the-image.md) 细化了 §47「丢弃标记而不猜」——丢掉的 `img` 标记改为保留图片；成对标记与排版类 void（`br`/`wbr`/`hr`）仍照本文）
+Status: accepted（**部分 superseded**：[ADR 0054](0054-a-dropped-image-marker-keeps-the-image.md) 细化了 §47「丢弃标记而不猜」——丢掉的 `img` 标记改为保留图片；成对标记与排版类 void（`br`/`wbr`/`hr`）仍照本文。[ADR 0055](0055-an-empty-completion-is-transient.md) 修订了 §5「provider 返回空 content 仍走 parse」——空补全改判瞬时 `network`，使 worker 可重试；§5 的「块独立消费回复、回复不足则保留原文」与 AC-22 不变）
 Date: 2026-09-26
 Context: issue #33。translate 的产物把条目 HTML 拍平成纯文本再逐行包 `<p>`，读者拿到的
 「译文」是一大块无标题、无图、无链接的纯文字，而原文（ADR 0018 的 merge 叠在下面）却有

@@ -273,7 +273,14 @@ def _parse_reply(payload: dict[str, Any]) -> str:
             f"unrecognised chat-completion reply: {type(exc).__name__}",
         ) from exc
     if not isinstance(content, str) or not content.strip():
-        raise ProcessorError(ErrorClass.PARSE, "empty completion content")
+        # A 200 with no content is a provider-side glitch, not a verdict on the
+        # text: measured live, three such rows all succeeded on the next attempt
+        # (issue #259). It classifies transient (`network`) so the worker retries
+        # the row -- as `parse` (permanent) it pinned a single-model row forever,
+        # with nothing able to rescue it. The chain still falls through to the
+        # next model first (AC-133), and a provider that *keeps* returning
+        # nothing exhausts MAX_ATTEMPTS and stops in `failed` with this detail.
+        raise ProcessorError(ErrorClass.NETWORK, "empty completion content")
     return str(content)
 
 
