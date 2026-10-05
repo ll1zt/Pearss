@@ -2,6 +2,8 @@
 
 AC-290..292: the INFO volume does not grow with idle polling or with batch size
 (issue #297's rule: INFO/WARNING is event-driven and O(1) per job or failure).
+AC-299: the same rule on the chain path -- an item the chain itself drops, because
+its text is already in the target language, is not a per-item event either.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.main import create_engine_for
 from app.pipeline import normalise_and_store
 from app.scheduler import run_tick
+from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
 
@@ -172,3 +175,65 @@ def test_the_info_count_does_not_grow_with_the_batch(
             engine.dispose()
 
     assert counts == [1, 1, 1, 1], counts
+
+
+_TRANSLATE_TO_ZH = EnrichmentSpec(
+    plugin_id="translate", kind=EnrichmentKind.TRANSLATION, lang="zh"
+)
+
+
+def _chinese_draft(index: int) -> ItemDraft:
+    return ItemDraft(
+        source_id=SOURCE,
+        external_id=f"zh{index}",
+        title=f"第 {index} 篇",
+        canonical_url=f"https://example.com/zh/{index}",
+        published_at=NOW,
+        content="<p>这是一篇已经是中文的文章不需要再翻译</p>",
+    )
+
+
+def test_a_dropped_translation_spec_is_not_an_info_line_per_item(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-299: a Chinese timeline through translate->zh drops every spec.
+
+    That is the steady state of such a source, not a per-item event, so the
+    INFO volume must not grow with the batch. AC-292's test passes no chain, so
+    it never reaches this line -- the rule held only on the path the test drove.
+    """
+    counts: list[int] = []
+    dropped_per_run: list[list[str]] = []
+    for label, size in (("one", 1), ("fifty", 50)):
+        engine = create_engine_for(migrated_database(tmp_path, f"chain-{label}.db"))
+        try:
+            with sessionmaker(engine, expire_on_commit=False)() as session:
+                _add_source(
+                    session,
+                    source_id=SOURCE,
+                    policy={"type": "fixed", "interval": "1h"},
+                )
+                caplog.clear()
+                with caplog.at_level(logging.DEBUG, logger="app.pipeline"):
+                    normalise_and_store(
+                        session,
+                        [_chinese_draft(i) for i in range(size)],
+                        chain=(_TRANSLATE_TO_ZH,),
+                    )
+                counts.append(len(_store_path_info_records(caplog)))
+                dropped_per_run.append(
+                    [
+                        record.getMessage()
+                        for record in caplog.records
+                        if record.name == "app.pipeline"
+                        and record.levelno == logging.DEBUG
+                        and "already in" in record.getMessage()
+                    ]
+                )
+        finally:
+            engine.dispose()
+
+    assert counts[0] == counts[1], counts
+    # Moved down a level, not deleted: the reason is still in the journal for
+    # anyone diagnosing "why was this not translated?".
+    assert all(dropped_per_run), "the reason a spec was dropped must still be logged"
