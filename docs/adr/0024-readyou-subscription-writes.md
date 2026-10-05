@@ -296,3 +296,48 @@ UI 上表现为删除永不成功。拒绝方案实际产出的是「看似更�
 
 「完整 Google Reader API 从来不是目标」不变；本修订只把未决项落到可判定的去向
 （实现或 declined），没有扩大范围。若要改变目标本身，应新开 ADR。
+
+## 修订（2026-10-05）：`ot` 保留无日期条目（issue #285）
+
+2026-09-30 修订把 `ot` 实现为 `published_at > ot`，并写下「NULL `published_at`
+无法满足 `>`，因此无日期条目离开有窗口的流（miniflux 同样如此）」。**该条结论
+superseded**：miniflux 的条目总有 `published_at`，所以那条对齐论证在本仓库
+（`published_at` 允许 NULL）并不成立。
+
+### 为什么必须改
+
+Read You 全局 sync（`GoogleReaderRssService.sync()`）用集合求交回灌：
+
+- `remoteUnread = ids(s=reading-list&xt=read)`（无窗口）
+- `remoteRead   = ids(s=reading-list&it=read&ot=<now−1月>)`（有窗口）
+- `toBeReadLocal = remoteRead ∩ localUnread` → 本地标已读
+
+无日期条目既不在 `remoteRead`（不满足 `>`）也不在 `remoteUnread`（它是已读的），
+于是**永远无法回灌**；而同一客户端的 feed 级 `syncFeed → getItemIdsForFeed`
+**不带 `ot`**，能回灌同一批条目——同一客户端两条路径结论相反，是本仓库一贯的
+定位手法。叠加 Read You 侧 `DiffMapHolder` 的 `debounce(2_000)`（读完约 2 秒才
+上送），「读完立刻刷新」时服务端仍可能未读、先被 `toBeUnreadLocal` 翻回未读；
+随后推送到达、服务端变已读，而下一次 sync 的 read 走查不含它 → **永久停在未读**。
+用户可见表现即「一部分已读又变未读」。
+
+### 新语义
+
+- `ot` 只约束**有日期**的历史：`published_at IS NULL OR published_at > ot`；
+- 无日期条目没有该排序里的位置，静默丢掉等于让它的已读状态无法同步——与决策 2
+  「无法兑现的过滤器不得静默收窄成错误答案」同构；
+- 超过窗口的**有日期**条目维持现状（那是 Read You 自己的窗口选择，本仓不改）；
+- 排序与游标语义不变（`published_at DESC NULLSLAST, id DESC`，无日期条目仍排最后）。
+
+### 与 `_MAX_SERVED` 的关系
+
+`ot` 被实现的理由之一是「游标会翻到穷尽，忽略 `ot` 会每轮翻完整个已读历史」。
+本修订不改变那个界：无日期条目只是不再被窗口**额外**丢弃，而同一轮 sync 的
+`xt=read` 走查本来就**不带窗口**、已经要翻完整个未读集——有界性不依赖把无日期
+条目从 read 走查里删掉。
+
+`ot` 的解析（仅正数生效、非数字 = 无下界）与「严格大于」不变。实现由
+`tests/integration/test_reader_ot_window.py::test_ot_windows_the_read_stream`
+（AC-273/AC-274，已按新语义更新）与
+`::test_a_non_positive_or_unparseable_ot_disables_the_window` 钉住。
+（2026-09-30 修订把这两个用例的位置记成 `test_reader_coverage_gaps.py`；实际在
+`test_reader_ot_window.py`，本次一并更正。）
