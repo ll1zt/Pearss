@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 from typing import TextIO
+from urllib.parse import urlsplit
 
 from adapters import correlation
 
@@ -100,14 +101,17 @@ def describe_database_url(url: str) -> str:
     For a network URL the authority (``user:password@host:port``) and the query
     string (``?sslmode=...``, sometimes a token) are dropped: only the scheme
     and the database path are safe to print.
+
+    Parsed with :func:`urllib.parse.urlsplit` rather than splitting on ``/``:
+    a URL with no path has no path segment, and the old fallback took the whole
+    authority -- password included -- and printed it as the path.
     """
-    scheme, separator, rest = url.partition("://")
-    if not separator:
+    parts = urlsplit(url)
+    if not parts.scheme:
         return "<unparseable>"
-    if scheme.startswith("sqlite"):
+    if parts.scheme.startswith("sqlite"):
         return url.split("?", 1)[0]
-    path = rest.split("?", 1)[0].rsplit("/", 1)[-1]
-    return f"{scheme}:///{path}"
+    return f"{parts.scheme}:///{parts.path.lstrip('/')}"
 
 
 def log_startup_banner() -> None:

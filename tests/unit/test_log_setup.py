@@ -2,6 +2,9 @@
 
 AC-275..277: the logging bootstrap injects the active correlation id into
 every record, renders it in the line, and prints one redacted startup banner.
+AC-295: a network database URL with no path must not print its authority -- the
+last path segment is the whole authority there, so the old fallback leaked the
+password into the startup banner.
 
 These assert on the observable artifacts -- the rendered line and the captured
 ``LogRecord`` -- never on "the filter ran N times".
@@ -156,6 +159,55 @@ def test_startup_banner_reports_effective_config_without_credentials(
     rendered = stream.getvalue()
     assert "level=DEBUG" in rendered
     assert "postgresql:///pearss" in rendered
+    assert "s3cr3t-pw" not in rendered
+    assert "db.internal" not in rendered
+    assert "operator" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # No path at all: the authority must not be mistaken for the path.
+        ("postgresql://operator:s3cr3t@db.internal", "postgresql:///"),
+        ("mysql://root:hunter2@localhost", "mysql:///"),
+        ("postgresql://operator:s3cr3t@db.internal:5432", "postgresql:///"),
+        # A path is still reported; the authority and query are still dropped.
+        (
+            "postgresql://operator:s3cr3t@db.internal:5432/pearss?sslmode=require",
+            "postgresql:///pearss",
+        ),
+        # SQLite has no authority; the path is the location.
+        ("sqlite:////var/lib/pearss.db", "sqlite:////var/lib/pearss.db"),
+        ("sqlite+aiosqlite:///./pearss.db?mode=ro", "sqlite+aiosqlite:///./pearss.db"),
+    ],
+)
+def test_describe_database_url_never_reports_credentials(
+    url: str, expected: str
+) -> None:
+    """AC-295: only scheme and path survive, whatever shape the URL has."""
+    assert log_setup.describe_database_url(url) == expected
+
+
+def test_describe_database_url_flags_a_url_it_cannot_parse() -> None:
+    """AC-295: a string with no scheme is reported, not echoed."""
+    assert log_setup.describe_database_url("pearss.db") == "<unparseable>"
+
+
+def test_startup_banner_hides_a_pathless_network_credential(
+    monkeypatch: pytest.MonkeyPatch, restore_root_logger: None
+) -> None:
+    """AC-295: the banner is the user-visible path; it must not leak either."""
+    monkeypatch.delenv("PEARSS_LOG_LEVEL", raising=False)
+    monkeypatch.setenv(
+        "PEARSS_DATABASE_URL", "postgresql://operator:s3cr3t-pw@db.internal"
+    )
+    stream = io.StringIO()
+    log_setup.configure_logging(stream=stream)
+
+    log_setup.log_startup_banner()
+
+    rendered = stream.getvalue()
+    assert "postgresql:///" in rendered
     assert "s3cr3t-pw" not in rendered
     assert "db.internal" not in rendered
     assert "operator" not in rendered
