@@ -33,12 +33,19 @@ from typing import Any, Final
 
 from starlette.types import Receive, Scope, Send
 
+from adapters.log_limits import rate_limited_logger
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_MAX_BODY_BYTES: Final = 1024 * 1024
 DEFAULT_FAILURE_MAX: Final = 50
 DEFAULT_FAILURE_WINDOW_SECONDS: Final = 300.0
 DEFAULT_FAILURE_BLOCK_SECONDS: Final = 900.0
+# One refusal line per window per kind. A credential-free probe is the caller
+# `AuthFailureRateLimit` deliberately does not count (issue #18), so this line
+# is the only record a flood would leave -- once per window is enough to leave
+# it without the line *becoming* the flood (issue #297's rule).
+DEFAULT_REFUSAL_WINDOW_SECONDS: Final = 60.0
 
 _SUCCESS = 200
 _TOO_LARGE = 413
@@ -185,6 +192,12 @@ class EarlyAuthMiddleware:
 
     def __init__(self, app: Any) -> None:
         self.app = app
+        # Per middleware instance rather than per process: one app's refusals
+        # must not silence another app's, and several are built in one test
+        # process.
+        self._refusal_log = rate_limited_logger(
+            LOGGER, window_seconds=DEFAULT_REFUSAL_WINDOW_SECONDS
+        )
 
     def _required_scope(self, path: str, method: str) -> str:
         for suffix, scope in self._ACTION_SCOPES.items():
@@ -210,12 +223,21 @@ class EarlyAuthMiddleware:
         needed = self._required_scope(path, method)
         principal = authenticate(_ScopeHeaders(scope))
         if principal is None:
-            LOGGER.info("early auth refused: unauthenticated, method=%s", method)
+            self._refusal_log(
+                logging.INFO,
+                f"unauthenticated {method}",
+                "early auth refused: unauthenticated, method=%s",
+                method,
+            )
             await _send_auth_error(send, status=401, code="unauthenticated")
             return
         if not principal.may(needed):
-            LOGGER.info(
-                "early auth refused: scope=%s to principal=%s", needed, principal.name
+            self._refusal_log(
+                logging.INFO,
+                f"insufficient_scope {principal.name}",
+                "early auth refused: scope=%s to principal=%s",
+                needed,
+                principal.name,
             )
             await _send_auth_error(send, status=403, code="insufficient_scope")
             return

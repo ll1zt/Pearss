@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from typing import Any
 
@@ -40,10 +41,14 @@ class RateLimitedLogger:
         self._logger = logger
         self._window = window_seconds
         self._clock = clock
-        self._max_keys = max_keys
+        self._max_keys = max(1, max_keys)
         self._lock = threading.Lock()
-        # key -> (window_start, suppressed, level)
-        self._state: dict[str, tuple[float, int, int]] = {}
+        # key -> (window_start, suppressed, level), ordered by last use so the
+        # bound can drop the least recently seen key in O(1). The previous
+        # min()-over-the-table was O(max_keys) on exactly the flood path this
+        # class exists to collapse, and raised on an empty table when
+        # max_keys was 0 (issue #315).
+        self._state: OrderedDict[str, tuple[float, int, int]] = OrderedDict()
 
     def __call__(
         self, level: int, key: str, message: str, *args: Any, **kwargs: Any
@@ -67,6 +72,7 @@ class RateLimitedLogger:
                 start, suppressed, summary_level = entry
                 if now - start < self._window:
                     self._state[key] = (start, suppressed + 1, level)
+                    self._state.move_to_end(key)
                 else:
                     if suppressed:
                         summary = self._summary(key, suppressed)
@@ -92,9 +98,12 @@ class RateLimitedLogger:
             self._logger.log(level, self._summary(key, suppressed))
 
     def _remember(self, key: str, now: float, level: int) -> None:
-        if key not in self._state and len(self._state) >= self._max_keys:
-            oldest = min(self._state, key=lambda item: self._state[item][0])
-            del self._state[oldest]
+        if key in self._state:
+            self._state.move_to_end(key)
+        elif len(self._state) >= self._max_keys:
+            # last=False drops the least recently used key. Forgetting one
+            # costs a single extra line next time it speaks, never a lost one.
+            self._state.popitem(last=False)
         self._state[key] = (now, 0, level)
 
     def _summary(self, key: str, suppressed: int) -> str:
