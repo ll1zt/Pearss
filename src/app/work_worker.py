@@ -626,8 +626,8 @@ class WorkWorker:
             await self._task
         except asyncio.CancelledError:
             pass
-        except Exception as exc:  # a failed task must not block shutdown
-            LOGGER.error("work task failed (%s)", type(exc).__name__)
+        except Exception:  # a failed task must not block shutdown
+            LOGGER.exception("work task failed")
         self._task = None
         LOGGER.info("work worker stopped")
 

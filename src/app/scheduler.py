@@ -545,8 +545,8 @@ class Scheduler:
             await self._task
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            LOGGER.error("scheduler task failed (%s)", type(exc).__name__)
+        except Exception:
+            LOGGER.exception("scheduler task failed")
         self._task = None
         LOGGER.info("scheduler stopped")
 
