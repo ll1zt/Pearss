@@ -79,6 +79,13 @@ def configure_logging(
     handler.addFilter(CorrelationIdFilter())
     root.addHandler(handler)
 
+    # uvicorn's access log is replaced by the application's own line (issue
+    # #294): it carries no correlation id and no route template, and two lines
+    # per request would double the journal. `uvicorn.access` has its own
+    # handler and `propagate=False`, so its level is the only lever; the app
+    # middleware emits the line instead.
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
 
 def describe_database_url(url: str) -> str:
     """The database location without anything that could be a credential.
