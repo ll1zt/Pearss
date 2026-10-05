@@ -144,6 +144,11 @@ def visible_ids_for_stream(
     # (an item read elsewhere, a deletion, a new arrival) shifts an offset
     # past unserved rows, while a stable `(published_at, id)` boundary keeps
     # every page anchored to the last row actually served.
+    #
+    # The tiebreak is `id DESC`, matching the predicate below (`id <` the last
+    # served id) and the ordering convention in `items_query`: an ascending
+    # tiebreak under a `<` predicate re-serves the group's smallest id and never
+    # reaches the rest of it (issue #274).
     if after_item_id is not None:
         if after_published_null or after_published_at is None:
             # The boundary row had no published_at; with nullslast those rows
@@ -172,7 +177,9 @@ def visible_ids_for_stream(
         query = query.offset(offset)
 
     rows = session.execute(
-        query.order_by(ItemRow.published_at.desc().nullslast(), ItemRow.id).limit(limit)
+        query.order_by(
+            ItemRow.published_at.desc().nullslast(), ItemRow.id.desc()
+        ).limit(limit)
     ).all()
     if with_ordering:
         return [(row_id, published) for row_id, published in rows]

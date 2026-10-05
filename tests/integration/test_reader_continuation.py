@@ -63,6 +63,85 @@ def _page_params(**extra: str) -> dict[str, str]:
     return base
 
 
+async def _walk_all(client: httpx.AsyncClient, token: str, *, n: str) -> list[str]:
+    """Walk the reading list to the end from a cursor, as Read You does."""
+    walked: list[str] = []
+    cursor: str | None = None
+    while True:
+        params = _page_params(n=n)
+        if cursor:
+            params["c"] = cursor
+        page = await _get(client, token, params)
+        walked.extend(ref["id"] for ref in page["itemRefs"])
+        cursor = page["continuation"]
+        if not cursor:
+            return walked
+
+
+@pytest.mark.asyncio
+async def test_a_walk_covers_a_timestamp_tie_wider_than_one_page(
+    reader: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    """#274: a tiebreak must agree with the continuation predicate's direction.
+
+    The stream ordered by `id` **ascending** while the continuation predicate
+    assumed descending (`id < last served`). A page boundary that landed inside
+    a group of items sharing one `published_at` therefore re-served the group's
+    smallest id and never reached the rest: Read You folds everything it has
+    seen into its read set, so the unserved ids stayed unread in the client for
+    good -- the live symptom was "some articles I read came back unread".
+
+    The pre-existing fixtures could not catch it: every timestamp in them is
+    distinct, and a tie only matters when the boundary falls inside the group.
+    The undated tail is one huge tie (`nullslast` puts it last), so it is
+    exercised here too.
+    """
+    app, client = reader
+    token = await login(client)
+    tied = datetime(2026, 2, 1, 12, 0, tzinfo=UTC)
+
+    with app.state.session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id="src-1",
+                    external_id=f"urn:uuid:tied-{n}",
+                    title=f"Tied {n}",
+                    canonical_url=f"https://blog.example.com/2026/02/tied-{n}",
+                    published_at=tied,
+                    content=f"<p>Tied {n}</p>",
+                )
+                for n in range(5)
+            ]
+            + [
+                ItemDraft(
+                    source_id="src-1",
+                    external_id=f"urn:uuid:undated-{n}",
+                    title=f"Undated {n}",
+                    canonical_url=f"https://blog.example.com/2026/02/undated-{n}",
+                    published_at=None,
+                    content=f"<p>Undated {n}</p>",
+                )
+                for n in range(5)
+            ],
+            tenant_id=TENANT,
+        )
+        session.commit()
+
+    every_id = [
+        ref["id"]
+        for ref in (await _get(client, token, _page_params(n="10000")))["itemRefs"]
+    ]
+    walked = await _walk_all(client, token, n="2")
+
+    assert len(walked) == len(set(walked)), f"the walk repeated ids: {walked}"
+    assert set(walked) == set(every_id), (
+        f"the walk missed {sorted(set(every_id) - set(walked))} of {len(every_id)} "
+        "items, so a tiebreak disagreed with the continuation predicate"
+    )
+
+
 @pytest.mark.asyncio
 async def test_user_items_read_between_pages_are_still_all_served(
     reader: tuple[FastAPI, httpx.AsyncClient],
