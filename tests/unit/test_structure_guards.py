@@ -2322,3 +2322,29 @@ def test_url_redaction_for_logs_has_a_single_implementation() -> None:
             f"{caller} still strips the query itself instead of delegating to "
             "redact_url_for_log"
         )
+
+
+# --------------------------------------------------------------------------
+# The logging rules are long-term constraints, so they live in an ADR
+# --------------------------------------------------------------------------
+
+
+def test_the_logging_rules_have_an_adr_and_adr_0049_records_the_revision() -> None:
+    """AC-312: a rule that lives only in a runbook drifts from the code.
+
+    The batch's rules -- INFO is event-driven and O(1), the access line is the
+    per-request record, `uvicorn.access` is silenced and replaced -- constrain
+    every future log site, which is what an ADR is for. And the processor
+    child-log ADR's field list gained a correlation id without saying so.
+    """
+    adr = REPO_ROOT / "docs" / "adr" / "0059-logging-volume-and-the-access-line.md"
+    assert adr.exists(), "the logging rules need an ADR, not only a runbook"
+    text = adr.read_text(encoding="utf-8")
+    assert "uvicorn.access" in text
+    assert "O(1)" in text
+
+    parents = sorted((REPO_ROOT / "docs" / "adr").glob("0049-*.md"))
+    assert len(parents) == 1, parents
+    assert "0059" in parents[0].read_text(encoding="utf-8"), (
+        "ADR 0049 must record the revision that added the correlation id"
+    )

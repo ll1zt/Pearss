@@ -147,6 +147,7 @@
 | AC-302..303 | #315 早认证拒绝不再每请求一行 INFO + 限速器加固：`EarlyAuthMiddleware` 的 401/403 拒绝行改走**每 app 实例**的 `rate_limited_logger`（按「拒绝种类 + method/principal」每分钟一行）——无凭据探测正是 `AuthFailureRateLimit` 故意不计数的那类（issue #18），此前无人限流（AC-302）；`RateLimitedLogger` 的 key 上界改为按最近使用淘汰（O(1)；此前 `min()` 全表扫描，且会淘汰正活跃的 key），`max_keys=0` 不再抛 `ValueError`（AC-303） | issue #315 | 已合并 | `tests/integration/test_app.py`、`tests/unit/test_log_limits.py` |
 | AC-304 | #316 崩溃请求仍有访问日志行：`CorrelationAndAuditMiddleware` 在 `except` 路径上、`sent` 仍为 False 时补记一行 `status=500`——未捕获异常由 Starlette 的 `ServerErrorMiddleware`（在本中间件**外层**）应答，`send_wrapper` 看不到 500，此前崩溃请求一条访问行都没有（响应已开始后才失败的情况仍由 `finally` 记，不重复） | issue #316 | 已合并 | `tests/integration/test_request_logs.py` |
 | AC-313 | #322 日志小问题合集：启动 banner 报**生效** level（`configure_logging` 记录 `_effective_level`，不再重读环境）且 `PEARSS_LOG_LEVEL=`（空串）按缺省处理、不再抛 `ValueError`；`_request` 的**初始 SSRF 拒绝**（socket 之前）补一条 DEBUG 失败行，与其余出口一致；`idempotency` 复用行的措辞不再承诺「返回已存响应」（409 也可能）；`TickReport.next_due_at` docstring 修正。**declined**：`log_setup` 的 lazy import（绕开 `app.main` 循环）需由调用方组装 banner 输入，改动大于本 issue，记录为已知取舍 | issue #322 | 已合并 | `tests/unit/test_log_setup.py`、`tests/unit/test_http.py` |
+| AC-312 | #321 日志长期约束补 ADR：新增 `docs/adr/0059-logging-volume-and-the-access-line.md`（INFO 事件驱动且 O(1)、访问行是每请求一行的契约、静掉 `uvicorn.access` 并以应用行替代、不可信文本必须转义/脱敏、限速器必须有生产调用点；含被否决的备选：给 `uvicorn.access` 挂 Filter 为何不可行），并记录对 ADR 0049 决定 3 的修订（重记行新增 `correlation_id`）；结构守卫钉住「ADR 存在且 0049 记录了修订」 | issue #321 | 已合并 | `tests/unit/test_structure_guards.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
