@@ -20,6 +20,14 @@ just service-restart    # 改完 .env 或代码后
 journalctl --user -u pearss.service -f
 ```
 
+### 日志行的形状
+
+每一行是 `<时间> <级别> [<correlation_id>] <logger>: <message>`。方括号里的 id 取自
+入站 `X-Request-ID`（缺失时生成），与审计行里的 `correlation_id` 同值，所以一次请求
+在 journal 与审计表里可以互相对上（issue #290）。启动时还有一行
+`pearss starting: level=… db=… tick=…` 的 banner，报出生效配置；db 位置只保留
+scheme + 路径，不含凭据。
+
 三个进程内组件共用一个进程：Core API、Reader API、MCP 工具面，外加 asyncio 调度任务。
 `PEARSS_SCHEDULER_ENABLED=0` 可只跑 API 不跑调度；`PEARSS_TICK_SECONDS` 控制轮询间隔。
 
