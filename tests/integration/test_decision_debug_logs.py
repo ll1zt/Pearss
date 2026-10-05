@@ -128,7 +128,13 @@ def test_debug_reports_each_draft_outcome(
 def test_the_default_level_produces_none_of_the_debug_lines(
     session: Session, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """AC-282: INFO output is unchanged by the debug additions."""
+    """AC-282: INFO output is unchanged by the debug additions.
+
+    Asserted on the *messages*, not on `levelno == DEBUG`: a regression that
+    promoted one of these lines to INFO would slip through a filter that only
+    looks at DEBUG records -- the test would pass on the very change it exists
+    to catch (AC-309).
+    """
     normalise_and_store(session, [_draft(external_id="e1", body="<p>old</p>")])
 
     with caplog.at_level(logging.INFO, logger="app.pipeline"):
@@ -140,7 +146,8 @@ def test_the_default_level_produces_none_of_the_debug_lines(
             ],
         )
 
-    assert _debug_records(caplog, "app.pipeline") == []
+    spoken = [record.getMessage() for record in caplog.records]
+    assert not any("draft outcome:" in message for message in spoken), spoken
 
 
 @pytest.mark.integration

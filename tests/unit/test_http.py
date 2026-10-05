@@ -701,3 +701,38 @@ def test_a_fetch_summary_also_hides_userinfo_and_fragment(
     assert "feed.example.com/rss" in line
     for secret in ("alice", "s3cr3t", "supersecret", "token=", "frag"):
         assert secret not in line, line
+
+
+@pytest.mark.unit
+def test_a_redirect_loop_is_classified_and_logged_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-311: this branch had no test, so it had no regression either.
+
+    httpx abandons a chain that never reaches a final response; the adapter's
+    job is to classify that like every other transport failure and leave one
+    debug line for it.
+    """
+
+    def loop(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": str(request.url)})
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="adapters.http"),
+        client_for(httpx.MockTransport(loop)) as client,
+        pytest.raises(FetchError) as raised,
+    ):
+        fetch(URL, client=client)
+
+    assert raised.value.error_class is ErrorClass.NETWORK
+    assert "redirect loop" in raised.value.detail
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if record.name == "adapters.http" and record.levelno == logging.DEBUG
+            ]
+        )
+        == 1
+    )

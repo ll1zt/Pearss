@@ -71,6 +71,10 @@ def _match_source(
         return "identity"
     if any(seen.id == matched_id for seen in existing):
         return "content_hash"
+    # unreachable: `matched_id` is taken from the union of these two lists, so a
+    # match that is in neither cannot reach here. Kept as a total function, and
+    # declared rather than tested -- there is no input that exercises it
+    # (AC-311).
     return "unknown"
 
 
