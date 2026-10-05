@@ -47,10 +47,16 @@ class CorrelationIdFilter(logging.Filter):
     ``correlation.current()`` generates an id when none is set, deliberately:
     a scheduler tick or a CLI run outside any request still produces traceable
     lines rather than a blank field.
+
+    An id already on the record wins. A forwarded processor line carries the
+    id captured when its child was spawned (issue #298); stamping it with
+    ``current()`` would replace that with whatever context the host happens to
+    be re-logging from, which may be none at all.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.correlation_id = correlation.current()
+        if getattr(record, "correlation_id", None) is None:
+            record.correlation_id = correlation.current()
         return True
 
 

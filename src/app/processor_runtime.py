@@ -26,7 +26,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from adapters import filestore
+from adapters import correlation, filestore
 from app.plugin_runtime import child_environment
 from core.enums import ErrorClass
 from core.plugins.hooks import (
@@ -77,6 +77,12 @@ class _ChildLog:
 
     def __init__(self, *, plugin_id: str, item_id: str) -> None:
         self._prefix = f"[{plugin_id} {item_id}]"
+        # Captured once, at spawn, and stamped on every line this child writes:
+        # the lines belong to the request or job that started the child, and a
+        # background context has no ambient id, so letting the handler's filter
+        # generate one per line would scatter a single run across many ids
+        # (issue #298).
+        self._correlation_id = correlation.current()
         self._buffer = ""
         self._lines = 0
         self._truncated = False
@@ -103,6 +109,7 @@ class _ChildLog:
                     "%s child log truncated after %d lines; the rest is dropped",
                     self._prefix,
                     self._lines,
+                    extra={"correlation_id": self._correlation_id},
                 )
             return
         self._lines += 1
@@ -116,6 +123,7 @@ class _ChildLog:
             "%s %s",
             self._prefix,
             text,
+            extra={"correlation_id": self._correlation_id},
         )
 
     def tail(self) -> str:

@@ -12,6 +12,7 @@ with the row's context, and a processor cannot flood the journal with it.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import threading
@@ -157,3 +158,90 @@ def test_a_flooding_processor_cannot_fill_the_journal(
     assert any("truncated" in r.getMessage() for r in caplog.records), (
         "a dropped tail must say so, or the log silently lies"
     )
+
+
+class TwoLines:
+    """A processor that writes two lines, to pin one id across a whole run."""
+
+    @staticmethod
+    def process(item_ctx: Any, *, target_lang: str, store: Any) -> str:
+        log = logging.getLogger("fixtures.two_lines")
+        log.warning("first line")
+        log.warning("second line")
+        return str(store("<p>translated</p>"))
+
+
+@pytest.fixture
+def _restore_logging() -> Iterator[None]:
+    """Undo configure_logging's process-global effects after the test."""
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    access = logging.getLogger("uvicorn.access")
+    access_level = access.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+    for handler in handlers:
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    root.setLevel(level)
+    access.setLevel(access_level)
+
+
+@pytest.mark.integration
+def test_a_forwarded_processor_line_carries_the_request_correlation_id(
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_logging: None,
+) -> None:
+    """AC-293: the re-logged line names the request that started the child.
+
+    Rendered, not only inspected: the correlation id reaches the line through
+    the handler's filter, so the deliverable is the text in the journal.
+    """
+    from adapters import correlation
+    from app import log_setup
+
+    stream = io.StringIO()
+    log_setup.configure_logging(level="DEBUG", stream=stream)
+    token = correlation.set_correlation_id("req-7")
+    try:
+        _run(TwoLines, monkeypatch)
+    finally:
+        correlation.reset(token)
+
+    lines = [line for line in stream.getvalue().splitlines() if "first line" in line]
+    assert len(lines) == 1, stream.getvalue()
+    assert "req-7" in lines[0]
+    assert "[translate i-229]" in lines[0]
+
+
+@pytest.mark.integration
+def test_processor_lines_share_one_id_without_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _restore_logging: None,
+) -> None:
+    """AC-294: a background sweep still has one id for the whole child run.
+
+    With no request there is no ambient id. Before the child's id was captured
+    at spawn, the handler's filter generated a fresh one for every forwarded
+    line, so a single processor's two lines looked like two different jobs'.
+    """
+    from app import log_setup
+
+    stream = io.StringIO()
+    log_setup.configure_logging(level="DEBUG", stream=stream)
+    with caplog.at_level(logging.WARNING):
+        _run(TwoLines, monkeypatch)
+
+    forwarded = [
+        record
+        for record in caplog.records
+        if "first line" in record.getMessage() or "second line" in record.getMessage()
+    ]
+    assert len(forwarded) == 2, [r.getMessage() for r in forwarded]
+    ids = {getattr(record, "correlation_id", None) for record in forwarded}
+    assert len(ids) == 1, ids
+    assert ids != {None} and ids != {""}, ids
