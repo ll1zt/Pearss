@@ -1,5 +1,7 @@
 """Reader continuation must survive membership changes between pages.
 
+Scenario register (normative source: SCENARIOS.md, AC-267..269; issue #274).
+
 A continuation used to be an offset into the *current* filtered set, so any
 membership change between page requests -- an item read by another client, a
 deletion, a new arrival -- shifted every later page. Read-synchronisation
@@ -63,15 +65,15 @@ def _page_params(**extra: str) -> dict[str, str]:
     return base
 
 
-async def _walk_all(client: httpx.AsyncClient, token: str, *, n: str) -> list[str]:
-    """Walk the reading list to the end from a cursor, as Read You does."""
+async def _walk_all(client: httpx.AsyncClient, token: str, **params: str) -> list[str]:
+    """Walk a stream to the end from a cursor, as Read You does."""
     walked: list[str] = []
     cursor: str | None = None
     while True:
-        params = _page_params(n=n)
+        request = _page_params(**params)
         if cursor:
-            params["c"] = cursor
-        page = await _get(client, token, params)
+            request["c"] = cursor
+        page = await _get(client, token, request)
         walked.extend(ref["id"] for ref in page["itemRefs"])
         cursor = page["continuation"]
         if not cursor:
@@ -82,7 +84,7 @@ async def _walk_all(client: httpx.AsyncClient, token: str, *, n: str) -> list[st
 async def test_a_walk_covers_a_timestamp_tie_wider_than_one_page(
     reader: tuple[FastAPI, httpx.AsyncClient],
 ) -> None:
-    """#274: a tiebreak must agree with the continuation predicate's direction.
+    """AC-267, AC-269: the tiebreak must agree with the predicate's direction.
 
     The stream ordered by `id` **ascending** while the continuation predicate
     assumed descending (`id < last served`). A page boundary that landed inside
@@ -139,6 +141,66 @@ async def test_a_walk_covers_a_timestamp_tie_wider_than_one_page(
     assert set(walked) == set(every_id), (
         f"the walk missed {sorted(set(every_id) - set(walked))} of {len(every_id)} "
         "items, so a tiebreak disagreed with the continuation predicate"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_read_item_inside_a_tied_group_reaches_the_read_walk(
+    reader: tuple[FastAPI, httpx.AsyncClient],
+) -> None:
+    """AC-268: Read You's read-set walk serves a tied group whole.
+
+    Given five read items sharing one published_at -- a group wider than one
+    page
+    When the client walks the read stream (`s=reading-list&it=read`) at that
+    page size, the shape `getReadItemIds` uses on every global sync
+    Then every one of them arrives
+
+    This is the shape the user actually hit: `remoteReadIds` missing an entry
+    means `toBeReadLocal = remoteRead ∩ localUnread` never carries "the server
+    says read" back to the phone, so the article stays unread there for good.
+    `it=` is applied in SQL *before* the limit, so the filtered read stream is
+    its own query path and needs its own case; the unfiltered walks above do
+    not cover it.
+    """
+    app, client = reader
+    token = await login(client)
+    tied = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
+
+    with app.state.session_factory() as session:
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    source_id="src-1",
+                    external_id=f"urn:uuid:read-tie-{n}",
+                    title=f"Read Tie {n}",
+                    canonical_url=f"https://blog.example.com/2026/03/read-tie-{n}",
+                    published_at=tied,
+                    content=f"<p>Read Tie {n}</p>",
+                )
+                for n in range(5)
+            ],
+            tenant_id=TENANT,
+        )
+        session.commit()
+
+    # The group is the newest thing in the feed, so it leads the reading list.
+    newest_first = [
+        ref["id"]
+        for ref in (await _get(client, token, _page_params(n="10000")))["itemRefs"]
+    ]
+    group = newest_first[:5]
+    assert len(group) == 5, newest_first
+
+    marked = await edit(client, token, group, add=[READ_TAG])
+    assert marked.status_code == 200, marked.text
+
+    walked = await _walk_all(client, token, n="2", it=READ_TAG)
+    assert len(walked) == len(set(walked)), f"the read walk repeated ids: {walked}"
+    assert set(walked) == set(group), (
+        f"the read walk served {sorted(walked)}; "
+        f"{sorted(set(group) - set(walked))} of the read items never arrived"
     )
 
 
