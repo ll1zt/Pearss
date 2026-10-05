@@ -41,6 +41,8 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as SourceRow
+from adapters.log_safety import escape_control_characters
+from adapters.redaction import redact_url_for_log
 from adapters.repository import (
     append_unit,
     chain_for_source,
@@ -74,6 +76,26 @@ from core.tenancy import SINGLE_TENANT
 from core.work import WorkRecord, terminal_status
 
 LOGGER = logging.getLogger(__name__)
+
+# Kinds whose target is the payload itself rather than an address for it.
+# Printing one would put a whole article in the journal (AC-298).
+_PAYLOAD_TARGET_KINDS: Final = frozenset({"ingest"})
+
+
+def _target_for_log(kind: str, target: str) -> str:
+    """One work unit's target, as it should appear in a DEBUG line.
+
+    A target is a string the caller chose, so it is untrusted: it can carry a
+    token in its query and a newline anywhere, and either one would leak a
+    credential or forge a journal line (AC-298). An ``ingest`` target is the
+    item itself -- canonical JSON, body included -- so it is summarised rather
+    than printed. The ledger row still holds the full target, so nothing is
+    lost; it is only kept out of the journal.
+    """
+    if kind in _PAYLOAD_TARGET_KINDS:
+        return f"<{kind} payload {len(target)} bytes>"
+    return escape_control_characters(redact_url_for_log(target))
+
 
 # How often the loop looks for work. A work is not on a schedule, so this is
 # only "how long may a freshly submitted batch wait"; the work itself takes as
@@ -712,9 +734,9 @@ class WorkWorker:
                     LOGGER.debug(
                         "work %s unit %s -> %s (%s)",
                         work.id,
-                        target,
+                        _target_for_log(work.kind, target),
                         UnitOutcome.FAILED.value,
-                        prepared,
+                        escape_control_characters(prepared),
                     )
                 session.commit()
                 self._close(session, work.id)
@@ -749,9 +771,9 @@ class WorkWorker:
                 LOGGER.debug(
                     "work %s unit %s -> %s (%s)",
                     work.id,
-                    target,
+                    _target_for_log(work.kind, target),
                     result.outcome.value,
-                    result.detail or "-",
+                    escape_control_characters(result.detail or "-"),
                 )
                 if result.stop:
                     for rest in work.targets[index + 1 :]:
@@ -768,9 +790,9 @@ class WorkWorker:
                         LOGGER.debug(
                             "work %s unit %s -> %s (%s)",
                             work.id,
-                            rest,
+                            _target_for_log(work.kind, rest),
                             UnitOutcome.REJECTED.value,
-                            result.stop_detail or "-",
+                            escape_control_characters(result.stop_detail or "-"),
                         )
                     session.commit()
                     break
