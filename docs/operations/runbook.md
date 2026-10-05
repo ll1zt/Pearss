@@ -49,6 +49,30 @@ poll / tick / item 增长。周期性、空转、成功但无事件的路径一�
 进程在窗口内退出时，尚未发出的 suppressed 计数会丢（未在 shutdown 接 `flush()`，
 因为限速器既有模块级实例也有每 app 实例，没有单一收口；记录为已知限制）。
 
+### 访问日志的覆盖边界（已知缺口，issue #317）
+
+应用访问行由 `CorrelationAndAuditMiddleware` 写，而它在中间件栈的**内层**（ADR 0016：
+限速器在最外层）。因此被外侧中间件拒绝的请求**没有应用访问行**，只有各自中间件的一行：
+
+| 拒绝 | 已有的一行 | 缺什么 |
+|---|---|---|
+| 413 `BodySizeLimit` | WARNING「rejected N byte body from …」 | correlation id、route 模板、耗时 |
+| 401/403 `EarlyAuth` | INFO（按窗口限速）「early auth refused: …」 | 同上 |
+| 429 `AuthFailureRateLimit` | WARNING（**阻塞建立时**一次）「auth failures from … exceeded …」 | 逐次 429 不记（刻意：被阻塞客户端的重试是稳态，不是事件） |
+
+即：**不是静默，而是形状不同**——这些行没有 correlation id，无法与审计行、作业串起来，也
+没有 route 模板与耗时。
+
+**裁决：本批不修（declined）**，理由与重做条件：
+
+- 把 correlation / 访问日志移到最外层，会让审计中间件也为「被限速器拦下的地址」跑一遍——
+  即对**不受限流的滥用路径**逐个写审计行，正是 issue #6/#18 去掉的无界增长；
+- 让每个拒绝中间件自己写一行，则它拿不到 correlation id（id 由内层中间件生成），日志里会
+  出现客户端从未见过的 id。
+
+**重做条件**：当访问日志成为请求记录的唯一来源，或审计中间件获得「拒绝不落审计」的规则时，
+把 correlation / 访问日志提到最外层并覆盖这四条路径。
+
 查看与保留：
 
 ```bash
