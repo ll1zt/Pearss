@@ -129,6 +129,7 @@
 | AC-275..277 | #290 日志引导（原声明 AC-271..273，撞 #283/#284/#285 已合并的 AC-271..274 而让号）：幂等 `configure_logging` + correlation-id Filter 把当前请求 id 注入每条记录并渲染进格式串（AC-275）；并发请求的 id 不串号（AC-276）；启动 banner 报出生效 level 与脱敏后的 db 位置且不泄漏凭据（AC-277） | issue #290 | 已合并 | `tests/unit/test_log_setup.py` |
 | AC-278..279 | #291 后台 loop 死亡时保留 traceback（原声明 AC-274..275，让号）：scheduler / work / enrichment 三处 `stop()` 的最外层异常处理从「只记异常类型名」改为 `LOGGER.exception`，journal 里有完整 message 与 call site（AC-278）；正常取消（`CancelledError`）不产生 ERROR/traceback 行（AC-279） | issue #291 | 已合并 | `tests/integration/test_loop_tracebacks.py` |
 | AC-283 | #293 调度器空转可观测（原声明 AC-279，让号）：`report.ran == 0` 的 tick 在 INFO 级静默、DEBUG 级打一行心跳（含 considered 数与最近的下次 due 时刻）；`ran > 0` 维持原 INFO 汇总 | issue #293 | 已合并 | `tests/integration/test_scheduler.py` |
+| AC-284..285 | #294 请求级访问日志（原声明 AC-280..281，让号）：每请求一行应用访问日志，含 correlation id、method、route 模板、status、actor、duration_ms（AC-284）；读请求 2xx 默认 DEBUG，写请求与 ≥400 的响应 INFO（AC-285：读 200 在 INFO 静默、5xx 在 INFO 一行）；同时静掉 `uvicorn.access` 以免双写 | issue #294 | 已合并 | `tests/integration/test_request_logs.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

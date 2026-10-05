@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+import time
 from collections.abc import MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -109,6 +110,19 @@ def _operation(scope: ScopeState) -> str:
     return f"{scope.get('method', '?')} {scope.get('path', '?')}"
 
 
+def _access_level(scope: ScopeState, status: int) -> int:
+    """The level one request's access line is worth.
+
+    Reads that succeeded are DEBUG, writes and errors are INFO (issue #294).
+    The client polls the Reader API constantly; a line per poll at the default
+    level is a journal flood that carries nothing an operator acts on, while a
+    write or a response the caller did not succeed with is worth keeping.
+    """
+    if scope.get("method", "") in WRITE_METHODS:
+        return logging.INFO
+    return logging.INFO if status >= 400 else logging.DEBUG
+
+
 class CorrelationAndAuditMiddleware:
     """Assign a correlation id, echo it, and audit meaningful operations."""
 
@@ -156,6 +170,7 @@ class CorrelationAndAuditMiddleware:
             return
 
         request = Request(scope)
+        started = time.perf_counter()
         inbound = correlation.sanitize_inbound(request.headers.get("x-request-id"))
         correlation_id = inbound or correlation.new_correlation_id()
         token = correlation.set_correlation_id(correlation_id)
@@ -194,6 +209,12 @@ class CorrelationAndAuditMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            # Logged before the correlation reset: the id reaches the line
+            # through the handler's filter reading the contextvar, so resetting
+            # first would stamp the access log with a generated id instead of
+            # the caller's (issue #294).
+            if sent:
+                self._log_access(scope, status, started)
             # Reset before the task ends so a reused context cannot leak one
             # request's id into the next.
             correlation.reset(token)
@@ -230,6 +251,26 @@ class CorrelationAndAuditMiddleware:
         except TimeoutError:
             return False
         return True
+
+    def _log_access(self, scope: ScopeState, status: int, started: float) -> None:
+        """One line per request: method, route template, status, actor, time.
+
+        Route template rather than raw path: the path carries ids, so a line
+        per item would be a line per id instead of one per endpoint. The
+        correlation id is added by the handler's filter.
+
+        At most one line: uvicorn's access log is silenced (see
+        `configure_logging`) so this replaces it rather than doubling it.
+        """
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        LOGGER.log(
+            _access_level(scope, status),
+            "%s -> %d actor=%s in %.1fms",
+            _operation(scope),
+            status,
+            _actor(scope),
+            duration_ms,
+        )
 
     def _record(
         self, scope: ScopeState, status: int, correlation_id: str, audit_id: str
