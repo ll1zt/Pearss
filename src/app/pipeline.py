@@ -95,7 +95,13 @@ def _specs_needing_work(
             and spec.lang is not None
             and is_already_in(text, spec.lang)
         ):
-            LOGGER.info(
+            # DEBUG, not INFO: reading a Chinese timeline through a
+            # translate->zh chain drops the spec for *every* item. That is the
+            # steady state of such a source, so an INFO line here would grow
+            # with the batch -- exactly what issue #297's rule forbids. The
+            # line stays, one level down, because "why was this not
+            # translated?" is a real question (issue #312).
+            LOGGER.debug(
                 "item text is already in %s; not queueing its translation",
                 spec.lang,
             )
