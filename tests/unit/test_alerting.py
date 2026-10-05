@@ -649,6 +649,27 @@ def test_the_alert_body_attributes_a_stuck_chain() -> None:
     assert len(body) <= 4093
 
 
+def test_the_stuck_chain_alert_points_at_an_entry_point_that_exists() -> None:
+    """#260: the next step must be a way back, not a command that cannot run.
+
+    Measured: the body's last line read `(just retry-enrichments)` and no such
+    recipe has ever existed -- the operator read it while looking for what to do
+    next, and ran a command that fails immediately. The retry entry points that
+    do exist are the MCP tool and the `/v1` endpoint.
+    """
+    verdict = HealthVerdict(
+        degraded=True,
+        reason="1 source(s) with a chain that cannot finish",
+        exhausted_sources=(_stuck(),),
+    )
+
+    action = alert_body(verdict).splitlines()[-1]
+
+    assert action.startswith("action:"), action
+    assert "retry_enrichments" in action, action
+    assert "/v1/sources/{source_id}:retry-enrichments" in action, action
+
+
 def test_the_alert_body_is_bounded_with_many_stuck_sources() -> None:
     """AC-156: three stuck sources are one line each, not an unbounded list.
 

@@ -306,6 +306,104 @@ def test_every_adr_file_number_matches_its_own_id() -> None:
 
 
 # --------------------------------------------------------------------------
+# docs and messages: `just <target>` must name a recipe that exists
+# --------------------------------------------------------------------------
+
+# A `just` reference is only a command when it sits in a command position. These
+# prefixes are what a command wears where this repo writes one: a backtick (docs
+# and docstrings), a quote (a string literal), a bracket (a parenthetical next
+# step) or `$(` (a shell substitution). Prose -- "a model that had just failed"
+# -- has a space before the word and no hyphen in the target, so it does not
+# match.
+_JUST_REFERENCE_PREFIXES = frozenset("`'\"(${")
+_JUST_REFERENCE = re.compile(r"just ([a-z][a-z0-9-]*)")
+# A recipe line is `name [args]: [dependencies]`. `name := value` is a variable,
+# which the negative lookahead after the colon rejects.
+_JUST_RECIPE = re.compile(r"^([a-z_][a-z0-9_-]*)( [^:]*)?:(?!=).*$")
+
+
+def _declared_just_targets() -> set[str]:
+    """Every recipe name the justfile defines.
+
+    Parsed rather than shelled out to `just --list`: that command also prints
+    the file's `#` comment lines as entries, and a structural guard should not
+    depend on the toolchain being on PATH.
+    """
+    targets: set[str] = set()
+    for line in (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines():
+        match = _JUST_RECIPE.match(line)
+        if match:
+            targets.add(match.group(1))
+    return targets
+
+
+def _just_references(text: str) -> list[str]:
+    """Targets named by `just <target>` where the text means a command.
+
+    Three positions count: after one of `_JUST_REFERENCE_PREFIXES`, at the start
+    of a line (how a recipe appears in a shell block), or with a hyphen in the
+    target (what recipe names use and prose does not).
+
+    Known limit, on purpose: a bare single-word reference in the middle of an
+    English sentence is not checked. Widening it makes "just failed" an unknown
+    target, and a guard that cries wolf is one that gets deleted -- the same
+    trade `test_every_adr_reference_in_docs_resolves_to_a_file` makes.
+    """
+    found: list[str] = []
+    for match in _JUST_REFERENCE.finditer(text):
+        target = match.group(1)
+        before = text[match.start() - 1] if match.start() else ""
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        if (
+            "-" in target
+            or before in _JUST_REFERENCE_PREFIXES
+            or not text[line_start : match.start()].strip()
+        ):
+            found.append(target)
+    return found
+
+
+def test_every_referenced_just_target_exists() -> None:
+    """A recipe named in code or docs must be one the justfile defines.
+
+    `alert_body` ended with `(just retry-enrichments)` and no such recipe has
+    ever existed (#260): the alert is read at the worst moment, and its last
+    line sent the operator to a command that fails on the spot. AGENTS.md
+    already required documentation to reference real recipes, and nothing
+    checked it, so it drifted.
+    """
+    declared = _declared_just_targets()
+    unknown: list[str] = []
+    for path in [
+        *(REPO_ROOT / "src").rglob("*.py"),
+        *(REPO_ROOT / "docs").rglob("*.md"),
+        REPO_ROOT / "README.md",
+        REPO_ROOT / "AGENTS.md",
+    ]:
+        for target in _just_references(path.read_text(encoding="utf-8")):
+            if target not in declared:
+                unknown.append(f"{path.relative_to(REPO_ROOT)}: just {target}")
+
+    assert not unknown, (
+        f"`just <target>` references with no matching recipe in justfile: {unknown}"
+    )
+
+
+def test_the_just_reference_guard_notices_an_unknown_target() -> None:
+    """The scanner must fail on a bad reference, not only pass on good ones.
+
+    Without this, `_just_references` returning `[]` -- or losing its prefix rule
+    -- leaves the repo-wide test green forever, which is the shape of a guard
+    that proves nothing.
+    """
+    text = "then retry the chain (just no-such-target) or run `just migrate`"
+
+    assert _just_references(text) == ["no-such-target", "migrate"]
+    assert "migrate" in _declared_just_targets()
+    assert "no-such-target" not in _declared_just_targets()
+
+
+# --------------------------------------------------------------------------
 # .env.example: the deployment contract must not drift from the code
 # --------------------------------------------------------------------------
 
