@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,6 +37,7 @@ from app.hardening import (
 )
 from app.ingest_routes import router as ingest_router
 from app.items_routes import router as items_router
+from app.log_setup import configure_logging, log_startup_banner
 from app.mcp_guard import (
     MCPAuthMiddleware,
     MCPHeaderValidationMiddleware,
@@ -56,28 +56,6 @@ from app.tenancy_check import report_other_tenants
 from app.work_routes import router as work_router
 
 LOGGER = logging.getLogger(__name__)
-
-
-def configure_logging() -> None:
-    """Send application logs to stderr so the service journal shows them.
-
-    Without this the scheduler is silent: uvicorn configures only its own
-    loggers, so `logging.getLogger("app.scheduler")` records fall to the root
-    logger's last-resort handler at WARNING and everything below that — every
-    tick summary, every "not stored (skip_same_source)", every collection
-    failure detail — disappears. A scheduler you cannot observe is a scheduler
-    that gets shipped unexamined, which is why the loop logs a per-tick summary
-    in the first place.
-
-    Called from the entry point rather than at import: configuring logging as a
-    side effect of importing a module takes the decision away from whoever
-    embeds it.
-    """
-    logging.basicConfig(
-        level=os.environ.get("PEARSS_LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
 
 
 DEFAULT_DATABASE_URL = "sqlite+pysqlite:///./data/pearss.db"
@@ -171,6 +149,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     handler's execution model is what keeps both honest.
     """
     configure_logging()
+    log_startup_banner()
 
     # connect covers the TLS handshake too, so it needs headroom; 5s dropped
     # about a third of requests to slow origins. pool is the wait for a free

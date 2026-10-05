@@ -126,6 +126,7 @@
 | AC-271 | #283 走查 helper 有界：`_walk_all` 在 `_MAX_PAGES`（50）页后以明确断言失败（`pagination did not terminate after 50 pages`）——一个不再前进的 continuation 表现为**失败**（点名原因）而不是挂到全局超时 | issue #283 | 已合并 | `tests/integration/test_reader_continuation.py` |
 | AC-272 | #284 深度上限只对**良构**游标生效：形状（十进制 served、两个 `|`、十进制 external id）先于上限判定——`100000|garbage`（缺分隔符）与 `100000|...|xyz`（尾部非整数）一律走「不可解析 → 从头开始」（此前分别被判为「耗尽」返回空页、以及抛 ValueError 变成 500）；**良构**游标达上限仍结束走查（AC-270 不变） | issue #284 | 已合并 | `tests/integration/test_readyou_compat.py` |
 | AC-273..274 | #285 `ot` 窗口只约束**有日期**的历史（`published_at IS NULL OR published_at > ot`）：已读的**无日期**条目出现在 Read You 全局 sync 形态（`s=reading-list&it=read&ot=…`）的已读集合里（AC-273）；有日期但早于窗口的条目仍在集合外（AC-274，维持现状） | issue #285 / ADR 0024（2026-10-05 修订） | 已合并 | `tests/integration/test_reader_ot_window.py` |
+| AC-275..277 | #290 日志引导（原声明 AC-271..273，撞 #283/#284/#285 已合并的 AC-271..274 而让号）：幂等 `configure_logging` + correlation-id Filter 把当前请求 id 注入每条记录并渲染进格式串（AC-275）；并发请求的 id 不串号（AC-276）；启动 banner 报出生效 level 与脱敏后的 db 位置且不泄漏凭据（AC-277） | issue #290 | 已合并 | `tests/unit/test_log_setup.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
