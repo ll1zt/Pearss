@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -65,11 +65,23 @@ def _page_params(**extra: str) -> dict[str, str]:
     return base
 
 
+# A cursor that stops advancing is a bug on this side, and an unbounded loop
+# turns it into a stall rather than a failure: the run then reports a timeout
+# somewhere in the walk instead of "the cursor stopped advancing". The sibling
+# walk helpers carry the same bound (`test_readyou_compat.py::walk_ids` uses
+# 50 pages, `test_client_sync_journey.py` uses 100).
+_MAX_PAGES = 50
+
+
 async def _walk_all(client: httpx.AsyncClient, token: str, **params: str) -> list[str]:
-    """Walk a stream to the end from a cursor, as Read You does."""
+    """Walk a stream to the end from a cursor, as Read You does.
+
+    Bounded (AC-271): a continuation that never advances fails the test with a
+    message instead of stalling it.
+    """
     walked: list[str] = []
     cursor: str | None = None
-    while True:
+    for _ in range(_MAX_PAGES):
         request = _page_params(**params)
         if cursor:
             request["c"] = cursor
@@ -78,6 +90,54 @@ async def _walk_all(client: httpx.AsyncClient, token: str, **params: str) -> lis
         cursor = page["continuation"]
         if not cursor:
             return walked
+    raise AssertionError(f"pagination did not terminate after {_MAX_PAGES} pages")
+
+
+class _NeverEndingStream:
+    """A stream whose cursor never advances: same page, same continuation.
+
+    Only the two response attributes `_get` reads are provided. That shape --
+    `itemRefs` plus a non-null `continuation` -- is what the real endpoint
+    returns, and the rest of this module pins the endpoint to it.
+    """
+
+    async def get(self, url: str, **kwargs: Any) -> _NeverEndingPage:
+        return _NeverEndingPage()
+
+
+class _NeverEndingPage:
+    status_code = 200
+    text = ""
+
+    def json(self) -> dict[str, Any]:
+        return {
+            "itemRefs": [{"id": "1"}],
+            "continuation": "1|2026-01-07T00:00:00.000000Z|1",
+        }
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_a_stuck_cursor_fails_the_walk_instead_of_stalling_it() -> None:
+    """AC-271: a cursor that never advances must fail the test, not stall it.
+
+    Given a stream that returns the same page and the same continuation forever
+    When the walk helper follows it
+    Then it stops at its page bound and raises, naming the bound
+
+    The bound is what makes the failure readable. Without it the walk runs
+    until the suite's global timeout, which reports "this test was slow" and
+    names no cause -- the same shape as issue #49, where a stall was
+    indistinguishable from a slow suite. The short timeout here is the
+    deadlock detector for *this* test: the bound is the subject, so a
+    regression in it would otherwise take the global 300s to surface.
+
+    The stream is a two-attribute stand-in for `httpx.AsyncClient` because the
+    helper itself is what is under test; the response shape is pinned against
+    the real endpoint by every other test in this module.
+    """
+    with pytest.raises(AssertionError, match="did not terminate"):
+        await _walk_all(cast("httpx.AsyncClient", _NeverEndingStream()), "token", n="2")
 
 
 @pytest.mark.asyncio
