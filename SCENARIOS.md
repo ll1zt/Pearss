@@ -121,6 +121,7 @@
 | AC-256..258 | #268 模型降权按一行的失败**比例**：「一行里答对过」不再复位升级档。报告变为 `(model, asked, failed, last_error_class)`；行失败比例 ≥ `PEARSS_MODEL_FAILURE_RATIO`（默认 0.5）为降权行（连续降权冷却翻倍），低于阈值算抖动（不冷却不升级），该行无失败则复位 | issue #268 / ADR 0056 | 已合并 | `tests/unit/test_model_health.py`、`tests/integration/test_model_failover.py` |
 | AC-259..261 | #269 `:diagnose` 的 `model_health` 增一格**窗口计数**：按模型折叠最近 10 行（attempts / failures / fallbacks / failure_rate / 最近失败类与距今秒），与「当前冷却」的 `models` 并存——让「长期半坏、但低于降权门槛所以从不冷却」的模型在诊断面可见；从不失败的模型不出现（无噪音）；冷却模型两格都在 | issue #269 / ADR 0057 | 已合并 | `tests/unit/test_model_health.py`、`tests/integration/test_sources_api.py` |
 | AC-262..266 | #270 写工具**不 elicit**：16 个写工具不再注入 `confirmed`、不再发 `elicitation/create`，任何客户端（含无 elicitation 能力者）都能调用；入参 schema 无确认参数；不再出现 `-32021`；写仍有 actor 与审计归属；破坏性工具的不可逆在描述里明说且 `destructiveHint=true` | issue #270 / ADR 0058 | 已合并 | `tests/integration/test_mcp_server.py`、`tests/unit/test_mcp_tool_guide.py`、`tests/e2e/test_failure_paths.py` |
+| AC-270 | #275 Reader 流游标到达深度上限（`_MAX_SERVED`）时**走查结束**：新式 `served|published|external` 游标返回空 `itemRefs` 且不给 continuation（此前解码成 「第 1 页」会重启走查）；旧式裸整数游标的夹紧行为与「不可解析 → 从头开始」不变 | issue #275 / ADR 0024 | 已合并 | `tests/integration/test_readyou_compat.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

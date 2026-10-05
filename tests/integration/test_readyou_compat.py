@@ -685,6 +685,44 @@ async def test_a_cursor_at_the_depth_cap_terminates_the_walk(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_a_new_style_cursor_at_the_depth_cap_terminates_the_walk(
+    reader_client: httpx.AsyncClient,
+) -> None:
+    """AC-270: the cap terminates the keyset walk too, not just the offset one.
+
+    Given a keyset cursor whose served count is at the server's cap
+    When the next page is requested
+    Then it comes back empty and offers no further cursor
+
+    The cap's first fix covered only the legacy bare-integer cursor, and that
+    one terminated by accident: its offset fell past the end of the table. A
+    keyset cursor at the cap decoded to `(0, None)` -- page one -- so the walk
+    restarted from the top instead of ending, and Read You's
+    `while continuation != null` loop never finished. #274 made the cursor's
+    `served` counter climb faster, which is what made this reachable in
+    practice.
+    """
+    token = await login(reader_client)
+    for cursor in (
+        "100000|2026-01-07T00:00:00.000000Z|1",
+        "100001|2026-01-07T00:00:00.000000Z|1",
+        "100000|-|1",
+    ):
+        response = await reader_client.get(
+            "/api/greader.php/reader/api/0/stream/items/ids",
+            headers=auth_header(token),
+            params={"output": "json", "s": READING_LIST, "n": "2", "c": cursor},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["itemRefs"] == [], f"cursor {cursor} returned items"
+        assert payload.get("continuation") in (None, ""), (
+            f"cursor {cursor} offered another cursor; the client would loop"
+        )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_a_malformed_cursor_restarts_rather_than_failing(
     reader_client: httpx.AsyncClient,
 ) -> None:
