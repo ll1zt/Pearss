@@ -6,8 +6,15 @@ month)` (`GoogleReaderRssService.kt:293`) -- and `fetchItemIdsAndContinue`
 parameter therefore walked the whole read history each sync, and once that
 history exceeds this server's single-walk cap it is truncated, so older
 remote-read items stop propagating. The disposition is in ADR 0024's #92
-revision; the semantics follow miniflux (`published_at > ot`, applied only for
-a positive integer, NULL rows dropped).
+revision; the semantics follow miniflux for the **dated** rows
+(`published_at > ot`, applied only for a positive integer).
+
+Undated rows are the exception, and ADR 0024's 2026-10-05 revision is why:
+miniflux entries always carry a `published_at`, so its strict `>` says nothing
+about a NULL here. A window that drops them makes their read state
+unsynchronisable, because Read You derives `remoteRead` from this exact query
+and `remoteUnread` from an unwindowed one -- an already-read undated item is in
+neither set, so `toBeReadLocal` never carries it back to the phone.
 """
 
 from __future__ import annotations
@@ -36,18 +43,31 @@ async def _ids(client: httpx.AsyncClient, token: str, **params: str) -> list[str
 
 @pytest.mark.asyncio
 async def test_ot_windows_the_read_stream(reader_client: httpx.AsyncClient) -> None:
-    """ReadYou's FreshRSS read query: `s=reading-list&it=read&ot=<since>`.
+    """AC-273, AC-274: ReadYou's `s=reading-list&it=read&ot=<since>`.
 
-    The conftest feed's items are Second (2026-01-07, newest), First
-    (2026-01-05) and Third (no date). With `ot` at 2026-01-06 only Second is
-    "published after" it; First is older and Third cannot be compared, so both
-    are excluded -- matching miniflux, whose `published_at > ot` drops the
-    NULL rows. Before this fix `ot` was ignored and all three came back.
+    Given three read items -- Second (2026-01-07, newest), First (2026-01-05)
+    and Third (no date) -- and `ot` at 2026-01-06
+    When the read stream is walked with that window
+    Then Second arrives (dated, inside), **and Third arrives** (undated)
+    And First does not (dated, older than the bound)
+
+    The bullet that matters is Third. `ot` bounds *dated* history; an undated
+    item has no position in that ordering, and dropping it silently left its
+    read state unsynchronisable: Read You computes
+    `toBeReadLocal = remoteRead ∩ localUnread` from this windowed query, and an
+    already-read undated item is in neither `remoteRead` nor `remoteUnread`, so
+    the phone never learns the server has it read (issue #285). The feed-level
+    path (`syncFeed` -> `getItemIdsForFeed`) sends no `ot` and does serve it,
+    which is how the two paths came to disagree.
+
+    First staying out is the other half, and it is unchanged: the window is the
+    client's own choice about dated history. Before #92 at all, `ot` was
+    ignored and all three came back.
     """
     token = await login(reader_client)
     everything = await _ids(reader_client, token, s=READING_LIST)
     assert len(everything) == 3, everything
-    newest, _, _ = everything
+    newest, older, undated = everything
 
     marked = await reader_client.post(
         EDIT_TAG,
@@ -59,13 +79,15 @@ async def test_ot_windows_the_read_stream(reader_client: httpx.AsyncClient) -> N
     windowed = await _ids(
         reader_client, token, s=READING_LIST, it=READ_TAG, ot=str(since)
     )
-    assert windowed == [newest], (
-        f"ot=2026-01-06 should serve only the 2026-01-07 item; got {windowed}"
+    assert windowed == [newest, undated], (
+        "ot=2026-01-06 must serve the dated 2026-01-07 item and the undated "
+        f"one, and must not serve the dated 2026-01-05 one ({older}); "
+        f"got {windowed}"
     )
 
     # Without the window the same query serves the whole read set.
     unwindowed = await _ids(reader_client, token, s=READING_LIST, it=READ_TAG)
-    assert len(unwindowed) == 3
+    assert unwindowed == everything
 
 
 @pytest.mark.asyncio

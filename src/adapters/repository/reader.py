@@ -65,11 +65,12 @@ def visible_ids_for_stream(
     rows deeper, and in all three cases the next page still starts exactly
     after the last served id rather than at an absolute row number.
 
-    `published_after` is the `ot=` window: a fixed-width UTC bound, applied as
-    a strict `>` before `limit` for the same reason `it`/`xt` are -- a window
-    filtered after the limit would return fewer items than asked and look like
-    missing data. A NULL `published_at` cannot satisfy `>`, so undated items
-    leave a windowed stream; miniflux's `published_at > $n` drops them too.
+    `published_after` is the `ot=` window: a fixed-width UTC bound, applied
+    before `limit` for the same reason `it`/`xt` are -- a window filtered after
+    the limit would return fewer items than asked and look like missing data.
+    It bounds *dated* history only: undated rows are kept, because they have no
+    position in that ordering and dropping them makes their read state
+    unsynchronisable (ADR 0024, 2026-10-05 revision).
     """
     from adapters import reader_api
 
@@ -136,9 +137,21 @@ def visible_ids_for_stream(
     )
 
     if published_after is not None:
-        # `ot`: strictly after the bound. NULL cannot satisfy `>`, so undated
-        # items drop out of a windowed stream rather than leaking into it.
-        query = query.where(ItemRow.published_at > published_after)
+        # `ot` bounds *dated* history: strictly after the bound, with the
+        # undated rows kept. Dropping them reads as tidy and is worse than
+        # wrong -- Read You builds its `remoteRead` set from exactly this
+        # windowed query and its `remoteUnread` set from an unwindowed one, so
+        # an already-read undated item lands in neither and `toBeReadLocal`
+        # never carries "the server says read" back to the phone. The
+        # feed-level path (`getItemIdsForFeed`) sends no `ot` and does serve
+        # it; that disagreement between one client's two paths is how this was
+        # found (issue #285, ADR 0024's 2026-10-05 revision).
+        query = query.where(
+            or_(
+                ItemRow.published_at.is_(None),
+                ItemRow.published_at > published_after,
+            )
+        )
 
     # Keyset continuation, not OFFSET: a membership change between pages
     # (an item read elsewhere, a deletion, a new arrival) shifts an offset
