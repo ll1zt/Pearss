@@ -41,14 +41,17 @@ class _CollectingHandler(logging.Handler):
 
 @pytest.fixture
 def restore_root_logger() -> Iterator[None]:
-    """Put the root logger back the way configure_logging found it.
+    """Put the root logger and uvicorn's access logger back as they were.
 
-    The bootstrap mutates process-global state (root handlers and level), so a
-    test that installs it must not leak into the rest of the suite.
+    The bootstrap mutates process-global state -- root handlers and level, and
+    `uvicorn.access`'s level -- so a test that installs it must not leak into
+    the rest of the suite (AC-310).
     """
     root = logging.getLogger()
     handlers = list(root.handlers)
     level = root.level
+    access = logging.getLogger("uvicorn.access")
+    access_level = access.level
     yield
     for handler in list(root.handlers):
         if handler not in handlers:
@@ -57,6 +60,7 @@ def restore_root_logger() -> Iterator[None]:
         if handler not in root.handlers:
             root.addHandler(handler)
     root.setLevel(level)
+    access.setLevel(access_level)
 
 
 def test_the_format_pins_the_correlation_id_placeholder() -> None:
