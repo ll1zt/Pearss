@@ -8,6 +8,7 @@ source only once.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -394,6 +395,50 @@ def test_second_tick_skips_a_source_that_is_not_due(
     later = run_tick(session_factory, client=fake_feed, now=NOW + timedelta(minutes=5))
     assert later.due == 0
     assert later.skipped == ["s1"]
+
+
+@pytest.mark.integration
+def test_an_idle_tick_is_a_debug_heartbeat_without_an_info_line(
+    session_factory: sessionmaker[Session],
+    fake_feed: httpx.Client,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-283: a tick that ran nothing is observable, but not at INFO.
+
+    "The scheduler is idling" and "the scheduler is dead" used to render
+    identically in the journal -- neither wrote a line -- and only /healthz's
+    503 told them apart. The heartbeat is DEBUG so the per-tick line does not
+    become an INFO stream.
+    """
+    with session_factory() as session:
+        add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
+    run_tick(session_factory, client=fake_feed, now=NOW)
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="app.scheduler"):
+        idle = run_tick(
+            session_factory, client=fake_feed, now=NOW + timedelta(minutes=5)
+        )
+    assert idle.ran == 0
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == "app.scheduler" and record.levelno == logging.INFO
+    ], "an idle tick must stay silent at INFO"
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="app.scheduler"):
+        run_tick(session_factory, client=fake_feed, now=NOW + timedelta(minutes=10))
+    heartbeats = [
+        record
+        for record in caplog.records
+        if record.name == "app.scheduler" and record.levelno == logging.DEBUG
+    ]
+    assert len(heartbeats) == 1, [r.getMessage() for r in heartbeats]
+    message = heartbeats[0].getMessage()
+    assert "1 considered" in message
+    assert "next due" in message
+    assert "next due -" not in message
 
 
 @pytest.mark.integration

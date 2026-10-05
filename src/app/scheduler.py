@@ -150,6 +150,10 @@ class TickReport:
     collected: list[str]
     failed: list[str]
     skipped: list[str]
+    # The earliest next-due time among the sources this pass skipped, so an
+    # idle tick can say when it will next have something to do (issue #293).
+    # None when every considered source was collected (or there were none).
+    next_due_at: datetime | None = None
 
     @property
     def ran(self) -> int:
@@ -356,8 +360,10 @@ def run_tick(
     skipped: list[str] = []
     due_count = 0
 
-    def evaluate_and_collect(source_id: str, policy_json: str) -> str | None:
-        """One source's due-check + collection. Returns outcome category."""
+    def evaluate_and_collect(
+        source_id: str, policy_json: str
+    ) -> tuple[str, datetime | None]:
+        """One source's due-check + collection. Returns outcome and next due."""
         try:
             with session_factory() as session:
                 decision = evaluate_source(
@@ -387,7 +393,7 @@ def run_tick(
                         if decision.next_due_at
                         else "-",
                     )
-                return "skipped"
+                return "skipped", decision.next_due_at
 
             with session_factory() as session:
                 status, _ = collect_now(
@@ -399,14 +405,15 @@ def run_tick(
                     registry=registry,
                 )
                 session.commit()
-            return "collected" if status is JobRunStatus.SUCCEEDED else "failed"
+            return ("collected" if status is JobRunStatus.SUCCEEDED else "failed"), None
         except Exception:
             # One broken source must not end the pass: the remaining sources
             # would silently stop being collected, which looks like a quiet
             # scheduler rather than a failing one.
             LOGGER.exception("collection failed for source %s", source_id)
-            return "failed"
+            return "failed", None
 
+    nearest_next_due: datetime | None = None
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = {
             pool.submit(evaluate_and_collect, source_id, policy_json): source_id
@@ -414,7 +421,11 @@ def run_tick(
         }
         for future in as_completed(futures):
             source_id = futures[future]
-            outcome = future.result()
+            outcome, next_due = future.result()
+            if next_due is not None and (
+                nearest_next_due is None or next_due < nearest_next_due
+            ):
+                nearest_next_due = next_due
             if outcome == "collected":
                 due_count += 1
                 collected.append(source_id)
@@ -430,6 +441,7 @@ def run_tick(
         collected=collected,
         failed=failed,
         skipped=skipped,
+        next_due_at=nearest_next_due,
     )
     if report.ran:
         LOGGER.info(
@@ -439,6 +451,17 @@ def run_tick(
             len(report.collected),
             len(report.failed),
             len(report.skipped),
+        )
+    else:
+        # "Idling" and "dead" used to look identical in the journal (issue
+        # #293): neither wrote a line. The heartbeat is DEBUG so it is
+        # available when someone is diagnosing and costs nothing at the
+        # default level -- at 60s/tick a line per tick at INFO would be 1440
+        # rows a day of "nothing happened".
+        LOGGER.debug(
+            "tick: %d considered, 0 due, next due %s",
+            report.considered,
+            report.next_due_at.isoformat() if report.next_due_at else "-",
         )
     return report
 
