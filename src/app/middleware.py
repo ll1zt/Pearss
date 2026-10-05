@@ -34,6 +34,7 @@ from starlette.types import Receive, Scope, Send
 
 from adapters import correlation
 from adapters.audit import headers_from_scope, record, redact_headers
+from adapters.log_safety import escape_control_characters
 from app.auth import principal_from_scope
 from core.enums import AuditOutcome
 
@@ -104,10 +105,20 @@ def _actor(scope: ScopeState) -> str:
 
 
 def _operation(scope: ScopeState) -> str:
+    """Name what the request hit, safe to put in a log line and an audit row.
+
+    An unmatched route has no template, so the fallback is the request's own
+    path -- which the caller controls. ``scope["path"]`` is percent-decoded,
+    so a ``%0A`` arrives as a real newline and would end the access line early
+    (AC-296). Escaping it here fixes the log *and* the audit row, which is the
+    other place this string lands.
+    """
     route = scope.get("route")
     if route is not None and getattr(route, "path", None):
-        return f"{scope.get('method', '?')} {route.path}"
-    return f"{scope.get('method', '?')} {scope.get('path', '?')}"
+        return escape_control_characters(f"{scope.get('method', '?')} {route.path}")
+    return escape_control_characters(
+        f"{scope.get('method', '?')} {scope.get('path', '?')}"
+    )
 
 
 def _access_level(scope: ScopeState, status: int) -> int:
