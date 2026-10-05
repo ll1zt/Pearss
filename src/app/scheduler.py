@@ -29,6 +29,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
 import httpx
 from sqlalchemy import text
@@ -36,6 +37,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Source as SourceRow
+from adapters.log_limits import rate_limited_logger
 from adapters.repository import (
     claim_job_run,
     collectable_sources,
@@ -66,6 +68,16 @@ from core.scheduling import ScheduleDecision, decide_schedule
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
+
+# How often a source that keeps failing may say so at INFO. The failing state
+# does not change between ticks, so an unthrottled line is one row per tick per
+# broken source -- 1440 a day at the default 60s tick (issue #313). An hour
+# keeps the signal (which source, why, when the next probe is) without the
+# repetition; the limiter reports what it suppressed when the window rolls.
+_FAILING_SOURCE_WINDOW_SECONDS: Final = 3600.0
+_failing_source_log = rate_limited_logger(
+    LOGGER, window_seconds=_FAILING_SOURCE_WINDOW_SECONDS
+)
 
 
 def _utcnow() -> datetime:
@@ -381,9 +393,13 @@ def run_tick(
                 # rendered identically (issue #4, mode 2). Log only the failing
                 # case -- a healthy source that is simply not due yet is the
                 # normal, silent state, and logging it would put one line per
-                # source per tick into the journal.
+                # source per tick into the journal. The failing case is
+                # throttled too, for the same reason: it is a state, not an
+                # event, and it repeats for as long as the source stays broken.
                 if decision.consecutive_failures > 0:
-                    LOGGER.info(
+                    _failing_source_log(
+                        logging.INFO,
+                        source_id,
                         "source %s failing: %d consecutive failure(s),"
                         " last class %s, next probe at %s",
                         source_id,
