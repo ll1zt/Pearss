@@ -373,6 +373,10 @@ def _request(
     guard_private = not allow_private_fetch()
     reason = _refusal_reason(url, deadline=deadline) if guard_private else None
     if reason is not None:
+        # Logged for the same reason as every other failure on this path: the
+        # refusal at the socket boundary used to be the one ``_request`` exit
+        # with no line at all (AC-313).
+        _log_fetch_failure(method, url, started=started, error_class=ErrorClass.BLOCKED)
         raise FetchError(
             ErrorClass.BLOCKED, f"{reason} fetch refused for {redact_url_for_log(url)}"
         )

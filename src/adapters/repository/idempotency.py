@@ -111,15 +111,12 @@ def reserve_idempotent(
         )
     ).scalar_one()
     if row.owner_token != owner_token:
-        # The key already had an owner: this is the conflict path that answers
-        # the caller with the stored response instead of running the write
-        # again. DEBUG because a retrying client hits it by design (issue
-        # #296).
-        LOGGER.debug(
-            "idempotency key %s reused on %s; returning the stored response",
-            key,
-            endpoint,
-        )
+        # The key already had an owner. Which answer the caller gets depends on
+        # the stored row's state -- a replay returns it, a still-running or
+        # outcome-unknown write is a 409 -- so this line names the reuse rather
+        # than promising a shape. DEBUG because a retrying client hits it by
+        # design (issue #296).
+        LOGGER.debug("idempotency key %s reused on %s", key, endpoint)
     return row
 
 

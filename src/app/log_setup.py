@@ -41,6 +41,11 @@ LOG_FORMAT = "%(asctime)s %(levelname)s [%(correlation_id)s] %(name)s: %(message
 # logger is process state that outlives any import.
 _HANDLER_MARKER = "_pearss_log_handler"
 
+# The level `configure_logging` actually applied. The banner reports this
+# rather than re-reading the environment, which would name a level the process
+# is not using when the caller passed one (AC-313).
+_effective_level: str | None = None
+
 
 class CorrelationIdFilter(logging.Filter):
     """Stamp every record with the correlation id active when it was emitted.
@@ -73,6 +78,17 @@ def _writes_to_the_journal(handler: logging.Handler) -> bool:
     )
 
 
+def _resolve_level(level: str | None) -> str:
+    """The level in force: the argument, else the environment, else INFO.
+
+    An empty `PEARSS_LOG_LEVEL` is a missing value, not a bad one: `setLevel("")`
+    raises ValueError, and an unset variable is exactly what an empty export
+    looks like to a process (AC-313).
+    """
+    configured = level if level is not None else os.environ.get("PEARSS_LOG_LEVEL")
+    return (configured or "INFO").upper()
+
+
 def configure_logging(
     *, level: str | None = None, stream: TextIO | None = None
 ) -> None:
@@ -86,7 +102,9 @@ def configure_logging(
     exception is another writer to *this* stream, which would print every
     record a second time in a second format (AC-308).
     """
-    resolved_level = (level or os.environ.get("PEARSS_LOG_LEVEL", "INFO")).upper()
+    resolved_level = _resolve_level(level)
+    global _effective_level
+    _effective_level = resolved_level
     root = logging.getLogger()
     root.setLevel(resolved_level)
 
@@ -154,7 +172,7 @@ def log_startup_banner() -> None:
     LOGGER.info(
         "pearss starting: level=%s db=%s tick=%ss scheduler=%s "
         "fetch_min_interval=%ss fetch_max_per_host=%s",
-        os.environ.get("PEARSS_LOG_LEVEL", "INFO").upper(),
+        _effective_level or _resolve_level(None),
         describe_database_url(database_url()),
         os.environ.get("PEARSS_TICK_SECONDS", "60"),
         "on" if scheduler_enabled() else "off",
