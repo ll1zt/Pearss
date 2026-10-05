@@ -362,7 +362,8 @@ def _request(
     )
 
     headers = _request_headers(limits, conditional, json_body=json_body is not None)
-    deadline = monotonic() + limits.total_timeout
+    started = monotonic()
+    deadline = started + limits.total_timeout
 
     # The guard runs before the socket: an unresolvable or private target is
     # refused without spending a connection. When the guard is active,
@@ -425,6 +426,13 @@ def _request(
                 if status == 304:
                     # Not modified: a legitimate outcome, not an error. The
                     # caller records it and skips parsing.
+                    _log_fetch_summary(
+                        method,
+                        url,
+                        started=started,
+                        status=status,
+                        detail="not modified",
+                    )
                     return RawPayload(
                         url=url,
                         status_code=status,
@@ -448,16 +456,23 @@ def _request(
                 last_modified = response.headers.get("last-modified")
                 break
 
-    except FetchError:
+    except FetchError as exc:
+        _log_fetch_failure(method, url, started=started, error_class=exc.error_class)
         raise
     except httpx.TimeoutException as exc:
+        _log_fetch_failure(method, url, started=started, error_class=ErrorClass.NETWORK)
         raise FetchError(ErrorClass.NETWORK, f"timeout: {exc!r}") from exc
     except httpx.TooManyRedirects as exc:
+        _log_fetch_failure(method, url, started=started, error_class=ErrorClass.NETWORK)
         raise FetchError(ErrorClass.NETWORK, f"redirect loop: {exc!r}") from exc
     except httpx.HTTPError as exc:
         # Covers connect errors, TLS failures and protocol errors.
+        _log_fetch_failure(method, url, started=started, error_class=ErrorClass.NETWORK)
         raise FetchError(ErrorClass.NETWORK, f"transport: {exc!r}") from exc
 
+    _log_fetch_summary(
+        method, url, started=started, status=status, detail=f"{len(body)} bytes"
+    )
     return RawPayload(
         url=url,
         status_code=status,
@@ -569,3 +584,41 @@ def _redact(url: str) -> str:
     forbids writing private URLs to logs.
     """
     return url.split("?", 1)[0]
+
+
+def _log_fetch_summary(
+    method: str, url: str, *, started: float, status: int, detail: str
+) -> None:
+    """One DEBUG line per fetch: method, redacted URL, status, time, size.
+
+    DEBUG-only and redacted (issue #295): a fetch is the highest-volume thing
+    the process does, and feed URLs carry tokens. Headers and body are never
+    printed -- the summary is what a "which hop is this stuck on?" question
+    needs and nothing more.
+    """
+    LOGGER.debug(
+        "%s %s -> %d in %.1fms (%s)",
+        method,
+        _redact(url),
+        status,
+        (monotonic() - started) * 1000.0,
+        detail,
+    )
+
+
+def _log_fetch_failure(
+    method: str, url: str, *, started: float, error_class: ErrorClass
+) -> None:
+    """The failure twin of `_log_fetch_summary`.
+
+    The exception's own text is not logged: a transport error's repr can carry
+    the full URL (query and all), which is exactly what `_redact` exists to
+    keep out. The class and the elapsed time are the actionable part.
+    """
+    LOGGER.debug(
+        "%s %s failed (%s) in %.1fms",
+        method,
+        _redact(url),
+        error_class.value,
+        (monotonic() - started) * 1000.0,
+    )

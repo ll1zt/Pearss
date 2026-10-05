@@ -8,6 +8,7 @@ instead of testing a mock of the library.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import httpx
@@ -608,3 +609,66 @@ def test_allow_private_fetch_env_disables_the_guard(
         payload = fetch("http://127.0.0.1:8901/local-feed", client=http_client)
 
     assert payload.body == b"ok"
+
+
+# --------------------------------------------------------------------------
+# Per-request debug logging (AC-286..287)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_a_fetch_logs_a_redacted_debug_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-286: DEBUG shows method, status, duration and size, never the query."""
+    url = "https://feed.example.com/rss?token=supersecret"
+    with (
+        caplog.at_level(logging.DEBUG, logger="adapters.http"),
+        client_for(ok_transport()) as client,
+    ):
+        payload = fetch(url, client=client)
+
+    assert payload.status_code == 200
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "adapters.http" and record.levelno == logging.DEBUG
+    ]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "GET" in line
+    assert "200" in line
+    assert "feed.example.com/rss" in line
+    assert f"{len(FEED_BODY)} bytes" in line
+    assert "ms" in line
+    assert "supersecret" not in line
+    assert "token=" not in line
+
+
+@pytest.mark.unit
+def test_a_failed_fetch_logs_its_class_and_duration(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-287: a timeout leaves one debug line naming the class, not the token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("too slow", request=request)
+
+    url = "https://feed.example.com/rss?token=supersecret"
+    with (
+        caplog.at_level(logging.DEBUG, logger="adapters.http"),
+        client_for(httpx.MockTransport(handler)) as client,
+        pytest.raises(FetchError),
+    ):
+        fetch(url, client=client)
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "adapters.http" and record.levelno == logging.DEBUG
+    ]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "network" in line
+    assert "ms" in line
+    assert "supersecret" not in line
