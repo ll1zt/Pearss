@@ -61,6 +61,18 @@ class CorrelationIdFilter(logging.Filter):
         return True
 
 
+def _writes_to_the_journal(handler: logging.Handler) -> bool:
+    """Whether `handler` is another writer to the stream this module logs to.
+
+    Identity, not equality: `sys.stderr` is the journal, and a handler holding
+    it is a second writer to it.
+    """
+    return (
+        isinstance(handler, logging.StreamHandler)
+        and getattr(handler, "stream", None) is sys.stderr
+    )
+
+
 def configure_logging(
     *, level: str | None = None, stream: TextIO | None = None
 ) -> None:
@@ -69,15 +81,25 @@ def configure_logging(
     Idempotent by construction: an earlier handler installed by this function
     is removed before the new one is added, so repeated calls (uvicorn reload,
     a CLI that imports the app, a test) converge on one handler and one line
-    per record. Foreign handlers -- pytest's capture, another library's -- are
-    left alone, which ``logging.basicConfig(force=True)`` would not do.
+    per record. Foreign handlers are left alone -- pytest's capture, another
+    library's -- which ``logging.basicConfig(force=True)`` would not do; the
+    exception is another writer to *this* stream, which would print every
+    record a second time in a second format (AC-308).
     """
     resolved_level = (level or os.environ.get("PEARSS_LOG_LEVEL", "INFO")).upper()
     root = logging.getLogger()
     root.setLevel(resolved_level)
 
     for existing in list(root.handlers):
-        if getattr(existing, _HANDLER_MARKER, False):
+        if getattr(existing, _HANDLER_MARKER, False) or _writes_to_the_journal(
+            existing
+        ):
+            # A second writer to the journal is the double line this function
+            # exists to prevent: a library that called
+            # `logging.config.fileConfig` (alembic's env.py does) leaves a
+            # stderr handler behind, and it prints every record again, in its
+            # own format. Handlers writing somewhere else -- pytest's capture,
+            # a file -- are the embedder's business and stay (AC-308).
             root.removeHandler(existing)
 
     handler = logging.StreamHandler(stream if stream is not None else sys.stderr)

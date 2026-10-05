@@ -5,6 +5,8 @@ every record, renders it in the line, and prints one redacted startup banner.
 AC-295: a network database URL with no path must not print its authority -- the
 last path segment is the whole authority there, so the old fallback leaked the
 password into the startup banner.
+AC-308: and a foreign writer to the journal (a library's stderr handler) is
+replaced rather than joined, or every record would be written twice.
 
 These assert on the observable artifacts -- the rendered line and the captured
 ``LogRecord`` -- never on "the filter ran N times".
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import io
 import logging
+import sys
 import threading
 from collections.abc import Iterator
 
@@ -211,3 +214,25 @@ def test_startup_banner_hides_a_pathless_network_credential(
     assert "s3cr3t-pw" not in rendered
     assert "db.internal" not in rendered
     assert "operator" not in rendered
+
+
+def test_a_foreign_journal_writer_is_replaced_not_duplicated(
+    restore_root_logger: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-308: two writers to the journal is the double line #290 removed.
+
+    A library that called `logging.config.fileConfig` -- alembic's env.py does
+    -- leaves a stderr handler on the root. Adding ours on top of it wrote
+    every application record twice, which is the one thing this function exists
+    to prevent.
+    """
+    journal = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", journal)
+    foreign = logging.StreamHandler(sys.stderr)
+    foreign.setFormatter(logging.Formatter("FOREIGN %(message)s"))
+    logging.getLogger().addHandler(foreign)
+
+    log_setup.configure_logging(level="INFO", stream=journal)
+    logging.getLogger("app.example").info("once")
+
+    assert journal.getvalue().count("once") == 1, journal.getvalue()
