@@ -2293,3 +2293,32 @@ def test_no_mcp_tool_writes_its_own_error_envelope() -> None:
         "error body is a different thing and lives outside this package "
         "(app/mcp_guard.py) (issue #216)."
     )
+
+
+# --------------------------------------------------------------------------
+# One implementation of "a URL safe to log"
+# --------------------------------------------------------------------------
+
+
+def test_url_redaction_for_logs_has_a_single_implementation() -> None:
+    """AC-297: two byte-identical copies leaked the authority in both.
+
+    The first copy was ``adapters.http._redact``, the second
+    ``app.pipeline._redact_target``; neither stripped ``user:password@``. A
+    third copy is how the next fix misses one of them, so the definition is
+    pinned to one module and the callers are pinned to using it.
+    """
+    owners = [
+        path.relative_to(REPO_ROOT)
+        for path in sorted((REPO_ROOT / "src").rglob("*.py"))
+        if "def redact_url_for_log(" in path.read_text(encoding="utf-8")
+    ]
+    assert owners == [Path("src/adapters/redaction.py")], owners
+
+    for caller in ("src/adapters/http.py", "src/app/pipeline.py"):
+        text = (REPO_ROOT / caller).read_text(encoding="utf-8")
+        assert "redact_url_for_log" in text, f"{caller} does not use the redactor"
+        assert 'split("?", 1)[0]' not in text, (
+            f"{caller} still strips the query itself instead of delegating to "
+            "redact_url_for_log"
+        )

@@ -527,7 +527,7 @@ class PluginChild:
                         # detail and the operator cannot tell which egress
                         # died. Host:port only: the path/query can carry
                         # credentials (CookieCloud's uuid), same red line
-                        # _redact() holds.
+                        # redact_url_for_log() holds.
                         from urllib.parse import urlsplit
 
                         host = urlsplit(str(request.url)).netloc
