@@ -191,7 +191,10 @@ def sweep_queue(
         if not fetch_pacer.reserve(host):
             # Deferred, not dropped: the row stays queued and a later sweep
             # picks it up once the cooldown has passed.
-            LOGGER.info(
+            # DEBUG: one line per row is INFO volume growing with the queue,
+            # which issue #297's rule forbids. The sweep summary reports the
+            # counts; this is the per-row detail a diagnosis opens (AC-301).
+            LOGGER.debug(
                 "deferring enrichment %s: host %s is paced (%d per sweep, "
                 "%.0fs interval)",
                 row_id,
@@ -373,7 +376,7 @@ def _execute_row(
             )
             outcome["skipped"] += 1
             if fenced:
-                LOGGER.info(
+                LOGGER.debug(
                     "enrichment %s deferred: host %s is cooling down or paced",
                     row_id,
                     host or "-",
@@ -393,7 +396,7 @@ def _execute_row(
                 # row goes back untouched and unrecorded, so a later sweep runs
                 # it. Falling back to the item's own body here is precisely the
                 # mismatched-layers outcome this rule exists to remove.
-                LOGGER.info(
+                LOGGER.debug(
                     "enrichment %s waiting for the upstream product from %s",
                     row_id,
                     upstream_spec.plugin_id,
@@ -484,7 +487,7 @@ def _execute_row(
                     session, item_id=item.id, content_hash=item.content_hash
                 )
                 session.commit()
-                LOGGER.info("enrichment %s succeeded", row.id)
+                LOGGER.debug("enrichment %s succeeded", row.id)
                 outcome["succeeded"] += 1
             else:
                 session.rollback()
