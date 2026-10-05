@@ -135,6 +135,7 @@
 | AC-293..294 | #298 处理器子进程日志转发带 correlation id（原声明 AC-289..290，让号）：`_ChildLog` 在 spawn 时捕获一次 correlation id，并以 `extra={"correlation_id": …}` 盖在每条重记的行上，Filter 对已带 id 的记录不再覆盖；子进程写一条 warning，宿主重记的行含该 id 与 `[plugin_id item_id]` 前缀（AC-293），无请求上下文（sweep）时一次子进程运行的所有行共享一个非空 id（AC-294） | issue #298 | 已合并 | `tests/integration/test_processor_logs.py` |
 | AC-283 | #293 调度器空转可观测（原声明 AC-279，让号）：`report.ran == 0` 的 tick 在 INFO 级静默、DEBUG 级打一行心跳（含 considered 数与最近的下次 due 时刻）；`ran > 0` 维持原 INFO 汇总 | issue #293 | 已合并 | `tests/integration/test_scheduler.py` |
 | AC-284..285 | #294 请求级访问日志（原声明 AC-280..281，让号）：每请求一行应用访问日志，含 correlation id、method、route 模板、status、actor、duration_ms（AC-284）；读请求 2xx 默认 DEBUG，写请求与 ≥400 的响应 INFO（AC-285：读 200 在 INFO 静默、5xx 在 INFO 一行）；同时静掉 `uvicorn.access` 以免双写 | issue #294 | 已合并 | `tests/integration/test_request_logs.py` |
+| AC-295 | #308 启动 banner 的 db 位置对「无路径的网络型 URL」不泄漏凭据：`describe_database_url` 改用 `urlsplit`，只输出 scheme + path，authority（`user:password@host`）与 query 一律丢弃；无 scheme 的字符串仍报 `<unparseable>`。修前 `postgresql://operator:s3cr3t@db.internal` 被当成 path 打印成 `postgresql:///operator:s3cr3t@db.internal`，密码进 journal | issue #308 | 已合并 | `tests/unit/test_log_setup.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
