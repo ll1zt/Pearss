@@ -59,6 +59,16 @@ from core.tenancy import SINGLE_TENANT
 LOGGER = logging.getLogger(__name__)
 
 
+def _redact_target(url: str) -> str:
+    """A target address without its query string.
+
+    A debug line must not put a token into the journal (AGENTS.md), and the
+    target addresses operators submit are external URLs, so the same rule as
+    the fetch adapter's applies here.
+    """
+    return url.split("?", 1)[0]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Ingested:
     """One draft, and what storing it decided."""
@@ -145,6 +155,15 @@ def normalise_and_store(
             item = with_content_ref(item, filestore.store_body(body_markup))
 
         outcome = store_item(session, item)
+        # One line per draft, at DEBUG: the batch summary below says how many
+        # were stored but not what happened to each, and "why is my item not
+        # there?" is answered per draft (issue #292).
+        LOGGER.debug(
+            "draft outcome: action=%s item=%s source_ref=%s",
+            outcome.action.value,
+            item.id,
+            draft.external_id or draft.canonical_url,
+        )
         if outcome.action in (
             DedupeAction.INSERT,
             DedupeAction.INSERT_RELATED,
@@ -873,12 +892,20 @@ def fetch_one(
         # difference between two entry points that should behave the same.
         chain = chain_for_source(session, source_id=source.id)
     if not _on_source_host(source_url, url):
+        LOGGER.debug(
+            "fetch preflight rejected %s: not on the source's own host",
+            _redact_target(url),
+        )
         return FetchUnit(
             action=FetchItemAction.REJECTED,
             error_class=ErrorClass.STRUCTURE_CHANGED,
             detail="address is not on the source's own host",
         )
     if registration is None:
+        LOGGER.debug(
+            "fetch preflight rejected %s: no collector serves this source",
+            _redact_target(url),
+        )
         return FetchUnit(
             action=FetchItemAction.REJECTED,
             error_class=ErrorClass.STRUCTURE_CHANGED,

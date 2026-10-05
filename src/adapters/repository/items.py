@@ -55,6 +55,25 @@ def find_by_identity(session: Session, *, item_id: str, guid: str) -> list[Item]
     return [row_to_item(row) for row in rows]
 
 
+def _match_source(
+    matched_id: str | None, *, identity: list[Item], existing: list[Item]
+) -> str:
+    """Which comparison matched: the identity key or the content hash.
+
+    The two are unioned for the decision, but they mean different things: an
+    identity match is the same entry re-fetched, a content match is the same
+    article from another source. Naming which one fired is the difference
+    between "the origin reworded it" and "two feeds carry it" (issue #292).
+    """
+    if matched_id is None:
+        return "none"
+    if any(seen.id == matched_id for seen in identity):
+        return "identity"
+    if any(seen.id == matched_id for seen in existing):
+        return "content_hash"
+    return "unknown"
+
+
 def store_item(session: Session, candidate: Item) -> StoreOutcome:
     """Persist `candidate`, applying the dedupe rule.
 
@@ -64,11 +83,22 @@ def store_item(session: Session, candidate: Item) -> StoreOutcome:
     enough, and content-only matching is what previously let a reworded article
     fall through to an INSERT that collided on the frozen guid.
     """
-    existing = find_by_identity(session, item_id=candidate.id, guid=candidate.guid)
+    identity = find_by_identity(session, item_id=candidate.id, guid=candidate.guid)
+    existing = list(identity)
     for other in find_by_content_hash(session, candidate.content_hash):
         if all(seen.id != other.id for seen in existing):
             existing.append(other)
     decision = decide_dedupe(candidate, existing)
+    # Every decision, at DEBUG: which rule fired and what it matched. The INFO
+    # lines below cover only the terminal outcomes, and "why did this draft not
+    # become a row?" is the question a diagnosis opens with (issue #292).
+    LOGGER.debug(
+        "dedupe %s: %s matched %s via %s",
+        decision.action.value,
+        candidate.id,
+        decision.matched_id or "-",
+        _match_source(decision.matched_id, identity=identity, existing=existing),
+    )
 
     if decision.action in (DedupeAction.INSERT, DedupeAction.INSERT_RELATED):
         _insert(session, candidate)
