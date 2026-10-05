@@ -6,6 +6,8 @@ the response is an error, so NNW's constant polling is not an INFO stream.
 AC-296: the access line is rendered from an untrusted request target, so a
 control character in the path must not split one record across two physical
 lines -- that is how a forged entry gets into the journal in the first place.
+AC-304: and a request that crashed still gets its line, even though Starlette
+answers it from outside this middleware.
 
 The line is read from a real handler installed by ``configure_logging`` (not
 ``caplog``) because the correlation id reaches the rendered text through the
@@ -200,3 +202,43 @@ def test_configure_logging_silences_the_uvicorn_access_log(
     assert not logging.getLogger("uvicorn.access").isEnabledFor(logging.INFO), (
         "uvicorn.access still emits INFO, so every request would be logged twice"
     )
+
+
+@pytest.mark.asyncio
+async def test_an_unhandled_exception_still_gets_an_access_line(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-304: the request most worth a line is the one that crashed.
+
+    Starlette answers an unhandled exception with `ServerErrorMiddleware`, which
+    sits *outside* this middleware: `send_wrapper` never sees the 500, so `sent`
+    stays False and the request left no line at all -- a silent hole exactly
+    where an operator starts looking.
+    """
+
+    async def boom() -> None:
+        raise RuntimeError("kaboom")
+
+    # Inserted before the `/{path}` catch-all `create_app` mounts for the Reader
+    # API: a route appended after it would never be reached, and the 404 that
+    # produces reads as if the route were absent rather than shadowed.
+    from fastapi.routing import APIRoute
+
+    app.router.routes.insert(1, APIRoute("/v1/boom", boom, methods=["GET"]))
+
+    with caplog.at_level(logging.INFO, logger="app.middleware"):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {WRITE_TOKEN}"},
+        ) as crashing:
+            response = await crashing.get("/v1/boom")
+
+    assert response.status_code == 500, response.text
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.middleware"
+    ]
+    assert len(lines) == 1, lines
+    assert "-> 500" in lines[0], lines

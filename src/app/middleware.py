@@ -219,6 +219,16 @@ class CorrelationAndAuditMiddleware:
 
         try:
             await self.app(scope, receive, send_wrapper)
+        except Exception:
+            # An unhandled exception is answered by Starlette's
+            # ServerErrorMiddleware, which sits outside this one: `send_wrapper`
+            # never sees the 500, so without this the request that crashed --
+            # the one an operator most needs -- left no line at all (AC-304).
+            # Only when nothing was sent: a failure *after* the response started
+            # already has its line in the `finally` below.
+            if not sent:
+                self._log_access(scope, 500, started)
+            raise
         finally:
             # Logged before the correlation reset: the id reaches the line
             # through the handler's filter reading the contextvar, so resetting
