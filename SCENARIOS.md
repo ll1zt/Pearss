@@ -137,6 +137,7 @@
 | AC-284..285 | #294 请求级访问日志（原声明 AC-280..281，让号）：每请求一行应用访问日志，含 correlation id、method、route 模板、status、actor、duration_ms（AC-284）；读请求 2xx 默认 DEBUG，写请求与 ≥400 的响应 INFO（AC-285：读 200 在 INFO 静默、5xx 在 INFO 一行）；同时静掉 `uvicorn.access` 以免双写 | issue #294 | 已合并 | `tests/integration/test_request_logs.py` |
 | AC-295 | #308 启动 banner 的 db 位置对「无路径的网络型 URL」不泄漏凭据：`describe_database_url` 改用 `urlsplit`，只输出 scheme + path，authority（`user:password@host`）与 query 一律丢弃；无 scheme 的字符串仍报 `<unparseable>`。修前 `postgresql://operator:s3cr3t@db.internal` 被当成 path 打印成 `postgresql:///operator:s3cr3t@db.internal`，密码进 journal | issue #308 | 已合并 | `tests/unit/test_log_setup.py` |
 | AC-296 | #309 访问日志对未匹配路由的路径做控制字符转义：`_operation` 走 `adapters/log_safety.escape_control_characters`，请求路径里的换行（解码后的 `%0A`）渲染成 `\x0a` 而不是真的断行，于是一个请求只产生一行日志、无法伪造日志条目；审计行同一函数受益。printable 字符（空格、CJK）原样保留 | issue #309 | 已合并 | `tests/unit/test_log_safety.py`、`tests/integration/test_request_logs.py` |
+| AC-297 | #310 日志 URL 脱敏单一实现：新增 `adapters/redaction.redact_url_for_log`，一次剥掉 query（feed token）、userinfo（basic-auth 密码）与 fragment（`#access_token=…`）——此前 `http._redact` 与 `pipeline._redact_target` 是两份字节相同的实现且都漏掉 authority，DEBUG 摘要会打印 `https://user:pass@host/rss`；`audit.redact_url` / `mcp.rendering._redact_url` 是 param-aware 的**另一类**，有意不合入；结构守卫钉住「全仓只有一处该实现」 | issue #310 | 已合并 | `tests/unit/test_redaction.py`、`tests/unit/test_http.py`、`tests/unit/test_structure_guards.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 
