@@ -672,3 +672,32 @@ def test_a_failed_fetch_logs_its_class_and_duration(
     assert "network" in line
     assert "ms" in line
     assert "supersecret" not in line
+
+
+@pytest.mark.unit
+def test_a_fetch_summary_also_hides_userinfo_and_fragment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """AC-297: the query string is not the only credential a feed URL carries.
+
+    A feed URL can be ``https://user:password@host/rss``, or end in
+    ``#access_token=...``; the old redaction printed both verbatim.
+    """
+    url = "https://alice:s3cr3t@feed.example.com/rss?token=supersecret#frag"
+    with (
+        caplog.at_level(logging.DEBUG, logger="adapters.http"),
+        client_for(ok_transport()) as client,
+    ):
+        payload = fetch(url, client=client)
+
+    assert payload.status_code == 200
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "adapters.http" and record.levelno == logging.DEBUG
+    ]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "feed.example.com/rss" in line
+    for secret in ("alice", "s3cr3t", "supersecret", "token=", "frag"):
+        assert secret not in line, line

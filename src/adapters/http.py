@@ -24,6 +24,7 @@ import httpx
 
 from adapters import deadline_transport
 from adapters.raw_payload import ConditionalState, RawPayload
+from adapters.redaction import redact_url_for_log
 
 # Re-exported: fetch() takes one, so it is part of this module's public surface
 # even though the type lives in raw_payload to keep the repository off httpx.
@@ -373,7 +374,7 @@ def _request(
     reason = _refusal_reason(url, deadline=deadline) if guard_private else None
     if reason is not None:
         raise FetchError(
-            ErrorClass.BLOCKED, f"{reason} fetch refused for {_redact(url)}"
+            ErrorClass.BLOCKED, f"{reason} fetch refused for {redact_url_for_log(url)}"
         )
     manual_redirects = guard_private and follow_redirects
     hops = 0
@@ -400,13 +401,13 @@ def _request(
                         raise FetchError(
                             ErrorClass.NETWORK,
                             f"redirect loop past {MAX_MANUAL_REDIRECT_HOPS} "
-                            f"hops for {_redact(url)}",
+                            f"hops for {redact_url_for_log(url)}",
                         )
                     location = response.headers.get("location")
                     if not location:
                         raise FetchError(
                             ErrorClass.NETWORK,
-                            f"redirect without location for {_redact(url)}",
+                            f"redirect without location for {redact_url_for_log(url)}",
                         )
                     next_url = urljoin(url, location)
                     redirect_reason = _refusal_reason(next_url, deadline=deadline)
@@ -414,7 +415,7 @@ def _request(
                         raise FetchError(
                             ErrorClass.BLOCKED,
                             f"redirect to a {redirect_reason} refused for "
-                            f"{_redact(next_url)}",
+                            f"{redact_url_for_log(next_url)}",
                         )
                     if urlsplit(next_url).hostname != urlsplit(url).hostname:
                         # The new host was chosen by the old host; credentials
@@ -448,7 +449,9 @@ def _request(
 
                 if status != 200:
                     error_class = classify(http_status=status) or ErrorClass.NETWORK
-                    raise FetchError(error_class, f"HTTP {status} for {_redact(url)}")
+                    raise FetchError(
+                        error_class, f"HTTP {status} for {redact_url_for_log(url)}"
+                    )
 
                 body = read_capped(response, limits.max_bytes, url)
                 response_headers = _safe_headers(response.headers)
@@ -498,7 +501,7 @@ def check_destination(url: str, *, deadline: float | None = None) -> None:
     reason = _refusal_reason(url, deadline=deadline)
     if not allow_private_fetch() and reason is not None:
         raise FetchError(
-            ErrorClass.BLOCKED, f"{reason} fetch refused for {_redact(url)}"
+            ErrorClass.BLOCKED, f"{reason} fetch refused for {redact_url_for_log(url)}"
         )
 
 
@@ -552,7 +555,7 @@ def read_capped(response: httpx.Response, max_bytes: int, url: str) -> bytes:
         if total > max_bytes:
             raise FetchError(
                 ErrorClass.NETWORK,
-                f"response exceeded {max_bytes} bytes for {_redact(url)}",
+                f"response exceeded {max_bytes} bytes for {redact_url_for_log(url)}",
             )
         chunks.append(chunk)
     return b"".join(chunks)
@@ -577,15 +580,6 @@ def _safe_headers(headers: httpx.Headers) -> dict[str, str]:
     return {key: headers[key] for key in allowed if key in headers}
 
 
-def _redact(url: str) -> str:
-    """Strip the query before a URL reaches a log.
-
-    Feed URLs routinely carry tokens in their query string, and AGENTS.md
-    forbids writing private URLs to logs.
-    """
-    return url.split("?", 1)[0]
-
-
 def _log_fetch_summary(
     method: str, url: str, *, started: float, status: int, detail: str
 ) -> None:
@@ -599,7 +593,7 @@ def _log_fetch_summary(
     LOGGER.debug(
         "%s %s -> %d in %.1fms (%s)",
         method,
-        _redact(url),
+        redact_url_for_log(url),
         status,
         (monotonic() - started) * 1000.0,
         detail,
@@ -612,13 +606,14 @@ def _log_fetch_failure(
     """The failure twin of `_log_fetch_summary`.
 
     The exception's own text is not logged: a transport error's repr can carry
-    the full URL (query and all), which is exactly what `_redact` exists to
+    the full URL (query and all), which is exactly what `redact_url_for_log`
+    exists to
     keep out. The class and the elapsed time are the actionable part.
     """
     LOGGER.debug(
         "%s %s failed (%s) in %.1fms",
         method,
-        _redact(url),
+        redact_url_for_log(url),
         error_class.value,
         (monotonic() - started) * 1000.0,
     )

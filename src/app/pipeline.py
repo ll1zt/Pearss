@@ -27,7 +27,9 @@ from adapters import filestore
 from adapters.correlation import current as current_correlation_id
 from adapters.db_models import Source as SourceRow
 from adapters.http import FetchError
+from adapters.log_safety import escape_control_characters
 from adapters.raw_payload import RawPayload
+from adapters.redaction import redact_url_for_log
 from adapters.repository import (
     StoreOutcome,
     chain_for_source,
@@ -57,16 +59,6 @@ from core.normalize import (
 from core.tenancy import SINGLE_TENANT
 
 LOGGER = logging.getLogger(__name__)
-
-
-def _redact_target(url: str) -> str:
-    """A target address without its query string.
-
-    A debug line must not put a token into the journal (AGENTS.md), and the
-    target addresses operators submit are external URLs, so the same rule as
-    the fetch adapter's applies here.
-    """
-    return url.split("?", 1)[0]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -162,7 +154,9 @@ def normalise_and_store(
             "draft outcome: action=%s item=%s source_ref=%s",
             outcome.action.value,
             item.id,
-            draft.external_id or draft.canonical_url,
+            escape_control_characters(
+                redact_url_for_log(draft.external_id or draft.canonical_url)
+            ),
         )
         if outcome.action in (
             DedupeAction.INSERT,
@@ -894,7 +888,7 @@ def fetch_one(
     if not _on_source_host(source_url, url):
         LOGGER.debug(
             "fetch preflight rejected %s: not on the source's own host",
-            _redact_target(url),
+            redact_url_for_log(url),
         )
         return FetchUnit(
             action=FetchItemAction.REJECTED,
@@ -904,7 +898,7 @@ def fetch_one(
     if registration is None:
         LOGGER.debug(
             "fetch preflight rejected %s: no collector serves this source",
-            _redact_target(url),
+            redact_url_for_log(url),
         )
         return FetchUnit(
             action=FetchItemAction.REJECTED,
