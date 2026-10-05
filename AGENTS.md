@@ -42,7 +42,7 @@ core -> adapters -> plugins -> app
 - 所有写操作必须幂等，API 写请求需要 `Idempotency-Key`
 - **复数操作 = 作业 + 账本**（ADR 0046）：效果 O(1) 返回句柄（`202` + `work_id`），逐条结果**只**在 `work_unit` 账本里（可寻址：`(work, target)`），响应字节数不随输入规模变化；`counts` 由账本折叠而不落库；`rejected`（没尝试）与 `failed`（尝试了但失败）必须分开——只有后者值得重发
 - 所有 API 调用方均需经过 Core API 审计中间件；不得只在 MCP 层做审计
-- 任何 API/MCP 写操作都必须有清晰的 actor、session/correlation ID；需要用户确认的 MCP 动作必须走 elicitation
+- 任何 API/MCP 写操作都必须有清晰的 actor、session/correlation ID（MCP 写工具经 `/v1`，审计行由 Core API 中间件写）
 
 ## 必须执行的检查
 
@@ -84,7 +84,7 @@ just ci-nix           # CI 实际执行的命令：nix flake check + just ci
 - **`is not None` 不是断言**：它看不见"某个分支丢了值"。按分支断言**确切值**（`matched_id == "x"`、`audit_note == "..."`）
 - **持久化标识必须钉死字面值**：item id / guid / content_hash / 密码哈希格式。只测"确定、隔离、互不相同"这类相对性质时，**丢输入字段的回归仍然通过**。钉值处注明"改动需数据迁移"
 - **安全与不变量测试要注入式验证**：临时改源码注入对应回归，确认测试变红，再恢复。不可省
-- **失败路径要写 E2E**：拒绝之后系统有没有被改动，happy path 永远测不出来。鉴权失败、未确认的写、闸门、幂等冲突各自要有"拒绝了且没落库"的端到端断言（`tests/e2e/test_failure_paths.py`）
+- **失败路径要写 E2E**：拒绝之后系统有没有被改动，happy path 永远测不出来。鉴权失败、闸门、幂等冲突、参数被拒各自要有"拒绝了且没落库"的端到端断言（`tests/e2e/test_failure_paths.py`）
 - **种子数据走 repository**：不手写 INSERT——它会随 schema 加列而碎，且复现不出生产写入路径
 - **新增行要有覆盖**：`just coverage-diff` 检查本次改动新增/修改的行是否被执行（默认 20% 未覆盖即失败）。到不了的行在 commit message 里说明理由，不写凑数测试
 - 纯重构不允许改断言，只允许改 fixture/构造部分
@@ -112,8 +112,7 @@ just ci-nix           # CI 实际执行的命令：nix flake check + just ci
 - 新增/修改 HTTP endpoint：更新 OpenAPI，遵循 `docs/api/style-guide.md`，通过 `just contract`
 - 新增/修改 MCP Tool：更新 Tool 描述与 schema，更新 snapshot（`MCP_SNAPSHOT_UPDATE=1 just contract` 后审查 diff），遵循 `docs/api/mcp-tool-guide.md`
 - MCP 工具**必须经 `/v1` 调用**，不得直调 `adapters/repository`：那样会绕过审计中间件、鉴权与校验（ADR 0010）
-- 工具的 elicitation schema 只能用原始类型；嵌套对象在渲染时抛 TypeError，结构化参数须以 canonical JSON 文本传递
-- 写工具：默认需要用户确认；返回审计 ID 与 correlation ID
+- 写工具**不 elicit**（ADR 0058）：约束误操作靠 token 权限、描述与 annotations（破坏性工具明说不可逆）、每次新生成的 `Idempotency-Key`、以及可追溯的审计行；工具返回审计 ID 与 correlation ID
 - **不得批量返回正文**：列表类工具只返回 item/enrichment ID 或 Resource URI。单条、显式、带截断的正文获取允许（`get_item_body`，见 ADR 0013），因为 Resource 是 MCP 中采用率最低的特性，客户端不支持时 agent 完全取不到正文
 
 ### Reader API（兼容层）

@@ -18,8 +18,6 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.conftest import _auto_accept
-
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
 
 
@@ -63,7 +61,7 @@ async def test_get_source_returns_the_configuration_of_one_source(
     a projection of the Core API, so the useful property is that the values
     that identify the source survived the trip.
     """
-    async with open_mcp_session(mcp_url, elicitation_callback=_auto_accept) as session:
+    async with open_mcp_session(mcp_url) as session:
         source_id = await _add_source(
             session, "https://get-source.example/feed.xml", folder="阅读"
         )
@@ -110,7 +108,7 @@ async def test_get_source_distinguishes_two_sources(
     A tool that ignored its argument and returned the first source would pass a
     single-source test; this is the check that it does not.
     """
-    async with open_mcp_session(mcp_url, elicitation_callback=_auto_accept) as session:
+    async with open_mcp_session(mcp_url) as session:
         first = await _add_source(session, "https://get-source.example/one.xml")
         second = await _add_source(session, "https://get-source.example/two.xml")
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -159,28 +160,6 @@ def _rpc_error(excinfo: pytest.ExceptionInfo[BaseException]) -> MCPError:
     return found[0]
 
 
-async def _auto_accept(_ctx: Any, params: Any) -> Any:
-    """Answer an elicitation by echoing the schema's prefilled defaults.
-
-    The server seeds each field with the value it intends to execute, so
-    returning the defaults is exactly "the user pressed confirm without
-    editing". It also proves the prefill reaches the client: if it did not, the
-    server's `_matches` check would abort and the write would not happen.
-    """
-    from mcp import types
-
-    properties = (params.requested_schema or {}).get("properties", {})
-    content = {
-        name: (
-            spec.get("default", False)
-            if spec.get("type") == "boolean"
-            else spec.get("default", "")
-        )
-        for name, spec in properties.items()
-    }
-    return types.ElicitResult(action="accept", content=content)
-
-
 @asynccontextmanager
 async def mcp_session(
     url: str, *, elicitation_callback: Any = None
@@ -243,12 +222,14 @@ async def _call(
     url: str,
     tool: str,
     args: dict[str, Any],
-    *,
-    confirm: bool = False,
 ) -> dict[str, Any]:
-    async with mcp_session(
-        url, elicitation_callback=_auto_accept if confirm else None
-    ) as session:
+    """Call a tool from a client that declares no elicitation capability.
+
+    That is the client #270 is about -- it used to get `-32021` from every
+    write, so it could call all the reads and none of the writes -- and it is
+    why no test needs an elicitation callback any more.
+    """
+    async with mcp_session(url) as session:
         return _payload(await session.call_tool(tool, args))
 
 
@@ -576,202 +557,104 @@ async def test_a_wide_request_is_told_what_it_cost(mcp_url: str) -> None:
 
 
 # --------------------------------------------------------------------------
-# Writes require confirmation
+# Writes need no confirmation (ADR 0058, issue #270)
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_writes_refuse_when_the_client_cannot_confirm(mcp_url: str) -> None:
-    """The test client declares no elicitation capability.
+async def test_a_write_runs_without_any_elicitation(mcp_url: str) -> None:
+    """AC-262: a client that cannot answer an elicitation can still write.
 
-    The resolver refuses with the spec's MissingRequiredClientCapability
-    (-32021) rather than executing: a server MUST NOT send an elicitation
-    request to a client that did not declare support. An earlier
-    implementation returned a friendly {"declined": true} body here, but that
-    shape required sending the request anyway on the legacy wire and has no
-    delivery mechanism at all on the stateless protocol -- the protocol error
-    is the honest answer, and its data names the missing capability.
+    It used to be refused with `-32021 MissingRequiredClientCapability` before
+    the tool body ran, so this client could call every read and no write. The
+    counter is the other half of the scenario: not only does the call go
+    through, no `elicitation/create` is sent at all.
     """
-    with pytest.raises(BaseException) as excinfo:
-        await _call(mcp_url, "remove_source", {"source_id": "src-1"})
-    error = _rpc_error(excinfo)
-    assert error.code == -32021, error.error
-    assert "elicitation" in str(error.error.data), error.error
+    elicitations: list[Any] = []
 
-    # The refusal must be real: the source is still there.
-    still = await _call(mcp_url, "list_sources", {"limit": 10})
-    assert [row["id"] for row in still["data"]] == ["src-1"]
+    async def _counting(_ctx: Any, params: Any) -> Any:
+        from mcp import types
+
+        elicitations.append(params)
+        return types.ElicitResult(action="accept", content={})
+
+    async with mcp_session(mcp_url, elicitation_callback=_counting) as session:
+        payload = _payload(
+            await session.call_tool(
+                "add_source",
+                {
+                    "url": "https://no-elicitation.example/feed.xml",
+                    "schedule_policy": {"type": "fixed", "interval": "30m"},
+                },
+            )
+        )
+
+    assert payload.get("error") is None, payload
+    assert payload["canonical_url"] == "https://no-elicitation.example/feed.xml"
+    assert elicitations == [], "a write must not elicit"
 
 
 @pytest.mark.asyncio
-async def test_every_write_tool_refuses_without_elicitation(mcp_url: str) -> None:
-    agent_id = await _an_agent_source(mcp_url)
-    before_ids = [
-        row["id"]
-        for row in (await _call(mcp_url, "list_sources", {"limit": 100}))["data"]
-    ]
-    cases: list[tuple[str, dict[str, Any]]] = [
-        (
-            "add_source",
-            {
-                "url": "https://x.example/feed",
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-        ),
-        (
-            "update_schedule_policy",
-            {
-                "source_id": "src-1",
-                "schedule_policy": {"type": "fixed", "interval": "1h"},
-            },
-        ),
-        (
-            "add_sources",
-            {
-                "urls": ["https://x.example/feed", "https://y.example/feed"],
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-        ),
-        (
-            "fetch_source_items",
-            {"source_id": "src-1", "urls": ["https://x.example/archives/1"]},
-        ),
-        ("set_source_status", {"source_id": "src-1", "status": "paused"}),
-        ("set_source_folder", {"source_id": "src-1", "folder": "阅读"}),
-        (
-            "set_source_pipeline_chain",
-            {
-                "source_id": "src-1",
-                "pipeline_chain": [{"plugin_id": "translate", "kind": "translation"}],
-            },
-        ),
-        ("trigger_job", {"source_id": "src-1"}),
-        ("retry_enrichments", {"source_id": "src-1"}),
-        # Consumption state (issue #218): the item's own columns are frozen,
-        # but the state itself is a write and confirms like every other.
-        ("set_item_read_state", {"item_id": "it-1", "is_read": True}),
-        # Every write tool belongs here: a tool left out is a tool whose
-        # confirmation requirement is unverified.
-        ("backfill_source", {"source_id": "src-1"}),
-        ("set_plugin_status", {"plugin_id": "rss", "status": "disabled"}),
-        ("remove_source", {"source_id": "src-1"}),
-        # Deletion (ADR 0021).
-        ("delete_items", {"item_ids": ["it-1"]}),
-        ("delete_source_items", {"source_id": "src-1"}),
-        # A3 ingest (ADR 0022).
-        ("submit_items", {"source_id": agent_id, "items": [_submitted_item()]}),
-    ]
+async def test_no_write_tool_has_a_confirmation_parameter(mcp_url: str) -> None:
+    """AC-263: the retired machinery left no parameter on the tool face.
 
-    # The sweep is only as good as this list: a write tool that exists on the
-    # surface but is not named here would pass the test below without ever
-    # being asked to confirm anything. The registry is the source of truth, so
-    # the list is checked against it rather than trusted -- the hand-written
-    # version had already drifted (issue #125).
+    Read from the live registry rather than a hand-written list: a tool left out
+    is a tool whose schema is unverified, and the hand-written version of this
+    list had already drifted (issue #125).
+    """
     async with mcp_session(mcp_url) as session:
-        registered = {tool.name: tool for tool in (await session.list_tools()).tools}
+        tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+
     writes = {
         name
-        for name, tool in registered.items()
+        for name, tool in tools.items()
         if tool.annotations is not None and tool.annotations.read_only_hint is False
     }
-    swept = {tool for tool, _ in cases}
-    assert swept == writes, (
-        "the sweep must cover exactly the tools the server registers as writes: "
-        f"missing {sorted(writes - swept)}, not writes {sorted(swept - writes)}"
+    assert len(writes) == 16, sorted(writes)
+
+    offenders: list[str] = []
+    for name in sorted(writes):
+        properties = tools[name].input_schema.get("properties") or {}
+        offenders.extend(
+            f"{name}.{prop}"
+            for prop in properties
+            if re.search(r"confirm|ack", prop, re.IGNORECASE)
+        )
+    assert not offenders, (
+        "a write tool still shows a confirmation parameter, so the machinery "
+        f"was retired only halfway: {offenders}"
     )
 
-    for tool, args in cases:
-        with pytest.raises(BaseException) as excinfo:
-            await _call(mcp_url, tool, args)
-        error = _rpc_error(excinfo)
-        assert error.code == -32021, (tool, error.error)
 
-    # Nothing changed anywhere. Compared against a snapshot taken before the
-    # calls rather than against a fixed list: this suite shares one database
-    # across the module, so other tests' sources are legitimately present and
-    # an exact-match assertion would be testing the neighbours, not the
-    # refusals.
-    sources = await _call(mcp_url, "list_sources", {"limit": 100})
-    assert {row["status"] for row in sources["data"]} == {"active"}
-    assert [row["id"] for row in sources["data"]] == before_ids
+@pytest.mark.asyncio
+async def test_a_refused_write_is_not_a_capability_error(mcp_url: str) -> None:
+    """AC-264: a client without elicitation gets the API's answer, not `-32021`.
+
+    The retired requirement answered every write with
+    `-32021 MissingRequiredClientCapability` *before* the tool body ran, so the
+    caller could not even learn that the source did not exist. A
+    `source_not_found` says which mistake was made; a capability error says the
+    client is the wrong kind of client, which is no longer true.
+    """
+    payload = await _call(mcp_url, "trigger_job", {"source_id": "does-not-exist"})
+
+    assert payload["error"] == "source_not_found", payload
+    assert "elicitation" not in json.dumps(payload).lower()
 
 
 # --------------------------------------------------------------------------
 # Audit coverage
 # --------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_refused_writes_reach_no_audit_row(
+async def test_reads_and_writes_share_one_audit_path(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
-    """A write declined at the MCP layer never reaches the Core API.
-
-    This is the honest shape rather than the one first assumed here: the
-    refusal happens before any HTTP call, so there is no Core API request to
-    audit. Recording it would need the MCP layer to write AuditLog directly,
-    which is a separate decision — and AGENTS.md asks for audit at the Core API
-    covering every caller, not for the MCP layer to keep its own ledger.
-
-    The consequence worth pinning is that MCP-layer refusals produce no *Core
-    API* rows, while a confirmed write does (asserted by the next test), so the
-    audit trail of `/v1/*` means exactly "something reached the API".
-
-    Rows are filtered to `POST /v1/` rather than counted wholesale: the MCP
-    transport itself is a POST to `/mcp`, so every protocol frame
-    (`initialize`, `list_tools`, each `tools/call`) leaves an audit row for the
-    mounted edge route. A plain before/after count therefore moves even when
-    the refused write is correctly refused, and the earlier substring-search
-    version could not fail at all — the audit row carries the route, never the
-    request URL.
-    """
-
-    def _core_api_writes() -> list[str]:
-        # The row is written after the response is on the wire, so a count
-        # taken straight after a tool call is a race (issue #101).
-        CorrelationAndAuditMiddleware.drain_audit()
-        engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
-        try:
-            with engine.connect() as conn:
-                return [
-                    op
-                    for (op,) in conn.execute(
-                        text(
-                            "select operation from audit_log"
-                            " where operation like 'POST /v1/%'"
-                        )
-                    ).fetchall()
-                ]
-        finally:
-            engine.dispose()
-
-    before = _core_api_writes()
-
-    await _call(mcp_url, "list_sources", {"limit": 5})
-    with pytest.raises(BaseException) as excinfo:
-        await _call(
-            mcp_url,
-            "add_source",
-            {
-                "url": "https://never-applied.example/feed",
-                "schedule_policy": {"type": "fixed", "interval": "30m"},
-            },
-        )
-    assert _rpc_error(excinfo).code == -32021
-
-    assert _core_api_writes() == before, (
-        "a declined write must not produce a Core API audit row"
-    )
-
-
-@pytest.mark.asyncio
-async def test_confirmed_reads_and_writes_share_one_audit_path(
-    mcp_url: str, mcp_env: dict[str, str]
-) -> None:
-    """A confirmed tool write is audited exactly like a REST call.
+    """AC-265: a tool write is audited exactly like a REST call.
 
     This is the payoff of routing tools through /v1: the same middleware sees
-    both, so there is one ledger rather than one per entry point.
+    both, so there is one ledger rather than one per entry point. Retiring the
+    confirmation changed none of it -- the write still has an actor and a
+    correlation id.
 
     The actor assertion is deliberately exact for the row this test creates:
     a subset check against {"api:full","anonymous"} would pass on an empty
@@ -784,7 +667,6 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
             "url": "https://shared-audit.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     CorrelationAndAuditMiddleware.drain_audit()
     engine = create_engine_for(mcp_env["PEARSS_DATABASE_URL"])
@@ -792,24 +674,20 @@ async def test_confirmed_reads_and_writes_share_one_audit_path(
         rows = conn.execute(text("select actor, operation from audit_log")).fetchall()
     engine.dispose()
     writes = [(actor, op) for actor, op in rows if "POST /v1/sources" in op]
-    assert writes, "a confirmed write must leave an audit row"
+    assert writes, "a write must leave an audit row"
     assert {actor for actor, _ in writes} == {"api:full"}, (
         "the write must be attributed to the authenticated caller, not anonymous"
     )
 
 
 # --------------------------------------------------------------------------
-# The confirmed path: elicitation accepted, write executed, run audited
+# The write path: executed, then audited
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_confirmed_write_reaches_the_core_api(mcp_url: str) -> None:
-    """With a client that can confirm, the write must actually happen.
-
-    Refusing without confirmation is only half the requirement; a tool that
-    refused *with* confirmation would be unusable.
-    """
+async def test_a_write_reaches_the_core_api(mcp_url: str) -> None:
+    """The write must actually happen, and be attributed like any other."""
     payload = await _call(
         mcp_url,
         "add_source",
@@ -817,7 +695,6 @@ async def test_confirmed_write_reaches_the_core_api(mcp_url: str) -> None:
             "url": "https://confirmed.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     assert payload.get("declined") is None, payload
     assert payload.get("aborted") is None, payload
@@ -852,7 +729,6 @@ async def _an_agent_source(mcp_url: str) -> str:
             "type": "agent",
             "schedule_policy": {"type": "fixed", "interval": "1h"},
         },
-        confirm=True,
     )
     source_id = payload["id"]
     assert isinstance(source_id, str)
@@ -860,34 +736,7 @@ async def _an_agent_source(mcp_url: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_submit_items_refuses_without_confirmation(mcp_url: str) -> None:
-    """A client that cannot confirm must not be able to push content.
-
-    The refusal is the protocol's MissingRequiredClientCapability, the same
-    answer every other write tool gives -- see
-    test_writes_refuse_when_the_client_cannot_confirm for why it is not a
-    friendly {"declined": true} body.
-    """
-    source_id = await _an_agent_source(mcp_url)
-    with pytest.raises(BaseException) as excinfo:
-        await _call(
-            mcp_url,
-            "submit_items",
-            {"source_id": source_id, "items": [_submitted_item()]},
-        )
-    error = _rpc_error(excinfo)
-    assert error.code == -32021, error.error
-    assert "elicitation" in str(error.error.data), error.error
-
-    # The refusal must be real: nothing was stored.
-    stored = await _call(
-        mcp_url, "search_items", {"limit": 100, "source_id": source_id}
-    )
-    assert stored["data"] == []
-
-
-@pytest.mark.asyncio
-async def test_confirmed_submit_items_queues_and_then_stores(
+async def test_submit_items_queues_and_then_stores(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
     """AC-211: the confirmed path queues one item, and the worker lands it where told.
@@ -901,7 +750,6 @@ async def test_confirmed_submit_items_queues_and_then_stores(
         mcp_url,
         "submit_items",
         {"source_id": source_id, "items": [_submitted_item()]},
-        confirm=True,
     )
     assert payload.get("declined") is None, payload
     assert payload.get("aborted") is None, payload
@@ -935,7 +783,6 @@ async def test_submit_items_refuses_a_non_agent_source(
         mcp_url,
         "submit_items",
         {"source_id": "src-1", "items": [_submitted_item()]},
-        confirm=True,
     )
     assert payload.get("work_id"), payload
 
@@ -970,7 +817,6 @@ async def test_submitted_content_is_sanitised(
                 )
             ],
         },
-        confirm=True,
     )
     assert payload.get("work_id"), payload
     await run_work_to_completion(mcp_env, payload["work_id"])
@@ -984,7 +830,7 @@ async def test_submitted_content_is_sanitised(
 
 
 @pytest.mark.asyncio
-async def test_confirmed_trigger_records_a_run(mcp_url: str) -> None:
+async def test_trigger_records_a_run(mcp_url: str) -> None:
     """A confirmed trigger goes through collect_now, so a run exists.
 
     The endpoint used to call the pipeline helper directly, which collected the
@@ -998,84 +844,13 @@ async def test_confirmed_trigger_records_a_run(mcp_url: str) -> None:
             "url": "https://trig.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
-    result = await _call(
-        mcp_url, "trigger_job", {"source_id": created["id"]}, confirm=True
-    )
+    result = await _call(mcp_url, "trigger_job", {"source_id": created["id"]})
     assert result.get("declined") is None, result
     assert result["run_status"] in {"succeeded", "failed", "timed_out"}
 
     runs = await _call(mcp_url, "list_runs", {"job_id": f"job-{created['id']}"})
     assert runs.get("data"), "a confirmed trigger should leave a run behind"
-
-
-@pytest.mark.asyncio
-async def test_a_client_cannot_substitute_the_source_it_asked_for(
-    mcp_url: str,
-) -> None:
-    """AC-240: the identity in the request is the identity that executes.
-
-    The client accepts the dialog and answers with a *different* URL, which is
-    what a tampered or buggy client looks like. Since #250 the dialog offers no
-    URL field to answer with, so there is nothing to honour: the request's own URL
-    is what gets stored. Asserted on the sources -- the invented one must not
-    exist, and the requested one must.
-    """
-
-    async def _lies_about_the_url(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        return types.ElicitResult(
-            action="accept",
-            content={"confirmed": True, "url": "https://evil.example/feed"},
-        )
-
-    async with mcp_session(
-        mcp_url, elicitation_callback=_lies_about_the_url
-    ) as session:
-        payload = _payload(
-            await session.call_tool(
-                "add_source",
-                {
-                    "url": "https://honest.example/feed.xml",
-                    "schedule_policy": {"type": "fixed", "interval": "30m"},
-                },
-            )
-        )
-    assert payload.get("declined") is None and payload.get("aborted") is None, payload
-
-    sources = await _call(mcp_url, "list_sources", {"limit": 100})
-    urls = [row["canonical_url"] for row in sources["data"]]
-    assert "https://evil.example/feed" not in urls, urls
-    assert "https://honest.example/feed.xml" in urls, urls
-
-
-@pytest.mark.asyncio
-async def test_unchecking_the_confirmation_declines(mcp_url: str) -> None:
-    """Accepting the dialog with `confirmed` false is a refusal.
-
-    The checkbox exists so a user can decline without cancelling, and honouring
-    it is the difference between a confirmation and a form field.
-    """
-
-    async def _unchecked(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        properties = (params.requested_schema or {}).get("properties", {})
-        content = {
-            name: (False if name == "confirmed" else spec.get("default", ""))
-            for name, spec in properties.items()
-        }
-        return types.ElicitResult(action="accept", content=content)
-
-    async with mcp_session(mcp_url, elicitation_callback=_unchecked) as session:
-        result = await session.call_tool("remove_source", {"source_id": "src-1"})
-    payload = _payload(result)
-    assert payload.get("declined") is True
-
-    still = await _call(mcp_url, "list_sources", {"limit": 10})
-    assert "src-1" in [row["id"] for row in still["data"]]
 
 
 @pytest.mark.asyncio
@@ -1095,12 +870,11 @@ async def test_add_source_infers_web_type_for_a_collector_url(mcp_url: str) -> N
             "url": "https://www.zhihu.com/people/someone",
             "schedule_policy": {"type": "fixed", "interval": "2h"},
         },
-        confirm=True,
     )
     assert payload.get("declined") is None and payload.get("aborted") is None, payload
     assert payload["type"] == "web", payload
     # Clean up for the rest of the suite (list_sources shape assertions).
-    await _call(mcp_url, "remove_source", {"source_id": payload["id"]}, confirm=True)
+    await _call(mcp_url, "remove_source", {"source_id": payload["id"]})
 
 
 @pytest.mark.asyncio
@@ -1114,7 +888,6 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
             "url": "https://plain.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     assert feed["type"] == "rss", feed
     explicit = await _call(
@@ -1125,11 +898,10 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
             "type": "rss",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     assert explicit["type"] == "rss", explicit
-    await _call(mcp_url, "remove_source", {"source_id": feed["id"]}, confirm=True)
-    await _call(mcp_url, "remove_source", {"source_id": explicit["id"]}, confirm=True)
+    await _call(mcp_url, "remove_source", {"source_id": feed["id"]})
+    await _call(mcp_url, "remove_source", {"source_id": explicit["id"]})
 
 
 # --------------------------------------------------------------------------
@@ -1152,7 +924,6 @@ async def test_set_plugin_status_maps_its_operation_and_executes(
         mcp_url,
         "set_plugin_status",
         {"plugin_id": "rss", "status": "disabled"},
-        confirm=True,
     )
     assert disabled.get("declined") is None and disabled.get("aborted") is None
     assert disabled.get("status") == "disabled", disabled
@@ -1166,7 +937,6 @@ async def test_set_plugin_status_maps_its_operation_and_executes(
         mcp_url,
         "set_plugin_status",
         {"plugin_id": "rss", "status": "enabled"},
-        confirm=True,
     )
     assert enabled.get("status") == "enabled", enabled
     plugins = await _call(mcp_url, "list_plugins", {"limit": 50})
@@ -1210,9 +980,7 @@ async def test_backfill_source_executes_and_reports_queued(
     finally:
         engine.dispose()
 
-    payload = await _call(
-        mcp_url, "backfill_source", {"source_id": "src-1"}, confirm=True
-    )
+    payload = await _call(mcp_url, "backfill_source", {"source_id": "src-1"})
     assert payload.get("declined") is None and payload.get("aborted") is None
     # The module database is shared, so other tests' items for this source may
     # already be queued; what must hold is that the answer is a handle with a
@@ -1225,98 +993,6 @@ async def test_backfill_source_executes_and_reports_queued(
     listed = await _call(mcp_url, "list_enrichments", {"source_id": "src-1"})
     assert listed["data"], listed
     assert {row["plugin_id"] for row in listed["data"]} == {"translate"}
-
-
-@pytest.mark.asyncio
-async def test_a_write_accepts_without_supplying_any_field(mcp_url: str) -> None:
-    """AC-238: accepting the dialog is the whole confirmation.
-
-    The form used to echo every derived field back for the user to read and
-    re-supply; the default path now asks one question and executes what the
-    server derived (issue #250). `set_source_folder` is the observable here: the
-    requested folder is what a later read must report, and the audit row still
-    names the endpoint and the actor -- the same two facts as before.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-
-    payload = await _call(
-        mcp_url,
-        "set_source_folder",
-        {"source_id": source_id, "folder": "阅读"},
-        confirm=True,
-    )
-    assert payload.get("declined") is None and payload.get("aborted") is None, payload
-
-    source = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert source["folder"] == "阅读", source
-
-
-@pytest.mark.asyncio
-async def test_extra_fields_do_not_change_what_executes(mcp_url: str) -> None:
-    """AC-240: a client cannot substitute values the dialog never offered.
-
-    The schema carries one acknowledgement, so a client that answers with
-    additional "fields" is answering a form that does not exist: the tool
-    executes the values it derived from its own arguments. Asserted on the
-    effect, not on the response -- `folder` must be the requested one and the
-    status untouched, whatever the client claimed.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-
-    async def _answers_with_junk(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        return types.ElicitResult(
-            action="accept",
-            content={
-                "confirmed": True,
-                "folder": "evil",
-                "status": "paused",
-                "source_id": "somebody-elses-source",
-            },
-        )
-
-    async with mcp_session(mcp_url, elicitation_callback=_answers_with_junk) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
-            )
-        )
-    assert payload.get("declined") is None and payload.get("aborted") is None, payload
-
-    source = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert source["folder"] == "阅读", source
-    assert source["status"] == before["status"], source
-
-
-@pytest.mark.asyncio
-async def test_unchecking_the_acknowledgement_declines_the_write(mcp_url: str) -> None:
-    """AC-239: the checkbox is the answer, so unchecking it is a refusal.
-
-    A client that accepts the dialog but answers `confirmed: false` has declined,
-    and the write must not happen: no folder change, and no Core API row for the
-    endpoint (the refusal is answered at the tool layer, which is what makes
-    "there is an audit row" mean "something reached the API").
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-
-    async def _unchecked(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        return types.ElicitResult(action="accept", content={"confirmed": False})
-
-    async with mcp_session(mcp_url, elicitation_callback=_unchecked) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
-            )
-        )
-    assert payload.get("declined") is True, payload
-
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["folder"] == before["folder"], after
 
 
 # --------------------------------------------------------------------------
@@ -1338,13 +1014,10 @@ async def test_delete_source_removes_its_items(mcp_url: str) -> None:
             "url": "https://plain.example/todelete.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     source_id = created["id"]
 
-    result = await _call(
-        mcp_url, "remove_source", {"source_id": source_id}, confirm=True
-    )
+    result = await _call(mcp_url, "remove_source", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert result["sources"] == 1
 
@@ -1368,7 +1041,7 @@ async def test_delete_items_takes_the_ids_it_was_given(
     if not ids:
         pytest.skip("no items seeded in this environment")
 
-    result = await _call(mcp_url, "delete_items", {"item_ids": ids[:1]}, confirm=True)
+    result = await _call(mcp_url, "delete_items", {"item_ids": ids[:1]})
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert result["counts"]["total"] == 1, result
 
@@ -1383,40 +1056,6 @@ async def test_delete_items_takes_the_ids_it_was_given(
 
 
 @pytest.mark.asyncio
-async def test_a_client_cannot_add_ids_to_a_delete(
-    mcp_url: str, mcp_env: dict[str, str]
-) -> None:
-    """AC-240: the ids that execute are the ids the tool was called with.
-
-    A client answering the dialog with ids of its own choosing is answering a form
-    that no longer exists (issue #250). The ledger is the observable: the work's
-    targets are exactly the requested ones, so an invented id was never looked at
-    -- which is the injection this used to guard against with a field comparison.
-    """
-
-    async def _adds_an_id(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        return types.ElicitResult(
-            action="accept",
-            content={"confirmed": True, "item_ids": "someone-elses-item"},
-        )
-
-    async with mcp_session(mcp_url, elicitation_callback=_adds_an_id) as session:
-        payload = _payload(
-            await session.call_tool("delete_items", {"item_ids": ["it-1"]})
-        )
-    assert payload.get("declined") is None and payload.get("aborted") is None, payload
-    assert payload.get("work_id"), payload
-
-    # The targets are the ledger's, and the ledger is written by the worker: run
-    # the work the tool answered with before reading it.
-    await run_work_to_completion(mcp_env, payload["work_id"])
-    units = await _call(mcp_url, "work_units", {"work_id": payload["work_id"]})
-    assert [row["target"] for row in units["data"]] == ["it-1"], units
-
-
-@pytest.mark.asyncio
 async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
     """Clearing a crawl must not remove the source or its position."""
     created = await _call(
@@ -1426,19 +1065,16 @@ async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
             "url": "https://plain.example/clearcrawl.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     source_id = created["id"]
 
-    result = await _call(
-        mcp_url, "delete_source_items", {"source_id": source_id}, confirm=True
-    )
+    result = await _call(mcp_url, "delete_source_items", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
 
     listed = await _call(mcp_url, "list_sources", {"limit": 50})
     assert source_id in [row["id"] for row in listed["data"]]
 
-    await _call(mcp_url, "remove_source", {"source_id": source_id}, confirm=True)
+    await _call(mcp_url, "remove_source", {"source_id": source_id})
 
 
 # --------------------------------------------------------------------------
@@ -1509,7 +1145,7 @@ def _seed_retry_rows(
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_row_level_retry_requeues_exactly_one(
+async def test_a_row_level_retry_requeues_exactly_one(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
     """The tool's second granularity: one row, named by its id.
@@ -1523,9 +1159,7 @@ async def test_a_confirmed_row_level_retry_requeues_exactly_one(
         mcp_env, slug="mcp-retry", statuses=["failed", "failed"]
     )
 
-    result = await _call(
-        mcp_url, "retry_enrichments", {"enrichment_id": second}, confirm=True
-    )
+    result = await _call(mcp_url, "retry_enrichments", {"enrichment_id": second})
 
     assert result.get("error") is None, result
     assert result["enrichment_id"] == second
@@ -1550,7 +1184,7 @@ async def test_the_row_level_retry_says_what_it_needs(mcp_url: str) -> None:
     error shape is the one `_error_from` uses rather than a second, nested one
     (issue #216).
     """
-    result = await _call(mcp_url, "retry_enrichments", {}, confirm=True)
+    result = await _call(mcp_url, "retry_enrichments", {})
 
     assert isinstance(result.get("error"), str), result
     assert result["error"] == "missing_target"
@@ -1558,7 +1192,7 @@ async def test_the_row_level_retry_says_what_it_needs(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_source_level_retry_submits_a_job(
+async def test_a_source_level_retry_submits_a_job(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
     """AC-213 through the tool face: the whole-source retry answers with a handle.
@@ -1572,9 +1206,7 @@ async def test_a_confirmed_source_level_retry_submits_a_job(
         mcp_env, slug="mcp-src-retry", statuses=["failed"]
     )
 
-    result = await _call(
-        mcp_url, "retry_enrichments", {"source_id": "src-1"}, confirm=True
-    )
+    result = await _call(mcp_url, "retry_enrichments", {"source_id": "src-1"})
 
     assert result.get("error") is None, result
     assert result["work_id"], result
@@ -1589,7 +1221,7 @@ async def test_a_confirmed_source_level_retry_submits_a_job(
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_source_items_delete_submits_a_job(
+async def test_a_source_items_delete_submits_a_job(
     mcp_url: str, mcp_env: dict[str, str]
 ) -> None:
     """AC-215: clearing a source's items is a job, and the source survives it.
@@ -1609,7 +1241,6 @@ async def test_a_confirmed_source_items_delete_submits_a_job(
             "url": "https://clear.example/feed",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
         },
-        confirm=True,
     )
     source_id = created["id"]
 
@@ -1634,9 +1265,7 @@ async def test_a_confirmed_source_items_delete_submits_a_job(
     finally:
         engine.dispose()
 
-    result = await _call(
-        mcp_url, "delete_source_items", {"source_id": source_id}, confirm=True
-    )
+    result = await _call(mcp_url, "delete_source_items", {"source_id": source_id})
 
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert result.get("work_id"), result
@@ -1658,248 +1287,3 @@ async def test_a_confirmed_source_items_delete_submits_a_job(
 # --------------------------------------------------------------------------
 # AC-243..245: the edit path -- choose a field, give it a value, confirm
 # --------------------------------------------------------------------------
-
-
-def _answer_rounds(
-    rounds: list[dict[str, Any]],
-) -> tuple[Any, dict[str, int]]:
-    """A client that answers each elicitation with the next scripted round.
-
-    The rounds are what the user does: round 1 accepts and names a field, round 2
-    gives the new value, round 3 confirms the composed request the server showed.
-    """
-    seen = {"rounds": 0}
-
-    async def _cb(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        index = min(seen["rounds"], len(rounds) - 1)
-        seen["rounds"] += 1
-        return types.ElicitResult(action="accept", content=rounds[index])
-
-    return _cb, seen
-
-
-@pytest.mark.asyncio
-async def test_editing_one_field_changes_only_that_field(mcp_url: str) -> None:
-    """AC-243: three rounds, one change, and everything else stays.
-
-    The request asks for folder `阅读`; the user then edits that same field to
-    `blog`. The dialog is about the *edited* request, so `blog` is what must land,
-    and every parameter nobody touched must equal what the tool was called with.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-    callback, seen = _answer_rounds(
-        [
-            {"confirmed": True, "edit": "folder"},
-            {"field": "folder", "value": "blog"},
-            {"confirmed": True, "field": "folder", "value": "blog"},
-        ]
-    )
-
-    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
-            )
-        )
-
-    assert payload.get("declined") is None and payload.get("aborted") is None, payload
-    assert seen["rounds"] == 3, seen
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["folder"] == "blog", after
-    assert after["status"] == before["status"], after
-
-
-@pytest.mark.asyncio
-async def test_round_three_answering_something_else_is_aborted(mcp_url: str) -> None:
-    """AC-244: the value that executes is the one the dialog showed.
-
-    Round 3 displayed `blog` and the client echoed `evil`. Nothing was executed:
-    the last stage compares the echo against what the dialog carried, so a client
-    cannot get a value executed that the user never saw.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-    callback, _ = _answer_rounds(
-        [
-            {"confirmed": True, "edit": "folder"},
-            {"field": "folder", "value": "blog"},
-            {"confirmed": True, "field": "folder", "value": "evil"},
-        ]
-    )
-
-    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
-            )
-        )
-
-    assert payload.get("aborted") is True, payload
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["folder"] == before["folder"], after
-
-
-@pytest.mark.asyncio
-async def test_cancelling_an_edit_round_writes_nothing(mcp_url: str) -> None:
-    """AC-245: a cancel in any later round is a refusal, not a partial write.
-
-    The user picks the field and then changes their mind: the same request must
-    end as `declined`, with nothing changed. Asserted on the folder and on the
-    audit trail, because "nothing reached the API" is what makes the audit row
-    mean "something happened".
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-    seen = {"rounds": 0}
-
-    async def _cancels_at_the_value(_ctx: Any, params: Any) -> Any:
-        from mcp import types
-
-        seen["rounds"] += 1
-        if seen["rounds"] == 1:
-            return types.ElicitResult(
-                action="accept", content={"confirmed": True, "edit": "folder"}
-            )
-        return types.ElicitResult(action="cancel")
-
-    async with mcp_session(
-        mcp_url, elicitation_callback=_cancels_at_the_value
-    ) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_folder", {"source_id": source_id, "folder": "阅读"}
-            )
-        )
-
-    assert payload.get("declined") is True, payload
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["folder"] == before["folder"], after
-
-
-@pytest.mark.asyncio
-async def test_structured_field_with_invalid_json_is_refused_before_it_is_confirmed(
-    mcp_url: str,
-) -> None:
-    """AC-246: malformed JSON for a structured field costs no confirmation round.
-
-    A structured field travels through the dialog as canonical JSON text (an
-    elicitation schema carries primitives only), so the answered text has to be
-    parsed back before anything can execute. When it is not JSON the request is
-    refused at that point: the user is never shown, and never asked to confirm,
-    a request the server already knows is malformed. The refusal is the
-    branchable `aborted` shape (AC-223) and the source is untouched.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-    callback, seen = _answer_rounds(
-        [
-            {"confirmed": True, "edit": "pipeline_chain"},
-            {"field": "pipeline_chain", "value": "{not json"},
-            {"confirmed": True, "field": "pipeline_chain", "value": "{not json"},
-        ]
-    )
-
-    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_pipeline_chain",
-                {
-                    "source_id": source_id,
-                    "pipeline_chain": [
-                        {"plugin_id": "translate", "kind": "translation"}
-                    ],
-                },
-            )
-        )
-
-    assert payload.get("aborted") is True, payload
-    assert seen["rounds"] == 2, (
-        "the malformed value is refused where it is given; a third round would "
-        f"be a confirmation dialog for a request that cannot be built: {seen}"
-    )
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["pipeline_chain"] == before["pipeline_chain"], after
-    assert after["target_lang"] == before["target_lang"], after
-
-
-@pytest.mark.asyncio
-async def test_editing_an_absent_structured_field_applies_the_parsed_list(
-    mcp_url: str,
-) -> None:
-    """AC-247: a structured field is parsed as its own kind, even when unset.
-
-    `add_source` without a chain leaves `pipeline_chain` null. Editing it is
-    still editing a *list*: the answered JSON text has to become the list the
-    API validates, not a string that reads as an invalid chain. The value the
-    dialog offers is the field's kind, not the current value's type.
-    """
-    chain = [{"plugin_id": "fulltext", "kind": "fulltext"}]
-    url = "https://absent-chain.example.test/feed.xml"
-    callback, seen = _answer_rounds(
-        [
-            {"confirmed": True, "edit": "pipeline_chain"},
-            {"field": "pipeline_chain", "value": json.dumps(chain)},
-            {"confirmed": True, "field": "pipeline_chain", "value": json.dumps(chain)},
-        ]
-    )
-
-    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
-        payload = _payload(
-            await session.call_tool(
-                "add_source",
-                {
-                    "url": url,
-                    "schedule_policy": {"type": "fixed", "interval": "30m"},
-                },
-            )
-        )
-
-    assert payload.get("error") is None, payload
-    assert seen["rounds"] == 3, seen
-    source = await _call(mcp_url, "get_source", {"source_id": payload["id"]})
-    assert source["url"] == url, source
-    assert source["pipeline_chain"] == chain, source
-
-
-@pytest.mark.asyncio
-async def test_editing_a_present_structured_field_applies_the_parsed_list(
-    mcp_url: str,
-) -> None:
-    """AC-248: a valid structured edit lands the list, and the source is otherwise.
-
-    The chain a source already has is edited to a different one: the JSON text
-    the user gave becomes the list the API validates and the request executes.
-    This is the happy path of the parse the refusal above guards.
-    """
-    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
-    before = await _call(mcp_url, "get_source", {"source_id": source_id})
-    chain = [{"plugin_id": "fulltext", "kind": "fulltext"}]
-    callback, seen = _answer_rounds(
-        [
-            {"confirmed": True, "edit": "pipeline_chain"},
-            {"field": "pipeline_chain", "value": json.dumps(chain)},
-            {"confirmed": True, "field": "pipeline_chain", "value": json.dumps(chain)},
-        ]
-    )
-
-    async with mcp_session(mcp_url, elicitation_callback=callback) as session:
-        payload = _payload(
-            await session.call_tool(
-                "set_source_pipeline_chain",
-                {
-                    "source_id": source_id,
-                    "pipeline_chain": [
-                        {"plugin_id": "translate", "kind": "translation"}
-                    ],
-                },
-            )
-        )
-
-    assert payload.get("error") is None and payload.get("aborted") is None, payload
-    assert seen["rounds"] == 3, seen
-    after = await _call(mcp_url, "get_source", {"source_id": source_id})
-    assert after["pipeline_chain"] == chain, after
-    assert after["url"] == before["url"], after

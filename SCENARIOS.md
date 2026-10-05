@@ -30,7 +30,7 @@
 | AC-36..39 | #63 MCP 工具结果脱敏 | `docs/api/mcp-tool-guide.md` §5 | 已合并 | `tests/integration/test_mcp_result_redaction.py` |
 | AC-40 | #64 audit_id 串号 | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_audit_id_crosstalk.py` |
 | AC-41..43 | #65 列表截断（41/42 有测试，43 由 README 重测承担） | `docs/api/mcp-tool-guide.md` §2 | 已合并 | `tests/unit/test_mcp_list_truncation.py`、`tests/integration/test_mcp_list_truncation.py` |
-| AC-44..46 | #67 submit_items 确认指纹 | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_submit_items_confirmation.py` |
+| AC-44..46 | #67 submit_items 的确认指纹**已退役** | issue #67 / #270 / ADR 0058 | 已明确不做 | 写确认机制整体退役，指纹不复存在；submit_items 仍是作业句柄 + 逐条账本（AC-211） |
 | AC-47..52 | #64 工具体覆盖（追加号段） | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/integration/test_mcp_tool_coverage.py` |
 | AC-53..54 | #68 list_plugins 的 limit 与分页 | `docs/api/mcp-tool-guide.md` §2 | 已合并 | `tests/integration/test_list_plugins_limit.py` |
 | AC-55..57 | #69 guide 一致性与缺席的守卫（原声明 49..51） | `docs/api/mcp-tool-guide.md` §2 / §6 | 已合并 | `tests/unit/test_mcp_tool_guide.py` |
@@ -40,7 +40,7 @@
 | AC-66..68 | #73 工具面常驻上下文预算（原声明 60..62） | issue #73 | 已合并 | `tests/unit/test_mcp_tool_guide.py`（预算守卫 + 任务级工具）、`tests/integration/test_sources_api.py`（`:diagnose`） |
 | AC-69..71 | #74 outputSchema 空壳（原声明 63..65） | issue #74 | 已合并 | `tests/integration/test_mcp_conformance.py`（instructions 携带协议字段）、`tests/unit/test_mcp_tool_guide.py`（写明保留宽松 schema 的理由） |
 | AC-72..74 | #75 工具名命名空间（原声明 66..68） | issue #75 | 已明确不做 | `docs/api/mcp-tool-guide.md` §七（决定 + 重做触发条件）；`tests/unit/test_mcp_tool_guide.py::test_the_guide_records_the_naming_decision` |
-| AC-75..77 | #76 写工具守卫统一（原声明 69..71） | `docs/api/mcp-tool-guide.md` §3 | 已合并 | `tests/unit/test_write_guard.py` |
+| AC-75..77 | #76 写工具守卫统一（原声明 69..71）**已退役** | issue #76 / #270 / ADR 0058 | 已明确不做 | 写确认机制整套退役，与它同生共死的守卫一并删除；取代它的结构性判据是 AC-57（描述 ⇔ annotations）与 AC-263（schema 无确认参数） |
 | AC-78..80 | #77 列表查询全表扫与索引（原声明 72..74） | ADR 0035 §9 | 已合并 | `tests/integration/test_item_query_plan.py` |
 | AC-81..87 | #78 中日英分词（原声明 75..81） | ADR 0035 §9 | 已合并 | `tests/unit/test_text_search.py`（27 条 golden 集，真 FTS5 表验召回） |
 | AC-88..92 | #79 item_fts 表（原声明 82..86） | ADR 0035 §9 | 已合并 | `tests/integration/test_search_index.py` |
@@ -71,13 +71,16 @@
 | AC-148..149 | #151 翻译：超长块被 _segment 切段后段间分隔不丢（短块字节不变） | issue #151 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-150..156 | #152 告警与诊断的归因：源标题/分类/计数/detail 摘要；`:diagnose` failed_enrichments + last_run.error_class | issue #152 | 已合并 | `tests/unit/test_alerting.py`、`tests/integration/test_alerting.py`、`tests/integration/test_sources_api.py` |
 | AC-157..160 | #91 X 视频渲染为宿主受限的 `<video>`（非白名单宿主/自动播放/事件属性被剥离，降级存活） | issue #91 | 已合并 | `tests/unit/test_sanitize.py`、`tests/unit/test_properties_sanitize.py`、`src/plugins/collectors/twitter/test_collector.py` |
-| AC-161..166 | #159 add_sources 批量建源：一次确认覆盖一批（ADR 0044） | issue #159 | 已合并 | `tests/integration/test_sources_batch.py`、`tests/integration/test_mcp_add_sources.py` |
+| AC-161 | #159 add_sources 批量建源：一次**调用**覆盖一批（ADR 0044） | issue #159 | 已合并 | `tests/integration/test_sources_batch.py`、`tests/integration/test_mcp_add_sources.py` |
+| AC-162 | #159 「用户没看过的列表不能执行」的**确认指纹**判据**已退役** | issue #159 / #270 / ADR 0058 | 已明确不做 | 写工具不再 elicit，指纹随确认机制一并删除；批量仍是一次调用一个作业句柄 |
+| AC-163..166 | #159 批量选项校验、幂等重放、上限拒绝与常驻上下文预算 | issue #159 | 已合并 | `tests/integration/test_sources_batch.py`、`tests/unit/test_mcp_tool_guide.py` |
 | AC-167 | #167 文章抽取器提为共享件 `adapters/article.py`：抽取输出逐字节不变，且仓库里只有一份实现 | issue #167 / ADR 0045 | 已合并 | `tests/unit/test_article.py`、`tests/unit/test_structure_guards.py` |
 | AC-168 | #168 采集器新增可选能力 `collect_item`：未声明的源在调用采集器之前被拒绝 | issue #168 | 已合并 | `tests/unit/test_collect_item_capability.py`、`tests/integration/test_collect_item_rpc.py` |
 | AC-169..171 | #169 rss 实现 `collect_item`（WordPress 地址取全文且身份对齐 / 非 WP 回落共享抽取器 / 产物达阈值故链不二次抓取） | issue #169 | 已合并 | `tests/unit/test_rss_collect_item.py` |
 | AC-172..175 | #170 按地址抓取入库（同源校验先于抓取 / 非本源拒绝且不落库 / 一条失败不影响其余 / 节拍夹取与幂等重放） | issue #170 | 已合并 | `tests/integration/test_fetch_items.py`、`tests/e2e/test_failure_paths.py` |
-| AC-176 | #171 MCP `fetch_source_items`：一次确认覆盖整批，且指纹覆盖 URL 列表（改任一 URL 即变） | issue #171 | 已合并 | `tests/integration/test_mcp_work_tools.py` |
-| AC-193..194 | #191 `fetch_source_items` 句柄化：响应为 `work_id` + counts 且**大小不随地址数变化**（10 个与 40 个地址字节等长）／确认覆盖 targets 与 params（换掉参数即失效且不落 work 行）；新增读侧 `get_work`、`work_units`（逐条账本 + outcome 过滤 + 错误码沿用 /v1） | issue #191 | 已合并 | `tests/integration/test_mcp_work_tools.py` |
+| AC-176 | #171 MCP `fetch_source_items` 的**确认指纹**覆盖 URL 列表**已退役** | issue #171 / #270 / ADR 0058 | 已明确不做 | 写工具不再 elicit，指纹随确认机制一并删除；该工具仍是作业句柄 + 账本（AC-193..194） |
+| AC-193 | #191 `fetch_source_items` 句柄化：响应为 `work_id` + counts 且**大小不随地址数变化**（10 个与 40 个地址字节等长）；新增读侧 `get_work`、`work_units`（逐条账本 + outcome 过滤 + 错误码沿用 /v1） | issue #191 | 已合并 | `tests/integration/test_mcp_work_tools.py` |
+| AC-194 | #191 「确认覆盖 targets 与 params」的判据**已退役** | issue #191 / #270 / ADR 0058 | 已明确不做 | 写工具不再 elicit；params 的校验仍是 `/v1` 的职责 |
 | AC-195..196 | #192 旧 `:fetch-items` 降级为受限兼容壳：小批（≤ 20）保持既有同步逐条语义**且**把同一次运行补记进账本（终态 work + 每地址一条 unit，永不占用在飞命令索引）；超限 422 且错误体指向 `/v1/works`（不再劝调用方切批——切批正是丢结果的那种投递） | issue #192 | 已合并 | `tests/integration/test_fetch_items.py` |
 | AC-197..198 | #193 两个读原语：`GET /v1/items?url=` 按**规范化后的** canonical url 精确查条目（追踪参数/片段不影响命中；未知 query 参数保留；未命中 200 空集；非 http(s) 422；pending 同样查不到）／`GET /v1/sources/{id}:queue` 队列四计数 + 由完成时间戳推导的 `rate_per_min`（不落库），计数与 `/v1/sources/{id}/enrichments` 逐行对账一致且响应为常数大小；两者并入既有 MCP 读工具（`search_items(url=)`、`diagnose_source` 的 `chain`） | issue #193 | 已合并 | `tests/integration/test_items_api.py`、`tests/integration/test_sources_api.py` |
 | AC-199..200 | #194 单地址原子 `POST /v1/sources/{id}:fetch-item`：一条收据（outcome + item_id/error_class + 一个 target 的账本引用）且同时写出一条可查账本（终态 work + 该地址的 unit）／非同源是收据而非异常（`rejected` + 零请求）／源级拒绝与复数端点一致（404/422/409 且在拓取之前）；**与 work 执行器等价**（同一地址经单数端点与经一个 target 的 work，item 身份与 outcome 相同且只多出一行） | issue #194 | 已合并 | `tests/integration/test_fetch_items.py` |
@@ -107,16 +110,17 @@
 | AC-234..235 | #232 块级进度落盘：运行时给每行 `item_ctx["cache_dir"]`（plugin/lang/item 三级）、处理器每块成功后原子写入（临时名 + replace）并在下一块前查缓存（进度行标 `(cached)`）；重试只问缺失块且产物与一次性完成**逐字节一致**；缓存**不是事实源**（不建表、不加列、不写 item/enrichment 字段），成功后运行时删除、失败时保留（永久失败的行留一个可丢目录，写明不做清理器）；块级并发推迟 | issue #232 / ADR 0052 | 已合并 | `src/plugins/processors/translate/test_processor.py`、`tests/integration/test_processor_cache.py` |
 | AC-236 | #211 ADR 0046 §7 补写兼容壳（`POST /v1/sources/{id}:fetch-items`）的**删除触发条件**：任一成立即删壳——①一个完整保留窗口（30 天）内 `audit_log` 里该 endpoint 的调用为零（可观测：审计记的是**路由模板**，`_operation`），②壳开始长功能，③下一次破坏式 API 变更窗口；时间型判据（「发版后」「过半年」）明确排除；触发条件①的可观测性由用例钉住（调用一次壳，审计行必须能被 `like 'POST /v1/sources/%:fetch-items'` 选中） | issue #211 / ADR 0046 §7 修订 | 已合并 | `tests/integration/test_fetch_items.py` |
 | AC-237 | #212 `running` 作业的租约：只认「账本安静超过窗口」的 running（每写一条 unit 是一次心跳，窗口由 `PEARSS_WORK_LEASE_SECONDS` 给、默认 900 秒、`0` 关闭）——因此活的慢作业不会被第二个执行者接走（不重跑正在抓的目标、不重复出网），而没有 unit 的 running 按 `created_at` 计时仍可被接管；坏值回落默认（打错字不会静默关掉保护） | issue #212 / ADR 0046 §7 修订 | 已合并 | `tests/integration/test_work_fetch.py`、`tests/unit/test_retention.py` |
-| AC-238..240 | #250 写确认默认路径单轮化：schema 只剩 `confirmed`（默认勾选 = 接受），执行值仍由各工具 `_<tool>_fields()` 单一来源派生；**接受即执行派生值**（对话框没有可替换的字段），客户端回传的多余/异值字段一律不读；不勾选/取消 = `declined` 且零写入、零 Core API 审计行。AC-75 判据迁移为「任一入参变化都会改变**摘要**」——迁移时发现并修好 3 个摘要漏参（`add_sources` 的 chain/lang/trust/parser、`retry_enrichments` 的 source_id、`submit_items` 的 fingerprint）；AC-76 的 `aborted` 放宽为「至多一次」（该拒绝归 #252 的修改路径） | issue #250 | 已合并 | `tests/unit/test_write_guard.py`、`tests/integration/test_mcp_server.py` |
-| AC-241..242 | #251 每个写工具**显式声明可编辑字段集**（`_Confirmation.editable`，由确认构造器的必填参数承载，所以漏声明会在守卫处失败而不是靠人读代码）：可编辑集 ⊆ 该工具的执行参数集；身份/目标类参数（`url`/`urls`/`type`/`items`/`item_ids`/`item_id`/`source_id`/`plugin_id`/`enrichment_id` 与 `*_fingerprint`）不得出现在任何可编辑集里——想改身份/目标的调用方重新发起请求；破坏性工具（`remove_source`/`delete_items`/`delete_source_items`）的确认摘要仍保留不可逆后果表述（**already correct, pinned**） | issue #251 | 已合并 | `tests/unit/test_write_guard.py` |
-| AC-243..245 | #252 写确认的**修改路径**（B1，两段式 + 最终确认）：第 1 轮 = `confirmed` + `edit`（受控单选 enum，`none` ∪ 该工具可编辑集）；第 2 轮（仅当选了字段）只问该字段新值（按值类型渲染：布尔=勾选、数字=数字、结构化值=canonical JSON 文本）；第 3 轮展示**组合后的请求**并把该值回显给客户端，服务端用 `_matches` 校验「回显 == 将要执行」，不符即 `aborted` 且零写入；执行的 fields = 派生默认覆盖被编辑字段（其余逐项等于默认）；任意一轮取消/拒绝 → `declined` 且零写入、零 Core API 审计行；默认路径（不修改）仍是 1 轮 | issue #252 | 已合并 | `tests/integration/test_mcp_server.py` |
+| AC-238..240 | #250 写确认默认路径单轮化（schema 只剩 `confirmed`）**已退役** | issue #250 / #270 / ADR 0058 | 已明确不做 | 写工具不再 elicit，对话框形状不复存在 |
+| AC-241..242 | #251 每个写工具显式声明可编辑字段集**已退役** | issue #251 / #270 / ADR 0058 | 已明确不做 | 编辑路径整体删除；「身份/目标不可改」的语义仍成立（想改就重新发起请求），只是不再有可编辑集这个结构 |
+| AC-243..245 | #252 写确认的修改路径（两段式 + 最终确认）**已退役** | issue #252 / #270 / ADR 0058 | 已明确不做 | 编辑路径整体删除 |
 | AC-231 | #229 处理器子进程的日志进 journal：子进程 stderr 成为日志通道（`<LEVEL> <logger> <message>`）、宿主在子进程运行**期间**排空并按原级别重记（带 `[plugin_id item_id]` 前缀）、无级别前缀的行（traceback）按 warning 转发、转发有界（200 行 / 每行 1000 字符）；翻译链的回落行首次可在 journal 里看到 | issue #229 / ADR 0049 | 已合并 | `tests/integration/test_processor_logs.py` |
-| AC-246..248 | #257 结构化可编辑字段的解析与拒绝形状：可编辑项声明自己是否为结构化（JSON 文本），所以编辑一个**当前为空**的结构化字段仍按 list/dict 解析（不再把原始文本泄漏进请求体、变成 422），且非法 JSON 在**展示确认对话框之前**被拒为 `aborted` 且零写入（不再先给用户看一个无法构造的确认、再在执行期才失败）；合法编辑的结构化值以 list 落到源上、其余字段逐项不变 | issue #257 | 已合并 | `tests/integration/test_mcp_server.py` |
+| AC-246..248 | #257 结构化可编辑字段的解析与拒绝形状**已退役** | issue #257 / #270 / ADR 0058 | 已明确不做 | 编辑路径整体删除 |
 | AC-249..250 | #258 部分模型冷却时**链未走完**的失败不得是永久类：聚合在「有配置的模型未被本次询问」（策略跳过=冷却中，或行内预算已用尽）时取 `network`（瞬时、可重试），detail 以 `not tried: <模型列表>` 开头点名未尝试者；链**走完**（无跳过）时维持原判（全永久→`parse`，AC-137/139 不变） | issue #258 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-251..254 | #264 「无正文」的块/分段不进 provider 请求：判据是先剥掉 `[[n]]`/`[[/n]]` 标记再 `strip()` 非空（`_flatten_inline` 把 void 元素变成标记后，`<p><img/></p>` 的文本就是 `[[0]]`——truthy，被 `if unit_text:` 放行）；发送侧与重建侧用**同一谓词**，否则回复游标错位；被跳过的块保留原文、被跳过的分段原样回填（否则它代表的 void 元素会被删掉）。只有内联标记的块、只有空白的块、混排文档的对齐、超长块的纯标记分段 | issue #264 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-255 | #265 provider 丢掉的 `img` 标记保留图片（追加到该块译文末尾，已保留的标记不重复追加）；`br`/`wbr`/`hr` 维持 ADR 0031 §47 的「丢弃」（AC-146 不变） | issue #265 / ADR 0054 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-256..258 | #268 模型降权按一行的失败**比例**：「一行里答对过」不再复位升级档。报告变为 `(model, asked, failed, last_error_class)`；行失败比例 ≥ `PEARSS_MODEL_FAILURE_RATIO`（默认 0.5）为降权行（连续降权冷却翻倍），低于阈值算抖动（不冷却不升级），该行无失败则复位 | issue #268 / ADR 0056 | 已合并 | `tests/unit/test_model_health.py`、`tests/integration/test_model_failover.py` |
 | AC-259..261 | #269 `:diagnose` 的 `model_health` 增一格**窗口计数**：按模型折叠最近 10 行（attempts / failures / fallbacks / failure_rate / 最近失败类与距今秒），与「当前冷却」的 `models` 并存——让「长期半坏、但低于降权门槛所以从不冷却」的模型在诊断面可见；从不失败的模型不出现（无噪音）；冷却模型两格都在 | issue #269 / ADR 0057 | 已合并 | `tests/unit/test_model_health.py`、`tests/integration/test_sources_api.py` |
+| AC-262..266 | #270 写工具**不 elicit**：16 个写工具不再注入 `confirmed`、不再发 `elicitation/create`，任何客户端（含无 elicitation 能力者）都能调用；入参 schema 无确认参数；不再出现 `-32021`；写仍有 actor 与审计归属；破坏性工具的不可逆在描述里明说且 `destructiveHint=true` | issue #270 / ADR 0058 | 已合并 | `tests/integration/test_mcp_server.py`、`tests/unit/test_mcp_tool_guide.py`、`tests/e2e/test_failure_paths.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

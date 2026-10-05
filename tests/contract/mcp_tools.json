@@ -6,7 +6,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add a source. Requires user confirmation: this makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
+    "description": "Add a source. This makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -65,7 +65,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add several sources in one call. Requires user confirmation: these sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units; an unusable one fails alone. Use add_source for a single source, where the dialog names it exactly.",
+    "description": "Add several sources in one call. These sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units; an unusable one fails alone. Use add_source for a single source.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -137,7 +137,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. Requires confirmation: it spends provider budget per item, and the source must have a pipeline_chain configured. Returns a job handle -- read each item's outcome with work_units.",
+    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. It spends provider budget per item, and the source must have a pipeline_chain configured. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -159,7 +159,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Permanently delete specific items by id. Requires confirmation: the bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible. Returns a job handle -- read each id's outcome with work_units; one already gone is `skipped`.",
+    "description": "Permanently delete specific items by id. The bodies, read state and processor products go with them. Use this to clean up items that were fetched wrongly or are no longer wanted; ids come from search_items. Not reversible. Returns a job handle -- read each id's outcome with work_units; one already gone is `skipped`.",
     "input_schema": {
       "properties": {
         "item_ids": {
@@ -184,7 +184,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a source's items while keeping the subscription. Requires confirmation. Use this after a bad crawl: the source keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible. Returns a job handle -- read each item's outcome with work_units.",
+    "description": "Delete a source's items while keeping the subscription. Use this after a bad crawl: the source keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "include_published": {
@@ -243,7 +243,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a list of article addresses into an existing source. Requires confirmation: the deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately: the work keeps running, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
+    "description": "Fetch a list of article addresses into an existing source. The deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately: the work keeps running, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
     "input_schema": {
       "properties": {
         "batch_size": {
@@ -542,7 +542,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a source and everything it collected. Requires confirmation. Permanent: the source row, its items, stored bodies, read state and translations are removed, and re-subscribing the same feed starts a new source with no history. Check the size first with search_items (its `total` counts the source's items). Use delete_source_items to clear a bad crawl and keep the subscription, or set_source_status to disable it instead.",
+    "description": "Delete a source and everything it collected. Permanent: the source row, its items, stored bodies, read state and translations are removed, and re-subscribing the same feed starts a new source with no history. Check the size first with search_items (its `total` counts the source's items). Use delete_source_items to clear a bad crawl and keep the subscription, or set_source_status to disable it instead.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -564,7 +564,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Requeue failed processing-chain rows (e.g. after fixing the provider key). Requires confirmation: the attempt budget restarts and the provider charges again. Pass enrichment_id to retry one row and get a receipt back, or source_id to retry every failed row of that source and get a job handle (read the per-row outcomes with work_units).",
+    "description": "Requeue failed processing-chain rows (e.g. after fixing the provider key). The attempt budget restarts and the provider charges again. Pass enrichment_id to retry one row and get a receipt back, or source_id to retry every failed row of that source and get a job handle (read the per-row outcomes with work_units).",
     "input_schema": {
       "properties": {
         "enrichment_id": {
@@ -698,7 +698,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Mark one item read/unread or starred/unstarred. Requires confirmation. Pass at least one of is_read/is_starred; an omitted field keeps its value. The item's content, guid and publish status are untouched, and the Reader API reports the same state.",
+    "description": "Mark one item read/unread or starred/unstarred. Pass at least one of is_read/is_starred; an omitted field keeps its value. The item's content, guid and publish status are untouched, and the Reader API reports the same state.",
     "input_schema": {
       "properties": {
         "is_read": {
@@ -744,7 +744,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Enable or disable a collector plugin. Requires confirmation: a disabled plugin stops collecting every source it serves, and enabling one resumes real outbound requests to the sites those sources point at.",
+    "description": "Enable or disable a collector plugin. A disabled plugin stops collecting every source it serves, and enabling one resumes real outbound requests to the sites those sources point at.",
     "input_schema": {
       "properties": {
         "plugin_id": {
@@ -771,7 +771,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Move a source to a sidebar folder (one folder per source; 'default' is the unclassified home). Requires confirmation. Reflected in the Reader API's subscription/list, so the client sidebar follows on its next refresh.",
+    "description": "Move a source to a sidebar folder (one folder per source; 'default' is the unclassified home). Reflected in the Reader API's subscription/list, so the client sidebar follows on its next refresh.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -798,7 +798,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Set a source's processing chain, and its target language with it. Requires confirmation: items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none. Run backfill_source afterwards for already-stored items; use add_source to set a chain on a new source.",
+    "description": "Set a source's processing chain, and its target language with it. Items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none. Run backfill_source afterwards for already-stored items; use add_source to set a chain on a new source.",
     "input_schema": {
       "properties": {
         "pipeline_chain": {
@@ -834,7 +834,7 @@
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Pause or resume a source. Requires confirmation. Pausing stops collection without deleting anything already gathered.",
+    "description": "Pause or resume a source. Pausing stops collection without deleting anything already gathered.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -861,7 +861,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's. Requires confirmation: this adds content to the corpus, and its chain spends provider budget on the submitted URLs. Returns a job handle; read each item's outcome with work_units.",
+    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's. This adds content to the corpus, and its chain spends provider budget on the submitted URLs. Returns a job handle; read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "items": {
@@ -892,7 +892,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a source now, outside its schedule. Requires confirmation: this issues a real request to the origin.",
+    "description": "Fetch a source now, outside its schedule. This issues a real request to the origin.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -914,7 +914,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Change a source's schedule policy. Requires confirmation: an aggressive interval puts real load on the origin site.",
+    "description": "Change a source's schedule policy. An aggressive interval puts real load on the origin site.",
     "input_schema": {
       "properties": {
         "schedule_policy": {

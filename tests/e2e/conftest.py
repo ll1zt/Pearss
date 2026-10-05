@@ -29,7 +29,6 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from mcp import types
 from mcp.client._transport import Transport
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -244,13 +243,3 @@ async def mcp_session(
 @pytest.fixture
 def open_mcp_session() -> Callable[..., Any]:
     return mcp_session
-
-
-async def _auto_accept(_ctx: Any, params: Any) -> Any:
-    """Confirm by echoing the server's prefilled defaults: 'press confirm'."""
-    properties = (params.requested_schema or {}).get("properties", {})
-    content = {
-        name: spec.get("default", False if spec.get("type") == "boolean" else "")
-        for name, spec in properties.items()
-    }
-    return types.ElicitResult(action="accept", content=content)

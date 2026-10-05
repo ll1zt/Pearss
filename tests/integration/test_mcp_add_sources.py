@@ -1,11 +1,10 @@
-"""One confirmation covers a batch of subscriptions.
+"""A batch of subscriptions is one job.
 
 Scenario register (normative source: SCENARIOS.md; issue #159; AC-161..166).
 
-`add_source` elicits once per source, so subscribing a list through MCP is a
-stack of dialogs. `add_sources` is the batch tool ADR 0044 asks for: the user is
-asked once, the dialog names the batch (count + URL preview + a fingerprint),
-and a client that edits the list cannot get the edited list executed.
+`add_source` subscribes one source per call, so a list through MCP was a stack
+of calls. `add_sources` is the batch tool ADR 0044 asks for: one call for the
+whole list, one work handle back, and each URL's outcome in the work's ledger.
 """
 
 from __future__ import annotations
@@ -29,13 +28,6 @@ MCP_EDGE_TOKEN = "add-sources-mcp-token"
 API_TOKEN = "add-sources-api-token"
 
 _POLICY: dict[str, object] = {"type": "fixed", "interval": "30m"}
-
-# Without an elicitation-capable client the server refuses the write with
-# MissingRequiredClientCapability and never asks the question these scenarios
-# are about.
-_ELICITATION_CAPABILITY: dict[str, dict[str, dict[str, object]]] = {
-    "elicitation": {"form": {}}
-}
 
 
 def feed(name: str) -> str:
@@ -87,7 +79,7 @@ def _subscribed_urls(database_url: str) -> set[str]:
 async def _rpc(
     client: httpx.AsyncClient, base: str, params: dict[str, Any], *, rid: int
 ) -> dict[str, Any]:
-    """One raw `tools/call`, so the MRTR rounds are observable."""
+    """One raw `tools/call`."""
     body = {
         "jsonrpc": "2.0",
         "id": rid,
@@ -96,7 +88,8 @@ async def _rpc(
             **params,
             "_meta": {
                 "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                "io.modelcontextprotocol/clientCapabilities": _ELICITATION_CAPABILITY,
+                # No elicitation capability: a write needs none (ADR 0058).
+                "io.modelcontextprotocol/clientCapabilities": {},
             },
         },
     }
@@ -125,75 +118,6 @@ async def _rpc(
     return decoded
 
 
-async def _ask(base: str, asked: list[str], *, replayed: list[str]) -> dict[str, Any]:
-    """Round 1 asks about `asked`; round 2 replays the answers with `replayed`."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        first = await _rpc(
-            client,
-            base,
-            {
-                "name": "add_sources",
-                "arguments": {"urls": asked, "schedule_policy": _POLICY},
-            },
-            rid=1,
-        )
-        result = first["result"]
-        state = result["requestState"]
-        key = next(iter(result["inputRequests"]))
-        properties = result["inputRequests"][key]["params"]["requestedSchema"][
-            "properties"
-        ]
-        answers = {name: spec.get("default") for name, spec in properties.items()}
-        return await _rpc(
-            client,
-            base,
-            {
-                "name": "add_sources",
-                "arguments": {"urls": replayed, "schedule_policy": _POLICY},
-                "inputResponses": {key: {"action": "accept", "content": answers}},
-                "requestState": state,
-            },
-            rid=2,
-        )
-
-
-@pytest.mark.asyncio
-async def test_the_dialog_asks_about_the_batch_once(base_url: str) -> None:
-    """AC-161: one elicitation names the batch; there is no per-URL dialog.
-
-    The observable is the number of `tools/call` rounds the framework asks for:
-    one round carrying the question, whatever the batch size.
-    """
-    urls = [feed("x"), feed("y"), feed("z")]
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        reply = await _rpc(
-            client,
-            base_url,
-            {
-                "name": "add_sources",
-                "arguments": {"urls": urls, "schedule_policy": _POLICY},
-            },
-            rid=1,
-        )
-
-    result = reply["result"]
-    assert len(result["inputRequests"]) == 1, result
-    only = next(iter(result["inputRequests"].values()))
-    message = only["params"]["message"]
-    # The batch is named in words: the count and the addresses themselves. The
-    # form is one acknowledgement since #250, so the fingerprint -- the field
-    # that covers addresses past the preview's fifth -- is asserted where the
-    # derived fields are readable (tests/unit/test_write_guard.py).
-    assert "3" in message, message
-    for url in urls:
-        assert url in message, message
-    assert set(only["params"]["requestedSchema"]["properties"]) == {
-        "confirmed",
-        "edit",
-    }, only
-
-
 def _payload(reply: dict[str, Any]) -> dict[str, Any]:
     """The JSON body of a completed `tools/call` reply."""
     for block in reply.get("result", {}).get("content", []):
@@ -204,24 +128,32 @@ def _payload(reply: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+async def _call(base: str, arguments: dict[str, Any], *, rid: int) -> dict[str, Any]:
+    """Call `add_sources` once and return its payload."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        reply = await _rpc(
+            client, base, {"name": "add_sources", "arguments": arguments}, rid=rid
+        )
+    return _payload(reply)
+
+
 @pytest.mark.asyncio
 async def test_the_whole_batch_becomes_one_job_that_subscribes_every_url(
     base_url: str, env: dict[str, str]
 ) -> None:
-    """AC-161 / AC-211: accepting the one dialog queues one work for the whole list.
+    """AC-161 / AC-211: one call queues one work for the whole list.
 
-    Since #199 the answer is a handle (issue #199): the subscriptions land when
-    the worker runs, and `work_units` is where each URL's outcome goes. Both
-    halves are asserted here, because "queued" and "subscribed" are now two
-    different moments and a test that checked only one of them would pass while
-    the other was broken.
+    Since #199 the answer is a handle: the subscriptions land when the worker
+    runs, and `work_units` is where each URL's outcome goes. Both halves are
+    asserted here, because "queued" and "subscribed" are now two different
+    moments and a test that checked only one of them would pass while the other
+    was broken.
     """
     urls = [feed("a"), feed("b"), feed("c")]
 
-    reply = await _ask(base_url, urls, replayed=urls)
+    payload = await _call(base_url, {"urls": urls, "schedule_policy": _POLICY}, rid=1)
 
-    assert "error" not in reply, reply
-    payload = _payload(reply)
+    assert "error" not in payload, payload
     assert payload["counts"]["total"] == 3, payload
     # Nothing is subscribed yet: the response is a handle, not a deed.
     assert _subscribed_urls(env["PEARSS_DATABASE_URL"]) == set()
@@ -229,30 +161,3 @@ async def test_the_whole_batch_becomes_one_job_that_subscribes_every_url(
     await run_work_to_completion(env, payload["work_id"])
 
     assert _subscribed_urls(env["PEARSS_DATABASE_URL"]) == set(urls)
-
-
-@pytest.mark.asyncio
-async def test_an_edited_batch_is_refused_and_creates_nothing(
-    base_url: str, env: dict[str, str]
-) -> None:
-    """AC-162: a list the user never saw cannot be executed.
-
-    The question showed A and B; the retry submits A and C. Same count, same
-    first URL -- so this is exactly the case a count-only check would accept.
-    """
-    asked = [feed("keep-a"), feed("keep-b")]
-    edited = [feed("keep-a"), feed("swapped-in")]
-
-    reply = await _ask(base_url, asked, replayed=edited)
-
-    error = reply.get("error")
-    assert error is not None, reply
-    assert error["code"] == -32602, error
-
-    # Neither the list the user saw nor the edited one landed. Asserted per URL
-    # rather than "the table is empty": this module shares one database, so the
-    # honest claim is about this batch.
-    subscribed = _subscribed_urls(env["PEARSS_DATABASE_URL"])
-    assert feed("keep-a") not in subscribed, subscribed
-    assert feed("keep-b") not in subscribed, subscribed
-    assert feed("swapped-in") not in subscribed, subscribed

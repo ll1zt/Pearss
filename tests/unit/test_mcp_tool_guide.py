@@ -395,13 +395,15 @@ def test_the_guide_records_the_naming_decision() -> None:
 
 
 def test_every_tool_annotation_matches_what_its_description_claims() -> None:
-    """AC-57: the three claims a description makes pin the three hints.
+    """AC-57 / AC-266: the side-effect claims a description makes pin the hints.
 
-    The annotation is what a host reads to decide whether to add its own
-    confirmation, and the description is what the model reads to choose the
-    tool. If they disagree, one of the two audiences is being told a
-    side-effect that does not exist -- which is why the guide puts both in the
-    same contract and why this is a guard rather than a review step.
+    The annotation is what a host reads to decide what to surface, and the
+    description is what the model reads to choose the tool. If they disagree,
+    one of the two audiences is being told a side effect that does not exist --
+    which is why the guide puts both in the same contract and why this is a
+    guard rather than a review step. Since #270 this is also what carries the
+    "this is irreversible" warning the retired confirmation dialog used to
+    deliver by hand.
     """
     annotations = _annotations()
     descriptions = _descriptions()
@@ -411,12 +413,23 @@ def test_every_tool_annotation_matches_what_its_description_claims() -> None:
         hints = annotations[name]
         description = descriptions[name]
 
+        # No description may promise a confirmation any more (ADR 0058, #270):
+        # the machinery is retired, so a description that still offered one
+        # would describe an interaction the server does not have. The
+        # write/read split is `idempotent_hint` -- only a write mints a fresh
+        # idempotency key per call -- and `read_only_hint` must agree with it.
         claims_confirmation = bool(re.search(CONFIRMATION_CLAIM, description, re.I))
-        if claims_confirmation != (hints["read_only_hint"] is False):
+        if claims_confirmation:
             problems.append(
-                f"{name}: read_only_hint={hints['read_only_hint']} but the "
-                f"description {'does' if claims_confirmation else 'does not'} "
-                "ask for confirmation"
+                f"{name}: the description still asks for a confirmation, which "
+                "the server no longer performs (ADR 0058)"
+            )
+
+        if (hints["read_only_hint"] is False) != (hints["idempotent_hint"] is False):
+            problems.append(
+                f"{name}: read_only_hint={hints['read_only_hint']} disagrees with "
+                f"idempotent_hint={hints['idempotent_hint']}; the write tools are "
+                "exactly the ones that mint a fresh idempotency key per call"
             )
 
         claims_irreversible = bool(re.search(IRREVERSIBLE_CLAIM, description, re.I))
@@ -459,7 +472,7 @@ def _endpoint_calls() -> dict[str, set[tuple[str, str]]]:
 
     Two shapes count, and the second one is why this had to be checked rather
     than assumed: a read calls `core.get(...)` directly, while every write goes
-    through `_guarded_write(..., method=..., path=...)`. A first version looked
+    through `_write(..., method=..., path=...)`. A first version looked
     only for `core.<verb>` and silently saw none of the thirteen write tools --
     found by injecting a nonexistent endpoint into `trigger_job` and watching the
     guard stay green.
@@ -493,9 +506,9 @@ def _endpoint_of(call: ast.Call) -> tuple[str, str] | None:
     func = call.func
     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
 
-    # `_guarded_write(core, method="PATCH", path=f"...")` -- every write tool,
+    # `_write(core, method="PATCH", path=f"...")` -- every write tool,
     # and the only shape that names both parts as literals at the call site.
-    if name == "_guarded_write":
+    if name == "_write":
         method = _keyword(call, "method")
         path = _keyword(call, "path")
         if isinstance(method, ast.Constant) and isinstance(method.value, str):

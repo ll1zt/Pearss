@@ -1,69 +1,29 @@
 """The write tools: every mutating operation on the MCP surface.
 
-Each one elicits first (the confirmation machinery in app.mcp.confirmation),
-refuses when the user declines or cannot be asked, checks the confirmed
-arguments against the ones about to execute, and only then calls the Core API
-under a fresh Idempotency-Key. The order is the contract: confirmation is of
-the same request that executes, never a rubber stamp (ADR 0010, and
-docs/api/mcp-tool-guide.md's presentation rules).
+Each one builds the request body from its arguments and hands it to `_write`,
+which calls the Core API under a fresh Idempotency-Key and attaches the audit
+id. That is the whole path: there is no confirmation step.
 
-The bodies are the closures that lived in build_mcp_server; `register_writes`
-is what build_mcp_server calls instead of inlining them. Each one is now three
-things: derive the fields it confirms, hand them to `_guarded_write`, and
-describe the request. The confirm/compare/execute/attribute sequence lives in
-that one helper because writing it out twelve times is how a field went
-uncompared (issue #67, and then #76 for the shape itself).
+The elicitation requirement was retired (ADR 0058, issue #270). It was never a
+security boundary -- the boundary is the token, and a client that wants to
+write can answer its own dialog -- while its cost fell on *every* client that
+cannot answer an elicitation at all, which is most of them: those clients could
+discover sixteen write tools and call none of them. What replaced it is in
+`docs/api/mcp-tool-guide.md` section 3: the token scope, the descriptions and
+annotations below (destructive tools say so in words *and* in
+`destructiveHint`), the Idempotency-Key every call mints, and the audit row
+that makes each write attributable afterwards.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
 from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.context import Context
-from mcp.server.mcpserver.resolve import Resolve
 
-from app.mcp.confirmation import (
-    Confirmation,
-    _aborted,
-    _add_source_confirmation,
-    _add_source_fields,
-    _add_sources_confirmation,
-    _add_sources_fields,
-    _backfill_source_confirmation,
-    _backfill_source_fields,
-    _delete_items_confirmation,
-    _delete_items_fields,
-    _delete_source_items_confirmation,
-    _delete_source_items_fields,
-    _fetch_work_confirmation,
-    _fetch_work_fields,
-    _overrides,
-    _read_state_change,
-    _remove_source_confirmation,
-    _remove_source_fields,
-    _retry_enrichments_confirmation,
-    _retry_enrichments_fields,
-    _set_item_read_state_confirmation,
-    _set_item_read_state_fields,
-    _set_plugin_status_confirmation,
-    _set_plugin_status_fields,
-    _set_source_folder_confirmation,
-    _set_source_folder_fields,
-    _set_source_pipeline_chain_confirmation,
-    _set_source_pipeline_chain_fields,
-    _set_source_status_confirmation,
-    _set_source_status_fields,
-    _submit_items_confirmation,
-    _submit_items_fields,
-    _trigger_job_confirmation,
-    _trigger_job_fields,
-    _update_schedule_policy_confirmation,
-    _update_schedule_policy_fields,
-    _write_verdict,
-    ingest_targets,
-)
+from app.collector_registry import infer_source_type
 from app.mcp.core_client import CoreAPIClient, _fresh_key
 from app.mcp.rendering import (
     _attributed,
@@ -73,46 +33,27 @@ from app.mcp.rendering import (
 )
 
 
-async def _guarded_write(
+async def _write(
     core: CoreAPIClient,
     *,
-    confirmed: Any,
-    fields: dict[str, Any],
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
     ok: tuple[int, ...] = (200,),
     extra: Callable[[int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Confirm, compare, execute and attribute one write.
+    """Execute and attribute one write.
 
-    Every write tool is this sequence, so it is written once. `confirmed` and
-    `fields` are the whole contract between a tool and its confirmation: the
-    tool hands over the same `fields` its resolver put in the dialog, so
-    "the confirmation covers what executes" is one computation used twice
-    rather than two lists kept in step by hand. That is the difference #76 is
-    about -- twelve hand-written comparisons are twelve chances to miss a
-    field, and #67 was one of them.
+    Every write tool is this sequence, so it is written once.
 
     `ok` is the statuses that are *outcomes* rather than errors: a 409 from an
-    already-enabled plugin and a 502 from a source that failed while
-    triggering are answers, and reporting them as errors would hide the
-    diagnosis. `extra` builds the keys a response carries beyond the Core API
-    payload, from the status -- the audit note for add_source, the status code
-    for set_plugin_status (which a caller needs precisely because a 409 is an
+    already-enabled plugin and a 502 from a source that failed while triggering
+    are answers, and reporting them as errors would hide the diagnosis. `extra`
+    builds the keys a response carries beyond the Core API payload, from the
+    status -- the audit note for add_source, the status code for
+    set_plugin_status (which a caller needs precisely because a 409 is an
     outcome).
     """
-    verdict = _write_verdict(confirmed, fields)
-    if verdict is not None:
-        return verdict
-    if body is not None:
-        # One place applies an edited value, and it checks that the field it names
-        # is a field of the request about to be sent: an override that landed
-        # nowhere would be a dialog that changed nothing (issue #252).
-        try:
-            body = {**body, **_overrides(confirmed, body)}
-        except ValueError:
-            return _aborted()
     status, payload, audit_id = await core.request(
         method, path, json_body=body, idempotency_key=_fresh_key()
     )
@@ -122,10 +63,32 @@ async def _guarded_write(
     return _truncate(_attributed({**payload, **extras}, audit_id))
 
 
+def _read_state_change(
+    is_read: bool | None, is_starred: bool | None
+) -> dict[str, bool]:
+    """The fields a read-state call actually asks to change.
+
+    A read-state write is *partial*: an omitted field keeps its value, so the
+    change is a subset of {is_read, is_starred} rather than two booleans.
+    """
+    pairs = (("is_read", is_read), ("is_starred", is_starred))
+    return {name: value for name, value in pairs if value is not None}
+
+
+def ingest_targets(items: list[dict[str, Any]]) -> list[str]:
+    """The submitted items as the *targets* of an `ingest` work (issue #199).
+
+    One item per target, as canonical JSON. The executor validates each target
+    with the same model the endpoint uses (`app.ingest`), so a target that is
+    not a usable item fails alone instead of refusing the batch.
+    """
+    return [json.dumps(item, separators=(",", ":"), sort_keys=True) for item in items]
+
+
 def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     """Register the mutating tools on `server`, bound to `core`."""
-    # The application's collector registry, read once so the tool body derives
-    # the same fields the confirmation resolver derives (issue #84).
+    # The application's collector registry, for the same type inference the
+    # executing request relies on (issue #84).
     registry = getattr(core, "registry", None)
 
     # ---------------------------------------------------------------- writes
@@ -133,9 +96,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Add a source. Requires user confirmation: this makes real "
-            "outbound requests to a third party. schedule_policy is "
-            "{type: fixed, interval: '30m'} or "
+            "Add a source. This makes real outbound requests to a third party. "
+            "schedule_policy is {type: fixed, interval: '30m'} or "
             "{type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed "
             "URL), 'web' (a page a login-type collector serves, e.g. "
             "zhihu/telegram) or 'auto' (default: inferred from the URL; "
@@ -147,31 +109,22 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     async def add_source(
         url: str,
         schedule_policy: dict[str, Any],
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_add_source_confirmation)],
         type: str = "auto",
         pipeline_chain: list[dict[str, Any]] | None = None,
         target_lang: str = "",
         folder: str = "",
     ) -> dict[str, Any]:
-        fields = _add_source_fields(
-            url,
-            schedule_policy,
-            type,
-            pipeline_chain,
-            target_lang,
-            folder,
-            registry=registry,
+        requested = type.strip().lower()
+        source_type = (
+            infer_source_type(url, registry) if requested == "auto" else requested
         )
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path="/v1/sources",
             body={
                 "url": url,
-                "type": fields["type"],
+                "type": source_type,
                 "schedule_policy": schedule_policy,
                 "pipeline_chain": pipeline_chain,
                 "target_lang": target_lang or None,
@@ -186,19 +139,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Add several sources in one call. Requires user confirmation: these "
-            "sources make real outbound requests to a third party. Options apply "
-            "to the whole batch; `type` 'auto' resolves per URL as add_source "
-            "does. Returns a job handle -- read each URL's "
-            "outcome with work_units; an unusable one fails alone. Use "
-            "add_source for a single source, where the dialog names it exactly."
+            "Add several sources in one call. These sources make real outbound "
+            "requests to a third party. Options apply to the whole batch; "
+            "`type` 'auto' resolves per URL as add_source does. Returns a job "
+            "handle -- read each URL's outcome with work_units; an unusable "
+            "one fails alone. Use add_source for a single source."
         ),
     )
     async def add_sources(
         urls: list[str],
         schedule_policy: dict[str, Any],
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_add_sources_confirmation)],
         type: str = "auto",
         folder: str = "",
         pipeline_chain: list[dict[str, Any]] | None = None,
@@ -206,27 +156,17 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         trust_level: str = "standard",
         parser_plugin_id: str = "",
     ) -> dict[str, Any]:
-        fields = _add_sources_fields(
-            urls,
-            schedule_policy,
-            type,
-            pipeline_chain,
-            target_lang,
-            folder,
-            trust_level,
-            parser_plugin_id,
-        )
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path="/v1/works",
             body={
-                "kind": fields["kind"],
+                "kind": "subscribe",
                 "targets": urls,
                 "params": {
-                    "type": fields["type"],
+                    # `auto` is resolved server-side per URL by the `subscribe`
+                    # executor, so it travels as requested.
+                    "type": type.strip().lower() or "auto",
                     "schedule_policy": schedule_policy,
                     "trust_level": trust_level,
                     "pipeline_chain": pipeline_chain,
@@ -245,34 +185,29 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Fetch a list of article addresses into an existing source. "
-            "Requires confirmation: the deployment makes real outbound requests "
-            "for every address. Returns a job handle (work_id, status, counts) "
-            "immediately: the work keeps running, and the response does not "
-            "grow with the list. Read per-address results "
-            "with work_units. Each address must be on the source's own host "
-            "(off-host ones come back `rejected`); the collector must be able "
-            "to fetch one address (rss can). Use this for addresses to fetch; "
-            "submit_items for content you already fetched."
+            "Fetch a list of article addresses into an existing source. The "
+            "deployment makes real outbound requests for every address. "
+            "Returns a job handle (work_id, status, counts) immediately: the "
+            "work keeps running, and the response does not grow with the list. "
+            "Read per-address results with work_units. Each address must be on "
+            "the source's own host (off-host ones come back `rejected`); the "
+            "collector must be able to fetch one address (rss can). Use this "
+            "for addresses to fetch; submit_items for content you already "
+            "fetched."
         ),
     )
     async def fetch_source_items(
         source_id: str,
         urls: list[str],
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_fetch_work_confirmation)],
         batch_size: int = 0,
         min_interval_seconds: float = 0.0,
     ) -> dict[str, Any]:
-        fields = _fetch_work_fields(source_id, urls, batch_size, min_interval_seconds)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path="/v1/works",
             body={
-                "kind": fields["kind"],
+                "kind": "fetch",
                 "targets": urls,
                 "params": {
                     "source_id": source_id,
@@ -295,23 +230,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Change a source's schedule policy. Requires confirmation: an "
-            "aggressive interval puts real load on the origin site."
+            "Change a source's schedule policy. An aggressive interval puts "
+            "real load on the origin site."
         ),
     )
     async def update_schedule_policy(
         source_id: str,
         schedule_policy: dict[str, Any],
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_update_schedule_policy_confirmation)
-        ],
     ) -> dict[str, Any]:
-        fields = _update_schedule_policy_fields(source_id, schedule_policy)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="PATCH",
             path=f"/v1/sources/{source_id}",
             body={"schedule_policy": schedule_policy},
@@ -320,23 +248,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
         description=(
-            "Pause or resume a source. Requires confirmation. Pausing stops "
-            "collection without deleting anything already gathered."
+            "Pause or resume a source. Pausing stops collection without "
+            "deleting anything already gathered."
         ),
     )
     async def set_source_status(
         source_id: str,
         status: str,
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_set_source_status_confirmation)
-        ],
     ) -> dict[str, Any]:
-        fields = _set_source_status_fields(source_id, status)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="PATCH",
             path=f"/v1/sources/{source_id}",
             body={"status": status},
@@ -346,24 +267,17 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=False),
         description=(
             "Move a source to a sidebar folder (one folder per source; "
-            "'default' is the unclassified home). Requires confirmation. "
-            "Reflected in the Reader API's subscription/list, so the client "
-            "sidebar follows on its next refresh."
+            "'default' is the unclassified home). Reflected in the Reader API's "
+            "subscription/list, so the client sidebar follows on its next "
+            "refresh."
         ),
     )
     async def set_source_folder(
         source_id: str,
         folder: str,
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_set_source_folder_confirmation)
-        ],
     ) -> dict[str, Any]:
-        fields = _set_source_folder_fields(source_id, folder)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="PATCH",
             path=f"/v1/sources/{source_id}",
             body={"folder": folder},
@@ -373,22 +287,17 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Set a source's processing chain, and its target language with it. "
-            "Requires confirmation: items are held at the gate until the chain "
-            "completes, and its processors can make real outbound requests and "
-            "spend provider budget per item. An empty list clears the chain, so "
-            "items publish as soon as they are stored; passing no target_lang "
-            "sets it to none. Run "
-            "backfill_source afterwards for already-stored items; use "
+            "Items are held at the gate until the chain completes, and its "
+            "processors can make real outbound requests and spend provider "
+            "budget per item. An empty list clears the chain, so items publish "
+            "as soon as they are stored; passing no target_lang sets it to "
+            "none. Run backfill_source afterwards for already-stored items; use "
             "add_source to set a chain on a new source."
         ),
     )
     async def set_source_pipeline_chain(
         source_id: str,
         pipeline_chain: list[dict[str, Any]],
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_set_source_pipeline_chain_confirmation)
-        ],
         target_lang: str = "",
     ) -> dict[str, Any]:
         """Give an existing source a chain, or take its chain away.
@@ -399,16 +308,11 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         source and starting over, which throws away its history and its read
         state (issue #71).
         """
-        fields = _set_source_pipeline_chain_fields(
-            source_id, pipeline_chain, target_lang
-        )
         # Both fields are always sent: the endpoint's three-state semantics mean
-        # an omitted `target_lang` would keep whatever was stored, and the
-        # confirmation says "none". Sending what was confirmed is the rule.
-        return await _guarded_write(
+        # an omitted `target_lang` would keep whatever was stored, while this
+        # tool's contract is "an empty target_lang means none".
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="PATCH",
             path=f"/v1/sources/{source_id}",
             body={"pipeline_chain": pipeline_chain, "target_lang": target_lang},
@@ -417,25 +321,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Delete a source and everything it collected. Requires "
-            "confirmation. Permanent: the source row, its items, stored bodies, "
-            "read state and translations are removed, and re-subscribing the "
-            "same feed starts a new source with no history. Check the size "
-            "first with search_items (its `total` counts the source's items). "
-            "Use delete_source_items to clear a bad crawl and keep the "
-            "subscription, or set_source_status to disable it instead."
+            "Delete a source and everything it collected. Permanent: the source "
+            "row, its items, stored bodies, read state and translations are "
+            "removed, and re-subscribing the same feed starts a new source with "
+            "no history. Check the size first with search_items (its `total` "
+            "counts the source's items). Use delete_source_items to clear a bad "
+            "crawl and keep the subscription, or set_source_status to disable "
+            "it instead."
         ),
     )
-    async def remove_source(
-        source_id: str,
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_remove_source_confirmation)],
-    ) -> dict[str, Any]:
-        fields = _remove_source_fields(source_id)
-        return await _guarded_write(
+    async def remove_source(source_id: str) -> dict[str, Any]:
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="DELETE",
             path=f"/v1/sources/{source_id}",
         )
@@ -443,31 +340,19 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Permanently delete specific items by id. Requires confirmation: "
-            "the bodies, read state and processor products go with them. Use "
-            "this to clean up items that were fetched wrongly or are no longer "
-            "wanted; ids come from search_items. Not reversible. Returns a job "
-            "handle -- read each id's outcome with work_units; one already gone "
-            "is `skipped`."
+            "Permanently delete specific items by id. The bodies, read state "
+            "and processor products go with them. Use this to clean up items "
+            "that were fetched wrongly or are no longer wanted; ids come from "
+            "search_items. Not reversible. Returns a job handle -- read each "
+            "id's outcome with work_units; one already gone is `skipped`."
         ),
     )
-    async def delete_items(
-        item_ids: list[str],
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_delete_items_confirmation)],
-    ) -> dict[str, Any]:
-        fields = _delete_items_fields(item_ids)
-        return await _guarded_write(
+    async def delete_items(item_ids: list[str]) -> dict[str, Any]:
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path="/v1/works",
-            body={
-                "kind": fields["kind"],
-                "targets": item_ids,
-                "params": {},
-            },
+            body={"kind": "delete", "targets": item_ids, "params": {}},
             # 202: the deletion is queued, not done. The handle is the answer.
             ok=(202,),
         )
@@ -475,35 +360,27 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Delete a source's items while keeping the subscription. Requires "
-            "confirmation. Use this after a bad crawl: the source keeps its "
-            "crawl position, so collection resumes instead of re-reading "
-            "history. Optionally narrow by since/until; pass "
-            "include_published=false to spare items a client has already seen. "
-            "Not reversible. Returns a job handle -- read each item's outcome "
-            "with work_units."
+            "Delete a source's items while keeping the subscription. Use this "
+            "after a bad crawl: the source keeps its crawl position, so "
+            "collection resumes instead of re-reading history. Optionally "
+            "narrow by since/until; pass include_published=false to spare items "
+            "a client has already seen. Not reversible. Returns a job handle -- "
+            "read each item's outcome with work_units."
         ),
     )
     async def delete_source_items(
         source_id: str,
-        ctx: Context,
         since: str = "",
         until: str = "",
         include_published: bool = True,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_delete_source_items_confirmation)
-        ] = None,
     ) -> dict[str, Any]:
-        fields = _delete_source_items_fields(source_id, since, until, include_published)
         body: dict[str, Any] = {"include_published": include_published}
         if since:
             body["since"] = since
         if until:
             body["until"] = until
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path=f"/v1/sources/{source_id}/items:delete",
             body=body,
@@ -515,26 +392,22 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
         description=(
-            "Mark one item read/unread or starred/unstarred. Requires "
-            "confirmation. Pass at least one of is_read/is_starred; an omitted "
-            "field keeps its value. The item's content, guid and publish "
-            "status are untouched, and the Reader API reports the same state."
+            "Mark one item read/unread or starred/unstarred. Pass at least one "
+            "of is_read/is_starred; an omitted field keeps its value. The "
+            "item's content, guid and publish status are untouched, and the "
+            "Reader API reports the same state."
         ),
     )
     async def set_item_read_state(
         item_id: str,
-        ctx: Context,
         is_read: bool | None = None,
         is_starred: bool | None = None,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_set_item_read_state_confirmation)
-        ] = None,
     ) -> dict[str, Any]:
         change = _read_state_change(is_read, is_starred)
         if not change:
-            # Refused before elicitation: a dialog asking a human to confirm a
-            # no-op spends a round trip to learn what `/v1` would say anyway.
-            # Same code, so an agent branches on one vocabulary (issue #218).
+            # Refused before the call: a no-op spends a round trip to learn
+            # what `/v1` would say anyway. Same code, so an agent branches on
+            # one vocabulary (issue #218).
             return {
                 "error": "empty_patch",
                 "message": (
@@ -545,11 +418,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                     "its current value."
                 ),
             }
-        fields = _set_item_read_state_fields(item_id, is_read, is_starred)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="PATCH",
             path=f"/v1/items/{item_id}/read-state",
             body=change,
@@ -558,23 +428,16 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Fetch a source now, outside its schedule. Requires confirmation: "
-            "this issues a real request to the origin."
+            "Fetch a source now, outside its schedule. This issues a real "
+            "request to the origin."
         ),
     )
-    async def trigger_job(
-        source_id: str,
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_trigger_job_confirmation)],
-    ) -> dict[str, Any]:
-        fields = _trigger_job_fields(source_id)
+    async def trigger_job(source_id: str) -> dict[str, Any]:
         # A 502 here is a real outcome to report, not a transport failure: the
         # run happened and the source failed, with the error_class explaining
         # which. Returning it as an error would hide the diagnosis.
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path=f"/v1/sources/{source_id}:trigger",
             ok=(200, 502),
@@ -584,24 +447,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Queue processing-chain products (e.g. translations) for items "
-            "stored before the chain was enabled. Requires confirmation: it "
-            "spends provider budget per item, and the source must have a "
-            "pipeline_chain configured. Returns a job handle -- read each item's "
-            "outcome with work_units."
+            "stored before the chain was enabled. It spends provider budget per "
+            "item, and the source must have a pipeline_chain configured. "
+            "Returns a job handle -- read each item's outcome with work_units."
         ),
     )
-    async def backfill_source(
-        source_id: str,
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_backfill_source_confirmation)
-        ],
-    ) -> dict[str, Any]:
-        fields = _backfill_source_fields(source_id)
-        return await _guarded_write(
+    async def backfill_source(source_id: str) -> dict[str, Any]:
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path=f"/v1/sources/{source_id}:backfill-chain",
             # 200 when the source has nothing stored (no job to submit) and 202
@@ -613,18 +466,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Requeue failed processing-chain rows (e.g. after fixing the "
-            "provider key). Requires confirmation: the attempt budget restarts "
-            "and the provider charges again. Pass enrichment_id to retry one row "
-            "and get a receipt back, or source_id to retry every failed row of "
-            "that source and get a job handle (read the per-row outcomes with "
+            "provider key). The attempt budget restarts and the provider "
+            "charges again. Pass enrichment_id to retry one row and get a "
+            "receipt back, or source_id to retry every failed row of that "
+            "source and get a job handle (read the per-row outcomes with "
             "work_units)."
         ),
     )
     async def retry_enrichments(
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_retry_enrichments_confirmation)
-        ],
         enrichment_id: str = "",
         source_id: str = "",
     ) -> dict[str, Any]:
@@ -634,7 +483,6 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         permanently failed products while the caller wants three retried, and
         `list_enrichments` already returns the ids that name one row.
         """
-        fields = _retry_enrichments_fields(enrichment_id, source_id)
         if enrichment_id:
             path = f"/v1/enrichments/{enrichment_id}:retry"
         elif source_id:
@@ -650,10 +498,8 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
                 ),
                 "next_actions": ["list_enrichments", "list_sources"],
             }
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path=path,
             # 200 when the source has nothing to requeue (no job to submit) and
@@ -664,26 +510,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Enable or disable a collector plugin. Requires confirmation: a "
-            "disabled plugin stops collecting every source it serves, and "
-            "enabling one resumes real outbound requests to the sites those "
-            "sources point at."
+            "Enable or disable a collector plugin. A disabled plugin stops "
+            "collecting every source it serves, and enabling one resumes real "
+            "outbound requests to the sites those sources point at."
         ),
     )
-    async def set_plugin_status(
-        plugin_id: str,
-        status: str,
-        ctx: Context,
-        confirmed: Annotated[
-            Confirmation | None, Resolve(_set_plugin_status_confirmation)
-        ],
-    ) -> dict[str, Any]:
-        fields = _set_plugin_status_fields(plugin_id, status)
+    async def set_plugin_status(plugin_id: str, status: str) -> dict[str, Any]:
         operation = ":enable" if status == "enabled" else ":disable"
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path=f"/v1/plugins/{plugin_id}{operation}",
             # A 409 means "already in that state", which is an outcome; the
@@ -700,27 +535,22 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "same pipeline as collected items. The target must be a source of "
             "type 'agent' — create one with add_source and a url like "
             "'agent://newsletter-intake'; pushing into an rss or web source is "
-            "refused, which would mix one origin's content into another's. "
-            "Requires confirmation: this adds content to the corpus, "
-            "and its chain spends provider budget on the submitted URLs. Returns "
-            "a job handle; read each item's outcome with work_units."
+            "refused, which would mix one origin's content into another's. This "
+            "adds content to the corpus, and its chain spends provider budget "
+            "on the submitted URLs. Returns a job handle; read each item's "
+            "outcome with work_units."
         ),
     )
     async def submit_items(
         source_id: str,
         items: list[dict[str, Any]],
-        ctx: Context,
-        confirmed: Annotated[Confirmation | None, Resolve(_submit_items_confirmation)],
     ) -> dict[str, Any]:
-        fields = _submit_items_fields(source_id, items)
-        return await _guarded_write(
+        return await _write(
             core,
-            confirmed=confirmed,
-            fields=fields,
             method="POST",
             path="/v1/works",
             body={
-                "kind": fields["kind"],
+                "kind": "ingest",
                 "targets": ingest_targets(items),
                 "params": {"source_id": source_id},
             },

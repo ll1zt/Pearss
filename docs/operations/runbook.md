@@ -141,8 +141,8 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 
   **排错要点**：`421` 不是鉴权失败，别去找 token；是 Host 不在白名单里。
   另外白名单条目需要 `host:*` 形式（浏览器总带端口），裸 `host` 匹配不上 `host:8000`。
-- **写操作需 elicitation**。客户端不支持时**拒绝执行**并返回 `{"declined": true}`，
-  不会静默照做。若用户报告「工具说 declined」，是客户端缺 elicitation 能力，不是故障
+- **写操作不 elicit**（ADR 0058）。所有写工具直接执行，因此客户端无需任何 elicitation 能力；
+  约束误操作靠 token 权限、工具描述与 annotations、`Idempotency-Key` 与审计行（见 `docs/api/mcp-tool-guide.md` 第三节）
 - 工具经 `/v1` 调用，所以审计与鉴权与任何客户端一致；审计里 actor 是 `api:full`
   （服务持有的 token），**agent 身份靠 correlation_id 关联，不体现在 actor 上**（ADR 0010 记录了这个可归因性弱化）
 - 工具面变更会撞 snapshot：`MCP_SNAPSHOT_UPDATE=1 just contract` 后**审查 diff 再提交**，
@@ -381,7 +381,7 @@ sqlite3 /var/lib/pearss/pearss.db \
 | 怀疑 token 泄漏 | AuditLog、访问日志、部署 Secret | 立刻撤销/轮换 token，评估暴露范围，清理受控日志 | 只改代码或只删除一条日志 |
 | 条目数不涨 | `source.status`、`job_run` 最近状态、启动日志有无 scheduler 行 | 见「调度器」一节按推导输入排查 | 去找 next_run 表 —— 不存在，是设计如此 |
 | 文章正文与源不一致 | `job_run` 是否有 `skip_published_content_changed` 告警 | 已发布内容按设计冻结；需要更正只能作为新条目 | 改已发布 Item 的正文或 GUID |
-| MCP 写操作全被拒 | 客户端是否实现 elicitation | 换支持的客户端，或直接用 `/v1` | 让工具在无确认时继续执行 |
+| MCP 写操作失败 | `:diagnose` 与 `/v1` 的错误体（`error_class`、`detail`） | 按 error_class 处置；写工具直接执行，不需要 elicitation | 把工具的失败当成「客户端能力不够」 |
 | NNW 里条目**全被标星** | `read_state.is_starred`、`s=.../starred` 流的返回 | 检查 Reader API 的状态流是否被正确过滤；数据库里 0 条星标却全部显示星标 = 状态流返回了全库 | 把「客户端显示」当成「数据库状态」 |
 | 经 NNW 消费的条目**永不冻结** | `item.publish_status` 是否停在 `ready` | 三条输出路径都必须写 `first_publish`；此前只有 RSS 写，Reader API 不写 → 不可变性保证在客户端实际缓存的那条路径上失效 | 只修 RSS 渲染 |
 | 应用日志**突然全部消失** | 是否执行过 alembic 迁移 | `fileConfig` 默认 `disable_existing_loggers=True`；已改为 `False` | 以为是代码没打日志 |
