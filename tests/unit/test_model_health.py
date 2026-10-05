@@ -17,7 +17,7 @@ import threading
 
 import pytest
 
-from app.model_health import ModelHealth
+from app.model_health import HEALTH_WINDOW_SAMPLES, ModelHealth
 
 pytestmark = pytest.mark.unit
 
@@ -257,6 +257,69 @@ def test_rows_running_in_parallel_do_not_lose_each_other_failures() -> None:
         thread.join(5)
 
     assert sorted(health.policy()["skip"]) == ["fallback", "primary"]
+
+
+def test_the_window_shows_a_partially_failing_model_that_is_not_cooling() -> None:
+    """AC-259: the half-broken model the `models` cell cannot show.
+
+    One failed ask of three is below the demotion gate (ADR 0056), so this model
+    is not cooling and appears nowhere under `models` -- yet the failure has to
+    be visible, or the diagnostic surface answers "healthy" while the journal
+    fills with fallbacks. That is exactly the live shape of #269: 132 fallbacks
+    in ten hours, 12 cooldowns, and a `model_health` cell that read completely
+    healthy.
+    """
+    clock = _Clock()
+    health = ModelHealth(clock=clock)
+    health.record([("primary", 3, 1, "network"), ("secondary", 3, 0, None)])
+
+    snapshot = health.snapshot()
+
+    assert snapshot["models"] == {}, "a blip is not a cooldown"
+    assert snapshot["skipped"] == []
+    assert snapshot["window"] == {
+        "primary": {
+            "attempts": 3,
+            "failures": 1,
+            "fallbacks": 1,
+            "failure_rate": 0.333,
+            "last_failure_class": "network",
+            "since_last_failure_seconds": 0.0,
+        }
+    }
+    assert "secondary" not in snapshot["window"], "a model that never failed is noise"
+
+
+def test_the_window_folds_the_last_samples_only() -> None:
+    """AC-260: bounded -- an old failure ages out instead of reporting forever."""
+    health = ModelHealth(clock=_Clock())
+    health.record([("primary", 3, 1, "network")])
+    for _ in range(HEALTH_WINDOW_SAMPLES):
+        health.record([("primary", 3, 0, None)])
+
+    assert health.snapshot()["window"] == {}, "the failure left the window"
+
+
+def test_a_cooling_model_still_appears_in_both_cells() -> None:
+    """AC-261: the new cell must not replace the old one (no #231 regression)."""
+    clock = _Clock()
+    health = ModelHealth(clock=clock)
+    health.record([("primary", 2, 2, "network")])
+    clock.advance(60.0)
+
+    snapshot = health.snapshot()
+
+    assert snapshot["preferred"] is None, "the only known model is cooling"
+    assert snapshot["skipped"] == ["primary"]
+    assert snapshot["models"]["primary"]["cooling_seconds"] == 240.0
+    assert snapshot["window"]["primary"] == {
+        "attempts": 2,
+        "failures": 2,
+        "fallbacks": 1,
+        "failure_rate": 1.0,
+        "last_failure_class": "network",
+        "since_last_failure_seconds": 60.0,
+    }
 
 
 def test_the_snapshot_reports_the_cooling_episode_and_what_is_preferred() -> None:
