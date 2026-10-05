@@ -37,8 +37,8 @@ def process(item_ctx: dict[str, Any], *, target_lang: str, store: Any) -> str:
     processor by module and attribute name, and this module is the fixture.
     """
     _RECEIVED["deadline"] = item_ctx.get("deadline")
-    item_ctx["model_events"].append(["primary", "network"])
-    item_ctx["model_events"].append(["fallback", None])
+    item_ctx["model_events"].append(["primary", 2, 1, "network"])
+    item_ctx["model_events"].append(["fallback", 3, 0, None])
     return str(store("<p>translated</p>"))
 
 
@@ -47,7 +47,7 @@ class Failing:
 
     @staticmethod
     def process(item_ctx: dict[str, Any], *, target_lang: str, store: Any) -> str:
-        item_ctx["model_events"].append(["primary", "blocked"])
+        item_ctx["model_events"].append(["primary", 1, 1, "blocked"])
         raise ProcessorError(ErrorClass.BLOCKED, "provider returned HTTP 429")
 
 
@@ -111,7 +111,7 @@ def test_the_child_hands_the_row_deadline_and_returns_the_model_report(
 
     assert response == {
         "body": "<p>translated</p>",
-        "model_events": [["primary", "network"], ["fallback", None]],
+        "model_events": [["primary", 2, 1, "network"], ["fallback", 3, 0, None]],
     }
     assert isinstance(_RECEIVED["deadline"], float), "the row's deadline arrived"
 
@@ -129,5 +129,5 @@ def test_the_child_returns_the_report_on_the_failure_path_too(
     assert response == {
         "error_class": "blocked",
         "detail": "provider returned HTTP 429",
-        "model_events": [["primary", "blocked"]],
+        "model_events": [["primary", 1, 1, "blocked"]],
     }

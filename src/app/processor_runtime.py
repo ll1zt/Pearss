@@ -169,7 +169,7 @@ def run_processor(
     target_lang: str,
     deadline: float,
     cancelled: threading.Event,
-    report: list[tuple[str, str | None]] | None = None,
+    report: list[tuple[str, int, int, str | None]] | None = None,
 ) -> str:
     """Return artifact text, after the child has exited and been reaped.
 
@@ -177,9 +177,10 @@ def run_processor(
     closures/instances are refused rather than silently run without a deadline.
 
     `report`, when given, collects the processor's per-model outcome for this
-    row -- `(model, error_class)` for a model that failed, `(model, None)` for
-    one that answered. It is filled on the failure path too, which is the path
-    the caller's health registry most needs (ADR 0048).
+    row -- `(model, asked, failed, last_error_class | None)`: how many requests
+    the row sent that model and how many of them failed. It is filled on the
+    failure path too, which is the path the caller's health registry most needs
+    (ADR 0048).
     """
     if isinstance(processor, ModuleType):
         module, name = processor.__name__, ""
@@ -300,7 +301,9 @@ def run_processor(
                     stream.close()
 
 
-def _collect_events(response: Any, report: list[tuple[str, str | None]] | None) -> None:
+def _collect_events(
+    response: Any, report: list[tuple[str, int, int, str | None]] | None
+) -> None:
     """Append the child's per-model report to the caller's list.
 
     Defensive on shape: the child is ours, but a malformed entry must not turn
@@ -314,11 +317,13 @@ def _collect_events(response: Any, report: list[tuple[str, str | None]] | None) 
     for event in events:
         if (
             isinstance(event, list)
-            and len(event) == 2
+            and len(event) == 4
             and isinstance(event[0], str)
-            and (event[1] is None or isinstance(event[1], str))
+            and isinstance(event[1], int)
+            and isinstance(event[2], int)
+            and (event[3] is None or isinstance(event[3], str))
         ):
-            report.append((event[0], event[1]))
+            report.append((event[0], event[1], event[2], event[3]))
 
 
 def _child_main() -> None:

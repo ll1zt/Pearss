@@ -267,8 +267,10 @@ class CollectorSpec(Protocol):
 # - `MODEL_POLICY_KEY`: the worker's model-health policy for this row, e.g.
 #   `{"skip": ["m1"], "attempts_per_model": 2}` (ADR 0048).
 # - `MODEL_EVENTS_KEY`: the report channel back. The runtime creates the list; a
-#   processor appends `(model, error_class | None)` for each model it asked, and
-#   the runtime forwards it to the worker's health registry (ADR 0048).
+#   processor appends `(model, asked, failed, last_error_class | None)` for each
+#   model it asked -- how many requests this row sent it, and how many of those
+#   failed -- and the runtime forwards it to the worker's health registry
+#   (ADR 0048 / ADR 0056).
 DEADLINE_KEY: Final = "deadline"
 MODEL_POLICY_KEY: Final = "model_policy"
 MODEL_EVENTS_KEY: Final = "model_events"

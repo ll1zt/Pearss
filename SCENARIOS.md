@@ -115,6 +115,7 @@
 | AC-249..250 | #258 部分模型冷却时**链未走完**的失败不得是永久类：聚合在「有配置的模型未被本次询问」（策略跳过=冷却中，或行内预算已用尽）时取 `network`（瞬时、可重试），detail 以 `not tried: <模型列表>` 开头点名未尝试者；链**走完**（无跳过）时维持原判（全永久→`parse`，AC-137/139 不变） | issue #258 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-251..254 | #264 「无正文」的块/分段不进 provider 请求：判据是先剥掉 `[[n]]`/`[[/n]]` 标记再 `strip()` 非空（`_flatten_inline` 把 void 元素变成标记后，`<p><img/></p>` 的文本就是 `[[0]]`——truthy，被 `if unit_text:` 放行）；发送侧与重建侧用**同一谓词**，否则回复游标错位；被跳过的块保留原文、被跳过的分段原样回填（否则它代表的 void 元素会被删掉）。只有内联标记的块、只有空白的块、混排文档的对齐、超长块的纯标记分段 | issue #264 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
 | AC-255 | #265 provider 丢掉的 `img` 标记保留图片（追加到该块译文末尾，已保留的标记不重复追加）；`br`/`wbr`/`hr` 维持 ADR 0031 §47 的「丢弃」（AC-146 不变） | issue #265 / ADR 0054 | 已合并 | `src/plugins/processors/translate/test_processor.py` |
+| AC-256..258 | #268 模型降权按一行的失败**比例**：「一行里答对过」不再复位升级档。报告变为 `(model, asked, failed, last_error_class)`；行失败比例 ≥ `PEARSS_MODEL_FAILURE_RATIO`（默认 0.5）为降权行（连续降权冷却翻倍），低于阈值算抖动（不冷却不升级），该行无失败则复位 | issue #268 / ADR 0056 | 已合并 | `tests/unit/test_model_health.py`、`tests/integration/test_model_failover.py` |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

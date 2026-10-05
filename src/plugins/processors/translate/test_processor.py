@@ -1704,7 +1704,7 @@ THREE_BLOCKS = (
 def test_a_cooling_model_is_not_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC-227: the row's policy decides which models are candidates at all."""
     asked = _model_provider(monkeypatch, {})
-    events: list[tuple[str, str | None]] = []
+    events: list[tuple[str, int, int, str | None]] = []
 
     process(
         _ctx(
@@ -1717,7 +1717,7 @@ def test_a_cooling_model_is_not_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert asked == ["fallback"]
-    assert events == [("fallback", None)]
+    assert events == [("fallback", 1, 0, None)]
 
 
 def test_a_wholly_cooling_chain_asks_nothing_and_fails_transiently(
@@ -1725,7 +1725,7 @@ def test_a_wholly_cooling_chain_asks_nothing_and_fails_transiently(
 ) -> None:
     """AC-230: no candidate left is local backpressure, not a provider verdict."""
     asked = _model_provider(monkeypatch, {})
-    events: list[tuple[str, str | None]] = []
+    events: list[tuple[str, int, int, str | None]] = []
 
     with pytest.raises(ProcessorError) as excinfo:
         process(
@@ -1798,7 +1798,7 @@ def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
     _model_provider(
         monkeypatch, {"primary": (503, {"error": {"message": "overloaded"}})}
     )
-    events: list[tuple[str, str | None]] = []
+    events: list[tuple[str, int, int, str | None]] = []
 
     process(
         _ctx(
@@ -1810,7 +1810,7 @@ def test_the_report_names_the_model_that_failed_and_the_one_that_answered(
         store=lambda content: "cas://product",
     )
 
-    assert events == [("primary", "network"), ("fallback", None)]
+    assert events == [("primary", 2, 2, "network"), ("fallback", 2, 0, None)]
 
 
 def test_each_block_announces_itself_on_the_progress_logger(

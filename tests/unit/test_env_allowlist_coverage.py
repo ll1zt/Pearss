@@ -61,6 +61,7 @@ HOST_SIDE: frozenset[str] = frozenset(
         "PEARSS_MODEL_COOLDOWN_SECONDS",
         "PEARSS_MODEL_COOLDOWN_MAX_SECONDS",
         "PEARSS_MODEL_ATTEMPTS_PER_MODEL",
+        "PEARSS_MODEL_FAILURE_RATIO",
         # Where the plugin loader reads installed plugins from (ADR 0023);
         # host-side, never passed to a child -- a plugin has no business
         # knowing where other plugins live.

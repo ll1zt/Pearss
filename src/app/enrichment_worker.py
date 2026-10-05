@@ -431,7 +431,7 @@ def _execute_row(
             # One report per row: the processor's per-model outcome, which the
             # registry below folds in on every path -- a failed row is exactly
             # the row whose outcome it needs (ADR 0048).
-            report: list[tuple[str, str | None]] = []
+            report: list[tuple[str, int, int, str | None]] = []
             result = run_processor(
                 processor,
                 plugin_id=row.plugin_id,
