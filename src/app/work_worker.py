@@ -705,6 +705,13 @@ class WorkWorker:
                         error_class=ErrorClass.STRUCTURE_CHANGED,
                         detail=prepared,
                     )
+                    LOGGER.debug(
+                        "work %s unit %s -> %s (%s)",
+                        work.id,
+                        target,
+                        UnitOutcome.FAILED.value,
+                        prepared,
+                    )
                 session.commit()
                 self._close(session, work.id)
                 return len(work.targets)
@@ -732,6 +739,16 @@ class WorkWorker:
                 if result.after_commit is not None:
                     result.after_commit()
                 written += 1
+                # One line per ledger row, at DEBUG: the finish summary reports
+                # counts, and "which target failed and why" is per unit
+                # (issue #292).
+                LOGGER.debug(
+                    "work %s unit %s -> %s (%s)",
+                    work.id,
+                    target,
+                    result.outcome.value,
+                    result.detail or "-",
+                )
                 if result.stop:
                     for rest in work.targets[index + 1 :]:
                         if rest in done:
@@ -743,6 +760,13 @@ class WorkWorker:
                             outcome=UnitOutcome.REJECTED,
                             error_class=ErrorClass.BLOCKED,
                             detail=result.stop_detail,
+                        )
+                        LOGGER.debug(
+                            "work %s unit %s -> %s (%s)",
+                            work.id,
+                            rest,
+                            UnitOutcome.REJECTED.value,
+                            result.stop_detail or "-",
                         )
                     session.commit()
                     break
