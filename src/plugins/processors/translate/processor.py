@@ -293,23 +293,26 @@ def _next_candidate(models: list[str], index: int, plan: _RowPlan) -> str | None
 
 
 class _ModelReport:
-    """What each model did in this row, folded to one entry per model.
+    """What each model did in this row: asked, failed, last class (ADR 0056).
 
-    A model that answered anything is healthy for the row, so a later failure
-    of the same model must not overwrite that: the worker's registry resets on
-    "answered" and escalates on "failed", and the two facts are not equally
-    interesting.
+    Counted per model rather than folded to one boolean. A row where the model
+    answered every block and a row where it answered one block out of three are
+    different facts to the worker's registry: the second is a *partially* failing
+    model, and folding it to "answered" is what let a chronically half-broken
+    model sit at the head of the chain forever (#268).
     """
 
     def __init__(self) -> None:
-        self._entries: dict[str, str | None] = {}
+        self._asked: dict[str, int] = {}
+        self._failed: dict[str, int] = {}
+        self._last_error: dict[str, str] = {}
+
+    def asked(self, model: str) -> None:
+        self._asked[model] = self._asked.get(model, 0) + 1
 
     def failed(self, model: str, error_class: ErrorClass) -> None:
-        if self._entries.get(model, "failed") is not None:
-            self._entries[model] = error_class.value
-
-    def answered(self, model: str) -> None:
-        self._entries[model] = None
+        self._failed[model] = self._failed.get(model, 0) + 1
+        self._last_error[model] = error_class.value
 
     def flush(self, item_ctx: Any) -> None:
         """Hand the report to the runtime, which forwards it to the worker."""
@@ -319,7 +322,10 @@ class _ModelReport:
         if not isinstance(events, list):
             events = []
             item_ctx[MODEL_EVENTS_KEY] = events
-        events.extend(self._entries.items())
+        for model, asked in self._asked.items():
+            events.append(
+                (model, asked, self._failed.get(model, 0), self._last_error.get(model))
+            )
 
 
 class _RowPlan:
@@ -356,7 +362,12 @@ class _RowPlan:
             self.attempts[model] = max(self.attempts[model], self.budget or 1)
 
     def answered(self, model: str) -> None:
-        self.report.answered(model)
+        """Record that this row sent one request to `model` (ADR 0056).
+
+        Named for the ask, not the answer: a request that fails is still an ask,
+        and the worker's ratio is `failed / asked`.
+        """
+        self.report.asked(model)
 
     def flush(self) -> None:
         self.report.flush(self.item_ctx)
@@ -1304,6 +1315,7 @@ def _translate_one(
         )
         if deadline is not None and seconds is None:
             raise _out_of_budget(failures)
+        plan.answered(model)
         try:
             answer = _request_one(
                 source_text,
@@ -1326,7 +1338,6 @@ def _translate_one(
                     fallback,
                 )
             continue
-        plan.answered(model)
         return answer
     if not failures:  # pragma: no cover - an invariant, not a reachable path
         # Unreachable as the loop stands: a model is only exhausted by a

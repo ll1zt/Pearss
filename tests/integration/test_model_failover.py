@@ -4,8 +4,9 @@ The processor runs in a child spawned per row (ADR 0047), so a counter inside
 one cannot outlive it -- the same reason fetch pacing lives in the host
 (`app/fetch_pacing`). What that means for the contract: the row's policy
 travels *into* the child as data (`item_ctx["model_policy"]`), and the child
-reports per model what happened (`model_events`), because the worker is the
-only process that can remember a provider going bad.
+reports per model what happened (`model_events`: how many requests went to it
+and how many failed), because the worker is the only process that can remember
+a provider going bad.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -43,17 +44,28 @@ def _answer(model: str) -> tuple[int, dict[str, Any]]:
 
 @contextlib.contextmanager
 def _provider(
-    monkeypatch: pytest.MonkeyPatch, answers: dict[str, tuple[int, dict[str, Any]]]
+    monkeypatch: pytest.MonkeyPatch,
+    answers: dict[str, tuple[int, dict[str, Any]]]
+    | Callable[[str, int], tuple[int, dict[str, Any]]],
 ) -> Iterator[list[str]]:
-    """A chat-completions endpoint that records the model each call names."""
+    """A chat-completions endpoint that records the model each call names.
+
+    `answers` is a mapping of model to a fixed response, or a callable taking the
+    model and its 0-based call index for this endpoint -- the second form is how
+    a test makes one model fail only *some* of the calls it receives (#268).
+    """
     asked: list[str] = []
 
     class Provider(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             model = str(body["model"])
+            call_index = asked.count(model)
             asked.append(model)
-            status, payload = answers.get(model, _answer(model))
+            if callable(answers):
+                status, payload = answers(model, call_index)
+            else:
+                status, payload = answers.get(model, _answer(model))
             raw = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Length", str(len(raw)))
@@ -167,6 +179,53 @@ def test_a_failed_model_is_skipped_on_the_next_row(
     assert first_row == [PRIMARY, FALLBACK], "the fallback serves the first row"
     assert asked[len(first_row) :] == [FALLBACK], "the cooling model is not asked"
     assert [title for title, status, _ in _rows(factory) if status != "ready"] == []
+
+
+def _half_failing(model: str, call_index: int) -> tuple[int, dict[str, Any]]:
+    """PRIMARY fails every other call, so one row gets both kinds of ask.
+
+    Half-failing every row is the model #268 was about: the report folded to one
+    boolean, so "answered something" cleared the escalation on every row and the
+    model kept the head of the chain while failing half its asks.
+    """
+    if model == PRIMARY and call_index % 2 == 0:
+        return 503, {"error": {"message": "overloaded"}}
+    return _answer(model)
+
+
+def test_a_partially_failing_model_is_demoted_all_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-256: answering some blocks must not excuse failing the others.
+
+    The row's report carries counts now (ADR 0056), so the worker can tell "this
+    model answered one ask and failed another" from "this model answered
+    everything". PRIMARY fails two of its three asks in the row, the fallback
+    completes the document, and PRIMARY is cooling when the next row starts --
+    which the old one-boolean fold could not see, so it kept the head of the
+    chain and every row paid its timeout first (#268).
+    """
+    from app.model_health import health
+
+    with _provider(monkeypatch, _half_failing) as asked:
+        factory = _world(
+            tmp_path,
+            monkeypatch,
+            {"one": THREE_BLOCKS, "two": THREE_BLOCKS},
+        )
+        _sweep(factory)
+        first_row = list(asked)
+        cooling = health().snapshot()["skipped"]
+        _sweep(factory)
+
+    assert first_row.count(PRIMARY) == 3, first_row
+    assert first_row.count(FALLBACK) == 2, first_row
+    assert cooling == [PRIMARY], "a half-failing model is degraded, not healthy"
+    assert asked[len(first_row) :] == [FALLBACK, FALLBACK, FALLBACK]
+    assert [(title, status) for title, status, _ in _rows(factory)] == [
+        ("one", "ready"),
+        ("two", "ready"),
+    ], "the fallback still produced the whole document"
 
 
 def test_a_model_is_retried_at_most_twice_per_row_not_per_block(
