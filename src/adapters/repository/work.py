@@ -15,6 +15,7 @@ shape decisions it inherits:
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -28,6 +29,8 @@ from adapters.db_models import WorkUnit as WorkUnitRow
 from adapters.repository._shared import dumps, timestamp
 from core.enums import ErrorClass, UnitOutcome, WorkStatus
 from core.work import UnitRecord, WorkRecord, work_counts
+
+LOGGER = logging.getLogger(__name__)
 
 
 def create_work(
@@ -162,6 +165,15 @@ def claim_next_work(
     if (claimed.rowcount or 0) == 0:
         return None
     session.flush()
+    # One line per claim, event-driven: an idle worker writes nothing, so
+    # without this "is the queue moving?" is answered only by the finish line
+    # (issue #296).
+    LOGGER.info(
+        "claimed work %s (kind=%s, %d target(s))",
+        row.id,
+        row.kind,
+        len(json.loads(row.targets_json)),
+    )
     return work_by_id(session, row.id)
 
 

@@ -15,6 +15,7 @@ item is promoted (ADR 0035 decision 4).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,6 +27,8 @@ from adapters.db_models import Item as ItemRow
 from adapters.repository._shared import visible_item_rows
 from core.language import prose_text
 from core.text_search import phrase_query, tokenize
+
+LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "count_matches",
@@ -62,6 +65,7 @@ def index_item(session: Session, *, item_id: str, title: str, body: str) -> None
             "body_tok": tokenize(prose_text(body)),
         },
     )
+    LOGGER.debug("indexed item %s", item_id)
 
 
 def deindex_items(session: Session, item_ids: Sequence[str]) -> None:
@@ -81,6 +85,7 @@ def deindex_items(session: Session, item_ids: Sequence[str]) -> None:
         ),
         {"ids": list(item_ids)},
     )
+    LOGGER.debug("deindexed %d item(s)", len(item_ids))
 
 
 def index_missing(session: Session, *, limit: int = 500) -> int:
