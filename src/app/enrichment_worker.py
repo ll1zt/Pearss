@@ -730,8 +730,8 @@ class EnrichmentWorker:
             await self._task
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            LOGGER.error("enrichment task failed (%s)", type(exc).__name__)
+        except Exception:
+            LOGGER.exception("enrichment task failed")
         self._task = None
         LOGGER.info("enrichment worker stopped")
 

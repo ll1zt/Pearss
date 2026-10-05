@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import sqlite3
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -252,11 +253,12 @@ async def test_user_stop_drains_a_task_that_died_of_an_error(
         f"{[r.getMessage() for r in failures]}"
     )
     reported = failures[0].getMessage()
-    assert reported == f"{worker_kind} task failed (RuntimeError)", reported
-    # The exception's own message and traceback must not reach the log: this
-    # line exists to report that shutdown survived, not to dump the failure.
-    assert "boom" not in reported, reported
-    assert failures[0].exc_info is None, (
-        "the failure log carries exc_info, so the traceback is written out; "
-        "only the exception's type name belongs here"
+    assert reported == f"{worker_kind} task failed", reported
+    # The traceback belongs in the log now (issue #291): the old line named the
+    # loop that died and nothing else, so the exception's message and its call
+    # site -- the only things that explain why -- never reached the journal.
+    assert failures[0].exc_info is not None, (
+        "the failure log carries no exc_info, so the traceback is lost"
     )
+    rendered = "".join(traceback.format_exception(*failures[0].exc_info))
+    assert "boom" in rendered, rendered
