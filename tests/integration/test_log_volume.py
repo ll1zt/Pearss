@@ -4,6 +4,8 @@ AC-290..292: the INFO volume does not grow with idle polling or with batch size
 (issue #297's rule: INFO/WARNING is event-driven and O(1) per job or failure).
 AC-299: the same rule on the chain path -- an item the chain itself drops, because
 its text is already in the target language, is not a per-item event either.
+AC-300: the same rule for a source that keeps failing -- "still in backoff" is one
+state, not one event per tick.
 """
 
 from __future__ import annotations
@@ -237,3 +239,42 @@ def test_a_dropped_translation_spec_is_not_an_info_line_per_item(
     # Moved down a level, not deleted: the reason is still in the journal for
     # anyone diagnosing "why was this not translated?".
     assert all(dropped_per_run), "the reason a spec was dropped must still be logged"
+
+
+def _failing_client() -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(403)))
+
+
+def test_a_source_stuck_in_backoff_is_not_a_line_per_tick(
+    session_factory: sessionmaker[Session], caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-300: "still failing" is one state, not one event per tick.
+
+    A feed answering 403 is held in backoff and re-evaluated on every tick. The
+    decision does not change between those ticks, so a line per tick is 1440
+    identical rows a day for one broken source -- the flood issue #297's rule
+    exists to stop, on the one path that still had it.
+    """
+    with session_factory() as session:
+        _add_source(
+            session,
+            source_id="src-failing-log",
+            policy={"type": "fixed", "interval": "60s"},
+        )
+
+    client = _failing_client()
+    try:
+        with caplog.at_level(logging.INFO, logger="app.scheduler"):
+            for index in range(10):
+                run_tick(
+                    session_factory,
+                    client=client,
+                    now=NOW + timedelta(seconds=30 * index),
+                )
+
+        failing = [
+            line for line in _info_records(caplog, "app.scheduler") if "failing" in line
+        ]
+        assert len(failing) == 1, failing
+    finally:
+        client.close()
