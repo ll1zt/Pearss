@@ -39,8 +39,15 @@ poll / tick / item 增长。周期性、空转、成功但无事件的路径一�
 | DEBUG | 空转 tick、空 work sweep、每条 fetch、每条 draft 的存储结果、每次 dedupe 决策、索引写入 |
 
 高频路径（外部抓取、请求）如需重复告警，用 `adapters.log_limits.rate_limited_logger`：
-同一 key 在窗口内只放行一行，窗口滚动时补一行 `suppressed N`（级别与原行一致，
-DEBUG 路径的汇总不会升到 INFO）。
+同一 key 在窗口内只放行一行，窗口滚动后**下一次该 key 说话时**补一行 `suppressed N`
+（级别与原行一致，DEBUG 路径的汇总不会升到 INFO）。目前的生产调用点：
+
+- `app/scheduler.py`：退避中的失败源，每源每小时最多一行（issue #313）；
+- `app/hardening.py`：早认证拒绝，按「拒绝种类 + method/principal」每分钟最多一行（issue #315）。
+
+注意汇总行是**惰性**的：窗口滚动后要等该 key 再次说话（或显式 `flush()`）才补记。
+进程在窗口内退出时，尚未发出的 suppressed 计数会丢（未在 shutdown 接 `flush()`，
+因为限速器既有模块级实例也有每 app 实例，没有单一收口；记录为已知限制）。
 
 查看与保留：
 

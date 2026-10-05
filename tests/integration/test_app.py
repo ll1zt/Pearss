@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator, Iterator
@@ -878,3 +879,35 @@ async def test_unauthenticated_requests_are_refused_before_body_parsing(
 
     # The documented envelope shape, not Starlette's default.
     assert "suggestion" in bad_token_bad_body.json()["error"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_an_unauthenticated_flood_is_not_an_info_line_per_request(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-302: an unauthenticated probe says so once per window, not per request.
+
+    The early-auth refusal is an INFO line per request, and the caller that
+    provokes it is exactly the one `AuthFailureRateLimit` refuses to count (a
+    probe is not a guess, issue #18) -- so nothing bounded it. The refusal is
+    also the *only* record of that traffic: the middleware sits outside the
+    access log (issue #317), so demoting it to DEBUG would make an
+    unauthenticated flood invisible rather than quiet.
+    """
+    transport = httpx.ASGITransport(app=app)
+
+    with caplog.at_level(logging.INFO, logger="app.hardening"):
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as anonymous:
+            for _ in range(10):
+                refused = await anonymous.get("/v1/sources")
+                assert refused.status_code == 401, refused.text
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.hardening" and "refused" in record.getMessage()
+    ]
+    assert len(lines) == 1, lines
