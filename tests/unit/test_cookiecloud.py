@@ -1,4 +1,14 @@
-"""Tests for the CookieCloud adapter: config, cache, and secret hygiene.
+"""Scenario register (normative source: SCENARIOS.md, AC-314..317; issue #338).
+
+AC-314: the request asks the Go server's `/export` endpoint for `format=raw`
+        with an admin bearer token, and the uuid stays percent-encoded.
+AC-315: the raw JSON array becomes a `Cookie:` header, preserving the order the
+        server sent, and a duplicated name keeps its most specific path.
+AC-316: expired cookies and `secure` cookies aimed at a plaintext target are
+        dropped; a session cookie without an expiry is kept.
+AC-317: an empty array, an all-expired response and a body that is not a JSON
+        array all raise rather than yielding an empty header; a deployment that
+        only sets the retired master password has not enabled the path.
 
 Every case runs against httpx's MockTransport. The synthetic values below are
 marked as such and exist so a test can assert where they land -- and, more
@@ -15,18 +25,48 @@ import pytest
 
 from adapters import cookiecloud as cc
 
+pytestmark = pytest.mark.unit
+
 # Synthetic. Never real, and never must appear in a log line or error detail.
-FAKE_TOKEN = "synthetic-master-password"
+FAKE_TOKEN = "synthetic-admin-token"
 FAKE_UUID = "synthetic-uuid-0001"
-FAKE_COOKIE = "auth_token=synthetic-auth; ct0=synthetic-csrf; other=keep"
 BASE = "http://127.0.0.1:4000"
+
+
+def raw(*cookies: dict[str, object]) -> str:
+    """A `format=raw` body: the flat JSON array the server renders."""
+    return json.dumps(list(cookies))
+
+
+def a_cookie(name: str, value: str, **overrides: object) -> dict[str, object]:
+    """One element of a `format=raw` response, shaped like the server's."""
+    element: dict[str, object] = {
+        "name": name,
+        "value": value,
+        "domain": ".x.com",
+        "path": "/",
+        "secure": False,
+        "httpOnly": True,
+        "hostOnly": False,
+    }
+    element.update(overrides)
+    return element
+
+
+FAKE_COOKIES: tuple[dict[str, object], ...] = (
+    a_cookie("auth_token", "synthetic-auth"),
+    a_cookie("ct0", "synthetic-csrf"),
+    a_cookie("other", "keep"),
+)
+FAKE_BODY = raw(*FAKE_COOKIES)
+FAKE_COOKIE = "auth_token=synthetic-auth; ct0=synthetic-csrf; other=keep"
 
 
 def config(**overrides: object) -> cc.Config:
     values: dict[str, object] = {
         "base_url": BASE,
         "uuid": FAKE_UUID,
-        "token": FAKE_TOKEN,
+        "admin_token": FAKE_TOKEN,
         "domain": "x.com",
         "cache_seconds": 300.0,
     }
@@ -48,7 +88,7 @@ def clear_cache() -> Callable[[], None]:
 def env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     monkeypatch.setenv(cc.BASE_URL_ENV, BASE)
     monkeypatch.setenv(cc.UUID_ENV, FAKE_UUID)
-    monkeypatch.setenv(cc.TOKEN_ENV, FAKE_TOKEN)
+    monkeypatch.setenv(cc.ADMIN_TOKEN_ENV, FAKE_TOKEN)
     monkeypatch.delenv(cc.CACHE_TTL_ENV, raising=False)
     return monkeypatch
 
@@ -62,23 +102,32 @@ def client_with(
 def fetch_with(
     handler: Callable[[httpx.Request], httpx.Response],
     made: cc.Config,
+    *,
+    secure_ok: bool = True,
     **kwargs: object,
 ) -> str:
     """Fetch through a mocked transport, asserting the call succeeds."""
     with client_with(handler) as client:
-        return cc.fetch_cookie_header(client, made, **kwargs)  # type: ignore[arg-type]
+        return cc.fetch_cookie_header(
+            client,
+            made,
+            secure_ok=secure_ok,
+            **kwargs,  # type: ignore[arg-type]
+        )
 
 
 def fetch_raises(
     handler: Callable[[httpx.Request], httpx.Response],
     made: cc.Config,
+    *,
+    secure_ok: bool = True,
 ) -> str:
     """Fetch through a mocked transport, returning the error message."""
     with (
         client_with(handler) as client,
         pytest.raises(cc.CookieCloudError) as excinfo,
     ):
-        cc.fetch_cookie_header(client, made)
+        cc.fetch_cookie_header(client, made, secure_ok=secure_ok)
     return str(excinfo.value)
 
 
@@ -87,7 +136,6 @@ def fetch_raises(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_absent_configuration_is_none_rather_than_an_error() -> None:
     """A half-configured deployment has not enabled this path.
 
@@ -97,15 +145,28 @@ def test_absent_configuration_is_none_rather_than_an_error() -> None:
     assert made is None or not made.base_url
 
 
-@pytest.mark.unit
 def test_partial_configuration_is_ignored(env: pytest.MonkeyPatch) -> None:
     monkeypatch = env
-    monkeypatch.delenv(cc.TOKEN_ENV)
+    monkeypatch.delenv(cc.ADMIN_TOKEN_ENV)
     assert cc.config_from_env(domain="x.com") is None
-    assert cc.TOKEN_ENV in cc.missing_config_keys()
+    assert cc.ADMIN_TOKEN_ENV in cc.missing_config_keys()
 
 
-@pytest.mark.unit
+def test_the_retired_master_password_does_not_enable_the_path(
+    env: pytest.MonkeyPatch,
+) -> None:
+    """The old credential name is not an alias: two sources would be two truths.
+
+    An operator who upgrades the code but not the secret must land on the
+    "not configured" path (a skip), not on a request that carries a token the
+    new server rejects.
+    """
+    env.delenv(cc.ADMIN_TOKEN_ENV)
+    env.setenv("PEARSS_COOKIECLOUD_TOKEN", "synthetic-master-password")
+    assert cc.config_from_env(domain="x.com") is None
+    assert cc.ADMIN_TOKEN_ENV in cc.missing_config_keys()
+
+
 def test_full_configuration_is_read(env: pytest.MonkeyPatch) -> None:
     made = cc.config_from_env(domain="x.com")
     assert made is not None
@@ -114,14 +175,12 @@ def test_full_configuration_is_read(env: pytest.MonkeyPatch) -> None:
     assert cc.enabled()
 
 
-@pytest.mark.unit
 def test_trailing_slash_does_not_double_up_in_the_url(env: pytest.MonkeyPatch) -> None:
     env.setenv(cc.BASE_URL_ENV, BASE + "/")
     made = cc.config_from_env(domain="x.com")
     assert made is not None and made.base_url == BASE
 
 
-@pytest.mark.unit
 def test_a_nonsense_ttl_falls_back_rather_than_crashing(
     env: pytest.MonkeyPatch,
 ) -> None:
@@ -130,7 +189,6 @@ def test_a_nonsense_ttl_falls_back_rather_than_crashing(
     assert made is not None and made.cache_seconds == cc.DEFAULT_CACHE_SECONDS
 
 
-@pytest.mark.unit
 def test_the_domain_is_required_rather_than_defaulted(
     env: pytest.MonkeyPatch,
 ) -> None:
@@ -145,7 +203,6 @@ def test_the_domain_is_required_rather_than_defaulted(
         cc.config_from_env()  # type: ignore[call-arg]
 
 
-@pytest.mark.unit
 def test_an_empty_domain_is_rejected_rather_than_exporting_everything(
     env: pytest.MonkeyPatch,
 ) -> None:
@@ -157,7 +214,6 @@ def test_an_empty_domain_is_rejected_rather_than_exporting_everything(
         cc.config_from_env(domain="   ")
 
 
-@pytest.mark.unit
 def test_two_collectors_get_their_own_cookies_from_one_server(
     env: pytest.MonkeyPatch,
 ) -> None:
@@ -166,27 +222,25 @@ def test_two_collectors_get_their_own_cookies_from_one_server(
     X and a hypothetical Zhihu collector ask the same server and must each
     receive only their own domain's cookies, with independent cache entries.
     """
-    asked: list[str] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         domain = request.url.params["domain"]
-        asked.append(domain)
-        return httpx.Response(200, text=f"session=for-{domain}")
+        return httpx.Response(
+            200, text=raw(a_cookie(f"session_{domain}", "for-" + domain))
+        )
 
     with client_with(capture) as client:
         x = cc.fetch_cookie_header(
-            client, cc.config_from_env(domain="x.com") or config()
+            client, cc.config_from_env(domain="x.com") or config(), secure_ok=True
         )
         zhihu = cc.fetch_cookie_header(
-            client, cc.config_from_env(domain="zhihu.com") or config()
+            client, cc.config_from_env(domain="zhihu.com") or config(), secure_ok=True
         )
 
-    assert x == "session=for-x.com"
-    assert zhihu == "session=for-zhihu.com"
-    assert asked == ["x.com", "zhihu.com"]
+    assert x == "session_x.com=for-x.com"
+    assert zhihu == "session_zhihu.com=for-zhihu.com"
 
 
-@pytest.mark.unit
 def test_a_collector_declares_its_own_domain() -> None:
     """The domain lives with the collector, not in the deployment config."""
     from plugins.collectors.twitter import client as x_client
@@ -195,87 +249,189 @@ def test_a_collector_declares_its_own_domain() -> None:
 
 
 # --------------------------------------------------------------------------
-# Request shape
+# Request shape (AC-314)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_request_is_scoped_to_one_domain() -> None:
+def test_the_request_asks_the_export_endpoint_for_raw_json() -> None:
     seen: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, text=FAKE_COOKIE)
+        return httpx.Response(200, text=FAKE_BODY)
 
     with client_with(capture) as client:
-        cc.fetch_cookie_header(client, config(domain="example.org"))
+        cc.fetch_cookie_header(client, config(domain="example.org"), secure_ok=True)
 
     request = seen[0]
-    assert request.url.path == f"/get/{FAKE_UUID}"
-    assert request.url.params["format"] == "header"
+    assert request.url.path == f"/export/{FAKE_UUID}"
+    assert request.url.params["format"] == "raw"
     assert request.url.params["domain"] == "example.org"
     assert request.headers["authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert request.headers["accept"] == "application/json"
 
 
-@pytest.mark.unit
 def test_the_uuid_is_url_encoded() -> None:
     """A uuid with a slash would otherwise address a different record.
 
     httpx does not escape a "/" in an already-assembled URL, so the adapter
-    has to: without encoding, "a/b" reaches /get/a/b -- a different path, and
+    has to: without encoding, "a/b" reaches /export/a/b -- a different path, and
     a silent wrong-record read rather than an error.
     """
     seen: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, text=FAKE_COOKIE)
+        return httpx.Response(200, text=FAKE_BODY)
 
     with client_with(capture) as client:
-        cc.fetch_cookie_header(client, config(uuid="a/b"))
+        cc.fetch_cookie_header(client, config(uuid="a/b"), secure_ok=True)
 
-    assert "/get/a%2Fb" in str(seen[0].url)
+    assert "/export/a%2Fb" in str(seen[0].url)
 
 
 # --------------------------------------------------------------------------
-# Response shapes
+# Response shape (AC-315)
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_a_bare_header_is_returned_as_is() -> None:
-    assert (
-        fetch_with(lambda r: httpx.Response(200, text=FAKE_COOKIE), config())
-        == FAKE_COOKIE
+def test_the_raw_cookie_array_becomes_a_cookie_header() -> None:
+    assert fetch_with(lambda r: httpx.Response(200, text=FAKE_BODY), config()) == (
+        FAKE_COOKIE
     )
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("key", ["cookie", "header", "cookies"])
-def test_json_wrapped_variants_are_unwrapped(key: str) -> None:
-    body = json.dumps({key: FAKE_COOKIE})
-    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == FAKE_COOKIE
+def test_cookies_keep_the_order_the_server_sent() -> None:
+    """The server already sorted them (by domain, then name); do not reorder.
+
+    Re-sorting here would be a second ordering rule to keep in sync, and the
+    header's order is visible to the origin.
+    """
+    body = raw(
+        a_cookie("b", "2"),
+        a_cookie("a", "1"),
+        a_cookie("c", "3"),
+    )
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == (
+        "b=2; a=1; c=3"
+    )
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "body",
-    ["", "   ", "no equals sign here", json.dumps({"unexpected": "shape"})],
-)
-def test_unusable_bodies_raise_rather_than_returning_empty(
-    body: str,
+def test_the_most_specific_path_wins_for_a_duplicated_name() -> None:
+    """A browser sends the narrowest matching scope, so that value is the one.
+
+    The adapter cannot see the request path, so "narrowest" is the closest
+    stand-in; on equal paths the later entry wins, matching `parse_cookie_header`.
+    """
+    body = raw(
+        a_cookie("ct0", "broad", path="/"),
+        a_cookie("ct0", "narrow", path="/api/v4"),
+        a_cookie("ct0", "same", path="/other"),
+    )
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == (
+        "ct0=narrow"
+    )
+
+
+def test_a_session_cookie_with_an_empty_value_is_still_sent() -> None:
+    """`name=` is a real cookie; dropping it would look like "no session"."""
+    body = raw(a_cookie("empty", ""), a_cookie("ct0", "x"))
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == (
+        "empty=; ct0=x"
+    )
+
+
+def test_an_element_that_is_not_a_cookie_is_skipped_not_fatal() -> None:
+    """The server owns the shape; one odd element must not poison the header."""
+    body = json.dumps([{"not": "a cookie"}, a_cookie("ct0", "x"), "nonsense"])
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == "ct0=x"
+
+
+def test_a_cookie_that_would_break_the_header_is_dropped() -> None:
+    """`raw` does not escape, so a `;` in a value would inject another pair.
+
+    No valid cookie value carries `;` or a newline (RFC 6265 cookie-octet), so
+    dropping it is safer than writing a header that says something else.
+    """
+    body = raw(a_cookie("ct0", "ok"), a_cookie("evil", "x; auth_token=stolen"))
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == "ct0=ok"
+
+
+# --------------------------------------------------------------------------
+# Expiry and transport security (AC-316)
+# --------------------------------------------------------------------------
+
+
+def test_an_expired_cookie_is_dropped() -> None:
+    body = raw(
+        a_cookie("stale", "old", expirationDate=1.0),
+        a_cookie("fresh", "new", expirationDate=4102444800.0),
+    )
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == "fresh=new"
+
+
+def test_a_cookie_without_an_expiry_is_a_session_cookie_and_is_kept() -> None:
+    body = raw(a_cookie("session", "x"))
+    assert fetch_with(lambda r: httpx.Response(200, text=body), config()) == (
+        "session=x"
+    )
+
+
+def test_a_secure_cookie_is_dropped_for_a_plaintext_target() -> None:
+    """A browser would not send a `secure` cookie over http://."""
+    body = raw(a_cookie("s", "secure", secure=True), a_cookie("p", "plain"))
+    assert fetch_with(
+        lambda r: httpx.Response(200, text=body), config(), secure_ok=False
+    ) == ("p=plain")
+
+
+def test_a_secure_cookie_is_kept_for_an_https_target() -> None:
+    body = raw(a_cookie("s", "secure", secure=True), a_cookie("p", "plain"))
+    assert fetch_with(
+        lambda r: httpx.Response(200, text=body), config(), secure_ok=True
+    ) == ("s=secure; p=plain")
+
+
+def test_a_cookie_that_expires_while_cached_is_not_sent(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty cookie would look like "the site has no session"."""
+    """Expiry is evaluated per call, so a warm cache cannot outlive the cookie."""
+    import time as time_module
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(time_module, "time", lambda: clock["now"])
+
+    body = raw(a_cookie("ct0", "x", expirationDate=1500.0))
+    with client_with(lambda r: httpx.Response(200, text=body)) as client:
+        assert cc.fetch_cookie_header(client, config(), secure_ok=True) == "ct0=x"
+        clock["now"] = 2000.0
+        with pytest.raises(cc.CookieCloudError):
+            cc.fetch_cookie_header(client, config(), secure_ok=True)
+
+
+# --------------------------------------------------------------------------
+# Empty and malformed bodies (AC-317)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body", ["", "   ", "not json", json.dumps({"a": 1}), "[]"])
+def test_unusable_bodies_raise_rather_than_returning_empty(body: str) -> None:
+    """An empty header would look like "the site has no session"."""
     fetch_raises(lambda r: httpx.Response(200, text=body), config())
 
 
-@pytest.mark.unit
+def test_a_response_whose_cookies_all_expired_raises() -> None:
+    body = raw(a_cookie("stale", "old", expirationDate=1.0))
+    message = fetch_raises(lambda r: httpx.Response(200, text=body), config())
+    assert "expired" in message.lower()
+
+
 def test_an_oversized_response_is_refused_by_size() -> None:
     """Issue #85: this fetch is capped like every other one.
 
     CookieCloud answers with a small JSON document, so anything larger is a
     mistake or a bomb -- and the message has to say which, because "too big" is
-    a different fix from "rejected the password".
+    a different fix from "rejected the token".
     """
     message = fetch_raises(
         lambda r: httpx.Response(200, content=b"x" * (cc.MAX_COOKIE_BYTES + 1)),
@@ -289,7 +445,6 @@ def test_an_oversized_response_is_refused_by_size() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 @pytest.mark.parametrize(
     ("status", "needle"),
     [
@@ -309,9 +464,8 @@ def test_server_errors_say_what_to_do(status: int, needle: str) -> None:
     assert needle in message.lower()
 
 
-@pytest.mark.unit
 def test_a_transport_failure_does_not_echo_the_url() -> None:
-    """The URL carries the uuid; uuid + master password is a full credential."""
+    """The URL carries the uuid; uuid + admin token is a full credential."""
 
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused at secret-host.internal", request=request)
@@ -326,23 +480,21 @@ def test_a_transport_failure_does_not_echo_the_url() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_a_fresh_cache_avoids_a_second_request() -> None:
     calls: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return httpx.Response(200, text=FAKE_COOKIE)
+        return httpx.Response(200, text=FAKE_BODY)
 
     with client_with(capture) as client:
-        first = cc.fetch_cookie_header(client, config())
-        second = cc.fetch_cookie_header(client, config())
+        first = cc.fetch_cookie_header(client, config(), secure_ok=True)
+        second = cc.fetch_cookie_header(client, config(), secure_ok=True)
 
     assert first == second == FAKE_COOKIE
     assert len(calls) == 1
 
 
-@pytest.mark.unit
 def test_domains_do_not_share_a_cache_entry() -> None:
     """Serving x.com's cookies for a request about another site is a leak."""
     calls: list[str] = []
@@ -350,40 +502,41 @@ def test_domains_do_not_share_a_cache_entry() -> None:
     def capture(request: httpx.Request) -> httpx.Response:
         domain = request.url.params["domain"]
         calls.append(domain)
-        return httpx.Response(200, text=f"site={domain}")
+        return httpx.Response(200, text=raw(a_cookie("site", domain)))
 
     with client_with(capture) as client:
-        x = cc.fetch_cookie_header(client, config(domain="x.com"))
-        other = cc.fetch_cookie_header(client, config(domain="example.org"))
+        x = cc.fetch_cookie_header(client, config(domain="x.com"), secure_ok=True)
+        other = cc.fetch_cookie_header(
+            client, config(domain="example.org"), secure_ok=True
+        )
 
     assert x == "site=x.com" and other == "site=example.org"
     assert calls == ["x.com", "example.org"]
 
 
-@pytest.mark.unit
 def test_force_bypasses_the_cache() -> None:
     """This is what a rejected session uses to pick up a rotated cookie."""
     calls: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return httpx.Response(200, text=f"ct0=v{len(calls)}")
+        return httpx.Response(200, text=raw(a_cookie("ct0", f"v{len(calls)}")))
 
     with client_with(capture) as client:
-        assert cc.fetch_cookie_header(client, config()) == "ct0=v1"
-        assert cc.fetch_cookie_header(client, config()) == "ct0=v1"
-        assert cc.fetch_cookie_header(client, config(), force=True) == "ct0=v2"
+        assert cc.fetch_cookie_header(client, config(), secure_ok=True) == "ct0=v1"
+        assert cc.fetch_cookie_header(client, config(), secure_ok=True) == "ct0=v1"
+        assert (
+            cc.fetch_cookie_header(client, config(), secure_ok=True, force=True)
+            == "ct0=v2"
+        )
 
 
-@pytest.mark.unit
-def test_an_expired_entry_is_refetched(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_expired_entry_is_refetched(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return httpx.Response(200, text=f"ct0=v{len(calls)}")
+        return httpx.Response(200, text=raw(a_cookie("ct0", f"v{len(calls)}")))
 
     import time as time_module
 
@@ -391,28 +544,33 @@ def test_an_expired_entry_is_refetched(
     monkeypatch.setattr(time_module, "monotonic", lambda: clock["now"])
 
     with client_with(capture) as client:
-        assert cc.fetch_cookie_header(client, config(cache_seconds=60.0)) == "ct0=v1"
+        assert (
+            cc.fetch_cookie_header(client, config(cache_seconds=60.0), secure_ok=True)
+            == "ct0=v1"
+        )
         clock["now"] += 61.0
-        assert cc.fetch_cookie_header(client, config(cache_seconds=60.0)) == "ct0=v2"
+        assert (
+            cc.fetch_cookie_header(client, config(cache_seconds=60.0), secure_ok=True)
+            == "ct0=v2"
+        )
 
 
-@pytest.mark.unit
 def test_invalidate_targets_one_deployment_only() -> None:
     calls: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return httpx.Response(200, text=FAKE_COOKIE)
+        return httpx.Response(200, text=FAKE_BODY)
 
     one = config(uuid="uuid-one")
     two = config(uuid="uuid-two")
     with client_with(capture) as client:
-        cc.fetch_cookie_header(client, one)
-        cc.fetch_cookie_header(client, two)
+        cc.fetch_cookie_header(client, one, secure_ok=True)
+        cc.fetch_cookie_header(client, two, secure_ok=True)
         assert len(calls) == 2
         cc.invalidate(one)
-        cc.fetch_cookie_header(client, one)
-        cc.fetch_cookie_header(client, two)
+        cc.fetch_cookie_header(client, one, secure_ok=True)
+        cc.fetch_cookie_header(client, two, secure_ok=True)
 
     assert len(calls) == 3, "only the invalidated deployment should refetch"
 
@@ -422,29 +580,27 @@ def test_invalidate_targets_one_deployment_only() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_plaintext_non_loopback_warns_without_leaking_the_token(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level("WARNING"):
         fetch_with(
-            lambda r: httpx.Response(200, text=FAKE_COOKIE),
+            lambda r: httpx.Response(200, text=FAKE_BODY),
             config(base_url="http://192.168.1.10:4000"),
         )
 
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert warnings, "a plaintext master-secret hop should be visible"
+    assert warnings, "a plaintext admin-token hop should be visible"
     joined = " ".join(r.getMessage() for r in warnings)
     assert FAKE_TOKEN not in joined
-    assert "master" in joined.lower()
+    assert "token" in joined.lower()
 
 
-@pytest.mark.unit
 def test_loopback_and_https_do_not_warn(caplog: pytest.LogCaptureFixture) -> None:
     for base in (BASE, "https://cookies.example.org"):
         with caplog.at_level("WARNING"):
             fetch_with(
-                lambda r: httpx.Response(200, text=FAKE_COOKIE), config(base_url=base)
+                lambda r: httpx.Response(200, text=FAKE_BODY), config(base_url=base)
             )
         assert not [r for r in caplog.records if r.levelname == "WARNING"], base
 
@@ -454,7 +610,6 @@ def test_loopback_and_https_do_not_warn(caplog: pytest.LogCaptureFixture) -> Non
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.unit
 def test_cookie_header_parses_and_keeps_values_intact() -> None:
     pairs = cc.parse_cookie_header(FAKE_COOKIE)
     assert pairs["auth_token"] == "synthetic-auth"
@@ -462,7 +617,6 @@ def test_cookie_header_parses_and_keeps_values_intact() -> None:
     assert pairs["other"] == "keep"
 
 
-@pytest.mark.unit
 def test_a_value_containing_an_equals_sign_survives() -> None:
     """Cookie values are frequently base64 and end in `=`."""
     pairs = cc.parse_cookie_header("ct0=YWJjMTIz==; auth_token=x")
@@ -470,14 +624,12 @@ def test_a_value_containing_an_equals_sign_survives() -> None:
     assert pairs["auth_token"] == "x"
 
 
-@pytest.mark.unit
 def test_a_duplicated_name_takes_the_last_one() -> None:
     """A browser sends the later, more specific scope last."""
     pairs = cc.parse_cookie_header("ct0=old; ct0=new")
     assert pairs["ct0"] == "new"
 
 
-@pytest.mark.unit
 def test_malformed_chunks_are_ignored_not_fatal() -> None:
     pairs = cc.parse_cookie_header("novalue; ; ct0=x; =emptname")
     assert pairs == {"ct0": "x"}

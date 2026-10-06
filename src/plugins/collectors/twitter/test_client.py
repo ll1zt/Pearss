@@ -106,12 +106,23 @@ def cookiecloud_env(monkeypatch: pytest.MonkeyPatch, header: str) -> None:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
     monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
-    monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
+    monkeypatch.setenv(cc.ADMIN_TOKEN_ENV, "synthetic-admin-token")
     cc.invalidate()
 
+    # The server answers `format=raw`: a flat JSON array of cookie objects, not
+    # a ready-made header (that format escapes `=`, which corrupts base64
+    # values). The caller's `name=value; ...` shape is converted here.
+    body = json.dumps(
+        [
+            {"name": name.strip(), "value": value.strip()}
+            for name, _, value in (chunk.partition("=") for chunk in header.split(";"))
+            if name.strip()
+        ]
+    )
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.startswith("/get/"):
-            return httpx.Response(200, text=header)
+        if request.url.path.startswith("/export/"):
+            return httpx.Response(200, text=body)
         return httpx.Response(404)
 
     monkeypatch.setattr(httpx, "Client", lambda *a, **k: client_with(handler))
@@ -174,7 +185,7 @@ def test_no_configuration_at_all_lists_both_options(
         x.CT0_ENV,
         cc.BASE_URL_ENV,
         cc.UUID_ENV,
-        cc.TOKEN_ENV,
+        cc.ADMIN_TOKEN_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(x.CredentialError) as excinfo:
@@ -208,7 +219,7 @@ def test_refreshing_a_pinned_credential_says_so(
     """Re-reading a pinned value would loop; the operator has to act."""
     from adapters import cookiecloud as cc
 
-    for key in (cc.BASE_URL_ENV, cc.UUID_ENV, cc.TOKEN_ENV):
+    for key in (cc.BASE_URL_ENV, cc.UUID_ENV, cc.ADMIN_TOKEN_ENV):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(x.AUTH_TOKEN_ENV, FAKE_AUTH)
     monkeypatch.setenv(x.CT0_ENV, FAKE_CT0)

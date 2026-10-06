@@ -17,14 +17,14 @@ def test_a_child_sees_its_own_credentials_and_the_shared_cookiecloud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PEARSS_ZHIHU_COOKIES", "d_c0=x")
-    monkeypatch.setenv("PEARSS_COOKIECLOUD_TOKEN", "t")
+    monkeypatch.setenv("PEARSS_COOKIECLOUD_ADMIN_TOKEN", "t")
     monkeypatch.setenv("PEARSS_X_AUTH_TOKEN", "x-token")
     monkeypatch.setenv("PEARSS_API_TOKEN", "host-write-token")
 
     env = child_environment("zhihu")
 
     assert env["PEARSS_ZHIHU_COOKIES"] == "d_c0=x"
-    assert env["PEARSS_COOKIECLOUD_TOKEN"] == "t"
+    assert env["PEARSS_COOKIECLOUD_ADMIN_TOKEN"] == "t"
     assert "PEARSS_X_AUTH_TOKEN" not in env, "another collector's session leaked"
     assert "PEARSS_API_TOKEN" not in env, "a host secret leaked"
 
