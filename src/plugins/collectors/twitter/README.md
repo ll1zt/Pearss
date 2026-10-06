@@ -63,9 +63,9 @@ curl -sS -X POST http://127.0.0.1:8000/v1/sources \
 浏览器重新登录后 X 会轮换 `ct0`，静态值就失效了。配了 CookieCloud 就不必重启：
 
 ```bash
-PEARSS_COOKIECLOUD_URL=http://127.0.0.1:4000   # 自部署 cookie_cloud_server
+PEARSS_COOKIECLOUD_URL=https://cookiecloud.example.ts.net:8088  # 自部署 cookie_cloud_server（Go 版）
 PEARSS_COOKIECLOUD_UUID=<你的同步 uuid>
-PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD>
+PEARSS_COOKIECLOUD_ADMIN_TOKEN=<服务端的 ADMIN_TOKEN，不是同步主口令>
 PEARSS_COOKIECLOUD_CACHE_SECONDS=300          # 可选
 ```
 
@@ -79,9 +79,10 @@ PEARSS_COOKIECLOUD_CACHE_SECONDS=300          # 可选
 **被拒时自愈**：X 返回 401 说明会话已轮换，此时绕过缓存重取一次并重试该页。
 只重试一次 —— 对着拒绝反复重试是在轰炸对方，而真正的问题是没人能给我们授权。
 
-> ⚠️ **`COOKIE_CLOUD_SERVER_PASSWORD` 不是"某个站的 cookie"**。它是服务端**主密钥**，
-> 能解密导出**任意 uuid、任意域名**的 cookie。`domain=` 只缩小本次响应，不缩小
-> token 权限。持有它 = 持有你同步过的全部站点会话（含银行、邮箱）。
+> ⚠️ **`PEARSS_COOKIECLOUD_ADMIN_TOKEN` 不是"某个站的 cookie"**。它是服务端的 **admin
+> 凭据**，能导出**任意 uuid、任意域名**的 cookie，**还能 `DELETE /records/<uuid>`**。
+> `domain=` 只缩小本次响应，不缩小 token 权限。持有它 = 持有你同步过的全部站点会话
+> （含银行、邮箱），并且能删掉任意 uuid 的记录。
 >
 > 因此：**用一个只含阅读器所需站点的专用 uuid**，别指向整个浏览器档案。
 > 明文 http 指向非回环地址时启动会告警（不记 token）。

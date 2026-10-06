@@ -183,14 +183,21 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
 | 每轮请求数远超预期 | `source.floor_cursor` 是否为 NULL | floor 为空说明区间只有上沿，walk 会一直翻到 origin 底部或 200 页护栏。让首轮正常跑完即可建立 floor |
 | 日志出现 `timeline gap` | 无处置动作 | 断档是**记录**而非待办：它位于区间内部，追它等于开出第二个爬取方向。frontier 持续推进才是下一步抓什么的依据 |
 | CookieCloud 连不上 | 服务日志 `CookieCloud unavailable` | 静态 `PEARSS_X_*` 优先；若两者都无 → `auth`。服务端不可达与“没配置”是**不同处置** |
+| CookieCloud 返回 401 | 服务日志 | 请求没带 admin token：`PEARSS_COOKIECLOUD_ADMIN_TOKEN` 为空（URL/UUID 有值才走得到这一步）。只设旧 `PEARSS_COOKIECLOUD_TOKEN` 会走「未配置 → 跳过」而不是 401 |
+| CookieCloud 返回 403 | 服务日志 | 两种，文案会说是哪一种：**token 被拒**（换 `PEARSS_COOKIECLOUD_ADMIN_TOKEN`）或 **服务端未启用导出**（服务端 sops 的 `cookie-cloud.env` 里还没设 `ADMIN_TOKEN`：补上并重新 switch 该主机） |
+| CookieCloud 返回 404 | 服务日志 | 该 uuid 没有任何记录：浏览器还没同步过它，或 uuid 写错了 |
+| CookieCloud 返回 409 | 服务日志 | 服务端解不开（未配 `COOKIE_CLOUD_SERVER_PASSWORD`，或密文不属于该口令）→ 在浏览器重新同步 |
+| CookieCloud 返回 429 | 服务日志 | 服务端限流（默认每客户端 100 次/15 分钟；失败的 admin 鉴权单独计数）→ 等 TTL 过后走缓存，不要手动重试 |
 | X 返回 401 | 服务日志 | 会话已轮换；会绕过缓存重取一次并重试该页（只一次）。若持续 401，说明 CookieCloud 里的仍未更新 —— 需在浏览器重新同步 |
 | `structure_changed` | 响应结构 | X 的 queryId 与结构由 X 单方变更；queryId 会自动从 x.com 的 JS bundle 恢复，失败则 human 介入（见采集器 README） |
 
 **手动续期**：CookieCloud 缓存 TTL 默认 300s（`PEARSS_COOKIECLOUD_CACHE_SECONDS`）。
 浏览器重登后最多等一个 TTL，或重启服务立即生效。
 
-> ⚠️ `COOKIE_CLOUD_SERVER_PASSWORD` 是**服务端主密钥**，能导出任意 uuid、任意域名的 cookie。
-> 它比它取回的那一个会话值强得多 —— 持有它等于持有同步过的全部站点会话（含银行、邮箱）。
+> ⚠️ `PEARSS_COOKIECLOUD_ADMIN_TOKEN` 是服务端的 **admin 凭据**（不是同步主口令）：能导出任意 uuid、
+> 任意域名的 cookie，**还能 `DELETE /records/<uuid>`**。它比它取回的那一个会话值强得多 —— 持有它等于
+> 持有同步过的全部站点会话（含银行、邮箱），并且能删掉任意 uuid 的记录。用只放所需站点的专用 uuid，
+> 且它只从环境读、绝不进日志/异常/URL（ADR 0060）。
 
 ## MCP 工具面
 
@@ -256,7 +263,7 @@ checksum。checksum 只覆盖 manifest，不是代码签名。
 **装载器不判断插件是否安全**（ADR 0023）：它只校验结构与声明一致性。子进程隔离
 （env allowlist + 宿主代理出网 + 资源限额）限制的是**故障半径**，不是**恶意行为** ——
 信任决定属于运行者。若插件声明了 `PEARSS_COOKIECLOUD_` 前缀，它会拿到 CookieCloud
-服务端主密钥（能解密你同步过的全部站点会话），见 ADR 0012 的既有要求。
+的 admin token（能导出你同步过的全部站点会话、还能删除任意 uuid 的记录），见 ADR 0060。
 
 ## Agent 源与主动接入（A3，ADR 0022）
 

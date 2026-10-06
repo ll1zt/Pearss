@@ -1,6 +1,6 @@
 # 0012 · 登录型采集器：允许使用用户自供凭据
 
-- 状态：accepted
+- 状态：accepted（**CookieCloud 消费端凭据部分被 [ADR 0060](0060-cookiecloud-admin-token-and-the-export-contract.md) 取代**：消费端改用 `ADMIN_TOKEN` + `/export`，不再持有同步主口令。本 ADR 其余决定仍有效）
 - 日期：2026-09-05
 - 修订：`docs/guides/collector-guide.md` 第 14 行（采集器不得绕过登录限制/反自动化）
 
@@ -43,8 +43,9 @@ collector-guide 第 14 行原本无条件禁止绕过登录限制与反自动化
 - **账号风控**：可能限流、要求验证、乃至封号。
 - **私有接口不稳定**：`HomeLatestTimeline` 的 queryId 与响应结构由 X 单方变更，
   无兼容性承诺。故 queryId 自动恢复与 `structure_changed` 分类是必需件而非优化。
-- **CookieCloud 的 token 比它取回的凭据更强力**。`COOKIE_CLOUD_SERVER_PASSWORD`
-  是服务端主密钥：它能解密导出**任意 uuid、任意域名**的 cookie。`domain=` 参数只
+- **CookieCloud 的 token 比它取回的凭据更强力**（消费端凭据现为 `ADMIN_TOKEN`，
+  见 [ADR 0060](0060-cookiecloud-admin-token-and-the-export-contract.md)）。它能导出
+  **任意 uuid、任意域名**的 cookie，**还能 `DELETE /records/<uuid>`**。`domain=` 参数只
   缩小本次响应的范围，不缩小 token 的权限。持有它等于持有你同步过的**全部**站点
   会话，包括银行与邮箱。
 

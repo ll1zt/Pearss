@@ -369,17 +369,18 @@ PEARSS_X_AUTH_TOKEN=<你的 auth_token cookie>
 PEARSS_X_CT0=<你的 ct0 cookie>
 
 # 2) CookieCloud 自动续期（推荐）
-PEARSS_COOKIECLOUD_URL=http://127.0.0.1:4000
+PEARSS_COOKIECLOUD_URL=https://cookiecloud.example.ts.net:8088
 PEARSS_COOKIECLOUD_UUID=<你的同步 uuid>
-PEARSS_COOKIECLOUD_TOKEN=<COOKIE_CLOUD_SERVER_PASSWORD 的值>
+PEARSS_COOKIECLOUD_ADMIN_TOKEN=<服务端的 ADMIN_TOKEN，不是同步主口令>
 ```
 
 解析顺序：**静态优先**于 CookieCloud（显式钉住值就是明确要求用那个值）。X 返回 401 说明
 会话已轮换，此时绕过缓存重取一次并重试该页（只一次）。
 
-> ⚠️ `COOKIE_CLOUD_SERVER_PASSWORD` 是**服务端主密钥**，能导出任意 uuid、任意域名的
-> cookie —— 持有它等于持有你同步过的全部站点会话（含银行、邮箱）。用**只含阅读器所需
-> 站点的专用 uuid**，别指向整个浏览器档案。详见 ADR 0012。
+> ⚠️ `PEARSS_COOKIECLOUD_ADMIN_TOKEN` 是服务端的 **admin 凭据**（不是同步主口令），能导出
+> 任意 uuid、任意域名的 cookie，**还能 `DELETE /records/<uuid>`** —— 持有它等于持有你同步过的
+> 全部站点会话（含银行、邮箱），并且能删掉任意 uuid 的记录。用**只含阅读器所需站点的专用
+> uuid**，别指向整个浏览器档案。详见 ADR 0060。
 
 ## 知乎与知识星球源：登录型采集
 

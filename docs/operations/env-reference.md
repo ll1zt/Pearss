@@ -98,8 +98,8 @@ PEARSS_DOCS_ENABLED=0
 #
 # ⚠️ 装载器**不判断插件是否安全**：子进程隔离（env allowlist + 宿主代理出网 +
 #    资源限额）限制的是故障半径，不是恶意行为——信任决定属于运行者。
-#    若插件声明了 PEARSS_COOKIECLOUD_ 前缀，它会拿到 CookieCloud 服务端主密钥，
-#    而那把密钥能解密你同步过的全部站点会话（见 ADR 0012）。
+#    若插件声明了 PEARSS_COOKIECLOUD_ 前缀，它会拿到 CookieCloud 的 admin token，
+#    而那把 token 能导出你同步过的全部站点会话、还能删除任意 uuid 的记录（见 ADR 0060）。
 # 本变量是 host-side：绝不下发给子进程，插件无权知道其他插件在哪。
 # PEARSS_PLUGIN_DIR=/var/lib/pearss/plugins
 
@@ -234,9 +234,12 @@ PEARSS_DOCS_ENABLED=0
 
 # --- CookieCloud（X / 知乎 / 知识星球共用一套凭据分发）---
 # 三者齐备才启用；按 domain 过滤，一个部署服务多个采集器。
-# PEARSS_COOKIECLOUD_URL=
+# ⚠️ ADMIN_TOKEN 是服务端的 admin 凭据（不是同步主口令）：它能导出任意 uuid、
+#    任意域名，还能 DELETE /records/<uuid>。用只放该采集器所需站点的专用 uuid。
+#    服务端未设 ADMIN_TOKEN 时 /export 恒 403。
+# PEARSS_COOKIECLOUD_URL=https://cookiecloud.example.ts.net:8088
 # PEARSS_COOKIECLOUD_UUID=
-# PEARSS_COOKIECLOUD_TOKEN=
+# PEARSS_COOKIECLOUD_ADMIN_TOKEN=
 # PEARSS_COOKIECLOUD_CACHE_SECONDS=300
 
 
