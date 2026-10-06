@@ -845,13 +845,15 @@ def mark_all_as_read(
     """Mark everything in a stream read up to a timestamp."""
     when = _parse_ts(ts) or datetime.now(UTC)
     if reader_api.is_state_stream(s, state="reading-list"):
-        source_id: str | None = None
+        subscription_id: str | None = None
         folder: str | None = None
     elif (feed := reader_api.parse_feed_stream_id(s)) is not None:
-        source_id = feed
+        # A channel id names a *subscription* (ADR 0046 D-C); the repository
+        # resolves it to the origin whose items the channel serves.
+        subscription_id = feed
         folder = None
     elif (label := reader_api.label_stream_name(s)) is not None:
-        source_id = None
+        subscription_id = None
         folder = label
     else:
         # A scope we do not model gets a refusal, never an unfiltered sweep.
@@ -859,7 +861,7 @@ def mark_all_as_read(
 
     changed = operations.mark_stream_read(
         request.app.state.session_factory,
-        source_id=source_id,
+        subscription_id=subscription_id,
         folder=folder,
         before=when,
     )

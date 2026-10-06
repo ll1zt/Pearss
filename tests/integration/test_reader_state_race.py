@@ -268,7 +268,7 @@ def test_mark_all_read_gains_read_without_losing_a_star(
             session,
             tenant_id="default",
             before=datetime.now(UTC),
-            source_id="src-1",
+            subscription_id="src-1",
         )
         session.commit()
         assert changed == 1, "only the unread row is a candidate"
