@@ -97,8 +97,10 @@ from adapters.repository.plugins import (
 )
 from adapters.repository.rawfetch import record_raw_fetch
 from adapters.repository.reader import (
+    AmbiguousChannelError,
     apply_read_state,
     mark_all_read,
+    origin_of_channel,
     read_states_for,
     reader_credential,
     resolve_reader_ids,
@@ -151,6 +153,7 @@ __all__ = [
     "EPOCH_FLOOR",
     "FEED_WINDOW",
     "RATE_WINDOW_MINUTES",
+    "AmbiguousChannelError",
     "DeletionResult",
     "ItemFilter",
     "ItemPage",
@@ -216,6 +219,7 @@ __all__ = [
     "mark_all_read",
     "mark_published",
     "origin_display_labels",
+    "origin_of_channel",
     "paging_state",
     "parse_chain",
     "plugin_status",

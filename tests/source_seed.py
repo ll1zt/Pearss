@@ -36,6 +36,7 @@ def seed_source(
     *,
     source_id: str,
     url: str | None,
+    origin_id: str | None = None,
     canonical_url: str | None = None,
     source_type: str = "rss",
     schedule_policy: str = "{}",
@@ -49,10 +50,16 @@ def seed_source(
     tenant_id: str = "default",
     at: str = DEFAULT_AT,
 ) -> str:
-    """Insert origin + subscription for `source_id`; returns the id."""
+    """Insert origin + subscription for `source_id`; returns the id.
+
+    `origin_id` defaults to `source_id` (the 1:1 stage's rule). Passing it
+    separately is how a test builds the state the legacy channel alias exists
+    for: an origin id that is not a subscription id.
+    """
     canonical = canonical_url if canonical_url is not None else url
+    facts_id = origin_id if origin_id is not None else source_id
     origin: dict[str, Any] = {
-        "id": source_id,
+        "id": facts_id,
         "type": source_type,
         "url": url,
         "canonical_url": canonical,
@@ -65,7 +72,7 @@ def seed_source(
     subscription: dict[str, Any] = {
         "id": source_id,
         "tenant_id": tenant_id,
-        "origin_id": source_id,
+        "origin_id": facts_id,
         "schedule_policy": schedule_policy,
         "pipeline_chain": pipeline_chain,
         "target_lang": target_lang,

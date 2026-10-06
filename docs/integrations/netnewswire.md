@@ -18,6 +18,18 @@ API**（原定 P3，已提前，见 ADR 0004）。
 NNW 以「FreshRSS」账号类型连接 `/api/greader.php`。Reader API 端点由
 `adapters/reader_api.py` 实现，兼容格式不得渗入 core 领域模型。
 
+## 频道身份：订阅（ADR 0046 D-C，2026-10）
+
+Reader 的一个「频道」（`feed/<id>`）就是一条**订阅**：客户端订阅的是策略，条目属于它背后的
+origin。1:1 阶段两者 id 相同，所以**客户端什么都不用做**——已缓存的 `feed/<id>` 继续解析。
+
+- 新端点 `GET /v1/subscriptions` 与 `GET /v1/subscriptions/{id}` 把两半分开展示
+  （`policy` 与 `origin`）；`/v1/sources*` 的读端点保留为**投影**并已标 deprecated（issue #366）。
+- **别名何时失效**：一个 origin 挂了**第二个**订阅时，`feed/<origin id>` 不再唯一——服务端
+  返回 `400 ambiguous_channel`，而不是任选其一（那会把另一个频道的条目显示在你请求的 id 下）。
+  那时客户端应按 `subscription/list` 给出的订阅 id 重新订阅；两个订阅各有自己的 stream。
+- 已读/星标仍按条目同步（ADR 0024），与频道身份无关。
+
 ## 接入步骤
 
 1. `.env` 配置 `PEARSS_READER_USERNAME` / `PEARSS_READER_PASSWORD` 并
