@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from sqlalchemy import select
 
+from adapters import reader_api
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.raw_payload import RawPayload
@@ -18,6 +19,7 @@ from plugins.collectors.rss import collector as rss
 
 from .test_reader_api import (
     READ_TAG,
+    READING_LIST,
     STARRED_TAG,
     auth_header,
     edit,
@@ -136,6 +138,40 @@ async def test_user_marking_an_empty_scope_read_leaves_the_library_unchanged(
     assert response.text == "OK"
     with reader_app.state.session_factory() as session:
         assert session.execute(select(ReadStateRow.__table__)).all() == before
+
+
+async def test_mark_all_as_read_honours_a_microsecond_cutoff(
+    reader_app: FastAPI, reader_client: httpx.AsyncClient
+) -> None:
+    """AC-328 end to end: `ts` keeps the unit the client sent.
+
+    1700000000000000 is 2023-11-14 as microseconds and year 53 million as
+    seconds. The fixture's dated items are January 2026, so only the
+    microsecond reading leaves them unread; reading the value as seconds would
+    sweep them in, which is what this guards against.
+    """
+    with reader_app.state.session_factory() as session:
+        dated = [
+            row.id
+            for row in session.execute(select(ItemRow.__table__)).all()
+            if row.published_at is not None
+        ]
+    assert dated, "the fixture must carry dated items for this to mean anything"
+
+    token = await login(reader_client)
+    response = await reader_client.post(
+        "/api/greader.php/reader/api/0/mark-all-as-read",
+        data={"T": token, "s": READING_LIST, "ts": "1700000000000000"},
+    )
+    assert response.status_code == 200
+
+    read = await reader_client.get(
+        "/api/greader.php/reader/api/0/stream/items/ids",
+        headers=auth_header(token),
+        params={"s": READ_TAG},
+    )
+    read_ids = {int(ref["id"]) for ref in read.json()["itemRefs"]}
+    assert read_ids.isdisjoint(reader_api.reader_id(item_id) for item_id in dated)
 
 
 async def test_mark_all_as_read_for_an_unknown_scope_is_refused_without_writing(
