@@ -15,14 +15,13 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source
 from adapters.repository import (
     claim_job_run,
     create_job_run,
     ensure_collect_job,
     job_for_source,
 )
-from core.enums import SourceStatus, TrustLevel
+from tests.source_seed import seed_source
 
 pytestmark = pytest.mark.integration
 
@@ -33,19 +32,13 @@ NOW = "2026-01-01T00:00:00.000000Z"
 @pytest.fixture()
 def run_id(migrated_factory: sessionmaker[Session]) -> str:
     with migrated_factory() as session:
-        session.add(
-            Source(
-                id="src-1",
-                tenant_id="t",
-                type="rss",
-                url="https://e.com/f.xml",
-                canonical_url="https://e.com/f.xml",
-                status=SourceStatus.ACTIVE.value,
-                trust_level=TrustLevel.STANDARD.value,
-                schedule_policy=POLICY,
-                created_at=NOW,
-                updated_at=NOW,
-            )
+        seed_source(
+            session,
+            source_id="src-1",
+            tenant_id="t",
+            url="https://e.com/f.xml",
+            schedule_policy=POLICY,
+            at=NOW,
         )
         session.commit()
         job_id = ensure_collect_job(session, source_id="src-1", tenant_id="t", at=NOW)

@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 
 from app.middleware import CorrelationAndAuditMiddleware
+from tests.source_seed import mirror_sources
 
 from .conftest import (
     READER_PASSWORD as TEST_PASSWORD,
@@ -281,7 +282,7 @@ async def test_subscription_list_excludes_a_disabled_source(
     """
     with app.state.session_factory() as session:
         session.execute(
-            sa.text("update source set status = 'disabled' where id = 'src-1'")
+            sa.text("update subscription set status = 'disabled' where id = 'src-1'")
         )
         session.commit()
 
@@ -1032,6 +1033,7 @@ async def test_a_folder_stream_returns_only_that_folders_items(
                 " 'work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
+        mirror_sources(session)
         session.commit()
 
     token = await login(client)

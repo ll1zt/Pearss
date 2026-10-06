@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,6 +55,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
             ),
             {"id": RSS_SOURCE_ID},
         )
+        mirror_sources(connection)
         connection.execute(
             text(
                 "insert into source (id, type, url, canonical_url, schedule_policy,"
@@ -64,6 +66,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
             ),
             {"id": AGENT_SOURCE_ID},
         )
+        mirror_sources(connection)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -332,7 +335,7 @@ async def test_a_chained_agent_source_holds_items_behind_the_gate(
     with app.state.session_factory() as session:
         session.execute(
             sa.text(
-                "update source set pipeline_chain = :chain, target_lang = 'en'"
+                "update subscription set pipeline_chain = :chain, target_lang = 'en'"
                 " where id = :sid"
             ),
             {

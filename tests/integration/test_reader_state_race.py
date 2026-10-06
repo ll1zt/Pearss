@@ -16,38 +16,30 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ReadState as ReadStateRow
-from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     read_states_for,
     upsert_read_state,
 )
 from core.reader_state import ReadState as ReadStateDomain
 from core.reader_state import TagChange, merge_state
+from tests.source_seed import seed_source
 
 NOW = "2026-01-01T00:00:00.000000Z"
 
 
 def _seed(session: Session, item_ids: list[str]) -> None:
-    session.add(
-        SourceRow(
-            id="src-1",
-            type="rss",
-            url="https://example.test/src-1.xml",
-            canonical_url="https://example.test/src-1.xml",
-            schedule_policy='{"type": "fixed", "interval": "30m"}',
-            folder="default",
-            status="active",
-            trust_level="standard",
-            tenant_id="default",
-            created_at=NOW,
-            updated_at=NOW,
-        )
+    seed_source(
+        session,
+        source_id="src-1",
+        url="https://example.test/src-1.xml",
+        schedule_policy='{"type": "fixed", "interval": "30m"}',
     )
     session.commit()
     for item_id in item_ids:
         session.add(
             ItemRow(
                 id=item_id,
+                origin_id="src-1",
                 source_id="src-1",
                 guid=f"guid-{item_id}",
                 content_hash="hash",

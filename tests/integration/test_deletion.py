@@ -36,6 +36,7 @@ from adapters.repository import (
 from adapters.timestamps import fixed_width_utc as timestamp
 from app.main import create_session_factory
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -122,21 +123,11 @@ def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _source(session: Session, source_id: str = "src-1") -> None:
     # The URL follows the id: canonical_url is part of a unique constraint, so
     # two sources in one test cannot share one.
-    session.add(
-        SourceRow(
-            id=source_id,
-            type="rss",
-            url=f"https://example.test/{source_id}.xml",
-            canonical_url=f"https://example.test/{source_id}.xml",
-            parser_plugin_id=None,
-            schedule_policy='{"type": "fixed", "interval": "30m"}',
-            folder="default",
-            status="active",
-            trust_level="standard",
-            tenant_id="default",
-            created_at=NOW,
-            updated_at=NOW,
-        )
+    seed_source(
+        session,
+        source_id=source_id,
+        url=f"https://example.test/{source_id}.xml",
+        schedule_policy='{"type": "fixed", "interval": "30m"}',
     )
     session.flush()
 
@@ -155,6 +146,7 @@ def _item(
     session.add(
         ItemRow(
             id=item_id,
+            origin_id=source_id,
             source_id=source_id,
             guid=f"guid-{item_id}",
             content_hash=f"hash-{item_id}",
@@ -394,7 +386,7 @@ class TestDeleteSourceItems:
             _source(session)
             session.execute(
                 sa.text(
-                    "update source set seen_frontier = 12345, floor_cursor = 'abc' "
+                    "update origin set seen_frontier = 12345, floor_cursor = 'abc' "
                     "where id = 'src-1'"
                 )
             )
@@ -407,7 +399,7 @@ class TestDeleteSourceItems:
             assert session.get(SourceRow, "src-1") is not None
             frontier, floor = session.execute(
                 sa.text(
-                    "select seen_frontier, floor_cursor from source where id = 'src-1'"
+                    "select seen_frontier, floor_cursor from origin where id = 'src-1'"
                 )
             ).one()
             assert frontier == 12345
@@ -503,6 +495,7 @@ class TestDeleteSource:
             session.add(
                 RawFetchRow(
                     id="rf-1",
+                    origin_id="src-1",
                     source_id="src-1",
                     payload_ref=payload,
                     content_hash="h",

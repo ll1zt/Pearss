@@ -29,6 +29,7 @@ from app.scheduler import run_tick
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 pytestmark = pytest.mark.integration
 
@@ -51,6 +52,7 @@ def _add_source(session: Session, *, source_id: str, policy: dict[str, object]) 
             "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
         },
     )
+    mirror_sources(session)
     session.commit()
 
 

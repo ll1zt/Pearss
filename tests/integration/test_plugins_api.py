@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -240,6 +241,7 @@ def zhihu_source(session_factory: sessionmaker[Session]) -> Iterator[str]:
                 "u": "https://www.zhihu.com/people/example",
             },
         )
+        mirror_sources(session)
         session.commit()
     yield source_id
 
@@ -264,7 +266,7 @@ async def test_a_disabled_plugin_collects_nothing(
     The skip must not touch the network, must not store items, and must not
     record a failed run: an operator decision is not an incident.
     """
-    from adapters.db_models import Source
+    from adapters.repository import get_source
     from app.pipeline import collect_source
 
     assert (
@@ -274,7 +276,7 @@ async def test_a_disabled_plugin_collects_nothing(
     ).status_code == 200
 
     with session_factory() as session:
-        source = session.get(Source, zhihu_source)
+        source = get_source(session, zhihu_source)
         assert source is not None
         result = collect_source(
             session,
@@ -303,11 +305,11 @@ def test_an_enabled_plugin_collects_normally(
     session_factory: sessionmaker[Session], zhihu_source: str
 ) -> None:
     """Default state (no plugin row yet) is enabled: collection proceeds."""
-    from adapters.db_models import Source
+    from adapters.repository import get_source
     from app.pipeline import collect_source
 
     with session_factory() as session:
-        source = session.get(Source, zhihu_source)
+        source = get_source(session, zhihu_source)
         assert source is not None
         result = collect_source(
             session,

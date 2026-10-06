@@ -18,10 +18,10 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source
+from adapters.repository import get_source
 from app.pipeline import collect_source
-from core.enums import SourceStatus, TrustLevel
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -42,19 +42,12 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
 
 def _add_source(session: Session, source_id: str, url: str) -> None:
-    session.add(
-        Source(
-            id=source_id,
-            tenant_id="default",
-            type="rss",
-            url=url,
-            canonical_url=url,
-            status=SourceStatus.ACTIVE.value,
-            trust_level=TrustLevel.STANDARD.value,
-            schedule_policy=POLICY,
-            created_at="2026-01-01T00:00:00.000000Z",
-            updated_at="2026-01-01T00:00:00.000000Z",
-        )
+    seed_source(
+        session,
+        source_id=source_id,
+        source_type="rss",
+        url=url,
+        schedule_policy=POLICY,
     )
     session.commit()
 
@@ -82,7 +75,7 @@ def test_summary_feed_stores_full_text(
     """The stored body is the REST article, not the feed's truncated cut."""
     with session_factory() as session:
         _add_source(session, "s1", FEED_URL)
-        source = session.get(Source, "s1")
+        source = get_source(session, "s1")
         assert source is not None
         result = collect_source(
             session, source=source, client=_wp_client(tmp_path), tenant_id="default"
@@ -113,7 +106,7 @@ def test_a_second_collection_does_not_duplicate(
     client = _wp_client(tmp_path)
     with session_factory() as session:
         _add_source(session, "s2", FEED_URL)
-        source = session.get(Source, "s2")
+        source = get_source(session, "s2")
         assert source is not None
         first = collect_source(
             session, source=source, client=client, tenant_id="default"
@@ -121,7 +114,7 @@ def test_a_second_collection_does_not_duplicate(
         session.commit()
 
     with session_factory() as session:
-        source = session.get(Source, "s2")
+        source = get_source(session, "s2")
         assert source is not None
         second = collect_source(
             session, source=source, client=client, tenant_id="default"

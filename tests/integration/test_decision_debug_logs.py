@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.pipeline import fetch_one, normalise_and_store
 from core.models import ItemDraft
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 pytestmark = pytest.mark.integration
 
@@ -42,6 +43,7 @@ def session(tmp_path: Path) -> Iterator[Session]:
                 ),
                 {"id": SOURCE, "url": "https://example.com/src-1/feed"},
             )
+            mirror_sources(opened)
             opened.commit()
             yield opened
     finally:

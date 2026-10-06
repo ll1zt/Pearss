@@ -271,7 +271,8 @@ class World:
 
         self.session.execute(
             sa.text(
-                "update source set pipeline_chain = :c, target_lang = :l where id = :s"
+                "update subscription set pipeline_chain = :c, target_lang = :l"
+                " where id = :s"
             ),
             {"c": chain, "l": lang, "s": self.source_id},
         )
@@ -646,7 +647,8 @@ def test_a_row_left_by_an_edited_chain_falls_back_to_the_item_body(
     # The operator keeps only the Chinese target.
     world.session.execute(
         sa.text(
-            "update source set pipeline_chain = :c, target_lang = :l where id = :s"
+            "update subscription set pipeline_chain = :c, target_lang = :l"
+            " where id = :s"
         ),
         {"c": _two_target_translate("zh"), "l": "zh", "s": world.source_id},
     )

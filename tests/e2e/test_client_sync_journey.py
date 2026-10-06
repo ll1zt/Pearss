@@ -763,7 +763,7 @@ async def test_j11_renaming_a_subscription_sticks_across_recollection(
 
     The name was previously answered with a silent OK and nothing else,
     on the reasoning that the next fetch would overwrite it. That
-    reasoning was wrong: `set_source_title_if_absent` writes only when the
+    reasoning was wrong: `set_origin_title_if_absent` writes only when the
     column is empty, so a client-set title is protected by the same
     conditional-write rule an operator's rename through the API gets. The
     fetch fills an absent title; it does not replace a present one.

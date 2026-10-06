@@ -35,6 +35,7 @@ from core.enums import ErrorClass
 from core.normalize import normalize
 from plugins.collectors.rss import collector as rss
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -57,6 +58,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
                 " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
+        mirror_sources(connection)
         # The ingestion target for these tests. Writing through the real
         # endpoint needs an agent source (ADR 0022); src-1 stays an rss source
         # so tests can still cover the types being distinct.
@@ -69,6 +71,7 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
                 " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
+        mirror_sources(connection)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:

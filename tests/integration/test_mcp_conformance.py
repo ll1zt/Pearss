@@ -40,6 +40,7 @@ from core.enums import ErrorClass
 from core.job_state import JobRunEvent
 from tests.integration.conftest import ServerInThread, free_port
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "conformance-edge-token"
@@ -74,11 +75,13 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             )
         )
+        mirror_sources(conn)
         conn.execute(
             text(
-                "insert into item (id, source_id, guid, content_hash, title, url,"
+                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                " title, url,"
                 " publish_status, tenant_id, created_at, updated_at, content_ref)"
-                " values ('i-ready', 'src-1', 'g-ready', 'h-ready', 'Ready',"
+                " values ('i-ready', 'src-1', 'src-1', 'g-ready', 'h-ready', 'Ready',"
                 " 'https://e.com/1', 'ready', 'default',"
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z',"
                 " null)"
@@ -526,9 +529,9 @@ async def test_the_health_panel_renders_the_decay_signals(
             )
         session.execute(
             text(
-                "insert into item (id, source_id, guid, content_hash, title,"
+                "insert into item (id, source_id, origin_id, guid, content_hash, title,"
                 " url, publish_status, tenant_id, created_at, updated_at)"
-                " values ('i-hold', 'src-1', 'g-hold', 'h-hold', 'Held',"
+                " values ('i-hold', 'src-1', 'src-1', 'g-hold', 'h-hold', 'Held',"
                 " 'https://e.com/held', 'pending', 'default',"
                 " '2026-01-01T00:00:00.000000Z',"
                 " '2026-01-01T00:00:00.000000Z')"

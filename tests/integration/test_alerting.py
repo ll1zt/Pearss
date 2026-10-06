@@ -683,7 +683,7 @@ def test_a_source_whose_chain_all_failed_is_reported(
             session, source_id="done", statuses=["failed", "failed", "succeeded"]
         )
         session.execute(
-            sa.text("update source set title = :t where id = :i"),
+            sa.text("update origin set title = :t where id = :i"),
             {"t": "X Following", "i": stuck},
         )
         session.execute(
@@ -729,7 +729,7 @@ def test_the_representative_failure_is_the_newest(
     with session_factory() as session:
         stuck = _source_with_chain(session, source_id="stuck", statuses=["failed"] * 3)
         session.execute(
-            sa.text("update source set title = 'T' where id = :i"), {"i": stuck}
+            sa.text("update origin set title = 'T' where id = :i"), {"i": stuck}
         )
         row_ids = (
             session.execute(
@@ -783,7 +783,7 @@ def test_the_alert_attributes_a_stuck_chain(
     with session_factory() as session:
         stuck = _source_with_chain(session, source_id="stuck", statuses=["failed"] * 3)
         session.execute(
-            sa.text("update source set title = 'X Following' where id = :i"),
+            sa.text("update origin set title = 'X Following' where id = :i"),
             {"i": stuck},
         )
         session.execute(
@@ -827,7 +827,7 @@ def test_three_stuck_sources_are_each_named(
                 session, source_id=f"stuck{index}", statuses=["failed"] * 3
             )
             session.execute(
-                sa.text("update source set title = :t where id = :i"),
+                sa.text("update origin set title = :t where id = :i"),
                 {"t": f"Feed {index}", "i": stuck},
             )
             session.execute(
@@ -870,7 +870,7 @@ def test_the_alert_never_carries_item_content(
             content="<p>ITEM-SECRET-MARKER</p>",
         )
         session.execute(
-            sa.text("update source set title = 'T' where id = :i"), {"i": stuck}
+            sa.text("update origin set title = 'T' where id = :i"), {"i": stuck}
         )
         session.execute(
             sa.text(

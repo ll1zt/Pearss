@@ -20,11 +20,11 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source
+from adapters.repository import get_source
 from app import collector_registry
 from app.pipeline import collect_source
-from core.enums import SourceStatus, TrustLevel
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/zhihu/fixtures"
@@ -57,19 +57,12 @@ def session_factory(
 
 
 def _add_source(session: Session, source_id: str, url: str) -> None:
-    session.add(
-        Source(
-            id=source_id,
-            tenant_id="default",
-            type="web",
-            url=url,
-            canonical_url=url,
-            status=SourceStatus.ACTIVE.value,
-            trust_level=TrustLevel.STANDARD.value,
-            schedule_policy=POLICY,
-            created_at="2026-01-01T00:00:00.000000Z",
-            updated_at="2026-01-01T00:00:00.000000Z",
-        )
+    seed_source(
+        session,
+        source_id=source_id,
+        source_type="web",
+        url=url,
+        schedule_policy=POLICY,
     )
     session.commit()
 
@@ -108,7 +101,7 @@ def test_answers_flow_from_source_url_to_stored_items(
     collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s1", "https://www.zhihu.com/people/example/answers")
-        source = session.get(Source, "s1")
+        source = get_source(session, "s1")
         assert source is not None
         result = collect_source(
             session,
@@ -130,7 +123,7 @@ def test_activities_flow_names_the_source_and_opens_the_gate(
     collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s2", "https://www.zhihu.com/people/example/activities")
-        source = session.get(Source, "s2")
+        source = get_source(session, "s2")
         assert source is not None
         result = collect_source(
             session,
@@ -145,7 +138,7 @@ def test_activities_flow_names_the_source_and_opens_the_gate(
 
     with session_factory() as session:
         title = session.execute(
-            sa.text("select title from source where id = 's2'")
+            sa.text("select title from origin where id = 's2'")
         ).scalar()
         statuses = session.execute(
             sa.text("select publish_status from item where source_id = 's2'")
@@ -165,7 +158,7 @@ def test_a_missing_session_is_an_auth_run_not_a_crash(
     collector_registry.set_http_transport("zhihu", _zhihu_transport())
     with session_factory() as session:
         _add_source(session, "s3", "https://www.zhihu.com/people/example/answers")
-        source = session.get(Source, "s3")
+        source = get_source(session, "s3")
         assert source is not None
         result = collect_source(
             session,
@@ -210,7 +203,7 @@ def test_a_transport_failure_stays_network_and_keeps_the_child(
 
     with session_factory() as session:
         _add_source(session, "s4", "https://www.zhihu.com/people/example/answers")
-        source = session.get(Source, "s4")
+        source = get_source(session, "s4")
         assert source is not None
         result = collect_source(session, source=source, client=httpx.Client())
         session.commit()
@@ -247,7 +240,7 @@ def test_a_policy_refusal_keeps_its_blocked_classification(
 
     with session_factory() as session:
         _add_source(session, "s5", "https://www.zhihu.com/people/example/answers")
-        source = session.get(Source, "s5")
+        source = get_source(session, "s5")
         assert source is not None
         result = collect_source(session, source=source, client=httpx.Client())
         session.commit()
@@ -295,7 +288,7 @@ def test_an_unknown_target_type_loses_only_itself(
     collector_registry.set_http_transport("zhihu", httpx.MockTransport(handler))
     with session_factory() as session:
         _add_source(session, "s6", "https://www.zhihu.com/people/example/activities")
-        source = session.get(Source, "s6")
+        source = get_source(session, "s6")
         assert source is not None
         result = collect_source(
             session,
