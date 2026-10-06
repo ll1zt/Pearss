@@ -216,8 +216,12 @@ def tag_list(request: Request, _: str = Depends(authenticate_any)) -> dict[str, 
 # and each is a real write -- audited by the middleware like any POST, and
 # attributed in the log.
 #
-# `subscription/edit`'s `ac=unsubscribe` stays unimplemented on purpose; see
-# its docstring for why a delete is not offered to a client that retries.
+# `subscription/edit`'s `ac=unsubscribe` *is* implemented (2026-09-16). It
+# deletes the source and everything it collected -- the ADR 0021 semantics,
+# through the same repository entry point `DELETE /v1/sources` uses. See the
+# `subscription_edit` docstring for why the earlier refusal was reversed: a
+# client whose UI already showed a confirmation dialog only gets a permanent
+# retry loop from a refusal.
 
 
 @router.post("/reader/api/0/subscription/quickadd")
@@ -608,8 +612,11 @@ def _render_item(
         "updated": published,
         "alternate": [{"href": row.url, "type": "text/html"}],
         # The body is untrusted remote HTML, same trust decision as the RSS
-        # path (ADR 0003). Here it is a JSON string, so there is no XML escape
-        # or injection surface; the reader applies its own sanitising rules.
+        # path (ADR 0003). It is sanitised once, at ingest, by
+        # `app/pipeline.py` through `adapters/sanitize.py` (nh3, allow-list),
+        # so every output path -- RSS, Reader, MCP -- serves the same safe
+        # bytes and the Reader layer does not sanitise again. Here it is a
+        # JSON string, so there is no XML escape or injection surface.
         "summary": {"direction": "ltr", "content": body},
         "content": {"direction": "ltr", "content": body},
         "origin": {
