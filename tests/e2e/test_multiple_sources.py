@@ -73,14 +73,15 @@ def _runs_by_source(session_factory: sessionmaker[Session]) -> dict[str, list[st
 
     The job/source link is `job.config` holding the source id (see
     `ensure_collect_job`) rather than a foreign-key column: there is one job per
-    source, and the source id is the config.
+    source, and the source id is the config. The id resolves to `origin` -- the
+    fact table -- because that is where the canonical URL lives.
     """
     with session_factory() as db:
         rows = db.execute(
             sa.text(
                 "select s.canonical_url, r.status from job_run r"
                 " join job j on j.id = r.job_id"
-                " join source s on s.id = j.config"
+                " join origin s on s.id = j.config"
                 " order by r.started_at, r.id"
             )
         ).fetchall()
