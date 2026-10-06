@@ -50,7 +50,7 @@ async def _write(
     already-enabled plugin and a 502 from a source that failed while triggering
     are answers, and reporting them as errors would hide the diagnosis. `extra`
     builds the keys a response carries beyond the Core API payload, from the
-    status -- the audit note for add_source, the status code for
+    status -- the audit note for add_subscription, the status code for
     set_plugin_status (which a caller needs precisely because a 409 is an
     outcome).
     """
@@ -96,17 +96,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Add a source. This makes real outbound requests to a third party. "
+            "Add a subscription to a feed or page (and the origin it points "
+            "at). This makes real outbound requests to a third party. "
             "schedule_policy is {type: fixed, interval: '30m'} or "
             "{type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed "
             "URL), 'web' (a page a login-type collector serves, e.g. "
             "zhihu/telegram) or 'auto' (default: inferred from the URL; "
             "pass it when auto would guess wrong). "
             "pipeline_chain plus target_lang gate items until the chain "
-            "completes -- see set_source_pipeline_chain."
+            "completes -- see set_subscription_pipeline_chain."
         ),
     )
-    async def add_source(
+    async def add_subscription(
         url: str,
         schedule_policy: dict[str, Any],
         type: str = "auto",
@@ -139,14 +140,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Add several sources in one call. These sources make real outbound "
+            "Add several subscriptions in one call. They make real outbound "
             "requests to a third party. Options apply to the whole batch; "
-            "`type` 'auto' resolves per URL as add_source does. Returns a job "
+            "`type` 'auto' resolves per URL as add_subscription does. Returns a job "
             "handle -- read each URL's outcome with work_units; an unusable "
-            "one fails alone. Use add_source for a single source."
+            "one fails alone. Use add_subscription for a single subscription."
         ),
     )
-    async def add_sources(
+    async def add_subscriptions(
         urls: list[str],
         schedule_policy: dict[str, Any],
         type: str = "auto",
@@ -185,18 +186,18 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Fetch a list of article addresses into an existing source. The "
+            "Fetch a list of article addresses into an existing origin. The "
             "deployment makes real outbound requests for every address. "
             "Returns a job handle (work_id, status, counts) immediately: the "
             "work keeps running, and the response does not grow with the list. "
             "Read per-address results with work_units. Each address must be on "
-            "the source's own host (off-host ones come back `rejected`); the "
+            "the origin's own host (off-host ones come back `rejected`); the "
             "collector must be able to fetch one address (rss can). Use this "
             "for addresses to fetch; submit_items for content you already "
             "fetched."
         ),
     )
-    async def fetch_source_items(
+    async def fetch_origin_items(
         source_id: str,
         urls: list[str],
         batch_size: int = 0,
@@ -230,11 +231,11 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Change a source's schedule policy. An aggressive interval puts "
-            "real load on the origin site."
+            "Change a subscription's schedule policy. An aggressive interval "
+            "puts real load on the origin site."
         ),
     )
-    async def update_schedule_policy(
+    async def update_subscription_policy(
         source_id: str,
         schedule_policy: dict[str, Any],
     ) -> dict[str, Any]:
@@ -248,11 +249,11 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
         description=(
-            "Pause or resume a source. Pausing stops collection without "
+            "Pause or resume a subscription. Pausing stops collection without "
             "deleting anything already gathered."
         ),
     )
-    async def set_source_status(
+    async def set_subscription_status(
         source_id: str,
         status: str,
     ) -> dict[str, Any]:
@@ -266,13 +267,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=False),
         description=(
-            "Move a source to a sidebar folder (one folder per source; "
+            "Move a subscription to a sidebar folder (one folder per "
+            "subscription; "
             "'default' is the unclassified home). Reflected in the Reader API's "
             "subscription/list, so the client sidebar follows on its next "
             "refresh."
         ),
     )
-    async def set_source_folder(
+    async def set_subscription_folder(
         source_id: str,
         folder: str,
     ) -> dict[str, Any]:
@@ -286,26 +288,29 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Set a source's processing chain, and its target language with it. "
+            "Set a subscription's processing chain, and its target language "
+            "with it. "
             "Items are held at the gate until the chain completes, and its "
             "processors can make real outbound requests and spend provider "
             "budget per item. An empty list clears the chain, so items publish "
             "as soon as they are stored; passing no target_lang sets it to "
-            "none. Run backfill_source afterwards for already-stored items; use "
-            "add_source to set a chain on a new source."
+            "none. Run backfill_subscription_chain afterwards for "
+            "already-stored items; use add_subscription to set a chain on a "
+            "new subscription."
         ),
     )
-    async def set_source_pipeline_chain(
+    async def set_subscription_pipeline_chain(
         source_id: str,
         pipeline_chain: list[dict[str, Any]],
         target_lang: str = "",
     ) -> dict[str, Any]:
-        """Give an existing source a chain, or take its chain away.
+        """Give an existing subscription a chain, or take its chain away.
 
-        `add_source` sets a chain only at creation, and `backfill_source`
-        requires one to exist already -- so before this tool, translating the
-        items of a source that was subscribed without a chain meant deleting the
-        source and starting over, which throws away its history and its read
+        `add_subscription` sets a chain only at creation, and
+        `backfill_subscription_chain` requires one to exist already -- so
+        before this tool, translating the
+        items of an origin that was subscribed without a chain meant deleting the
+        subscription and starting over, which throws away its history and its read
         state (issue #71).
         """
         # Both fields are always sent: the endpoint's three-state semantics mean
@@ -321,16 +326,17 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Delete a source and everything it collected. Permanent: the source "
-            "row, its items, stored bodies, read state and translations are "
-            "removed, and re-subscribing the same feed starts a new source with "
+            "Delete a subscription and everything its origin collected. "
+            "Permanent: the origin row, its items, stored bodies, read state "
+            "and translations are "
+            "removed, and re-subscribing the same feed starts a new origin with "
             "no history. Check the size first with search_items (its `total` "
-            "counts the source's items). Use delete_source_items to clear a bad "
-            "crawl and keep the subscription, or set_source_status to disable "
+            "counts the origin's items). Use delete_origin_items to clear a bad "
+            "crawl and keep the subscription, or set_subscription_status to disable "
             "it instead."
         ),
     )
-    async def remove_source(source_id: str) -> dict[str, Any]:
+    async def remove_subscription(source_id: str) -> dict[str, Any]:
         return await _write(
             core,
             method="DELETE",
@@ -360,15 +366,15 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=True, open_world=False),
         description=(
-            "Delete a source's items while keeping the subscription. Use this "
-            "after a bad crawl: the source keeps its crawl position, so "
+            "Delete an origin's items while keeping the subscription. Use this "
+            "after a bad crawl: the origin keeps its crawl position, so "
             "collection resumes instead of re-reading history. Optionally "
             "narrow by since/until; pass include_published=false to spare items "
             "a client has already seen. Not reversible. Returns a job handle -- "
             "read each item's outcome with work_units."
         ),
     )
-    async def delete_source_items(
+    async def delete_origin_items(
         source_id: str,
         since: str = "",
         until: str = "",
@@ -446,13 +452,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
     @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
-            "Queue processing-chain products (e.g. translations) for items "
-            "stored before the chain was enabled. It spends provider budget per "
-            "item, and the source must have a pipeline_chain configured. "
+            "Queue processing-chain products (e.g. translations) for the "
+            "origin's items stored before the chain was enabled. It spends "
+            "provider budget per item, and the subscription must have a "
+            "pipeline_chain configured. "
             "Returns a job handle -- read each item's outcome with work_units."
         ),
     )
-    async def backfill_source(source_id: str) -> dict[str, Any]:
+    async def backfill_subscription_chain(source_id: str) -> dict[str, Any]:
         return await _write(
             core,
             method="POST",
@@ -533,7 +540,7 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             "Push items into an agent source (A3, ADR 0022): pass each item's "
             "title, url, published_at and content; Pearss stores it through the "
             "same pipeline as collected items. The target must be a source of "
-            "type 'agent' — create one with add_source and a url like "
+            "type 'agent' — create one with add_subscription and a url like "
             "'agent://newsletter-intake'; pushing into an rss or web source is "
             "refused, which would mix one origin's content into another's. This "
             "adds content to the corpus, and its chain spends provider budget "

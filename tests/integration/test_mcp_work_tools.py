@@ -271,10 +271,10 @@ async def test_ac193_the_answer_is_a_handle_whose_size_does_not_follow_the_list(
     before = _work_count(env["PEARSS_DATABASE_URL"])
 
     small = await _call(
-        base_url, "fetch_source_items", _arguments(source_id, ten), rid=1
+        base_url, "fetch_origin_items", _arguments(source_id, ten), rid=1
     )
     large = await _call(
-        base_url, "fetch_source_items", _arguments(source_id, forty), rid=2
+        base_url, "fetch_origin_items", _arguments(source_id, forty), rid=2
     )
 
     payload_small = small
@@ -308,7 +308,7 @@ async def test_the_ledger_is_where_the_addresses_end_up(
 
     work_id = (
         await _call(
-            base_url, "fetch_source_items", _arguments(source_id, OFF_HOST), rid=1
+            base_url, "fetch_origin_items", _arguments(source_id, OFF_HOST), rid=1
         )
     )["work_id"]
 

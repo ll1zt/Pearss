@@ -218,8 +218,8 @@ X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**�
   （服务持有的 token），**agent 身份靠 correlation_id 关联，不体现在 actor 上**（ADR 0010 记录了这个可归因性弱化）
 - 工具面变更会撞 snapshot：`MCP_SNAPSHOT_UPDATE=1 just contract` 后**审查 diff 再提交**，
   不要为了让测试绿而重写
-- **删除类工具（ADR 0021）**：`remove_source`（删订阅+内容）、`delete_items`（按 id）、
-  `delete_source_items`（清空某源条目、保留订阅）。三者都不可逆，确认文本里会写明
+- **删除类工具（ADR 0021）**：`remove_subscription`（删订阅+内容）、`delete_items`（按 id）、
+  `delete_origin_items`（清空某源条目、保留订阅）。三者都不可逆，确认文本里会写明
   后果。它们与其它写工具的一个区别：破坏半径不在参数里，所以确认消息必须把
   「删掉什么」说出来，而不只是复述参数
 
@@ -496,7 +496,7 @@ sqlite3 /var/lib/pearss/pearss.db \
 
 ### 抓错了内容，但订阅要保留
 
-用 `POST /v1/sources/{id}/items:delete`（MCP：`delete_source_items`）。
+用 `POST /v1/sources/{id}/items:delete`（MCP：`delete_origin_items`）。
 源与其 `seen_frontier` / `floor_cursor` 保留，下一轮从这里继续——
 **不要**用「删订阅再重新订阅」代替，那会让采集重新采样历史深度。
 
@@ -516,9 +516,9 @@ id 从 `search_items` 或 Reader 的 items 流里取。
 
 ### 删除整个订阅
 
-`DELETE /v1/sources/{id}`（MCP：`remove_source`）。**不可逆**，
+`DELETE /v1/sources/{id}`（MCP：`remove_subscription`）。**不可逆**，
 且重新订阅同一 feed 会得到一个新源、从首轮页数策略重新采样。
-若不确定，先用 `set_source_status` 置为 `disabled`——它停止采集但保留一切。
+若不确定，先用 `set_subscription_status` 置为 `disabled`——它停止采集但保留一切。
 
 ### 共享正文的坑（已由实现处理，排障时需知道）
 
@@ -623,7 +623,7 @@ curl -fsS http://127.0.0.1:8000/healthz   # 非 200 即需要人看
 
 **MCP（agent 面）**：
 
-5. 经 MCP `add_source` 添加一个非 feed URL（如 zhihu 频道），确认弹窗
+5. 经 MCP `add_subscription` 添加一个非 feed URL（如 zhihu 频道），确认弹窗
    类型正确、采集 run 成功
 6. `get_system_snapshot` 数字与库内一致
 

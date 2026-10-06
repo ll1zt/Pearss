@@ -112,7 +112,7 @@ ADR 0023）。失败契约：`fetch` 只抛 `FetchError(ErrorClass)`，`parse` �
    transport 时，httpx 的 `send` 已解压 body 而 `content-encoding` 头还在——
    必须剥掉传输态头再交给子进程，否则子进程 httpx 对明文做 gunzip 直接
    zlib -3。
-6. **MCP `add_source` 的类型推断边界**：推断只查非 rss 采集器的
+6. **MCP `add_subscription` 的类型推断边界**：推断只查非 rss 采集器的
    `match_url`；它认不出的 URL（新站点、新 URL 形式）会回落 rss。新增
    URL 形式时同步扩展对应采集器的 `resolve_source`/`match_url` 测试。
 
@@ -258,7 +258,7 @@ def collect_item(
 宿主侧的顺序（采集器看不到这些）：
 
 ```
-POST /v1/works（kind=fetch；MCP 为 fetch_source_items）
+POST /v1/works（kind=fetch；MCP 为 fetch_origin_items）
   ← 推荐：返回作业句柄，逐条结果在账本里（GET /v1/works/{id}/units）
 POST /v1/sources/{id}:fetch-items
   ← 兼容壳（deprecated，≤ 20 地址）：响应内联逐条结果，收尾时把同一次运行补记进账本
@@ -285,7 +285,7 @@ POST /v1/sources/{id}:fetch-item
 
 | 情况 | 用哪个 |
 |---|---|
-| 你发现了**地址**（归档页/sitemap），想让部署去抓 | `fetch_source_items` / `:fetch-items`（目标：已有采集源） |
+| 你发现了**地址**（归档页/sitemap），想让部署去抓 | `fetch_origin_items` / `:fetch-items`（目标：已有采集源） |
 | 你已经**抓到了内容**，部署读不到那个来源（登录态、内部系统） | `submit_items` / `:ingest`（目标：`agent` 型源，ADR 0022） |
 
 ## 处理器（P3）：翻译参考实现

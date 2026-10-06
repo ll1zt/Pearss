@@ -301,7 +301,7 @@ async def test_a_mismatched_mcp_method_header_is_refused(mcp_url: str) -> None:
     status, payload = await _rpc(
         mcp_url,
         "tools/list",
-        headers={"mcp-method": "tools/call", "mcp-name": "add_source"},
+        headers={"mcp-method": "tools/call", "mcp-name": "add_subscription"},
     )
 
     assert status != 200 or "error" in payload, payload
@@ -607,7 +607,7 @@ async def test_the_deletes_are_annotated_destructive(mcp_url: str) -> None:
     it were left unset on a delete, the machine-readable contract would say
     "safe" while the description said "permanent".
     """
-    deletes = {"remove_source", "delete_items", "delete_source_items"}
+    deletes = {"remove_subscription", "delete_items", "delete_origin_items"}
     async with mcp_session(mcp_url) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
 
@@ -627,9 +627,9 @@ async def test_reversible_writes_are_not_annotated_destructive(mcp_url: str) -> 
     warning worthless.
     """
     reversible = {
-        "update_schedule_policy",
-        "set_source_status",
-        "set_source_folder",
+        "update_subscription_policy",
+        "set_subscription_status",
+        "set_subscription_folder",
         "set_plugin_status",
     }
     async with mcp_session(mcp_url) as client:
@@ -651,9 +651,9 @@ async def test_tools_that_reach_outward_are_annotated_open_world(mcp_url: str) -
     A host that wants to treat those differently has only this field to go on.
     """
     open_world = {
-        "add_source",
+        "add_subscription",
         "trigger_job",
-        "backfill_source",
+        "backfill_subscription_chain",
         "retry_enrichments",
         "submit_items",
         "set_plugin_status",

@@ -698,3 +698,36 @@ def test_every_next_action_names_a_registered_tool() -> None:
         f"next_actions point at tools that are not registered: {unknown}; "
         f"registered: {sorted(registered)}"
     )
+
+
+def test_the_write_tools_are_named_for_what_they_act_on() -> None:
+    """AC-341 / AC-342: the write face speaks subscription and origin.
+
+    ADR 0046's split made policy and facts two tables; the tool names were the
+    last place still calling both "source". Pinned here rather than left to the
+    snapshot diff, because a rename that leaves the old name registered -- an
+    alias, or a half-finished edit -- would still read as "expected renames" in
+    a diff review, and two spellings for one intent is what the model would
+    then have to guess between.
+    """
+    snapshot = json.loads(SNAPSHOT.read_text(encoding="utf-8"))
+    renamed = {
+        "add_source": "add_subscription",
+        "add_sources": "add_subscriptions",
+        "remove_source": "remove_subscription",
+        "set_source_status": "set_subscription_status",
+        "set_source_folder": "set_subscription_folder",
+        "set_source_pipeline_chain": "set_subscription_pipeline_chain",
+        "update_schedule_policy": "update_subscription_policy",
+        "fetch_source_items": "fetch_origin_items",
+        "delete_source_items": "delete_origin_items",
+        "backfill_source": "backfill_subscription_chain",
+    }
+    missing = sorted(new for new in renamed.values() if new not in snapshot)
+    assert not missing, f"these renamed tools are not registered: {missing}"
+
+    stale = sorted(old for old in renamed if old in snapshot)
+    assert not stale, (
+        f"the retired names are still registered: {stale}. The write face must "
+        "not carry both spellings."
+    )

@@ -162,7 +162,7 @@
 | AC-337 | #366 拆表 D：`/v1/sources` 旧读端点收成 `origin ⋈ subscription` 投影并在 OpenAPI 标 deprecated；数据模型里 `Source` 实体拆为 `Origin` + `Subscription` | issue #366 | 已合并 | `tests/unit/test_structure_guards.py` |
 | AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 是**订阅** id（解析经 subscription → origin → items；未知频道为空而不是全库），folder 归类读 `subscription.folder`；1:1 阶段对客户端无感 | issue #367 | 已合并 | `tests/integration/test_reader_channel_identity.py` |
 | AC-340 | #368 频道身份切订阅 2/4：RSS 频道 = **订阅**（名字/链接来自其 origin 的展示名与 canonical URL，与 Reader 侧边栏同一套标签规则）；feed 窗口按该订阅的 origin 定域，闸门语义不变 | issue #368 | 已合并 | `tests/integration/test_feed_channel_identity.py` |
-| AC-341..342 | #369 频道身份切订阅 3/4：MCP 写工具的 target 语义、命名与快照（改名不留别名） | issue #369 | 保留 | |
+| AC-341..342 | #369 频道身份切订阅 3/4：MCP 写工具改名到拆表后的词汇（`add_subscription`/`add_subscriptions`/`remove_subscription`/`set_subscription_status`/`set_subscription_folder`/`set_subscription_pipeline_chain`/`update_subscription_policy`/`fetch_origin_items`/`delete_origin_items`/`backfill_subscription_chain`），**不留别名**；改名后每个工具仍落在 OpenAPI 声明的 `/v1` 端点上，`next_actions` 与常驻上下文预算（17602/18000）守卫仍绿 | issue #369 | 已合并 | `tests/integration/test_mcp_tool_coverage.py`、`tests/unit/test_mcp_tool_guide.py` |
 | AC-343..344 | #370 频道身份切订阅 4/4：`/v1/subscriptions` 新端点 + NNW 旧 stream id 别名 | issue #370 | 保留 | |
 | AC-345..347 | #371 一个 origin 多订阅：解除唯一约束 + 第二订阅写路径 + 按 `(item, subscription)` 判定的可见性（物化行 + 一致性守卫） | issue #371 | 保留 | |
 | AC-216..217 | #373 退订≠销毁：端点与语义拆分 + 销毁审计带理由（旧 `DELETE /v1/sources/{id}` 改退订语义） | issue #373 | 保留 | |

@@ -975,7 +975,7 @@ def infer_source_type(url: str, registry: CollectorRegistry | None = None) -> st
     finer targeting; this inference only picks between rss and web.
 
     Lives here rather than in the MCP layer because two callers need the same
-    answer: `add_source` resolves `auto` before it elicits, and
+    answer: `add_subscription` resolves `auto` before it elicits, and
     `/v1/sources:batch` resolves it per URL (ADR 0044). One implementation, so
     the same list cannot be split two ways depending on the entry point.
 

@@ -39,7 +39,7 @@ def _payload(result: Any) -> dict[str, Any]:
 async def _add_source(session: Any, url: str, **extra: Any) -> str:
     """Add a source through the tool and return the id it reports."""
     result = await session.call_tool(
-        "add_source",
+        "add_subscription",
         {
             "url": url,
             "schedule_policy": {"type": "fixed", "interval": "30m"},

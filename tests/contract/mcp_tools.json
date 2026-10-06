@@ -1,12 +1,12 @@
 {
-  "add_source": {
+  "add_subscription": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add a source. This makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_source_pipeline_chain.",
+    "description": "Add a subscription to a feed or page (and the origin it points at). This makes real outbound requests to a third party. schedule_policy is {type: fixed, interval: '30m'} or {type: adaptive, min: '15m', max: '24h'}. type is 'rss' (a feed URL), 'web' (a page a login-type collector serves, e.g. zhihu/telegram) or 'auto' (default: inferred from the URL; pass it when auto would guess wrong). pipeline_chain plus target_lang gate items until the chain completes -- see set_subscription_pipeline_chain.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -54,18 +54,18 @@
         "url",
         "schedule_policy"
       ],
-      "title": "add_sourceArguments",
+      "title": "add_subscriptionArguments",
       "type": "object"
     }
   },
-  "add_sources": {
+  "add_subscriptions": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Add several sources in one call. These sources make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_source does. Returns a job handle -- read each URL's outcome with work_units; an unusable one fails alone. Use add_source for a single source.",
+    "description": "Add several subscriptions in one call. They make real outbound requests to a third party. Options apply to the whole batch; `type` 'auto' resolves per URL as add_subscription does. Returns a job handle -- read each URL's outcome with work_units; an unusable one fails alone. Use add_subscription for a single subscription.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -126,18 +126,18 @@
         "urls",
         "schedule_policy"
       ],
-      "title": "add_sourcesArguments",
+      "title": "add_subscriptionsArguments",
       "type": "object"
     }
   },
-  "backfill_source": {
+  "backfill_subscription_chain": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Queue processing-chain products (e.g. translations) for items stored before the chain was enabled. It spends provider budget per item, and the source must have a pipeline_chain configured. Returns a job handle -- read each item's outcome with work_units.",
+    "description": "Queue processing-chain products (e.g. translations) for the origin's items stored before the chain was enabled. It spends provider budget per item, and the subscription must have a pipeline_chain configured. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -148,7 +148,7 @@
       "required": [
         "source_id"
       ],
-      "title": "backfill_sourceArguments",
+      "title": "backfill_subscription_chainArguments",
       "type": "object"
     }
   },
@@ -177,14 +177,14 @@
       "type": "object"
     }
   },
-  "delete_source_items": {
+  "delete_origin_items": {
     "annotations": {
       "destructive_hint": true,
       "idempotent_hint": false,
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a source's items while keeping the subscription. Use this after a bad crawl: the source keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible. Returns a job handle -- read each item's outcome with work_units.",
+    "description": "Delete an origin's items while keeping the subscription. Use this after a bad crawl: the origin keeps its crawl position, so collection resumes instead of re-reading history. Optionally narrow by since/until; pass include_published=false to spare items a client has already seen. Not reversible. Returns a job handle -- read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "include_published": {
@@ -210,7 +210,7 @@
       "required": [
         "source_id"
       ],
-      "title": "delete_source_itemsArguments",
+      "title": "delete_origin_itemsArguments",
       "type": "object"
     }
   },
@@ -236,14 +236,14 @@
       "type": "object"
     }
   },
-  "fetch_source_items": {
+  "fetch_origin_items": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Fetch a list of article addresses into an existing source. The deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately: the work keeps running, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the source's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
+    "description": "Fetch a list of article addresses into an existing origin. The deployment makes real outbound requests for every address. Returns a job handle (work_id, status, counts) immediately: the work keeps running, and the response does not grow with the list. Read per-address results with work_units. Each address must be on the origin's own host (off-host ones come back `rejected`); the collector must be able to fetch one address (rss can). Use this for addresses to fetch; submit_items for content you already fetched.",
     "input_schema": {
       "properties": {
         "batch_size": {
@@ -272,7 +272,7 @@
         "source_id",
         "urls"
       ],
-      "title": "fetch_source_itemsArguments",
+      "title": "fetch_origin_itemsArguments",
       "type": "object"
     }
   },
@@ -535,14 +535,14 @@
       "type": "object"
     }
   },
-  "remove_source": {
+  "remove_subscription": {
     "annotations": {
       "destructive_hint": true,
       "idempotent_hint": false,
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a source and everything it collected. Permanent: the source row, its items, stored bodies, read state and translations are removed, and re-subscribing the same feed starts a new source with no history. Check the size first with search_items (its `total` counts the source's items). Use delete_source_items to clear a bad crawl and keep the subscription, or set_source_status to disable it instead.",
+    "description": "Delete a subscription and everything its origin collected. Permanent: the origin row, its items, stored bodies, read state and translations are removed, and re-subscribing the same feed starts a new origin with no history. Check the size first with search_items (its `total` counts the origin's items). Use delete_origin_items to clear a bad crawl and keep the subscription, or set_subscription_status to disable it instead.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -553,7 +553,7 @@
       "required": [
         "source_id"
       ],
-      "title": "remove_sourceArguments",
+      "title": "remove_subscriptionArguments",
       "type": "object"
     }
   },
@@ -764,14 +764,14 @@
       "type": "object"
     }
   },
-  "set_source_folder": {
+  "set_subscription_folder": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Move a source to a sidebar folder (one folder per source; 'default' is the unclassified home). Reflected in the Reader API's subscription/list, so the client sidebar follows on its next refresh.",
+    "description": "Move a subscription to a sidebar folder (one folder per subscription; 'default' is the unclassified home). Reflected in the Reader API's subscription/list, so the client sidebar follows on its next refresh.",
     "input_schema": {
       "properties": {
         "folder": {
@@ -787,18 +787,18 @@
         "source_id",
         "folder"
       ],
-      "title": "set_source_folderArguments",
+      "title": "set_subscription_folderArguments",
       "type": "object"
     }
   },
-  "set_source_pipeline_chain": {
+  "set_subscription_pipeline_chain": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Set a source's processing chain, and its target language with it. Items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none. Run backfill_source afterwards for already-stored items; use add_source to set a chain on a new source.",
+    "description": "Set a subscription's processing chain, and its target language with it. Items are held at the gate until the chain completes, and its processors can make real outbound requests and spend provider budget per item. An empty list clears the chain, so items publish as soon as they are stored; passing no target_lang sets it to none. Run backfill_subscription_chain afterwards for already-stored items; use add_subscription to set a chain on a new subscription.",
     "input_schema": {
       "properties": {
         "pipeline_chain": {
@@ -823,18 +823,18 @@
         "source_id",
         "pipeline_chain"
       ],
-      "title": "set_source_pipeline_chainArguments",
+      "title": "set_subscription_pipeline_chainArguments",
       "type": "object"
     }
   },
-  "set_source_status": {
+  "set_subscription_status": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Pause or resume a source. Pausing stops collection without deleting anything already gathered.",
+    "description": "Pause or resume a subscription. Pausing stops collection without deleting anything already gathered.",
     "input_schema": {
       "properties": {
         "source_id": {
@@ -850,7 +850,7 @@
         "source_id",
         "status"
       ],
-      "title": "set_source_statusArguments",
+      "title": "set_subscription_statusArguments",
       "type": "object"
     }
   },
@@ -861,7 +861,7 @@
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_source and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's. This adds content to the corpus, and its chain spends provider budget on the submitted URLs. Returns a job handle; read each item's outcome with work_units.",
+    "description": "Push items into an agent source (A3, ADR 0022): pass each item's title, url, published_at and content; Pearss stores it through the same pipeline as collected items. The target must be a source of type 'agent' \u2014 create one with add_subscription and a url like 'agent://newsletter-intake'; pushing into an rss or web source is refused, which would mix one origin's content into another's. This adds content to the corpus, and its chain spends provider budget on the submitted URLs. Returns a job handle; read each item's outcome with work_units.",
     "input_schema": {
       "properties": {
         "items": {
@@ -907,14 +907,14 @@
       "type": "object"
     }
   },
-  "update_schedule_policy": {
+  "update_subscription_policy": {
     "annotations": {
       "destructive_hint": false,
       "idempotent_hint": false,
       "open_world_hint": true,
       "read_only_hint": false
     },
-    "description": "Change a source's schedule policy. An aggressive interval puts real load on the origin site.",
+    "description": "Change a subscription's schedule policy. An aggressive interval puts real load on the origin site.",
     "input_schema": {
       "properties": {
         "schedule_policy": {
@@ -931,7 +931,7 @@
         "source_id",
         "schedule_policy"
       ],
-      "title": "update_schedule_policyArguments",
+      "title": "update_subscription_policyArguments",
       "type": "object"
     }
   },

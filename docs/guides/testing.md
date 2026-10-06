@@ -22,7 +22,7 @@
 ### E2E（tests/e2e/）
 
 - 拓扑：一个 app 实例、一个 uvicorn 线程；REST 与 MCP（挂载于同一 app 的 `/mcp`）走同一端口；origin 是本地 `ThreadingHTTPServer` 供 RSS fixture
-- `test_full_loop.py` 覆盖七步：无 elicitation 拒绝写 → 确认 add_source → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
+- `test_full_loop.py` 覆盖七步：无 elicitation 拒绝写 → 确认 add_subscription → trigger_job 同步等 run 成功 → item 过闸（ready/published）→ Reader API 登录/ids/contents 稳定 → RSS+ 输出层（库级，`render_feed` 尚无 HTTP 路由）GUID 稳定 → 幂等重放只产生一个 source 且审计落行
 - discover_feed 不存在（A5 backlog），feed URL 由测试直接给定；工具落地后补第 2 步
 
 #### 客户端同步旅程（`test_client_sync_journey.py`）
@@ -248,7 +248,7 @@ P1 的 E2E 场景：
 
 1. Compose 启动 Core API、MCP 与受控 fixture HTTP server
 2. 调用 `discover_feed` 找到测试 feed
-3. 确认并 `add_source`
+3. 确认并 `add_subscription`
 4. `trigger_job`，等待对应 JobRun 成功
 5. 断言 Item 已入库且 `publish_status=ready/published`
 6. 获取 RSS 输出，断言 GUID 稳定、条目存在、pending 条目不存在

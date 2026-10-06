@@ -80,7 +80,7 @@ async def test_subscribe_collect_consume_replay(
     async with open_mcp_session(mcp_endpoint) as session:
         added = await _call(
             session,
-            "add_source",
+            "add_subscription",
             {
                 "url": origin_url,
                 "schedule_policy": {"type": "fixed", "interval": "30m"},

@@ -265,24 +265,24 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # P2 plugin lifecycle (ADR 0017).
         "list_plugins",
         "set_plugin_status",
-        "add_source",
+        "add_subscription",
         # The batch primitive (ADR 0044, issue #159): one confirmation covers a
         # list of URLs, because the single tool means one dialog per source.
-        "add_sources",
-        "update_schedule_policy",
-        "set_source_status",
-        "set_source_folder",
+        "add_subscriptions",
+        "update_subscription_policy",
+        "set_subscription_status",
+        "set_subscription_folder",
         # The fourth narrow tool on the same PATCH endpoint (ADR 0036, issue
         # #71): `add_source` sets a chain only at creation, so without this one
         # "subscribe first, decide to translate later" had no path but deleting
         # the source.
-        "set_source_pipeline_chain",
-        "remove_source",
+        "set_subscription_pipeline_chain",
+        "remove_subscription",
         # Deletion (ADR 0021): remove_source stops flagging and starts
         # deleting; these two clear items while keeping the subscription,
         # or name exact items.
         "delete_items",
-        "delete_source_items",
+        "delete_origin_items",
         # Consumption state (ADR 0046 D-E, issue #218): the /v1 atom is
         # first-class, and this is its write side. Read state is what a Reader
         # writes, so an agent without it could not mark anything read.
@@ -291,7 +291,7 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # P3 processor chain (ADR 0018): one-off backfill for legacy items,
         # plus chain visibility and the agent re-trigger the retry policy
         # stops at.
-        "backfill_source",
+        "backfill_subscription_chain",
         "list_enrichments",
         "retry_enrichments",
         # A3 ingest (ADR 0022): the write side of an agent source.
@@ -299,7 +299,7 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # The other direction (issue #171): the caller discovered addresses and
         # the deployment fetches them through the source's own collector. Since
         # #191 it answers with a work handle rather than a per-address report.
-        "fetch_source_items",
+        "fetch_origin_items",
         # The read side of the work mechanism (#191, ADR 0046): the handle a
         # submission returns is only useful if it leads somewhere, and the
         # ledger is where per-target results live once the response stops
@@ -582,7 +582,7 @@ async def test_a_write_runs_without_any_elicitation(mcp_url: str) -> None:
     async with mcp_session(mcp_url, elicitation_callback=_counting) as session:
         payload = _payload(
             await session.call_tool(
-                "add_source",
+                "add_subscription",
                 {
                     "url": "https://no-elicitation.example/feed.xml",
                     "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -663,7 +663,7 @@ async def test_reads_and_writes_share_one_audit_path(
     """
     await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://shared-audit.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -691,7 +691,7 @@ async def test_a_write_reaches_the_core_api(mcp_url: str) -> None:
     """The write must actually happen, and be attributed like any other."""
     payload = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://confirmed.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -724,7 +724,7 @@ async def _an_agent_source(mcp_url: str) -> str:
     """
     payload = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "agent://intake",
             "type": "agent",
@@ -840,7 +840,7 @@ async def test_trigger_records_a_run(mcp_url: str) -> None:
     """
     created = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://trig.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -866,7 +866,7 @@ async def test_add_source_infers_web_type_for_a_collector_url(mcp_url: str) -> N
     """
     payload = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://www.zhihu.com/people/someone",
             "schedule_policy": {"type": "fixed", "interval": "2h"},
@@ -875,7 +875,7 @@ async def test_add_source_infers_web_type_for_a_collector_url(mcp_url: str) -> N
     assert payload.get("declined") is None and payload.get("aborted") is None, payload
     assert payload["type"] == "web", payload
     # Clean up for the rest of the suite (list_sources shape assertions).
-    await _call(mcp_url, "remove_source", {"source_id": payload["id"]})
+    await _call(mcp_url, "remove_subscription", {"source_id": payload["id"]})
 
 
 @pytest.mark.asyncio
@@ -884,7 +884,7 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
     too: an operator passing type='rss' gets rss even for a zhihu URL)."""
     feed = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://plain.example/feed.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -893,7 +893,7 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
     assert feed["type"] == "rss", feed
     explicit = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://www.zhihu.com/people/other",
             "type": "rss",
@@ -901,8 +901,8 @@ async def test_add_source_rss_default_unchanged_for_feed_urls(mcp_url: str) -> N
         },
     )
     assert explicit["type"] == "rss", explicit
-    await _call(mcp_url, "remove_source", {"source_id": feed["id"]})
-    await _call(mcp_url, "remove_source", {"source_id": explicit["id"]})
+    await _call(mcp_url, "remove_subscription", {"source_id": feed["id"]})
+    await _call(mcp_url, "remove_subscription", {"source_id": explicit["id"]})
 
 
 # --------------------------------------------------------------------------
@@ -984,7 +984,9 @@ async def test_backfill_source_executes_and_reports_queued(
     finally:
         engine.dispose()
 
-    payload = await _call(mcp_url, "backfill_source", {"source_id": "src-1"})
+    payload = await _call(
+        mcp_url, "backfill_subscription_chain", {"source_id": "src-1"}
+    )
     assert payload.get("declined") is None and payload.get("aborted") is None
     # The module database is shared, so other tests' items for this source may
     # already be queued; what must hold is that the answer is a handle with a
@@ -1013,7 +1015,7 @@ async def test_delete_source_removes_its_items(mcp_url: str) -> None:
     """
     created = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://plain.example/todelete.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -1021,7 +1023,7 @@ async def test_delete_source_removes_its_items(mcp_url: str) -> None:
     )
     source_id = created["id"]
 
-    result = await _call(mcp_url, "remove_source", {"source_id": source_id})
+    result = await _call(mcp_url, "remove_subscription", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert result["sources"] == 1
 
@@ -1064,7 +1066,7 @@ async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
     """Clearing a crawl must not remove the source or its position."""
     created = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://plain.example/clearcrawl.xml",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -1072,13 +1074,13 @@ async def test_delete_source_items_keeps_the_subscription(mcp_url: str) -> None:
     )
     source_id = created["id"]
 
-    result = await _call(mcp_url, "delete_source_items", {"source_id": source_id})
+    result = await _call(mcp_url, "delete_origin_items", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
 
     listed = await _call(mcp_url, "list_sources", {"limit": 50})
     assert source_id in [row["id"] for row in listed["data"]]
 
-    await _call(mcp_url, "remove_source", {"source_id": source_id})
+    await _call(mcp_url, "remove_subscription", {"source_id": source_id})
 
 
 # --------------------------------------------------------------------------
@@ -1240,7 +1242,7 @@ async def test_a_source_items_delete_submits_a_job(
 
     created = await _call(
         mcp_url,
-        "add_source",
+        "add_subscription",
         {
             "url": "https://clear.example/feed",
             "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -1269,7 +1271,7 @@ async def test_a_source_items_delete_submits_a_job(
     finally:
         engine.dispose()
 
-    result = await _call(mcp_url, "delete_source_items", {"source_id": source_id})
+    result = await _call(mcp_url, "delete_origin_items", {"source_id": source_id})
 
     assert result.get("declined") is None and result.get("aborted") is None, result
     assert result.get("work_id"), result
