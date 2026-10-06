@@ -278,7 +278,7 @@ def test_redirects_are_followed() -> None:
 def test_source_and_raw_fetch_are_carried_through() -> None:
     with client_for(ok_transport()) as client:
         payload = fetch(URL, client=client, source_id="src-9", raw_fetch_id="raw-9")
-    assert payload.source_id == "src-9"
+    assert payload.origin_id == "src-9"
     assert payload.raw_fetch_id == "raw-9"
 
 

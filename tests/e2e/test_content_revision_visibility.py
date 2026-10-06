@@ -33,7 +33,7 @@ async def test_user_cannot_fetch_a_revision_before_its_processing_finishes(
             at="2026-01-01T00:00:00.000000Z",
         )
         draft = ItemDraft(
-            source_id=source.id,
+            origin_id=source.id,
             external_id="revision",
             title="Article",
             canonical_url="https://example.test/article",

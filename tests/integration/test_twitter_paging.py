@@ -18,13 +18,13 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from adapters.db_models import Source
-from adapters.repository import paging_state, save_paging_state
+from adapters.repository import SourceView, get_source, paging_state, save_paging_state
 from app import collector_registry
 from app.main import create_engine_for
 from app.pipeline import CollectionResult, collect_paged
 from core.enums import ErrorClass
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_ID = "src-x"
@@ -94,19 +94,12 @@ def session(tmp_path: Path) -> Iterator[Session]:
     engine = create_engine_for(url)
 
     with Session(engine) as made:
-        made.add(
-            Source(
-                id=SOURCE_ID,
-                type="web",
-                url=CANONICAL,
-                canonical_url=CANONICAL,
-                schedule_policy='{"type":"fixed","interval":"60m"}',
-                status="active",
-                trust_level="standard",
-                tenant_id="default",
-                created_at="2026-01-01T00:00:00.000000Z",
-                updated_at="2026-01-01T00:00:00.000000Z",
-            )
+        seed_source(
+            made,
+            source_id=SOURCE_ID,
+            source_type="web",
+            url=CANONICAL,
+            schedule_policy='{"type":"fixed","interval":"60m"}',
         )
         made.commit()
         yield made
@@ -118,8 +111,8 @@ def storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
 
 
-def source_row(session: Session) -> Source:
-    found = session.get(Source, SOURCE_ID)
+def source_row(session: Session) -> SourceView:
+    found = get_source(session, SOURCE_ID)
     assert found is not None
     return found
 
@@ -826,9 +819,7 @@ def test_a_new_reply_is_not_dropped_when_its_parent_is_already_seen(
 
     # 510 is the newest id already ingested; the module's parent (500) is below
     # it, its reply (520) is above it -- newer content, placed after a seen id.
-    row = session.get(Source, SOURCE_ID)
-    assert row is not None
-    row.seen_frontier = 510
+    save_paging_state(session, source_id=SOURCE_ID, newest_id=510, floor_candidate=None)
     session.commit()
 
     page1 = _page(

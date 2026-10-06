@@ -101,7 +101,7 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
     return [
         _draft_from_tweet(
             tweet,
-            source_id=raw.source_id,
+            source_id=raw.origin_id,
             raw_fetch_id=raw.raw_fetch_id,
             source_url=raw.url,
         )
@@ -414,7 +414,7 @@ def _draft_from_tweet(
         metadata["retweet"] = "true"
 
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"twitter:{_text(_get(tweet, 'rest_id'))}",
         title=title,
         canonical_url=_tweet_link(tweet, source_url=source_url),

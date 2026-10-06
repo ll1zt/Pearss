@@ -37,7 +37,6 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters import correlation
-from adapters.db_models import Source as SourceRow
 from adapters.log_limits import rate_limited_logger
 from adapters.repository import (
     claim_job_run,
@@ -46,6 +45,7 @@ from adapters.repository import (
     create_job_run,
     ensure_collect_job,
     finish_job_run,
+    get_source,
     last_collect_at,
     last_failure_error_class,
     prune_audit_log,
@@ -247,7 +247,7 @@ def collect_now(
         LOGGER.info("run %s was claimed elsewhere; standing down", run_id)
         return JobRunStatus.CANCELLED, None
 
-    source = session.get(SourceRow, source_id)
+    source = get_source(session, source_id)
     if source is None:
         # The listing came from the same database, so this is a race with a
         # delete rather than a normal path. It still has to close the run, or

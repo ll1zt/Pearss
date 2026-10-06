@@ -563,7 +563,7 @@ def test_a_stuck_chain_degrades_an_otherwise_healthy_state() -> None:
     assert decide_health(healthy).degraded is False
 
     source = ExhaustedSource(
-        source_id="src-a",
+        origin_id="src-a",
         title="A Feed",
         failed_count=3,
         error_class="parse",
@@ -619,7 +619,7 @@ def _stuck(
     ),
 ) -> ExhaustedSource:
     return ExhaustedSource(
-        source_id=source_id,
+        origin_id=source_id,
         title=title,
         failed_count=failed_count,
         error_class=error_class,

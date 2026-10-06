@@ -41,10 +41,10 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters import correlation
-from adapters.db_models import Source as SourceRow
 from adapters.log_safety import escape_control_characters
 from adapters.redaction import redact_url_for_log
 from adapters.repository import (
+    SourceView,
     append_unit,
     chain_for_source,
     claim_next_work,
@@ -72,7 +72,7 @@ from core.enrichment import EnrichmentSpec, EnrichmentStatus
 from core.enums import ErrorClass, SourceType, UnitOutcome
 from core.folders import DEFAULT_FOLDER
 from core.models import schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import DedupeAction, source_canonical_key
+from core.normalize import DedupeAction, origin_canonical_key
 from core.tenancy import SINGLE_TENANT
 from core.work import WorkRecord, terminal_status
 
@@ -170,7 +170,7 @@ class WorkRuntime:
 class SourceRuntime(WorkRuntime):
     """A work about one source: the source, and whatever the kind needs of it."""
 
-    source: SourceRow
+    source: SourceView
     registration: CollectorRegistration | None = None
     chain: tuple[EnrichmentSpec, ...] = ()
 
@@ -487,7 +487,7 @@ class SubscribeExecutor(KindExecutor):
                 if runtime.requested_type == "auto"
                 else runtime.requested_type
             )
-            canonical = source_canonical_key(source_type=source_type, url=target)
+            canonical = origin_canonical_key(source_type=source_type, url=target)
         except ValueError as exc:
             # This URL alone: the rest of the list is still subscribed.
             return UnitResult(
@@ -501,7 +501,7 @@ class SubscribeExecutor(KindExecutor):
             source_type=source_type,
             canonical_url=canonical,
         )
-        existed = session.get(SourceRow, source_id) is not None
+        existed = get_source(session, source_id) is not None
         create_source(
             session,
             source_type=source_type,

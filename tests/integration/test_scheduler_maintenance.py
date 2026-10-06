@@ -57,6 +57,7 @@ from adapters.repository import (
     ensure_collect_job,
     finish_work,
     timestamp,
+    update_source_policy,
 )
 from app.pipeline import normalise_and_store
 from app.scheduler import PRUNE_INTERVAL_SECONDS
@@ -69,6 +70,7 @@ from core.enums import (
     WorkStatus,
 )
 from core.models import ItemDraft
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -145,6 +147,7 @@ def _seed_running_run(session: Session, *, run_id: str, claimed_at: str) -> None
         ),
         {"now": "2026-06-01T00:00:00.000000Z"},
     )
+    mirror_sources(session)
     job_id = ensure_collect_job(
         session,
         source_id="s1",
@@ -387,7 +390,14 @@ async def test_user_abandoned_runs_close_and_expired_audits_disappear_in_the_loo
                 tenant_id="default",
                 at=claimed,
             )
-            source.status = SourceStatus.PAUSED.value
+            # Policy is a subscription column, and the write goes through the
+            # façade so the mirror row cannot drift from it.
+            update_source_policy(
+                session,
+                source_id=source.id,
+                changes={"status": SourceStatus.PAUSED.value},
+                at=claimed,
+            )
             job_id = ensure_collect_job(
                 session,
                 source_id=source.id,
@@ -576,7 +586,7 @@ def test_the_ledger_window_prunes_finished_work_and_leaves_live_rows_alone(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="retention-1",
                     title="Kept across the prune",
                     canonical_url="https://retention.example/post-1",

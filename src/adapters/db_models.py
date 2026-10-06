@@ -426,9 +426,10 @@ class Item(Base):
         # temp B-tree (issue #77).
         sa.Index("ix_item_sort_key_id", "sort_key", "id"),
         sa.Index("ix_item_source_sort_key_id", "source_id", "sort_key", "id"),
-        # Stage A only: the column 0027 keeps. The composite above is what
-        # serves the paged feed read once the reads switch over.
-        sa.Index("ix_item_origin_id", "origin_id"),
+        # Stage B's page: migration 0027 moved the composite off `source_id`
+        # onto the column the reads filter on, because a single-column index
+        # there sorted every page into a temporary b-tree (issue #77).
+        sa.Index("ix_item_origin_sort_key_id", "origin_id", "sort_key", "id"),
     )
 
 

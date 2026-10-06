@@ -181,8 +181,14 @@ RSS / Web Collector / Ingest -> ItemDraft -> normalize -> Item
 每个 ItemDraft 至少应尽力提供：
 
 ```text
-external_id/guid, title, canonical_url, published_at, content, source_id, raw_fetch_id
+external_id/guid, title, canonical_url, published_at, content, origin_id, raw_fetch_id
 ```
+
+> **字段改名（ADR 0046 拆表 B，2026-10）**：`ItemDraft.source_id` 现为
+> `origin_id`——「来源」一词在那次拆表里被拆成事实（origin）与策略（subscription）
+> 两半，草稿携带的是**事实**那一半。第三方采集器需要把构造草稿时的关键字同步改掉。
+> `fetch` / `collect_item` 钩子的**参数名仍是 `source_id`**（插件边界不随这次改名变），
+> 所以钩子签名不用动；传进去的值就是 origin id。
 
 规则：
 

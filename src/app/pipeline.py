@@ -25,12 +25,12 @@ from sqlalchemy.orm import Session
 
 from adapters import filestore
 from adapters.correlation import current as current_correlation_id
-from adapters.db_models import Source as SourceRow
 from adapters.http import FetchError
 from adapters.log_safety import escape_control_characters
 from adapters.raw_payload import RawPayload
 from adapters.redaction import redact_url_for_log
 from adapters.repository import (
+    SourceView,
     StoreOutcome,
     chain_for_source,
     enqueue_chain,
@@ -38,7 +38,7 @@ from adapters.repository import (
     paging_state,
     promote_to_ready,
     save_paging_state,
-    set_source_title_if_absent,
+    set_origin_title_if_absent,
     store_item,
 )
 from adapters.repository.search_index import index_item
@@ -238,7 +238,7 @@ def _plugin_disabled(session: Session, plugin_id: str, *, tenant_id: str) -> boo
 def collect_source(
     session: Session,
     *,
-    source: SourceRow,
+    source: SourceView,
     client: httpx.Client,
     tenant_id: str = SINGLE_TENANT,
     max_pages: int = 1,
@@ -342,7 +342,7 @@ def _collect_one_page(
     session: Session,
     *,
     url: str,
-    source: SourceRow,
+    source: SourceView,
     client: httpx.Client,
     tenant_id: str,
     max_pages: int = 1,
@@ -417,7 +417,7 @@ def _collect_one_page(
     # not to each of its items. Captured here, at the one moment both the
     # drafts and the source row are in scope.
     if drafts:
-        set_source_title_if_absent(
+        set_origin_title_if_absent(
             session,
             source_id=source.id,
             title=drafts[0].metadata.get("feed_title"),
@@ -515,6 +515,9 @@ def _raw_fetch_row(
 
     row = RawFetchRow(
         id=f"rawfetch-{secrets.token_hex(8)}",
+        # Both columns: `origin_id` is the fact and the column the conditional
+        # loop reads, `source_id` the stage-A mirror 0028 drops.
+        origin_id=source_id,
         source_id=source_id,
         status=status,
         http_status=payload.status_code if payload else None,
@@ -539,7 +542,7 @@ def _raw_fetch_row(
 def collect_paged(
     session: Session,
     *,
-    source: SourceRow,
+    source: SourceView,
     registration: CollectorRegistration,
     client: httpx.Client,
     tenant_id: str = SINGLE_TENANT,
@@ -573,7 +576,7 @@ def collect_paged(
         max_pages=max_pages,
     )
 
-    set_source_title_if_absent(
+    set_origin_title_if_absent(
         session, source_id=source.id, title=_paged_source_title(registration)
     )
 
@@ -734,7 +737,7 @@ class FetchItemsResult:
 def fetch_items(
     session: Session,
     *,
-    source: SourceRow,
+    source: SourceView,
     client: httpx.Client,
     urls: Sequence[str],
     tenant_id: str = SINGLE_TENANT,
@@ -867,7 +870,7 @@ def outcome_for(action: FetchItemAction) -> UnitOutcome:
 def fetch_one(
     session: Session,
     *,
-    source: SourceRow,
+    source: SourceView,
     registration: CollectorRegistration | None,
     client: httpx.Client,
     url: str,

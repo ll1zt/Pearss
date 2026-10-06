@@ -19,11 +19,11 @@ import sqlalchemy as sa
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source
+from adapters.repository import get_source
 from app import collector_registry
 from app.pipeline import collect_source
-from core.enums import SourceStatus, TrustLevel
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/zsxq/fixtures"
@@ -50,19 +50,12 @@ def session_factory(
 
 
 def _add_source(session: Session, source_id: str, url: str) -> None:
-    session.add(
-        Source(
-            id=source_id,
-            tenant_id="default",
-            type="web",
-            url=url,
-            canonical_url=url,
-            status=SourceStatus.ACTIVE.value,
-            trust_level=TrustLevel.STANDARD.value,
-            schedule_policy=POLICY,
-            created_at="2026-01-01T00:00:00.000000Z",
-            updated_at="2026-01-01T00:00:00.000000Z",
-        )
+    seed_source(
+        session,
+        source_id=source_id,
+        source_type="web",
+        url=url,
+        schedule_policy=POLICY,
     )
     session.commit()
 
@@ -99,7 +92,7 @@ def test_topics_flow_from_source_url_to_stored_items(
     collector_registry.set_http_transport("zsxq", _zsxq_transport())
     with session_factory() as session:
         _add_source(session, "s1", GROUP_URL)
-        source = session.get(Source, "s1")
+        source = get_source(session, "s1")
         assert source is not None
         result = collect_source(
             session,
@@ -121,7 +114,7 @@ def test_the_feed_name_comes_from_the_group(
     collector_registry.set_http_transport("zsxq", _zsxq_transport())
     with session_factory() as session:
         _add_source(session, "s2", GROUP_URL)
-        source = session.get(Source, "s2")
+        source = get_source(session, "s2")
         assert source is not None
         result = collect_source(
             session,
@@ -134,7 +127,7 @@ def test_the_feed_name_comes_from_the_group(
     assert result.succeeded
     with session_factory() as session:
         title = session.execute(
-            sa.text("select title from source where id = 's2'")
+            sa.text("select title from origin where id = 's2'")
         ).scalar()
     assert title == "知识星球 - 示例星球"
 
@@ -149,7 +142,7 @@ def test_a_missing_token_is_an_auth_run_not_a_crash(
     refresh_registry()  # respawn the child so it inherits the emptied env
     with session_factory() as session:
         _add_source(session, "s3", GROUP_URL)
-        source = session.get(Source, "s3")
+        source = get_source(session, "s3")
         assert source is not None
         result = collect_source(
             session,

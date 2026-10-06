@@ -77,7 +77,7 @@ def fetch(url: str, *, client, source_id: str, conditional=None):
 def parse(raw) -> list[ItemDraft]:
     return [
         ItemDraft(
-            source_id=raw.source_id,
+            origin_id=raw.origin_id,
             external_id="fetched-one",
             title="Plugin fetched: %(label)s",
             canonical_url="https://example.invalid/fetched",

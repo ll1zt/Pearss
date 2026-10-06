@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from adapters.db_models import AuditLog
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import JobRun as JobRunRow
-from adapters.db_models import Source as SourceRow
+from adapters.db_models import Origin as OriginRow
+from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository._shared import _parse
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
@@ -21,7 +22,7 @@ from core.enums import (
     SourceStatus,
     SourceType,
 )
-from core.normalize import source_display_label
+from core.normalize import origin_display_label
 from core.paging import WalkState
 from core.scheduling import observed_gaps
 
@@ -36,7 +37,7 @@ class PagingState(WalkState):
 
 
 def paging_state(session: Session, *, source_id: str) -> PagingState:
-    row = session.get(SourceRow, source_id)
+    row = session.get(OriginRow, source_id)
     if row is None:
         return PagingState()
     return PagingState(
@@ -69,7 +70,7 @@ def save_paging_state(
       stopped. It is never cleared.
     """
 
-    row = session.get(SourceRow, source_id)
+    row = session.get(OriginRow, source_id)
     if row is None:
         return
     if newest_id is not None and (
@@ -82,12 +83,12 @@ def save_paging_state(
     row.updated_at = timestamp(datetime.now(UTC))
 
 
-def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
+def origin_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
     """Display labels for the given sources, keyed by source id.
 
     Batched because a contents request can name a hundred items across several
     sources, and resolving a name per item would turn one page into one hundred
-    queries. Falls back through core.source_display_label so a source never
+    queries. Falls back through core.origin_display_label so a source never
     collected still gets something better than its hex id.
     """
     wanted = [source_id for source_id in set(source_ids) if source_id]
@@ -95,21 +96,21 @@ def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, 
         return {}
     rows = session.execute(
         select(
-            SourceRow.id, SourceRow.title, SourceRow.url, SourceRow.canonical_url
-        ).where(SourceRow.id.in_(wanted))
+            OriginRow.id, OriginRow.title, OriginRow.url, OriginRow.canonical_url
+        ).where(OriginRow.id.in_(wanted))
     ).all()
     return {
-        row.id: source_display_label(
+        row.id: origin_display_label(
             title=row.title,
             url=row.url,
             canonical_url=row.canonical_url,
-            source_id=row.id,
+            origin_id=row.id,
         )
         for row in rows
     }
 
 
-def set_source_title_if_absent(
+def set_origin_title_if_absent(
     session: Session, *, source_id: str, title: str | None
 ) -> bool:
     """Record the name the origin gives itself, when we have none.
@@ -128,10 +129,10 @@ def set_source_title_if_absent(
     result = cast(
         "CursorResult[Any]",
         session.execute(
-            update(SourceRow)
+            update(OriginRow)
             .where(
-                SourceRow.id == source_id,
-                or_(SourceRow.title.is_(None), SourceRow.title == ""),
+                OriginRow.id == source_id,
+                or_(OriginRow.title.is_(None), OriginRow.title == ""),
             )
             .values(title=cleaned, updated_at=timestamp(datetime.now(UTC)))
         ),
@@ -158,7 +159,7 @@ def update_gaps_for_source(
         session.execute(
             select(ItemRow.published_at)
             .where(
-                ItemRow.source_id == source_id,
+                ItemRow.origin_id == source_id,
                 ItemRow.published_at.is_not(None),
             )
             .order_by(ItemRow.published_at.desc())
@@ -322,10 +323,14 @@ def last_failure_error_class(
 
 
 def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, str]]:
-    """(source_id, schedule_policy_json) for sources we should consider.
+    """(origin_id, schedule_policy_json) for origins we should consider.
 
-    Only `active`: a paused or disabled source is not collected, and that is
-    the operator's explicit decision rather than something the scheduler
+    Policy comes from the subscription and identity from the origin: the two
+    halves of ADR 0046's split, read through a join so a paused subscription is
+    never collected however its origin is configured.
+
+    Only `active`: a paused or disabled subscription is not collected, and that
+    is the operator's explicit decision rather than something the scheduler
     should second-guess.
 
     `agent` sources are excluded by type: they are pushed to, not polled
@@ -336,10 +341,12 @@ def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, 
     success rate rather than as an incident to fix.
     """
     rows = session.execute(
-        select(SourceRow.id, SourceRow.schedule_policy).where(
-            SourceRow.tenant_id == tenant_id,
-            SourceRow.status == SourceStatus.ACTIVE.value,
-            SourceRow.type != SourceType.AGENT.value,
+        select(OriginRow.id, SubscriptionRow.schedule_policy)
+        .join(SubscriptionRow, SubscriptionRow.origin_id == OriginRow.id)
+        .where(
+            OriginRow.tenant_id == tenant_id,
+            SubscriptionRow.status == SourceStatus.ACTIVE.value,
+            OriginRow.type != SourceType.AGENT.value,
         )
     ).all()
     return [(str(row[0]), str(row[1])) for row in rows]

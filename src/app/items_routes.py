@@ -142,7 +142,7 @@ def _field_map(item: Item) -> dict[str, Any]:
     return {
         "id": item.id,
         "guid": item.guid,
-        "source_id": item.source_id,
+        "source_id": item.origin_id,
         "title": item.title,
         "url": item.url,
         "author": item.author,
@@ -270,7 +270,7 @@ def read_items(
 
     with request.app.state.session_factory() as session:
         filter_spec = ItemFilter(
-            source_id=source_id,
+            origin_id=source_id,
             publish_status=(
                 publish_status.value if publish_status is not None else None
             ),

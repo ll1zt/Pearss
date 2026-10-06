@@ -33,7 +33,7 @@ def payload(name: str) -> RawPayload:
         url=FEED_URL,
         status_code=200,
         body=body,
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
         raw_fetch_id="raw-1",
     )
 
@@ -52,7 +52,7 @@ def test_valid_feed_yields_one_draft_per_entry() -> None:
 @pytest.mark.fixture
 def test_draft_carries_the_source_and_raw_fetch() -> None:
     drafts = rss.parse(payload("valid.xml"))
-    assert all(d.source_id == SOURCE_ID for d in drafts)
+    assert all(d.origin_id == SOURCE_ID for d in drafts)
     assert all(d.raw_fetch_id == "raw-1" for d in drafts)
 
 
@@ -171,7 +171,7 @@ def test_truncated_feed_is_parse_not_silently_published() -> None:
 
 @pytest.mark.fixture
 def test_empty_payload_is_rejected() -> None:
-    raw = RawPayload(url=FEED_URL, status_code=200, body=b"", source_id=SOURCE_ID)
+    raw = RawPayload(url=FEED_URL, status_code=200, body=b"", origin_id=SOURCE_ID)
     with pytest.raises(CollectorError) as excinfo:
         rss.parse(raw)
     assert excinfo.value.error_class is ErrorClass.PARSE
@@ -184,7 +184,7 @@ def test_non_feed_xml_is_structure_changed() -> None:
         url=FEED_URL,
         status_code=200,
         body=b'<?xml version="1.0"?><html><body>Not a feed</body></html>',
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
     with pytest.raises(CollectorError) as excinfo:
         rss.parse(raw)

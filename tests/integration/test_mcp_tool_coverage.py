@@ -114,7 +114,7 @@ def _seed(factory: sessionmaker[Session], url: str) -> str:
             seed,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="covered-1",
                     title="A tool-coverage post",
                     canonical_url="https://tools.example/post-1",

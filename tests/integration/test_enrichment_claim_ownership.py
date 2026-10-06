@@ -53,7 +53,7 @@ def test_user_fresh_claim_is_not_stolen_by_a_stale_sweeper(
                 session,
                 [
                     ItemDraft(
-                        source_id=source.id,
+                        origin_id=source.id,
                         external_id="article",
                         title="Owned article",
                         canonical_url="https://ownership.example/article",
@@ -139,7 +139,7 @@ def queued_product(
                 session,
                 [
                     ItemDraft(
-                        source_id=source.id,
+                        origin_id=source.id,
                         external_id="article",
                         title="Owned article",
                         canonical_url="https://ownership.example/article",

@@ -820,7 +820,7 @@ async def test_a_read_item_marked_beyond_the_first_page_still_propagates(
 
     drafts = [
         ItemDraft(
-            source_id="src-1",
+            origin_id="src-1",
             external_id=f"scale-{index}",
             title=f"Scale item {index}",
             canonical_url=f"https://blog.example.com/scale/{index}",

@@ -81,7 +81,7 @@ def seeded(tmp_path: pathlib.Path) -> sessionmaker[Session]:
             )
             drafts = [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id=f"i{index}-{offset}",
                     title=f"Item {index}-{offset}",
                     canonical_url=f"https://plan{index}.example/{offset}",
@@ -193,14 +193,14 @@ def test_a_sources_page_is_served_by_an_index(
     """AC-79: scoping by source is the other shape every reader asks for."""
     with seeded() as session:
         source_id = session.execute(
-            sa.text("select source_id from item limit 1")
+            sa.text("select origin_id from item limit 1")
         ).scalar_one()
         emitted = _capture(
             session,
             lambda: query_items(
                 session,
                 tenant_id="default",
-                filter=ItemFilter(source_id=source_id),
+                filter=ItemFilter(origin_id=source_id),
                 descending=True,
                 limit=50,
             ),
@@ -246,7 +246,7 @@ def test_the_count_does_not_sort(
 # *not* reproducible at this scale, measured rather than assumed: with the fixture's
 # 300 rows, deleting `sqlite_stat1` leaves both plans byte-identical
 # (`SCAN item USING INDEX ix_item_sort_key_id` and
-# `SEARCH item USING INDEX ix_item_source_sort_key_id (source_id=?)`), because
+# `SEARCH item USING INDEX ix_item_origin_sort_key_id (origin_id=?)`), because
 # an `ORDER BY ... LIMIT 50` over a sort-key index is chosen on the ordering
 # alone. Statistics live in the fixture and in migration 0022's ANALYZE, and the
 # scheduler keeps them fresh with `PRAGMA optimize` (issue #77), because at
@@ -260,7 +260,7 @@ def _plan_of(session: Session, *, source_id: str | None = None) -> list[str]:
         lambda: query_items(
             session,
             tenant_id="default",
-            filter=ItemFilter(source_id=source_id),
+            filter=ItemFilter(origin_id=source_id),
             descending=True,
             limit=50,
         ),
@@ -299,24 +299,24 @@ def test_the_sort_index_is_load_bearing_for_the_newest_page(
 def test_the_source_index_is_load_bearing_for_a_sources_page(
     seeded: sessionmaker[Session],
 ) -> None:
-    """Drop `ix_item_source_sort_key_id` and the source page stops seeking (#356).
+    """Drop `ix_item_origin_sort_key_id` and the source page stops seeking (#356).
 
-    With it the plan seeks by source (`SEARCH item USING INDEX
-    ix_item_source_sort_key_id`); without it the planner walks the *whole*
+    With it the plan seeks by origin (`SEARCH item USING INDEX
+    ix_item_origin_sort_key_id`); without it the planner walks the *whole*
     sort-key index and filters, which is the O(all rows) shape AC-79 exists to
     remove. `_assert_indexed` cannot see this -- a scan of another index still
     "uses an index" -- so the assertion is on the seek itself.
     """
     with seeded() as session:
         source_id = session.execute(
-            sa.text("select source_id from item limit 1")
+            sa.text("select origin_id from item limit 1")
         ).scalar_one()
         baseline = _plan_of(session, source_id=source_id)
         assert any(statement.startswith("SEARCH item") for statement in baseline), (
             baseline
         )
 
-        session.execute(sa.text("DROP INDEX ix_item_source_sort_key_id"))
+        session.execute(sa.text("DROP INDEX ix_item_origin_sort_key_id"))
         session.commit()
         degraded = _plan_of(session, source_id=source_id)
 

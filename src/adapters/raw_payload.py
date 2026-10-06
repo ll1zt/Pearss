@@ -25,9 +25,9 @@ class RawPayload:
     url: str
     status_code: int
     body: bytes
-    # Which source this fetch belongs to. Carried here so parsing can stamp it
+    # Which origin this fetch belongs to. Carried here so parsing can stamp it
     # onto every draft without the collector needing database access.
-    source_id: str = ""
+    origin_id: str = ""
     # The RawFetch row this payload is stored under, once persisted.
     raw_fetch_id: str | None = None
     headers: dict[str, str] = field(default_factory=dict)
@@ -52,7 +52,7 @@ class RawPayload:
             "url": self.url,
             "status_code": self.status_code,
             "body": base64.b64encode(self.body).decode("ascii"),
-            "source_id": self.source_id,
+            "origin_id": self.origin_id,
             "raw_fetch_id": self.raw_fetch_id,
             "headers": dict(self.headers),
             "not_modified": self.not_modified,
@@ -71,7 +71,7 @@ class RawPayload:
             url=str(data["url"]),
             status_code=int(data["status_code"]),
             body=base64.b64decode(str(data["body"])),
-            source_id=str(data.get("source_id", "")),
+            origin_id=str(data.get("origin_id", "")),
             raw_fetch_id=data.get("raw_fetch_id"),
             headers={str(k): str(v) for k, v in (data.get("headers") or {}).items()},
             not_modified=bool(data.get("not_modified", False)),

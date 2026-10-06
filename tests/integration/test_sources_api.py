@@ -117,7 +117,9 @@ async def test_user_legacy_response_survives_migration_and_remains_replayable(
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     config.set_main_option("sqlalchemy.url", str(url))
     command.downgrade(config, "0019")
-    command.upgrade(config, "0020")
+    # To head, not just to 0020: the record is what has to survive the
+    # migration, and the app under test reads the schema at head.
+    command.upgrade(config, "head")
     with session_factory() as session:
         row = session.get(IdempotencyRecord, ("api:full", "POST /v1/sources", "legacy"))
         assert row is not None
@@ -175,7 +177,7 @@ async def test_user_overlapping_retry_does_not_enter_the_mutation_window(
     session_factory: sessionmaker[Session],
 ) -> None:
     """With a mutation committed and held, a retry gets 409, not another write."""
-    from adapters.db_models import Source
+    from adapters.db_models import Subscription
 
     created = await writer.post(
         "/v1/sources",
@@ -187,7 +189,8 @@ async def test_user_overlapping_retry_does_not_enter_the_mutation_window(
 
     def mark(session: Session, *_: object) -> None:
         if any(
-            isinstance(row, Source) and row.folder == "Held" for row in session.dirty
+            isinstance(row, Subscription) and row.folder == "Held"
+            for row in session.dirty
         ):
             session.info["hold_response"] = True
 
@@ -231,7 +234,7 @@ async def test_user_crash_after_mutation_never_reexecutes_or_replays_success(
     session_factory: sessionmaker[Session],
 ) -> None:
     """After committed state with no response, retries fail closed after expiry."""
-    from adapters.db_models import Source
+    from adapters.db_models import Subscription
 
     created = await writer.post(
         "/v1/sources",
@@ -243,7 +246,7 @@ async def test_user_crash_after_mutation_never_reexecutes_or_replays_success(
 
     def mark(session: Session, *_: object) -> None:
         if any(
-            isinstance(row, Source) and row.folder == "Committed"
+            isinstance(row, Subscription) and row.folder == "Committed"
             for row in session.dirty
         ):
             session.info["crash_response"] = True
@@ -684,9 +687,10 @@ async def test_delete_removes_the_source_and_its_items(
         for index in range(2):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, guid, content_hash, title,"
+                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :g, :h, :t, :u, 'published', 'default',"
+                    " values (:id, :s, :s, :g, :h, :t, :u, 'published', 'default',"
                     " '2026-01-01T00:00:00.000000Z',"
                     " '2026-01-01T00:00:00.000000Z')"
                 ),
@@ -825,14 +829,15 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
     source_id = created.json()["id"]
     with app.state.session_factory() as session:
         session.execute(
-            sa.text("update source set seen_frontier = 999 where id = :i"),
+            sa.text("update origin set seen_frontier = 999 where id = :i"),
             {"i": source_id},
         )
         session.execute(
             sa.text(
-                "insert into item (id, source_id, guid, content_hash, title, url,"
+                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                " title, url,"
                 " publish_status, tenant_id, created_at, updated_at)"
-                " values ('clear-item', :s, 'clear-guid', 'clear-hash', 'Bad',"
+                " values ('clear-item', :s, :s, 'clear-guid', 'clear-hash', 'Bad',"
                 " 'https://example.com/bad', 'published', 'default',"
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             ),
@@ -879,7 +884,7 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
     assert still.status_code == 200, "the subscription remains"
     with app.state.session_factory() as session:
         frontier = session.execute(
-            sa.text("select seen_frontier from source where id = :i"),
+            sa.text("select seen_frontier from origin where id = :i"),
             {"i": source_id},
         ).scalar()
         items = session.execute(
@@ -1289,9 +1294,10 @@ async def test_backfill_chain_endpoint_queues_and_audits(
         for index in range(2):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, guid, content_hash, title,"
+                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " values (:id, :s, :s, :g, :h, :t, :u, 'ready', 'default',"
                     " '2026-01-01T00:00:00.000000Z',"
                     " '2026-01-01T00:00:00.000000Z')"
                 ),
@@ -1385,6 +1391,7 @@ async def test_enrichment_visibility_and_agent_retry(
         session.add(
             ItemRow(
                 id="vis-item",
+                origin_id=source_id,
                 source_id=source_id,
                 guid="g-vis",
                 content_hash="hash-vis",
@@ -1671,9 +1678,10 @@ async def test_user_backfill_queues_a_watchable_batch_not_the_whole_backlog(
         for index in range(25):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, guid, content_hash, title,"
+                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " values (:id, :s, :s, :g, :h, :t, :u, 'ready', 'default',"
                     " :ts, :ts)"
                 ),
                 {
@@ -1825,7 +1833,7 @@ async def test_diagnose_answers_why_the_chain_is_stuck(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="one",
                     title="An item",
                     canonical_url="https://stuck.example/1",
@@ -1938,6 +1946,7 @@ async def test_ac198_the_queue_is_a_fold_over_the_rows(
             session.add(
                 ItemRow(
                     id=item_id,
+                    origin_id=source_id,
                     source_id=source_id,
                     guid=f"queue-guid-{index}",
                     content_hash=f"queue-hash-{index}",
@@ -2067,6 +2076,7 @@ async def _seed_failed_rows(
             session.add(
                 ItemRow(
                     id=item_id,
+                    origin_id=source_id,
                     source_id=source_id,
                     guid=f"{slug}-guid-{index}",
                     content_hash=f"{slug}-hash-{index}",
@@ -2464,7 +2474,7 @@ async def test_diagnose_answers_which_model_is_cooling_down(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="cooling",
                     title="Cooling article",
                     canonical_url="https://cooling.example/article",
@@ -2551,7 +2561,7 @@ async def test_diagnose_shows_a_half_broken_model_that_is_not_cooling(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="blip",
                     title="Blip article",
                     canonical_url="https://blip.example/article",

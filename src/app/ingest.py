@@ -70,7 +70,7 @@ def ingest_draft(item: IngestItem, *, source_id: str, source_url: str) -> ItemDr
         # readable rather than silently swallowed.
         metadata.setdefault("submitted_url", supplied)
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=item.external_id,
         title=item.title,
         canonical_url=resolved,

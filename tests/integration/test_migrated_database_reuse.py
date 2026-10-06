@@ -28,6 +28,7 @@ import sqlalchemy as sa
 
 from tests.integration.conftest import TENANT
 from tests.migrated_schema import build, migrated_database
+from tests.source_seed import mirror_sources
 
 pytestmark = pytest.mark.integration
 
@@ -135,6 +136,7 @@ def test_every_database_is_a_real_migration_and_the_copies_are_independent(
                 ),
                 {"tenant": TENANT},
             )
+            mirror_sources(connection)
 
         with engine_second.connect() as connection:
             assert (

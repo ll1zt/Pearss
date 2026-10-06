@@ -17,6 +17,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
+from tests.source_seed import seed_source
+
 pytestmark = pytest.mark.integration
 
 
@@ -63,7 +65,7 @@ def _seed_fulltext_world(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="post-1",
                     title="A summary post",
                     canonical_url="https://fulltext.example/post-1",
@@ -166,7 +168,6 @@ def test_user_existing_items_get_fulltext_queued_by_backfill(tmp_path: Path) -> 
     second call is asserted to queue zero rather than assumed to.
     """
     from adapters.db_models import Item as ItemRow
-    from adapters.db_models import Source as SourceRow
     from adapters.repository import backfill_chain
     from tests.migrated_schema import migrated_database
 
@@ -174,25 +175,17 @@ def test_user_existing_items_get_fulltext_queued_by_backfill(tmp_path: Path) -> 
     factory = sessionmaker(engine, expire_on_commit=False)
     try:
         with factory() as session:
-            session.add(
-                SourceRow(
-                    id="src-late",
-                    tenant_id="default",
-                    type="rss",
-                    url="https://late.example/feed",
-                    canonical_url="https://late.example/feed",
-                    status="active",
-                    trust_level="standard",
-                    schedule_policy="{}",
-                    pipeline_chain='[{"plugin_id":"fulltext","kind":"fulltext"}]',
-                    created_at="2026-01-01T00:00:00.000000Z",
-                    updated_at="2026-01-01T00:00:00.000000Z",
-                )
+            seed_source(
+                session,
+                source_id="src-late",
+                url="https://late.example/feed",
+                pipeline_chain='[{"plugin_id":"fulltext","kind":"fulltext"}]',
             )
             # Stored and published before the chain existed.
             session.add(
                 ItemRow(
                     id="late-item",
+                    origin_id="src-late",
                     source_id="src-late",
                     guid="g-late",
                     content_hash="hash-late",

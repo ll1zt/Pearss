@@ -153,12 +153,12 @@ _ID_PARTS = st.text(
 def test_item_identity_is_deterministic(
     tenant: str, source: str, external: str
 ) -> None:
-    first = derive_item_id(tenant_id=tenant, source_id=source, external_id=external)
-    second = derive_item_id(tenant_id=tenant, source_id=source, external_id=external)
+    first = derive_item_id(tenant_id=tenant, origin_id=source, external_id=external)
+    second = derive_item_id(tenant_id=tenant, origin_id=source, external_id=external)
 
     assert first == second
-    assert derive_guid(tenant_id=tenant, source_id=source, external_id=external) == (
-        derive_guid(tenant_id=tenant, source_id=source, external_id=external)
+    assert derive_guid(tenant_id=tenant, origin_id=source, external_id=external) == (
+        derive_guid(tenant_id=tenant, origin_id=source, external_id=external)
     )
 
 
@@ -172,8 +172,8 @@ def test_a_different_tenant_is_a_different_item(
         return
 
     assert derive_item_id(
-        tenant_id=tenant_a, source_id=source, external_id=external
-    ) != derive_item_id(tenant_id=tenant_b, source_id=source, external_id=external)
+        tenant_id=tenant_a, origin_id=source, external_id=external
+    ) != derive_item_id(tenant_id=tenant_b, origin_id=source, external_id=external)
 
 
 @settings(max_examples=100)
@@ -188,5 +188,5 @@ def test_guid_and_item_id_are_distinct_namespaces(
     scheme would silently change the other.
     """
     assert derive_guid(
-        tenant_id=tenant, source_id=source, external_id=external
-    ) != derive_item_id(tenant_id=tenant, source_id=source, external_id=external)
+        tenant_id=tenant, origin_id=source, external_id=external
+    ) != derive_item_id(tenant_id=tenant, origin_id=source, external_id=external)

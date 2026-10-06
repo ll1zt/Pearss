@@ -97,7 +97,7 @@ def _seed(
         session,
         [
             ItemDraft(
-                source_id=source_id,
+                origin_id=source_id,
                 external_id=external_id,
                 title=title,
                 canonical_url=f"https://example.test/{external_id}",

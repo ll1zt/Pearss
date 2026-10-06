@@ -91,6 +91,7 @@ def _seed_item(
         session.add(
             ItemRow(
                 id=item_id,
+                origin_id=source_id,
                 source_id=source_id,
                 guid=f"guid-{item_id}",
                 content_hash=f"hash-{item_id}",

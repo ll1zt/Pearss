@@ -54,7 +54,7 @@ async def test_user_cannot_mark_an_unsupported_stream_read(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="unread",
                     title="Unread item",
                     canonical_url="https://pending.example/unread",
@@ -329,7 +329,7 @@ async def test_a_pending_item_is_absent_from_both_read_surfaces(
             db,
             Item(
                 id=pending_id,
-                source_id=source_id,
+                origin_id=source_id,
                 guid=pending_id,
                 content_hash="hash-pending",
                 title="Behind the gate",

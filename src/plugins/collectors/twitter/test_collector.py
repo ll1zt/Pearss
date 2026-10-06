@@ -40,7 +40,7 @@ def payload(name: str) -> RawPayload:
         url=URL,
         status_code=200,
         body=(FIXTURES / name).read_bytes(),
-        source_id="src-x",
+        origin_id="src-x",
         raw_fetch_id="raw-1",
     )
 
@@ -900,7 +900,7 @@ def _module_item(rid: int, text: str, *, promoted: bool = False) -> dict[str, An
 
 
 def drafts_of(body: bytes) -> list[ItemDraft]:
-    return parse(RawPayload(url=URL, status_code=200, body=body, source_id="s"))
+    return parse(RawPayload(url=URL, status_code=200, body=body, origin_id="s"))
 
 
 @pytest.mark.unit
@@ -944,7 +944,7 @@ def test_a_promoted_slot_is_excluded_even_when_its_id_looks_like_a_tweet() -> No
     raw = json.dumps(body).encode()
     ids = page_ids(raw)
     assert "9990000000000000001" not in ids, "an ad slipped in on a tweet-shaped id"
-    for item in parse(RawPayload(url=URL, status_code=200, body=raw, source_id="s")):
+    for item in parse(RawPayload(url=URL, status_code=200, body=raw, origin_id="s")):
         assert "PROMOTED" not in item.content
         assert "adco" not in item.canonical_url
 
@@ -1098,7 +1098,7 @@ def test_truncated_json_is_parse_error() -> None:
 @pytest.mark.unit
 def test_empty_body_is_parse_error() -> None:
     with pytest.raises(CollectorError) as excinfo:
-        parse(RawPayload(url=URL, status_code=200, body=b"", source_id="s"))
+        parse(RawPayload(url=URL, status_code=200, body=b"", origin_id="s"))
     assert excinfo.value.error_class is ErrorClass.PARSE
 
 
@@ -1160,7 +1160,7 @@ def _page_with(text: str, indices: list[int], short: str) -> bytes:
 
 
 def _parse_raw(body: bytes) -> list[ItemDraft]:
-    return parse(RawPayload(url=URL, status_code=200, body=body, source_id="s"))
+    return parse(RawPayload(url=URL, status_code=200, body=body, origin_id="s"))
 
 
 @pytest.mark.unit
@@ -1291,7 +1291,7 @@ def test_an_unparseable_time_is_none_rather_than_a_guess() -> None:
 @pytest.mark.unit
 def test_drafts_stamp_source_and_raw_fetch() -> None:
     items = drafts("valid.json")
-    assert all(d.source_id == "src-x" for d in items)
+    assert all(d.origin_id == "src-x" for d in items)
     assert all(d.raw_fetch_id == "raw-1" for d in items)
 
 
@@ -1468,7 +1468,7 @@ def test_an_authorless_tweet_still_parses_end_to_end() -> None:
             }
         }
     ).encode()
-    drafts = parse(RawPayload(url=URL, status_code=200, body=body, source_id="src-x"))
+    drafts = parse(RawPayload(url=URL, status_code=200, body=body, origin_id="src-x"))
     assert len(drafts) == 1
     assert "unknown" not in drafts[0].canonical_url
     assert drafts[0].canonical_url == URL

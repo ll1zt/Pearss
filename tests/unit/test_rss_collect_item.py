@@ -138,7 +138,7 @@ def test_ac169_a_wordpress_address_keeps_the_feeds_identity() -> None:
             url=FEED_URL,
             status_code=200,
             body=(FIXTURES / "wp_summary_feed.xml").read_bytes(),
-            source_id=SOURCE_ID,
+            origin_id=SOURCE_ID,
         )
     )
     feed_identity = {d.canonical_url: d.external_id for d in feed}

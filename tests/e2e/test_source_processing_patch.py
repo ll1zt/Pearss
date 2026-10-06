@@ -11,7 +11,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Item, ItemEnrichment, Source
+from adapters.db_models import Item, ItemEnrichment, Subscription
 from tests.e2e.conftest import API_TOKEN
 
 pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
@@ -98,7 +98,7 @@ async def test_user_patches_only_intended_processing_fields_and_collection_obeys
     source_id = await _create_source(writer, origin_url)
     with session_factory() as session:
         original_chain = session.execute(
-            select(Source.pipeline_chain).where(Source.id == source_id)
+            select(Subscription.pipeline_chain).where(Subscription.id == source_id)
         ).scalar_one()
 
     response = await writer.patch(
@@ -115,7 +115,9 @@ async def test_user_patches_only_intended_processing_fields_and_collection_obeys
     assert stored.json()["pipeline_chain"] == expected_chain
     assert stored.json()["target_lang"] == expected_lang
     with session_factory() as session:
-        row = session.execute(select(Source).where(Source.id == source_id)).scalar_one()
+        row = session.execute(
+            select(Subscription).where(Subscription.id == source_id)
+        ).scalar_one()
         assert row.target_lang == expected_lang
         assert (json.loads(row.pipeline_chain) if row.pipeline_chain else None) == (
             expected_chain
@@ -130,7 +132,7 @@ async def test_user_patches_only_intended_processing_fields_and_collection_obeys
     assert collected.status_code == 200, collected.text
     assert collected.json()["inserted"] == 3
     with session_factory() as session:
-        items = session.scalars(select(Item).where(Item.source_id == source_id)).all()
+        items = session.scalars(select(Item).where(Item.origin_id == source_id)).all()
         assert len(items) == 3
         assert {item.publish_status for item in items} == (
             {"pending"} if expected_chain else {"ready"}
@@ -181,7 +183,9 @@ async def test_user_invalid_processing_change_leaves_entire_source_unchanged(
     after.pop("correlation_id")
     assert after == before
     with session_factory() as session:
-        row = session.execute(select(Source).where(Source.id == source_id)).scalar_one()
+        row = session.execute(
+            select(Subscription).where(Subscription.id == source_id)
+        ).scalar_one()
         assert row.pipeline_chain is not None
         assert json.loads(row.pipeline_chain) == CHAIN
         assert row.target_lang == "en"

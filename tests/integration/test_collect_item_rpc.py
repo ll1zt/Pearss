@@ -89,7 +89,7 @@ def collect_item(*, source_id: str, url: str, client):
         raise ValueError("a plugin bug, not a classified failure")
     return [
         ItemDraft(
-            source_id=source_id,
+            origin_id=source_id,
             external_id="item-plugin:1",
             title="Fetched by address",
             canonical_url=url,
@@ -150,7 +150,7 @@ def test_the_address_crosses_the_boundary_and_the_drafts_come_back(
     assert drafts[0].canonical_url == "https://item-plugin.example/archives/7"
     assert drafts[0].content == "<p>the article</p>"
     # The source id is the draft's provenance and is not the caller's to pick.
-    assert drafts[0].source_id == "s1"
+    assert drafts[0].origin_id == "s1"
 
 
 def test_a_classified_failure_keeps_its_class_across_the_boundary(

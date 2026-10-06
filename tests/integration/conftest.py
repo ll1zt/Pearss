@@ -37,6 +37,7 @@ from app.main import create_app, create_engine_for
 from app.pipeline import normalise_and_store
 from plugins.collectors.rss import collector as rss
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RSS_FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -105,6 +106,7 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
                 " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
             )
         )
+        mirror_sources(conn)
 
     factory = sessionmaker(engine, expire_on_commit=False)
     drafts = rss.parse(
@@ -112,7 +114,7 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
             url="https://blog.example.com/feed",
             status_code=200,
             body=(RSS_FIXTURES / "valid.xml").read_bytes(),
-            source_id="src-1",
+            origin_id="src-1",
         )
     )
     with Session(engine) as session:

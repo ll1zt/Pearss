@@ -23,10 +23,10 @@ from lxml import etree
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source
 from adapters.raw_payload import RawPayload
 from adapters.repository import (
     count_items,
+    get_source,
     items_ready_for_feed,
     mark_published,
     record_raw_fetch,
@@ -39,6 +39,7 @@ from core.models import Item, ItemDraft
 from core.normalize import content_hash, normalize
 from plugins.collectors.rss import collector as rss
 from tests.migrated_schema import migrated_database
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -66,14 +67,8 @@ def session(tmp_path: Path) -> Iterator[Session]:
 
 
 def _seed_source(session: Session, source_id: str) -> None:
-    session.execute(
-        text(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, tenant_id, created_at, updated_at)"
-            " values (:id, 'rss', :url, :url, '{}', 'active', 'default',"
-            " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-        ),
-        {"id": source_id, "url": f"https://example.com/{source_id}/feed"},
+    seed_source(
+        session, source_id=source_id, url=f"https://example.com/{source_id}/feed"
     )
     session.commit()
 
@@ -84,7 +79,7 @@ def collect(source_id: str, fixture: str) -> list[ItemDraft]:
         url="https://blog.example.com/feed",
         status_code=200,
         body=(FIXTURES / fixture).read_bytes(),
-        source_id=source_id,
+        origin_id=source_id,
         raw_fetch_id="raw-1",
     )
     return rss.parse(payload)
@@ -142,7 +137,7 @@ def test_same_article_from_two_sources_is_related(session: Session) -> None:
     _seed_source(session, "src-2")
 
     one = ItemDraft(
-        source_id="src-1",
+        origin_id="src-1",
         external_id="e1",
         title="Shared Article",
         canonical_url="https://a.example/1",
@@ -150,7 +145,7 @@ def test_same_article_from_two_sources_is_related(session: Session) -> None:
         content="<p>Same body.</p>",
     )
     two = ItemDraft(
-        source_id="src-2",
+        origin_id="src-2",
         external_id="e2",
         title="Shared Article",
         canonical_url="https://b.example/2",
@@ -262,20 +257,20 @@ def test_collection_records_the_name_the_origin_gives_itself(
     design; without this step the Reader API has nothing to show and a client
     renders the subscription by its hex id.
     """
-    from adapters.repository import set_source_title_if_absent
+    from adapters.repository import set_origin_title_if_absent
     from app.pipeline import normalise_and_store
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     drafts = collect(SOURCE, "valid.xml")
     assert drafts[0].metadata.get("feed_title") == "Example Blog"
 
-    set_source_title_if_absent(
+    set_origin_title_if_absent(
         session, source_id=SOURCE, title=drafts[0].metadata.get("feed_title")
     )
     normalise_and_store(session, drafts)
     session.commit()
 
-    row = session.get(Source, SOURCE)
+    row = get_source(session, SOURCE)
     assert row is not None
     assert row.title == "Example Blog"
 
@@ -290,24 +285,24 @@ def test_a_recorded_title_is_not_overwritten(
     twice: an unconditional write would let the origin silently undo a decision
     made on the operator's side.
     """
-    from adapters.repository import set_source_title_if_absent
+    from adapters.repository import set_origin_title_if_absent
 
-    assert set_source_title_if_absent(session, source_id=SOURCE, title="Kept") is True
+    assert set_origin_title_if_absent(session, source_id=SOURCE, title="Kept") is True
     session.commit()
-    assert set_source_title_if_absent(session, source_id=SOURCE, title="Later") is False
+    assert set_origin_title_if_absent(session, source_id=SOURCE, title="Later") is False
     session.commit()
 
-    row = session.get(Source, SOURCE)
+    row = get_source(session, SOURCE)
     assert row is not None and row.title == "Kept"
 
 
 @pytest.mark.integration
 def test_blank_title_is_not_recorded(session: Session) -> None:
     """A whitespace-only origin title must not occupy the column."""
-    from adapters.repository import set_source_title_if_absent
+    from adapters.repository import set_origin_title_if_absent
 
-    assert set_source_title_if_absent(session, source_id=SOURCE, title="   ") is False
-    assert set_source_title_if_absent(session, source_id=SOURCE, title=None) is False
+    assert set_origin_title_if_absent(session, source_id=SOURCE, title="   ") is False
+    assert set_origin_title_if_absent(session, source_id=SOURCE, title=None) is False
 
 
 @pytest.mark.integration
@@ -493,7 +488,7 @@ def test_visible_items_filters_pending_in_memory() -> None:
     # used when a caller already holds a list.
     pending = Item(
         id="p",
-        source_id="s",
+        origin_id="s",
         guid="gp",
         content_hash="h1",
         title="Pending",
@@ -503,7 +498,7 @@ def test_visible_items_filters_pending_in_memory() -> None:
     )
     ready = Item(
         id="r",
-        source_id="s",
+        origin_id="s",
         guid="gr",
         content_hash="h2",
         title="Ready",
@@ -531,7 +526,7 @@ def test_reworded_article_does_not_collide_on_the_guid(
 
     def draft_with(content: str) -> ItemDraft:
         return ItemDraft(
-            source_id=SOURCE,
+            origin_id=SOURCE,
             external_id="stable-entry-1",
             title="An article",
             canonical_url="https://blog.example.com/stable",
@@ -565,7 +560,7 @@ def test_reworded_published_article_keeps_the_frozen_content(
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     draft = ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id="published-entry",
         title="Headline",
         canonical_url="https://blog.example.com/p",
@@ -579,7 +574,7 @@ def test_reworded_published_article_keeps_the_frozen_content(
     session.commit()
 
     changed = ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id="published-entry",
         title="Headline",
         canonical_url="https://blog.example.com/p",
@@ -644,7 +639,7 @@ def test_the_conditional_loop_closes_over_two_cycles(session: Session) -> None:
 
     client = httpx.Client(transport=httpx.MockTransport(origin))
 
-    source = session.get(Source, SOURCE)
+    source = get_source(session, SOURCE)
     assert source is not None
     # Annotated so mypy's narrowing of `first` does not leak into `second`:
     # the two results are independent outcomes from the same function.
@@ -692,7 +687,7 @@ def test_a_failed_fetch_is_recorded_and_resets_validators(session: Session) -> N
         return httpx.Response(503)
 
     client = httpx.Client(transport=httpx.MockTransport(flaky))
-    source = session.get(Source, SOURCE)
+    source = get_source(session, SOURCE)
     assert source is not None
     result = collect_source(session, source=source, client=client)
     session.commit()
@@ -727,7 +722,7 @@ def test_a_chained_source_holds_the_gate_until_processing_completes(
     raw_chain = jsonlib.dumps(chain)
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'zh'"
+            "update subscription set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
@@ -786,7 +781,7 @@ def test_the_enrichment_worker_opens_the_gate_when_the_chain_completes(
     )
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'zh'"
+            "update subscription set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
@@ -850,7 +845,7 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     )
     session.execute(
         text(
-            "update source set pipeline_chain = :chain, target_lang = 'zh'"
+            "update subscription set pipeline_chain = :chain, target_lang = 'zh'"
             " where id = :sid"
         ),
         {"chain": raw_chain, "sid": SOURCE},
@@ -895,33 +890,24 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     immediately with no retry."""
     import json as jsonlib
 
-    from adapters.db_models import Source as SourceRow
     from adapters.repository import backfill_chain
     from app.enrichment_worker import sweep_queue
 
-    session.add(
-        SourceRow(
-            id="src-retry",
-            tenant_id="default",
-            type="rss",
-            url="https://retry.example/feed",
-            canonical_url="https://retry.example/feed",
-            status="active",
-            trust_level="standard",
-            schedule_policy="{}",
-            pipeline_chain=jsonlib.dumps(
-                [{"plugin_id": "translate", "kind": "translation"}]
-            ),
-            target_lang="en",
-            created_at="2026-01-01T00:00:00.000000Z",
-            updated_at="2026-01-01T00:00:00.000000Z",
-        )
+    seed_source(
+        session,
+        source_id="src-retry",
+        url="https://retry.example/feed",
+        pipeline_chain=jsonlib.dumps(
+            [{"plugin_id": "translate", "kind": "translation"}]
+        ),
+        target_lang="en",
     )
     from adapters.db_models import Item as ItemRow
 
     session.add(
         ItemRow(
             id="retry-item",
+            origin_id="src-retry",
             source_id="src-retry",
             guid="g-retry",
             content_hash="hash-retry",
@@ -1015,9 +1001,11 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     # auth failures skip retries entirely: a fresh row fails in one sweep.
     session.execute(
         text(
-            "insert into item (id, source_id, guid, content_hash, title, url,"
+            "insert into item (id, source_id, origin_id, guid, content_hash, title,"
+            " url,"
             " publish_status, tenant_id, created_at, updated_at)"
-            " values ('auth-item', 'src-retry', 'g-auth', 'hash-auth', 'A',"
+            " values ('auth-item', 'src-retry', 'src-retry', 'g-auth', 'hash-auth',"
+            " 'A',"
             " 'https://retry.example/2', 'pending', 'default',"
             " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
         )
@@ -1092,7 +1080,7 @@ def _translation_chain(lang: str = "zh") -> tuple[Any, ...]:
 def _draft(external_id: str, *, content: str, title: str | None = None) -> ItemDraft:
     """A draft whose title doubles as the test's lookup key."""
     return ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id=external_id,
         title=title if title is not None else f"item-{external_id}",
         canonical_url=f"https://blog.example.com/{external_id}",

@@ -96,7 +96,7 @@ def test_user_later_processing_progresses_after_stalled_provider_is_terminated(
                 session,
                 [
                     ItemDraft(
-                        source_id=source.id,
+                        origin_id=source.id,
                         external_id=name,
                         title=name,
                         canonical_url=f"https://deadline.example/{name.split()[0]}",
@@ -206,7 +206,7 @@ async def test_user_shutdown_terminates_active_processor_before_returning(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="shutdown",
                     title=f"127.0.0.1:{listener.getsockname()[1]}",
                     canonical_url="https://shutdown.example/article",
@@ -316,7 +316,7 @@ def test_user_sees_which_model_failed_when_the_budget_runs_out(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="stalled",
                     title="Stalled article",
                     canonical_url="https://reason.example/stalled",
@@ -428,7 +428,7 @@ def test_a_killed_row_keeps_what_the_chain_had_learned(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="killed",
                     title="Killed article",
                     canonical_url="https://killed.example/article",

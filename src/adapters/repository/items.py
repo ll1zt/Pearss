@@ -30,7 +30,7 @@ def existing_items_for_source(session: Session, source_id: str) -> list[Item]:
     can serve without loading every row.
     """
     rows = session.execute(
-        select(ItemRow).where(ItemRow.source_id == source_id)
+        select(ItemRow).where(ItemRow.origin_id == source_id)
     ).scalars()
     return [row_to_item(row) for row in rows]
 
@@ -191,7 +191,12 @@ def _insert(session: Session, item: Item) -> None:
     session.add(
         ItemRow(
             id=item.id,
-            source_id=item.source_id,
+            # The truth column first, then the stage-A legacy column it
+            # replaces. Both are written equal: 0027 drops `source_id`, so
+            # until then it is a mirror that only the compatibility façade
+            # reads.
+            origin_id=item.origin_id,
+            source_id=item.origin_id,
             guid=item.guid,
             content_hash=item.content_hash,
             title=item.title,

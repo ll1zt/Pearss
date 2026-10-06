@@ -60,7 +60,7 @@ def _store(session: Session, *, tenant_id: str) -> str:
         session,
         [
             ItemDraft(
-                source_id=source.id,
+                origin_id=source.id,
                 external_id="one",
                 title="An item",
                 canonical_url="https://x.example/one",

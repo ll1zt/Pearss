@@ -37,6 +37,7 @@ from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -57,6 +58,7 @@ def add_source(session: Session, *, source_id: str, policy: dict[str, object]) -
             "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
         },
     )
+    mirror_sources(session)
     session.commit()
 
 
@@ -67,9 +69,10 @@ def add_items(
         moment = NOW - spacing * (count - index)
         session.execute(
             sa.text(
-                "insert into item (id, source_id, guid, content_hash, title, url,"
+                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at)"
-                " values (:id, :s, :g, :h, :t, :u, :p, 'ready', 'default', :p, :p)"
+                " values (:id, :s, :s, :g, :h, :t, :u, :p, 'ready', 'default', :p, :p)"
             ),
             {
                 "id": f"{source_id}-i{index}",
@@ -458,7 +461,7 @@ def test_a_policy_change_takes_effect_without_rescheduling(
     # Shorten the interval immediately after a successful run.
     with session_factory() as session:
         session.execute(
-            sa.text("update source set schedule_policy = :p"),
+            sa.text("update subscription set schedule_policy = :p"),
             {
                 "p": schedule_policy_to_json(
                     schedule_policy_from_json({"type": "fixed", "interval": "1m"})
@@ -517,7 +520,7 @@ def test_paused_sources_are_not_collected(
 ) -> None:
     with session_factory() as session:
         add_source(session, source_id="s1", policy={"type": "fixed", "interval": "30m"})
-        session.execute(sa.text("update source set status = 'paused'"))
+        session.execute(sa.text("update subscription set status = 'paused'"))
         session.commit()
 
     report = run_tick(session_factory, client=fake_feed, now=NOW)
@@ -542,11 +545,13 @@ def test_one_broken_source_does_not_end_the_tick(
             sa.text(
                 "insert into source (id, type, url, canonical_url, schedule_policy,"
                 " status, trust_level, tenant_id, created_at, updated_at)"
-                " values ('broken', 'rss', 'https://b.example/f', 'https://b.example/f',"
+                " values ('broken', 'rss', 'https://b.example/f',"
+                " 'https://b.example/f',"
                 " 'not json', 'active', 'standard', 'default',"
                 " '2026-06-01T12:00:00.000000Z', '2026-06-01T12:00:00.000000Z')"
             )
         )
+        mirror_sources(session)
         session.commit()
 
     report = run_tick(session_factory, client=fake_feed, now=NOW)
@@ -687,7 +692,9 @@ def test_collectable_sources_lists_only_active(
         add_source(
             session, source_id="gone", policy={"type": "fixed", "interval": "30m"}
         )
-        session.execute(sa.text("update source set status='disabled' where id='gone'"))
+        session.execute(
+            sa.text("update subscription set status='disabled' where id='gone'")
+        )
         session.commit()
         rows = collectable_sources(session, tenant_id="default")
     assert [row[0] for row in rows] == ["active-one"]
@@ -723,6 +730,7 @@ def test_agent_sources_are_not_collectable(
                 "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
             },
         )
+        mirror_sources(session)
         session.commit()
         rows = collectable_sources(session, tenant_id="default")
     assert [row[0] for row in rows] == ["pushed"]

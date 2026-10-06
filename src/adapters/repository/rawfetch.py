@@ -38,6 +38,11 @@ def record_raw_fetch(
     session.add(
         RawFetchRow(
             id=fetch_id,
+            # Both columns: `origin_id` is the fact, `source_id` the stage-A
+            # mirror 0027 drops. raw_fetch is diagnostic data, so a drift here
+            # would cost a lookup, not content -- but the guard test still
+            # holds the two equal.
+            origin_id=source_id,
             source_id=source_id,
             payload_ref=payload_ref,
             content_hash=content_hash,

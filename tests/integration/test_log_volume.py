@@ -29,6 +29,7 @@ from app.scheduler import run_tick
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 pytestmark = pytest.mark.integration
 
@@ -51,12 +52,13 @@ def _add_source(session: Session, *, source_id: str, policy: dict[str, object]) 
             "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
         },
     )
+    mirror_sources(session)
     session.commit()
 
 
 def _draft(index: int) -> ItemDraft:
     return ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id=f"e{index}",
         title=f"Post {index}",
         canonical_url=f"https://example.com/{index}",
@@ -190,7 +192,7 @@ _TRANSLATE_TO_ZH = EnrichmentSpec(
 
 def _chinese_draft(index: int) -> ItemDraft:
     return ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id=f"zh{index}",
         title=f"第 {index} 篇",
         canonical_url=f"https://example.com/zh/{index}",
@@ -304,7 +306,7 @@ _ENRICH_CHAIN = '[{"plugin_id":"title-summary","kind":"summary","required":true}
 
 def _enrich_draft(index: int, source_id: str) -> ItemDraft:
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"enrich{index}",
         title=f"Enrich {index}",
         canonical_url=f"https://example.com/enrich/{index}",

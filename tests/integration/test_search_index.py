@@ -102,7 +102,7 @@ def _store(
     """One item through the production write path, returning its id."""
     drafts = [
         ItemDraft(
-            source_id=source_id,
+            origin_id=source_id,
             external_id=guid,
             title=title,
             canonical_url=f"https://x.example/{guid}",

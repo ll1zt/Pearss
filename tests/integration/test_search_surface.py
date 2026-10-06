@@ -105,7 +105,7 @@ def _store(
         session,
         [
             ItemDraft(
-                source_id=source_id,
+                origin_id=source_id,
                 external_id=guid,
                 title=title,
                 canonical_url=f"https://x.example/{guid}",
@@ -367,7 +367,7 @@ def _with_vector(
         session,
         [
             ItemDraft(
-                source_id=source_id,
+                origin_id=source_id,
                 external_id=external_id,
                 title=title,
                 canonical_url=f"https://example.test/{external_id}",

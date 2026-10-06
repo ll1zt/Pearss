@@ -16,6 +16,7 @@ from sqlalchemy import create_engine, text
 
 from app.backup import backup, database_path, restore
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -36,11 +37,13 @@ def test_backup_and_restore_round_trip(tmp_path: Path) -> None:
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             )
         )
+        mirror_sources(conn)
         conn.execute(
             text(
-                "insert into item (id, source_id, guid, content_hash, title, url,"
+                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                " title, url,"
                 " publish_status, tenant_id, created_at, updated_at)"
-                " values ('item-1', 'src-1', 'g1', 'h1', 'T', 'https://x/1',"
+                " values ('item-1', 'src-1', 'src-1', 'g1', 'h1', 'T', 'https://x/1',"
                 " 'ready', 'default', '2026-01-01T00:00:00.000000Z',"
                 " '2026-01-01T00:00:00.000000Z')"
             )

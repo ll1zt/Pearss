@@ -15,7 +15,8 @@ from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment
 from adapters.db_models import Job as JobRow
 from adapters.db_models import JobRun as JobRunRow
-from adapters.db_models import Source as SourceRow
+from adapters.db_models import Origin as OriginRow
+from adapters.db_models import Subscription as SubscriptionRow
 from core.alerting import DETAIL_EXCERPT_CHARS, ExhaustedSource
 from core.enrichment import EnrichmentStatus
 from core.enums import (
@@ -50,7 +51,7 @@ def exhausted_enrichment_sources(
     """
     source_ids = list(
         session.execute(
-            select(ItemRow.source_id)
+            select(ItemRow.origin_id)
             .join(ItemEnrichment, ItemEnrichment.item_id == ItemRow.id)
             .where(
                 ItemRow.tenant_id == tenant_id,
@@ -62,7 +63,7 @@ def exhausted_enrichment_sources(
                     )
                 ),
             )
-            .group_by(ItemRow.source_id)
+            .group_by(ItemRow.origin_id)
             .having(
                 func.count() >= min_rows,
                 func.sum(
@@ -79,22 +80,22 @@ def exhausted_enrichment_sources(
         return []
     rows = session.execute(
         select(
-            ItemRow.source_id,
-            SourceRow.title,
+            ItemRow.origin_id,
+            OriginRow.title,
             ItemEnrichment.error_class,
             ItemEnrichment.detail,
         )
-        .join(SourceRow, SourceRow.id == ItemRow.source_id)
+        .join(OriginRow, OriginRow.id == ItemRow.origin_id)
         .join(ItemEnrichment, ItemEnrichment.item_id == ItemRow.id)
         .where(
-            ItemRow.source_id.in_(source_ids),
+            ItemRow.origin_id.in_(source_ids),
             ItemEnrichment.status == EnrichmentStatus.FAILED.value,
         )
         .order_by(ItemEnrichment.updated_at.desc(), ItemEnrichment.id.desc())
     ).all()
     by_source: dict[str, list[Any]] = {}
     for row in rows:
-        by_source.setdefault(str(row.source_id), []).append(row)
+        by_source.setdefault(str(row.origin_id), []).append(row)
     exhausted: list[ExhaustedSource] = []
     for source_id in sorted(by_source):
         failures = by_source[source_id]
@@ -102,7 +103,7 @@ def exhausted_enrichment_sources(
         excerpt = str(latest.detail or "")[:DETAIL_EXCERPT_CHARS]
         exhausted.append(
             ExhaustedSource(
-                source_id=source_id,
+                origin_id=source_id,
                 title=str(latest.title or ""),
                 failed_count=len(failures),
                 error_class=latest.error_class,
@@ -231,9 +232,9 @@ def system_snapshot(session: Session, *, tenant_id: str) -> dict[str, object]:
         return tallied
 
     sources = counts(
-        select(SourceRow.status, func.count())
-        .where(SourceRow.tenant_id == tenant_id)
-        .group_by(SourceRow.status),
+        select(SubscriptionRow.status, func.count())
+        .where(SubscriptionRow.tenant_id == tenant_id)
+        .group_by(SubscriptionRow.status),
         every=SourceStatus,
     )
     items = counts(

@@ -42,7 +42,7 @@ def _payload(name: str) -> RawPayload:
         url=api_url,
         status_code=200,
         body=(FIXTURES / name).read_bytes(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
 
 
@@ -131,7 +131,7 @@ def test_answers_fixture_becomes_drafts() -> None:
 
     assert len(drafts) == 2
     first = drafts[0]
-    assert first.source_id == SOURCE_ID
+    assert first.origin_id == SOURCE_ID
     assert first.external_id == "answer:3100001"
     assert first.title == "在单人项目里，如何让约定不靠自觉？"
     assert (
@@ -210,7 +210,7 @@ def test_only_unusable_entries_is_not_a_quiet_empty() -> None:
     payload = _payload("answers_valid.json")
     body = '{"data": [{"nope": true}, {"question": {"id": 1}}]}'
     broken = RawPayload(
-        url=payload.url, status_code=200, body=body.encode(), source_id=SOURCE_ID
+        url=payload.url, status_code=200, body=body.encode(), origin_id=SOURCE_ID
     )
     with pytest.raises(CollectorError) as exc_info:
         collector.parse(broken)
@@ -224,7 +224,7 @@ def test_undecodable_json_is_a_parse_error() -> None:
         url=payload.url,
         status_code=200,
         body=b"<html>not json</html>",
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
     with pytest.raises(CollectorError) as exc_info:
         collector.parse(broken)

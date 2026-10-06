@@ -27,6 +27,7 @@ from app import log_setup
 from app.main import create_engine_for
 from app.scheduler import run_tick
 from tests.migrated_schema import migrated_database
+from tests.source_seed import mirror_sources
 
 pytestmark = pytest.mark.integration
 
@@ -102,6 +103,7 @@ def _add_source(session: Session, *, source_id: str) -> None:
             "now": timestamp(NOW),
         },
     )
+    mirror_sources(session)
     session.commit()
 
 

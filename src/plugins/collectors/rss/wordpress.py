@@ -258,7 +258,7 @@ def merge_fulltext(
         url=raw.url,
         status_code=raw.status_code,
         body=text.encode("utf-8"),
-        source_id=raw.source_id,
+        origin_id=raw.origin_id,
         raw_fetch_id=raw.raw_fetch_id,
         headers=raw.headers,
         etag=raw.etag,
@@ -388,7 +388,7 @@ def draft_from_post(post: WpPost, *, source_id: str) -> ItemDraft:
     guid falls back to the link rule `parse` uses for an entry with none.
     """
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=post.guid or f"link:{post.link}",
         title=post.title or post.link,
         canonical_url=post.link,

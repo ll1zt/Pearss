@@ -174,7 +174,7 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
         drafts.append(
             _draft_from_node(
                 node,
-                source_id=raw.source_id,
+                source_id=raw.origin_id,
                 channel=channel,
                 message_id=message_id,
                 channel_title=channel_title,
@@ -238,7 +238,7 @@ def _draft_from_node(
         metadata["author"] = author
 
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"telegram:{channel}/{message_id}",
         title=title,
         canonical_url=f"https://t.me/{channel}/{message_id}",

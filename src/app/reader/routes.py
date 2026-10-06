@@ -157,7 +157,7 @@ def user_info(_: str = Depends(authenticate_any)) -> dict[str, str]:
 def subscription_list(
     request: Request, _: str = Depends(authenticate_any)
 ) -> dict[str, list[dict[str, object]]]:
-    from core.normalize import source_display_label
+    from core.normalize import origin_display_label
 
     # The source's real folder. Every source has one (the column is
     # NOT NULL DEFAULT 'default'), so the sidebar always has a group to put the
@@ -166,11 +166,11 @@ def subscription_list(
     subscriptions: list[dict[str, object]] = [
         {
             "id": reader_api.feed_stream_id(row.id),
-            "title": source_display_label(
+            "title": origin_display_label(
                 title=row.title,
                 url=row.url,
                 canonical_url=row.canonical_url,
-                source_id=row.id,
+                origin_id=row.id,
             ),
             "categories": [
                 {
@@ -726,7 +726,7 @@ def subscription_edit(
 
     `t=` renames the source. It was refused silently until 2026-09-16, on
     the reasoning that the next fetch would overwrite the name; reading
-    `set_source_title_if_absent` shows that reasoning was wrong -- the
+    `set_origin_title_if_absent` shows that reasoning was wrong -- the
     conditional write fills an absent title and never replaces a present
     one, exactly to protect an operator's rename. A client rename is that
     same choice expressed from an app, so it now lands through the same

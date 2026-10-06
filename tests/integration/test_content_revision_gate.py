@@ -44,7 +44,7 @@ def test_user_publication_survives_a_collectors_stale_snapshot(
             at="2026-01-01T00:00:00.000000Z",
         )
         draft = ItemDraft(
-            source_id=source.id,
+            origin_id=source.id,
             external_id="race",
             title="Original",
             canonical_url="https://example.test/article",
@@ -97,7 +97,7 @@ def test_user_only_sees_processed_or_already_frozen_content(
             at="2026-01-01T00:00:00.000000Z",
         )
         draft = ItemDraft(
-            source_id=source.id,
+            origin_id=source.id,
             external_id="revision",
             title="Article",
             canonical_url="https://example.test/article",
@@ -161,7 +161,7 @@ def test_switching_the_embedding_model_does_not_reuse_the_old_vector(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="vectors",
                     title="Vectors",
                     canonical_url="https://example.test/vectors/1",

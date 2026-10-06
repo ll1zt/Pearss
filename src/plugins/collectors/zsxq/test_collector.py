@@ -47,7 +47,7 @@ def _payload(name: str, scope: str = "all") -> RawPayload:
         url=f"{zsxq_client.BASE}{topics_path}",
         status_code=200,
         body=json.dumps(merged, ensure_ascii=False).encode(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
 
 
@@ -125,7 +125,7 @@ def test_fetch_merges_group_and_topics_into_one_payload(
             url=f"{zsxq_client.BASE}{path}",
             status_code=200,
             body=json.dumps(resp_data).encode(),
-            source_id=str(kwargs["source_id"]),
+            origin_id=str(kwargs["source_id"]),
         )
 
     monkeypatch.setattr(zsxq_client, "get_json", fake_get_json)
@@ -143,7 +143,7 @@ def test_fetch_merges_group_and_topics_into_one_payload(
     merged = json.loads(raw.text())
     assert merged["group"]["name"] == "示例星球"
     assert len(merged["topics"]) == 7
-    assert raw.source_id == SOURCE_ID
+    assert raw.origin_id == SOURCE_ID
 
 
 # --------------------------------------------------------------------------
@@ -160,7 +160,7 @@ def test_topics_fixture_covers_every_rendered_type() -> None:
     assert [d.external_id for d in drafts] == [
         f"topic:{tid}" for tid in (5100001, 5100002, 5100003, 5100004, 5100005, 5100006)
     ]
-    assert all(d.source_id == SOURCE_ID for d in drafts)
+    assert all(d.origin_id == SOURCE_ID for d in drafts)
     assert all(d.canonical_url.startswith("https://wx.zsxq.com/topic/") for d in drafts)
 
 
@@ -224,7 +224,7 @@ def test_only_unusable_topics_is_not_a_quiet_empty() -> None:
         url=payload.url,
         status_code=200,
         body=json.dumps(merged).encode(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
     with pytest.raises(CollectorError) as exc_info:
         collector.parse(broken)

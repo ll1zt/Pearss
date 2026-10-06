@@ -26,7 +26,7 @@ class ItemFilter:
     widen it, because pending rows are excluded in SQL regardless.
     """
 
-    source_id: str | None = None
+    origin_id: str | None = None
     publish_status: str | None = None
     query: str | None = None
     # Full-text over the title *and* the body, through the FTS5 index. Separate
@@ -230,8 +230,8 @@ def _filter_conditions(
         visible_item_rows(),
         ItemRow.tenant_id == tenant_id,
     ]
-    if filter.source_id:
-        conditions.append(ItemRow.source_id == filter.source_id)
+    if filter.origin_id:
+        conditions.append(ItemRow.origin_id == filter.origin_id)
     if filter.publish_status:
         conditions.append(ItemRow.publish_status == filter.publish_status)
     if filter.query:

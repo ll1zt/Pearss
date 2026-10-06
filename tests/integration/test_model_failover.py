@@ -113,7 +113,7 @@ def _world(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id=title,
                     title=title,
                     canonical_url=f"https://models.example/{title}",

@@ -86,12 +86,14 @@ def parse_chain(
 
 def chain_for_source(session: Session, *, source_id: str) -> tuple[EnrichmentSpec, ...]:
     """The configured chain for a source; empty when the source has none."""
-    from adapters.db_models import Source as SourceRow
+    from adapters.db_models import Subscription as SubscriptionRow
 
-    source = session.get(SourceRow, source_id)
-    if source is None:
+    subscription = session.get(SubscriptionRow, source_id)
+    if subscription is None:
         return ()
-    return parse_chain(source.pipeline_chain, target_lang=source.target_lang)
+    return parse_chain(
+        subscription.pipeline_chain, target_lang=subscription.target_lang
+    )
 
 
 def enqueue_chain(
@@ -165,7 +167,7 @@ def backlog_for_source(session: Session, source_id: str) -> dict[str, Any]:
     a queue of one that has been waiting an hour is a different problem from a
     queue of one that just arrived.
     """
-    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    item_ids = select(ItemRow.id).where(ItemRow.origin_id == source_id)
     counts: dict[str, int] = {
         status: int(total)
         for status, total in session.execute(
@@ -209,7 +211,7 @@ def completion_rate_per_min(
     lands, and a succeeded row is not touched again.
     """
     since = timestamp(datetime.now(UTC) - timedelta(minutes=window_minutes))
-    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    item_ids = select(ItemRow.id).where(ItemRow.origin_id == source_id)
     finished = int(
         session.execute(
             select(func.count())
@@ -301,7 +303,7 @@ def items_missing_chain(
     ]
     query = (
         select(ItemRow.id)
-        .where(ItemRow.source_id == source_id, or_(*conditions))
+        .where(ItemRow.origin_id == source_id, or_(*conditions))
         .order_by(ItemRow.published_at.desc(), ItemRow.id)
     )
     if limit is not None:
@@ -315,7 +317,7 @@ def failed_enrichment_ids_for_source(session: Session, *, source_id: str) -> lis
     Selected rather than updated in bulk so the source-scoped requeue is a loop
     over `requeue_enrichment` -- one meaning of "requeue", N callers.
     """
-    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    item_ids = select(ItemRow.id).where(ItemRow.origin_id == source_id)
     return list(
         session.execute(
             select(ItemEnrichment.id)
@@ -338,7 +340,7 @@ def failed_enrichments_for_source(
     own message live on these rows. Metadata and error text only -- never the
     item body, which is why this returns selected columns rather than the rows.
     """
-    item_ids = select(ItemRow.id).where(ItemRow.source_id == source_id)
+    item_ids = select(ItemRow.id).where(ItemRow.origin_id == source_id)
     rows = (
         session.execute(
             select(ItemEnrichment)
@@ -475,12 +477,14 @@ def backfill_chain(
     pipeline uses, so re-running costs nothing for items already queued.
     """
     from adapters.db_models import Item as ItemRow
-    from adapters.db_models import Source as SourceRow
+    from adapters.db_models import Subscription as SubscriptionRow
 
-    source = session.get(SourceRow, source_id)
-    if source is None:
+    subscription = session.get(SubscriptionRow, source_id)
+    if subscription is None:
         raise ValueError(f"no source {source_id!r}")
-    chain = parse_chain(source.pipeline_chain, target_lang=source.target_lang)
+    chain = parse_chain(
+        subscription.pipeline_chain, target_lang=subscription.target_lang
+    )
     if not chain:
         raise ValueError(
             f"source {source_id!r} has no pipeline_chain; nothing to backfill"
@@ -488,7 +492,7 @@ def backfill_chain(
 
     query = (
         select(ItemRow)
-        .where(ItemRow.source_id == source_id)
+        .where(ItemRow.origin_id == source_id)
         .order_by(ItemRow.published_at.desc())
     )
     items = session.execute(query).scalars().all()
