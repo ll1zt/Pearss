@@ -1,0 +1,350 @@
+[
+  {
+    "name": "__cuid",
+    "value": "synthetic-cuid-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "auth_token",
+    "value": "synthetic-auth-token-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "cf_clearance",
+    "value": "synthetic-cf-clearance-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "ct0",
+    "value": "synthetic-ct0-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "lax",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "d_prefs",
+    "value": "synthetic-d-prefs-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "external_referer",
+    "value": "synthetic-external-referer-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "guest_id",
+    "value": "synthetic-guest-id-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "guest_id_ads",
+    "value": "synthetic-guest-id-ads-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "guest_id_marketing",
+    "value": "synthetic-guest-id-marketing-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "personalization_id",
+    "value": "synthetic-personalization-id-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "twid",
+    "value": "synthetic-twid-1",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "__zse_ck",
+    "value": "synthetic-zse-ck-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "_xsrf",
+    "value": "synthetic-xsrf-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "_zap",
+    "value": "synthetic-zap-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "d_c0",
+    "value": "synthetic-d-c0-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "z_c0",
+    "value": "synthetic-z-c0-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "lang",
+    "value": "synthetic-lang-1",
+    "domain": "api.x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-1",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-2",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-3",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-2",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-3",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-2",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-3",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "q_c1",
+    "value": "synthetic-q-c1-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "__cuid",
+    "value": "synthetic-cuid-2",
+    "domain": "x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "g_state",
+    "value": "synthetic-g-state-1",
+    "domain": "x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "lang",
+    "value": "synthetic-lang-2",
+    "domain": "x.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  }
+]

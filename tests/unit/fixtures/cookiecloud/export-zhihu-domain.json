@@ -1,0 +1,187 @@
+[
+  {
+    "name": "__zse_ck",
+    "value": "synthetic-zse-ck-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "no_restriction",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "_xsrf",
+    "value": "synthetic-xsrf-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "_zap",
+    "value": "synthetic-zap-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "d_c0",
+    "value": "synthetic-d-c0-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "z_c0",
+    "value": "synthetic-z-c0-1",
+    "domain": ".zhihu.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "hostOnly": false,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-2",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-3",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-2",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-3",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-2",
+    "domain": "www.zhihu.com",
+    "path": "/people",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-3",
+    "domain": "www.zhihu.com",
+    "path": "/question/659037399/answer",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "q_c1",
+    "value": "synthetic-q-c1-1",
+    "domain": "www.zhihu.com",
+    "path": "/",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified",
+    "expirationDate": 4102444800.0
+  },
+  {
+    "name": "JOID",
+    "value": "synthetic-joid-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "SESSIONID",
+    "value": "synthetic-sessionid-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  },
+  {
+    "name": "osd",
+    "value": "synthetic-osd-4",
+    "domain": "zhuanlan.zhihu.com",
+    "path": "/p",
+    "secure": false,
+    "httpOnly": false,
+    "hostOnly": true,
+    "sameSite": "unspecified"
+  }
+]
