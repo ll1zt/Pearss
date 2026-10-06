@@ -7,9 +7,10 @@ repository directly would be an unaudited, unauthenticated write path that
 happens to look convenient. See docs/adr/0010.
 
 Presentation rules come from docs/api/mcp-tool-guide.md: compact returns,
-truncated strings, no bodies in tool results (those are Resources), and
-elicitation on every write with the confirmed arguments identical to the ones
-executed.
+truncated strings, no bodies in tool results (those are Resources). Writes do
+not elicit (ADR 0058): they are constrained by the token scope, by their
+descriptions and annotations, by a freshly generated `Idempotency-Key`, and by
+the audit row each one returns.
 """
 
 from __future__ import annotations
@@ -44,7 +45,8 @@ def build_mcp_server(app: Any) -> MCPServer:
             "Pearss is a personal information feed system. Use these tools to "
             "manage sources, inspect collection runs, and search collected "
             "items. Article bodies are Resources, not tool results, so request "
-            "them only when needed. Writes ask the user to confirm first.\n\n"
+            "them only when needed. Writes apply immediately and are recorded: "
+            "every write returns an `audit_id` naming its audit row.\n\n"
             # The protocol fields every result may carry, stated once here
             # rather than 22 times in per-tool schemas -- they are identical
             # across tools, and the body fields a schema *could* declare change
@@ -119,8 +121,8 @@ def build_mcp_app(app: Any) -> Any:
       this path; the legacy wire has no place to put `ttlMs`/`cacheScope`.
 
     We keep no cross-request state on the MCP surface, so nothing is lost by
-    dropping the session: the tools are stateless by construction and every
-    write is confirmed by elicitation.
+    dropping the session: the tools are stateless by construction, no write
+    elicits (ADR 0058), and every write is audited.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 

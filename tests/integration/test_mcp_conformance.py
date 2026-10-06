@@ -393,6 +393,32 @@ async def test_server_discover_answers(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_server_instructions_do_not_promise_write_confirmation(
+    mcp_url: str,
+) -> None:
+    """ADR 0058 retired elicitation, so the model must not be told writes confirm.
+
+    `instructions` is the only global guidance a model reads, so a stale
+    "writes ask the user to confirm first" makes it wait for a prompt that never
+    comes. The per-tool guard scans tool descriptions only, not this string
+    (issue #355). Writes are constrained by token scope, descriptions and
+    annotations, a fresh `Idempotency-Key`, and the audit row they return --
+    none of which is a confirmation step.
+    """
+    status, payload = await _rpc(
+        mcp_url,
+        "server/discover",
+        headers={"mcp-method": "server/discover", "mcp-name": "server/discover"},
+    )
+
+    assert status == 200, payload
+    instructions = payload["result"]["instructions"]
+    lowered = instructions.lower()
+    assert "confirm" not in lowered, instructions
+    assert "elicit" not in lowered, instructions
+
+
+@pytest.mark.asyncio
 async def test_cacheable_results_carry_ttl_and_scope(mcp_url: str) -> None:
     """`tools/list` and `resources/read` MUST carry `ttlMs` and `cacheScope`.
 
