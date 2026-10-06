@@ -64,6 +64,9 @@ EXPECTED_TABLES = (
     | FTS_TABLES
     # The work ledger (ADR 0046): a requested batch and its per-target rows.
     | {"work", "work_unit"}
+    # The origin/subscription split (ADR 0046 D-A/D-B, issue #363). Migration
+    # 0026 creates both *alongside* `source`; 0027 is the one that removes it.
+    | {"origin", "subscription"}
 )
 
 
@@ -410,6 +413,341 @@ def test_timestamp_width_migration_normalises_existing_rows(
     assert untouched == ["2026-09-04T06:11:23.556932Z"]
 
 
+# The two fact tables a client can observe, plus the consumption state and the
+# feed declaration. Migration 0026 must leave every one of them untouched.
+#
+# Explicit column lists, not `select *`: 0026 adds `origin_id`, and a dump that
+# followed the schema would report the new column as a changed fact. The
+# pre-existing columns are what "nothing visible changed" means; the new one is
+# reconciled separately below.
+_DUMPED_TABLES = (
+    (
+        "source",
+        "select id, type, url, canonical_url, title, parser_plugin_id,"
+        " seen_frontier, floor_cursor, schedule_policy, pipeline_chain,"
+        " target_lang, folder, status, trust_level, tenant_id, created_at,"
+        " updated_at from source order by id",
+    ),
+    (
+        "item",
+        "select id, source_id, guid, content_hash, title, url, author,"
+        " published_at, content_ref, publish_status, published_to_feed_at,"
+        " tenant_id, created_at, updated_at, sort_key from item order by id",
+    ),
+    (
+        "raw_fetch",
+        "select id, source_id, payload_ref, content_hash, http_status, etag,"
+        " last_modified, status, error_class, fetched_at, correlation_id"
+        " from raw_fetch order by id",
+    ),
+    ("read_state", "select * from read_state order by 1"),
+    ("feed_out", "select * from feed_out order by 1"),
+)
+
+# Fixed-width on purpose: AGENTS.md's timestamp rule is what the ORDER BY keys
+# compare, and this fixture exists to prove the copy preserves the rows exactly.
+AT = "2026-01-01T00:00:00.000000Z"
+LATER = "2026-01-03T00:00:00.000000Z"
+
+
+def _dump_visible_facts(
+    connection: sqlite3.Connection,
+) -> dict[str, list[tuple[object, ...]]]:
+    """Every row an operator or a client can observe, in a stable order."""
+    return {
+        table: connection.execute(statement).fetchall()
+        for table, statement in _DUMPED_TABLES
+    }
+
+
+def _seed_a_populated_database(connection: sqlite3.Connection) -> None:
+    """A pre-0026 database with the shapes that actually carry facts.
+
+    Two sources with different types (one with cursors, one without), items on
+    both sides of the publish gate, a failed fetch, read state and a feed
+    declaration -- the tables whose rows a migration could silently drop.
+    """
+    connection.execute(
+        "insert into source (id, type, url, canonical_url, title,"
+        " parser_plugin_id, seen_frontier, floor_cursor, schedule_policy,"
+        " pipeline_chain, target_lang, folder, status, trust_level, tenant_id,"
+        " created_at, updated_at)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "s-feed",
+            "rss",
+            "https://a.example/feed",
+            "https://a.example/feed",
+            "A feed",
+            "rss",
+            None,
+            None,
+            '{"interval_minutes": 60}',
+            '[{"plugin_id": "translate", "kind": "translate"}]',
+            "zh",
+            "Tech",
+            "active",
+            "trusted",
+            "default",
+            AT,
+            AT,
+        ),
+    )
+    connection.execute(
+        "insert into source (id, type, url, canonical_url, title,"
+        " parser_plugin_id, seen_frontier, floor_cursor, schedule_policy,"
+        " pipeline_chain, target_lang, folder, status, trust_level, tenant_id,"
+        " created_at, updated_at)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "s-tweets",
+            "web",
+            "https://x.example/u",
+            "https://x.example/u",
+            None,
+            None,
+            12345,
+            "c-1",
+            '{"interval_minutes": 15}',
+            None,
+            None,
+            "default",
+            "paused",
+            "standard",
+            "default",
+            LATER,
+            LATER,
+        ),
+    )
+    connection.execute(
+        "insert into item (id, source_id, guid, content_hash, title, url, author,"
+        " published_at, content_ref, publish_status, published_to_feed_at,"
+        " tenant_id, created_at, updated_at)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "i-1",
+            "s-feed",
+            "guid-1",
+            "hash-1",
+            "T1",
+            "https://a.example/1",
+            "Ann",
+            LATER,
+            "files/i-1.html",
+            "published",
+            LATER,
+            "default",
+            LATER,
+            LATER,
+        ),
+    )
+    connection.execute(
+        "insert into item (id, source_id, guid, content_hash, title, url, author,"
+        " published_at, content_ref, publish_status, published_to_feed_at,"
+        " tenant_id, created_at, updated_at)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "i-2",
+            "s-tweets",
+            "guid-2",
+            "hash-2",
+            "T2",
+            "https://x.example/2",
+            "",
+            None,
+            None,
+            "ready",
+            None,
+            "default",
+            LATER,
+            LATER,
+        ),
+    )
+    connection.execute(
+        "insert into raw_fetch (id, source_id, payload_ref, content_hash,"
+        " http_status, etag, last_modified, status, error_class, fetched_at,"
+        " correlation_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "rf-1",
+            "s-feed",
+            "files/rf-1",
+            "hash-1",
+            200,
+            'W/"e"',
+            "Wed, 01 Jan 2026 00:00:00 GMT",
+            "ok",
+            None,
+            LATER,
+            "corr-1",
+        ),
+    )
+    connection.execute(
+        "insert into raw_fetch (id, source_id, payload_ref, content_hash,"
+        " http_status, etag, last_modified, status, error_class, fetched_at,"
+        " correlation_id) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "rf-2",
+            "s-tweets",
+            None,
+            None,
+            503,
+            None,
+            None,
+            "failed",
+            "network",
+            LATER,
+            "c2",
+        ),
+    )
+    connection.execute(
+        "insert into read_state (item_id, is_read, is_starred, updated_at,"
+        " tenant_id) values (?, ?, ?, ?, ?)",
+        ("i-1", 1, 0, LATER, "default"),
+    )
+    connection.execute(
+        "insert into feed_out (id, name, filter_query, pipeline_chain, format,"
+        " token_hash, tenant_id, created_at, updated_at)"
+        " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("fo-1", "all", "", "[]", "rss", None, "default", AT, AT),
+    )
+    connection.commit()
+
+
+def _split_test_config(db_path: Path) -> Config:
+    config = Config(str(MIGRATIONS_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(MIGRATIONS_DIR / "migrations"))
+    config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{db_path}")
+    return config
+
+
+@pytest.mark.integration
+def test_the_split_migration_reconciles_every_existing_row(tmp_path: Path) -> None:
+    """AC-332: 0026 copies the facts out and changes none of them.
+
+    The 1:1 stage means `origin.id` and `subscription.id` are the old
+    `source.id`, so every item id, guid, feed row and read state has to come
+    out the other side byte-identical -- a migration that rewrote an id would
+    change the guid a client already cached. Pinned to `0026` rather than
+    `head` on purpose: 0027 is the migration that *removes* `source`, and this
+    reconciliation has to stay about the copy.
+    """
+    db_path = tmp_path / "split.db"
+    config = _split_test_config(db_path)
+
+    command.upgrade(config, "0025")
+    connection = sqlite3.connect(db_path)
+    try:
+        _seed_a_populated_database(connection)
+        before = _dump_visible_facts(connection)
+    finally:
+        connection.close()
+
+    command.upgrade(config, "0026")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        assert _dump_visible_facts(connection) == before, (
+            "0026 must only copy: a visible row changed"
+        )
+
+        # Fact columns, column for column, on the same ids.
+        assert (
+            connection.execute(
+                "select id, tenant_id, type, url, canonical_url, title,"
+                " parser_plugin_id, seen_frontier, floor_cursor, created_at,"
+                " updated_at from origin order by id"
+            ).fetchall()
+            == connection.execute(
+                "select id, tenant_id, type, url, canonical_url, title,"
+                " parser_plugin_id, seen_frontier, floor_cursor, created_at,"
+                " updated_at from source order by id"
+            ).fetchall()
+        ), "origin is not a copy of source's fact columns"
+
+        # Policy columns, on the same ids, each subscription pointing at its
+        # own origin.
+        assert (
+            connection.execute(
+                "select id, tenant_id, origin_id, schedule_policy, pipeline_chain,"
+                " target_lang, folder, status, trust_level, created_at, updated_at"
+                " from subscription order by id"
+            ).fetchall()
+            == connection.execute(
+                "select id, tenant_id, id, schedule_policy, pipeline_chain,"
+                " target_lang, folder, status, trust_level, created_at, updated_at"
+                " from source order by id"
+            ).fetchall()
+        ), "subscription is not a copy of source's policy columns"
+
+        # Exactly one subscription per origin, and no source left behind.
+        for table, statement in (
+            ("origin", "select count(*) from origin"),
+            ("subscription", "select count(*) from subscription"),
+        ):
+            count = connection.execute(statement).fetchone()[0]
+            assert count == 2, f"{table} has {count} rows for 2 sources"
+
+        # Both new columns are backfilled from the column they replace.
+        for table, statement in (
+            ("item", "select count(*) from item where origin_id is not source_id"),
+            (
+                "raw_fetch",
+                "select count(*) from raw_fetch where origin_id is not source_id",
+            ),
+        ):
+            mismatched = connection.execute(statement).fetchone()[0]
+            assert mismatched == 0, f"{table}.origin_id was not backfilled"
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
+def test_the_split_tables_carry_the_taxonomies_of_the_table_they_came_from(
+    alembic_config: Config,
+) -> None:
+    """The CHECK constraints move with the columns, not just the values.
+
+    SQLite does not enforce a VARCHAR enum on its own (AGENTS.md: the error
+    taxonomy), and `alembic check` cannot see a missing CHECK either -- so a
+    split table without one accepts `type='carrier_pigeon'` from any direct
+    write while a fresh install and the app disagree about the taxonomy.
+    """
+    command.upgrade(alembic_config, "0026")
+    url = alembic_config.get_main_option("sqlalchemy.url") or ""
+    db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
+
+    insert_origin = (
+        "insert into origin (id, tenant_id, type, url, canonical_url, created_at,"
+        " updated_at) values (?, 'default', ?, 'https://a/f', 'https://a/f',"
+        " 'now', 'now')"
+    )
+    insert_subscription = (
+        "insert into subscription (id, tenant_id, origin_id, schedule_policy,"
+        " pipeline_chain, target_lang, folder, status, trust_level, created_at,"
+        " updated_at) values (?, 'default', 'o-1', '{}', NULL, NULL, 'default',"
+        " ?, ?, 'now', 'now')"
+    )
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(insert_origin, ("o-1", "rss"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert_origin, ("o-2", "carrier_pigeon"))
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert_subscription, ("sub-1", "snoozing", "standard"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                insert_subscription, ("sub-2", "active", "sort_of_trusted")
+            )
+        # The stage-A 1:1 rule: one subscription per origin (removed by #371).
+        connection.execute(insert_subscription, ("sub-3", "active", "standard"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert_subscription, ("sub-4", "active", "standard"))
+    finally:
+        connection.close()
+
+
+@pytest.mark.integration
 @pytest.mark.integration
 def test_timestamp_width_migration_is_idempotent(tmp_path: Path) -> None:
     """Re-running must not append a second fractional part."""

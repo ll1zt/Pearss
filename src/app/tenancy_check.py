@@ -34,9 +34,11 @@ TENANT_TABLES = (
     "feed_out",
     "item",
     "item_enrichment",
+    "origin",
     "plugin",
     "read_state",
     "source",
+    "subscription",
     "work",
 )
 

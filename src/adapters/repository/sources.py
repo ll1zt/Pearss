@@ -9,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Source as SourceRow
+from adapters.repository.origins import create_origin
+from adapters.repository.subscriptions import create_subscription
 from core.enums import (
     SourceStatus,
 )
@@ -49,6 +51,13 @@ def create_source(
     create answer with the same body instead of a 409: the caller's intent was
     "this source should exist", and after the first request it does.
 
+    The write is a façade over three tables while ADR 0046's split is staged.
+    `source` keeps answering every existing read, and `origin`/`subscription`
+    are written alongside it so the rows the later stages read already exist
+    for every source created from now on. `origin.id` and `subscription.id`
+    are this `source.id`, which is what keeps the three addressable by one key
+    -- and every item id, guid and `/v1/sources/{id}` URL unchanged.
+
     There is no revival branch any more. It existed for soft-deleted rows,
     which answered 201 while never being collected again; deletion now removes
     the row (ADR 0021), so a re-subscribe finds nothing and inserts fresh. The
@@ -84,7 +93,37 @@ def create_source(
     )
     session.add(row)
     session.flush()
-    LOGGER.debug("created source %s (%s)", source_id, source_type)
+
+    # The same write, expressed against the tables the split is moving to. The
+    # origin is created first because the subscription points at it; both are
+    # keyed on this row's id so the three stay one aggregate.
+    origin = create_origin(
+        session,
+        origin_id=source_id,
+        source_type=source_type,
+        url=url,
+        canonical_url=canonical_url,
+        tenant_id=tenant_id,
+        at=at,
+        parser_plugin_id=parser_plugin_id,
+    )
+    create_subscription(
+        session,
+        subscription_id=source_id,
+        origin_id=origin.id,
+        schedule_policy=schedule_policy,
+        tenant_id=tenant_id,
+        at=at,
+        pipeline_chain=pipeline_chain,
+        target_lang=target_lang,
+        folder=folder,
+        trust_level=trust_level,
+    )
+    LOGGER.debug(
+        "created source %s (%s) with its origin and subscription",
+        source_id,
+        source_type,
+    )
     return row
 
 

@@ -170,6 +170,127 @@ class Source(Base):
     )
 
 
+class Origin(Base):
+    """Where content comes from: the fact half of the split (ADR 0046 D-A).
+
+    Stage A: `Source` still carries both halves and every read path uses it, so
+    this table is written alongside `source` and read only by the repository
+    functions added with it. The 1:1 stage gives it the `Source`'s own id,
+    which is what keeps every existing item id, guid and `/v1/sources/{id}` URL
+    meaningful while the split is staged.
+
+    Fact, not policy. `schedule_policy`, `pipeline_chain` and `folder` say how
+    a client consumes this origin, and they live on `Subscription` -- two
+    clients consuming one origin is the case the split exists for.
+    """
+
+    __tablename__ = "origin"
+
+    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
+    type: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["source_type"]), nullable=False
+    )
+    url: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
+    # NOT NULL for the reason `Source.canonical_url` is: this is the dedupe
+    # key, and a nullable column in a unique constraint is not covered by it --
+    # SQL treats NULLs as distinct -- so a row without one could duplicate any
+    # other, silently.
+    canonical_url: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # The name the origin gives itself, discovered at collection time.
+    # Nullable because a source created before its first fetch legitimately has
+    # none; the display layer falls back to the id rather than a blank label.
+    title: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
+    parser_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(128), nullable=True
+    )
+    # Paging state for origins walked a page at a time. Not derivable from
+    # `item`: a cursor is an opaque string from the origin, and a gap position
+    # is not recoverable from stored rows.
+    seen_frontier: sa.orm.Mapped[int | None] = sa.orm.mapped_column(
+        sa.BigInteger, nullable=True
+    )
+    floor_cursor: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        enum_check("sourcetype", "type", ("rss", "web", "agent")),
+        # The dedupe identity, moved off `source` unchanged.
+        sa.UniqueConstraint("tenant_id", "canonical_url", "type", name="uq_origin_url"),
+    )
+
+
+class Subscription(Base):
+    """How one client consumes an origin: the policy half of the split.
+
+    Written alongside its `source` in stage A and read by the repository
+    functions added with it, so the rows the later stages read already exist
+    for sources created from the moment this lands.
+
+    `UNIQUE(tenant_id, origin_id)` is stage A only: it states "one subscription
+    per origin", which is true today and stops being true when a second
+    subscription becomes meaningful -- that migration drops it, and the test
+    that pins it here is what makes the removal deliberate rather than silent.
+    """
+
+    __tablename__ = "subscription"
+
+    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
+    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
+    origin_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("origin.id", ondelete="CASCADE"), nullable=False
+    )
+    # Per-subscription scheduling: fixed interval or adaptive bounds, plus the
+    # consecutive-failure count that drives backoff.
+    schedule_policy: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    # Processing chain the subscription's items must complete before the gate
+    # opens. JSON list of {plugin_id, kind, lang, required}; NULL means no
+    # chain (items go ready straight after normalisation).
+    pipeline_chain: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.Text, nullable=True
+    )
+    # Target language for language products (translation); default for the
+    # chain's language specs that omit their own.
+    target_lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(16), nullable=True
+    )
+    # The sidebar folder this subscription sits in. NOT NULL with the default
+    # name rather than nullable: an unclassified subscription still sits in a
+    # folder the client can show, and two spellings of "none" would make every
+    # reader of this column handle both.
+    folder: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.Text, nullable=False, server_default=SINGLE_TENANT
+    )
+    status: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["source_status"]), nullable=False
+    )
+    # Recorded intent about the origin. Never makes fetched content trusted --
+    # see core.enums.TrustLevel for why that distinction is load-bearing.
+    trust_level: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.String(ENUM_LENGTHS["trust_level"]), nullable=False
+    )
+    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        enum_check(
+            "sourcestatus",
+            "status",
+            ("active", "paused", "disabled"),
+        ),
+        enum_check(
+            "trustlevel",
+            "trust_level",
+            ("standard", "trusted", "restricted"),
+        ),
+        # Stage A only; the multi-subscription migration removes it.
+        sa.UniqueConstraint("tenant_id", "origin_id", name="uq_subscription_origin"),
+    )
+
+
 class RawFetch(Base):
     """One fetch attempt. Rebuildable diagnostic data, not backed up."""
 
@@ -178,6 +299,12 @@ class RawFetch(Base):
     id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
     source_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stage A of the split: nullable, backfilled from `source_id` by migration
+    # 0026, and not read by anything yet. Migration 0027 is what makes it NOT
+    # NULL, adds the foreign key and retires `source_id`.
+    origin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
     )
     # Reference into file storage; the payload itself never enters the DB.
     payload_ref: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
@@ -212,6 +339,9 @@ class RawFetch(Base):
         # The conditional-request state for the next fetch is the most recent
         # row for a source; raw_fetch only grows, so this needs an index.
         sa.Index("ix_raw_fetch_source_id_fetched_at", "source_id", "fetched_at"),
+        # Stage A only: the column 0027 keeps, under the name the reads will
+        # use. Its composite replacement arrives with that migration.
+        sa.Index("ix_raw_fetch_origin_id", "origin_id"),
     )
 
 
@@ -223,6 +353,13 @@ class Item(Base):
     id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
     source_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
         sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stage A of the split: nullable, backfilled from `source_id` by migration
+    # 0026, and not read by anything yet. Migration 0027 is what makes it NOT
+    # NULL, adds the foreign key, retires `source_id` and replaces the index
+    # below with `(origin_id, sort_key, id)`.
+    origin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
+        sa.String(64), nullable=True
     )
     # Stable across the item's life; frozen once published.
     guid: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
@@ -289,6 +426,9 @@ class Item(Base):
         # temp B-tree (issue #77).
         sa.Index("ix_item_sort_key_id", "sort_key", "id"),
         sa.Index("ix_item_source_sort_key_id", "source_id", "sort_key", "id"),
+        # Stage A only: the column 0027 keeps. The composite above is what
+        # serves the paged feed read once the reads switch over.
+        sa.Index("ix_item_origin_id", "origin_id"),
     )
 
 
