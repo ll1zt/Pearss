@@ -44,10 +44,10 @@
 丢了不会报错，但会让下一次采集把已经抓过的区间重走一遍（去重兜住重复入库，
 代价是白费请求）。`folder` 则是普通配置，丢了表现为订阅回到 `default` 分组。
 
-### Origin 与 Subscription（ADR 0046 拆表，进行中）
+### Origin 与 Subscription（ADR 0046 拆表，已完成）
 
-`Source` 正在按 ADR 0046 D-A/D-B 拆成两半。**阶段 A**（migration 0026）建表并复制，
-**阶段 B**（migration 0027）把读写切了过去：
+`Source` 已按 ADR 0046 D-A/D-B/D-C 拆成两半：阶段 A（migration 0026）建表并复制，
+阶段 B（0027）把读写切过去，阶段 C（0028）删掉镜像。
 
 - **`origin`** —— 事实：`type` / `url` / `canonical_url` / `title` / `parser_plugin_id` /
   `seen_frontier` / `floor_cursor`。同一租户内 `canonical_url + type` 唯一，这就是去重
@@ -55,22 +55,19 @@
 - **`subscription`** —— 策略：`schedule_policy` / `pipeline_chain` / `target_lang` /
   `folder` / `status` / `trust_level`。它回答「某个客户端怎么消费这个 origin」。
 
-阶段 B 之后的性质：
+阶段 B/C 之后的性质：
 
 - **读路径全部走 `origin` / `subscription`**：调度读订阅的策略、抓取历史写 origin、
-  `item.origin_id` 是事实列；`(origin_id, sort_key, id)` 复合索引由 0027 落下（源内分页
-  必须用它，否则每次排序都落临时 B 树，issue #77）。
-- **`source` 降为门面私有的镜像**：只有 `adapters/repository/sources.py` 会碰它。
-  `create_source` 写这一行，是因为 `item.source_id` 的外键还指着它；**没有任何读路径
-  读它**，所以它的策略列**在创建时就冻结**，不随后续修改更新。
-- `item.source_id` / `raw_fetch.source_id` 同属镜像：写入路径两列同写，读路径只认
-  `origin_id`；迁移 0028 删列。
+  `item.origin_id` 是事实列。
+- **`source` 表已不存在**（0028 删除）。`item.origin_id` / `raw_fetch.origin_id` 是
+  NOT NULL + `ON DELETE CASCADE` 外键 → `origin`：删一个 origin 会带走它的条目、抓取
+  记录与订阅。`(origin_id, sort_key, id)` 复合索引服务源内分页（不用它会落临时 B 树，
+  issue #77）。
 - **1:1 阶段 id 相同**：`origin.id = subscription.id = 旧 source.id`，因此既有 item id、
   guid 与 `/v1/sources/{id}` 都保持原义。
-- **「一个 origin 一个订阅」只是本阶段的约束**（`UNIQUE(tenant_id, origin_id)`）；
+- **「一个 origin 一个订阅」仍是当前约束**（`UNIQUE(tenant_id, origin_id)`）；
   多订阅迁移会删掉它，那时一个 origin 才能挂两套策略（一个翻译、一个不译）。
-- 运维 SQL 请查 `origin` / `subscription`（runbook 已同步）：`source` 的列对操作者
-  已经不再权威。
+- 运维 SQL 查 `origin` / `subscription`（runbook 已同步）。
 
 ### 抓取区间（分页型源）
 
