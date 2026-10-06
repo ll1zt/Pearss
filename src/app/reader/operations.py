@@ -99,27 +99,29 @@ def list_subscriptions(session_factory: sessionmaker[Session]) -> list[Subscript
     readable. Deleted sources need no clause: deletion removes the row
     (ADR 0021), so there is nothing left to filter out.
     """
-    from adapters.db_models import Source
+    from adapters.db_models import Origin as OriginRow
+    from adapters.db_models import Subscription as SubscriptionRow
     from core.enums import SourceStatus
 
     with session_factory() as session:
         rows = (
-            session.query(Source)
+            session.query(OriginRow, SubscriptionRow)
+            .join(SubscriptionRow, SubscriptionRow.origin_id == OriginRow.id)
             .filter(
-                Source.tenant_id == SINGLE_TENANT,
-                Source.status != SourceStatus.DISABLED.value,
+                OriginRow.tenant_id == SINGLE_TENANT,
+                SubscriptionRow.status != SourceStatus.DISABLED.value,
             )
             .all()
         )
         return [
             Subscription(
-                id=row.id,
-                title=row.title,
-                url=row.url,
-                canonical_url=row.canonical_url,
-                folder=row.folder,
+                id=origin.id,
+                title=origin.title,
+                url=origin.url,
+                canonical_url=origin.canonical_url,
+                folder=subscription.folder,
             )
-            for row in rows
+            for origin, subscription in rows
         ]
 
 
@@ -131,13 +133,13 @@ def list_folder_names(session_factory: sessionmaker[Session]) -> list[str]:
     """
     from sqlalchemy import distinct
 
-    from adapters.db_models import Source
+    from adapters.db_models import Subscription as SubscriptionRow
 
     with session_factory() as session:
         rows = (
-            session.query(distinct(Source.folder))
-            .filter(Source.tenant_id == SINGLE_TENANT)
-            .order_by(Source.folder)
+            session.query(distinct(SubscriptionRow.folder))
+            .filter(SubscriptionRow.tenant_id == SINGLE_TENANT)
+            .order_by(SubscriptionRow.folder)
             .all()
         )
     return [str(row[0]) for row in rows if row[0]]
@@ -202,13 +204,16 @@ def move_folder(
     difference -- what may be a target, what may be a source -- is the caller's
     to check.
     """
-    from adapters.db_models import Source as SourceRow
+    from adapters.db_models import Subscription as SubscriptionRow
 
     now = timestamp(at)
     with session_factory() as session:
         rows = (
-            session.query(SourceRow)
-            .filter(SourceRow.tenant_id == SINGLE_TENANT, SourceRow.folder == origin)
+            session.query(SubscriptionRow)
+            .filter(
+                SubscriptionRow.tenant_id == SINGLE_TENANT,
+                SubscriptionRow.folder == origin,
+            )
             .all()
         )
         for row in rows:
@@ -233,17 +238,17 @@ def set_sources_folder(
     need no clause -- deletion removes them (ADR 0021). Unknown ids are skipped
     rather than 404'd, the same leniency `edit-tag` applies to item ids.
     """
-    from adapters.db_models import Source as SourceRow
+    from adapters.db_models import Subscription as SubscriptionRow
     from core.enums import SourceStatus
 
     now = timestamp(at)
     with session_factory() as session:
         rows = (
-            session.query(SourceRow)
+            session.query(SubscriptionRow)
             .filter(
-                SourceRow.id.in_(source_ids),
-                SourceRow.tenant_id == SINGLE_TENANT,
-                SourceRow.status != SourceStatus.DISABLED.value,
+                SubscriptionRow.id.in_(source_ids),
+                SubscriptionRow.tenant_id == SINGLE_TENANT,
+                SubscriptionRow.status != SourceStatus.DISABLED.value,
             )
             .all()
         )
@@ -265,21 +270,23 @@ def rename_sources(
 
     Driven by `subscription/edit`'s `t=`. The conditional write on the
     collection path fills an absent title and never replaces a present one
-    (`set_source_title_if_absent`), exactly to protect an operator's rename; a
+    (`set_origin_title_if_absent`), exactly to protect an operator's rename; a
     client rename is that same choice expressed from an app, so it lands here
     and sticks (ADR 0024, revision).
     """
-    from adapters.db_models import Source as SourceRow
+    from adapters.db_models import Origin as OriginRow
+    from adapters.db_models import Subscription as SubscriptionRow
     from core.enums import SourceStatus
 
     now = timestamp(at)
     with session_factory() as session:
         rows = (
-            session.query(SourceRow)
+            session.query(OriginRow)
+            .join(SubscriptionRow, SubscriptionRow.origin_id == OriginRow.id)
             .filter(
-                SourceRow.id.in_(source_ids),
-                SourceRow.tenant_id == SINGLE_TENANT,
-                SourceRow.status != SourceStatus.DISABLED.value,
+                OriginRow.id.in_(source_ids),
+                OriginRow.tenant_id == SINGLE_TENANT,
+                SubscriptionRow.status != SourceStatus.DISABLED.value,
             )
             .all()
         )

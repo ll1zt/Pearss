@@ -165,7 +165,7 @@ def last_conditional_state(
     row = (
         session.execute(
             select(RawFetchRow)
-            .where(RawFetchRow.source_id == source_id)
+            .where(RawFetchRow.origin_id == source_id)
             .order_by(RawFetchRow.fetched_at.desc())
             .limit(1)
         )

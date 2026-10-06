@@ -41,10 +41,10 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters import correlation
-from adapters.db_models import Source as SourceRow
 from adapters.log_safety import escape_control_characters
 from adapters.redaction import redact_url_for_log
 from adapters.repository import (
+    SourceView,
     append_unit,
     chain_for_source,
     claim_next_work,
@@ -170,7 +170,7 @@ class WorkRuntime:
 class SourceRuntime(WorkRuntime):
     """A work about one source: the source, and whatever the kind needs of it."""
 
-    source: SourceRow
+    source: SourceView
     registration: CollectorRegistration | None = None
     chain: tuple[EnrichmentSpec, ...] = ()
 
@@ -501,7 +501,7 @@ class SubscribeExecutor(KindExecutor):
             source_type=source_type,
             canonical_url=canonical,
         )
-        existed = session.get(SourceRow, source_id) is not None
+        existed = get_source(session, source_id) is not None
         create_source(
             session,
             source_type=source_type,

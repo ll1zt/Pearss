@@ -20,9 +20,12 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy import text as sa_text
 
 from adapters.correlation import current as current_correlation_id
+from adapters.db_models import Origin as OriginRow
+from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository import (
     list_plugin_rows,
     plugin_status,
@@ -40,7 +43,7 @@ from app.api_conventions import (
 )
 from app.auth import Principal, read_required, write_required
 from app.collector_registry import shipped_collector_ids
-from core.enums import PluginStatus
+from core.enums import PluginStatus, SourceStatus
 from core.tenancy import SINGLE_TENANT
 
 if TYPE_CHECKING:
@@ -345,7 +348,9 @@ def uninstall_plugin(
         candidates = [
             (str(row[0]), str(row[1]))
             for row in session.execute(
-                sa_text("select id, url from source where status = 'active'")
+                select(OriginRow.id, OriginRow.url)
+                .join(SubscriptionRow, SubscriptionRow.origin_id == OriginRow.id)
+                .where(SubscriptionRow.status == SourceStatus.ACTIVE.value)
             ).fetchall()
         ]
     in_use = [

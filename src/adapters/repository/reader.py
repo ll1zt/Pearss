@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
-from adapters.db_models import Source as SourceRow
+from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository._shared import _parse, visible_item_rows
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.reader_state import ReadState as ReadStateDomain
@@ -78,7 +78,7 @@ def visible_ids_for_stream(
 
     source_id = reader_api.parse_feed_stream_id(stream_id)
     if source_id is not None:
-        query = query.where(ItemRow.source_id == source_id)
+        query = query.where(ItemRow.origin_id == source_id)
     else:
         state = reader_api.state_stream_name(stream_id)
         if state == "reading-list":
@@ -114,10 +114,10 @@ def visible_ids_for_stream(
             # the unfiltered list for a filter with no matches is a wrong
             # answer that looks like data.
             query = query.where(
-                ItemRow.source_id.in_(
-                    select(SourceRow.id).where(
-                        SourceRow.folder == label,
-                        SourceRow.tenant_id == tenant_id,
+                ItemRow.origin_id.in_(
+                    select(SubscriptionRow.id).where(
+                        SubscriptionRow.folder == label,
+                        SubscriptionRow.tenant_id == tenant_id,
                     )
                 )
             )
@@ -423,14 +423,15 @@ def mark_all_read(
         ItemRow.id.not_in(existing),
     )
     if source_id:
-        candidates = candidates.where(ItemRow.source_id == source_id)
+        candidates = candidates.where(ItemRow.origin_id == source_id)
     if folder is not None:
         # A folder no source carries is an empty scope, not the whole library:
         # the same rule the folder *read* path applies.
         candidates = candidates.where(
-            ItemRow.source_id.in_(
-                select(SourceRow.id).where(
-                    SourceRow.folder == folder, SourceRow.tenant_id == tenant_id
+            ItemRow.origin_id.in_(
+                select(SubscriptionRow.id).where(
+                    SubscriptionRow.folder == folder,
+                    SubscriptionRow.tenant_id == tenant_id,
                 )
             )
         )

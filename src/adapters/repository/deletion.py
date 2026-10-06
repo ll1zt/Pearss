@@ -35,11 +35,12 @@ from sqlalchemy.orm import Session
 from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment as EnrichmentRow
+from adapters.db_models import Origin as OriginRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
-from adapters.db_models import Source as SourceRow
 from adapters.repository._shared import row_to_item
 from adapters.repository.search_index import deindex_items
+from adapters.repository.sources import delete_source_mirror
 from core.models import Item
 
 LOGGER = logging.getLogger(__name__)
@@ -227,7 +228,7 @@ def items_for_source(
     to trim everything older than a date would have deleted the undated rows
     too, which is the opposite of what they asked for.
     """
-    query = select(ItemRow).where(ItemRow.source_id == source_id)
+    query = select(ItemRow).where(ItemRow.origin_id == source_id)
     if not include_published:
         query = query.where(ItemRow.publish_status != "published")
     if since:
@@ -280,7 +281,7 @@ def delete_source(
     The source's `raw_fetch` rows go with it. They are diagnostic records whose
     subject no longer exists, so nothing can read them as anything.
     """
-    row = session.get(SourceRow, source_id)
+    row = session.get(OriginRow, source_id)
     if row is None:
         return DeletionResult(
             counts={"sources": 0, "items": 0, "raw_fetches": 0, "bodies": 0},
@@ -299,7 +300,7 @@ def delete_source(
     raw_fetches = session.execute(
         select(func.count())
         .select_from(RawFetchRow)
-        .where(RawFetchRow.source_id == source_id)
+        .where(RawFetchRow.origin_id == source_id)
     ).scalar_one()
     # No payload refs are collected here. `RawFetch.payload_ref` is never
     # written -- pipeline._raw_fetch_row stores only content_hash, because a
@@ -309,10 +310,15 @@ def delete_source(
     # item-reference check: a fetch payload is not an item body, so no item row
     # accounts for it and `_still_referenced` would answer a question about the
     # wrong table.
-    session.execute(delete(RawFetchRow).where(RawFetchRow.source_id == source_id))
+    session.execute(delete(RawFetchRow).where(RawFetchRow.origin_id == source_id))
     session.flush()
 
-    session.execute(delete(SourceRow).where(SourceRow.id == source_id))
+    # Both rows. `origin` is the fact table; `source` is the stage-A mirror,
+    # and its row is what `item.source_id`'s foreign key still resolves
+    # against -- the items themselves were removed above. Migration 0028 drops
+    # it, and until then the façade owns every touch of it.
+    session.execute(delete(OriginRow).where(OriginRow.id == source_id))
+    delete_source_mirror(session, source_id=source_id)
 
     return DeletionResult(
         counts={

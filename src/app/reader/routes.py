@@ -726,7 +726,7 @@ def subscription_edit(
 
     `t=` renames the source. It was refused silently until 2026-09-16, on
     the reasoning that the next fetch would overwrite the name; reading
-    `set_source_title_if_absent` shows that reasoning was wrong -- the
+    `set_origin_title_if_absent` shows that reasoning was wrong -- the
     conditional write fills an absent title and never replaces a present
     one, exactly to protect an operator's rename. A client rename is that
     same choice expressed from an app, so it now lands through the same

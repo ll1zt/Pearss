@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import sys
 
-from adapters.db_models import Source
+from adapters.db_models import Subscription
 from adapters.repository import backfill_chain
 from adapters.repository.enrichment import parse_chain
 
@@ -29,11 +29,13 @@ def main() -> None:
     url = os.environ.get("PEARSS_DATABASE_URL") or "sqlite+pysqlite:///data/pearss.db"
     session_factory = sessionmaker(create_engine(url), expire_on_commit=False)
     with session_factory() as session:
-        source = session.get(Source, source_id)
-        if source is None:
+        subscription = session.get(Subscription, source_id)
+        if subscription is None:
             print(f"no source {source_id!r}", file=sys.stderr)
             raise SystemExit(1)
-        specs = parse_chain(source.pipeline_chain, target_lang=source.target_lang)
+        specs = parse_chain(
+            subscription.pipeline_chain, target_lang=subscription.target_lang
+        )
         if not specs:
             print(
                 f"source {source_id!r} has no pipeline_chain; nothing to backfill",

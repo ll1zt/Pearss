@@ -132,7 +132,7 @@ def _verify(db_path: Path) -> None:
         if integrity != "ok":
             raise ValueError(f"restored database failed integrity_check: {integrity}")
         items = conn.execute("select count(*) from item").fetchone()[0]
-        sources = conn.execute("select count(*) from source").fetchone()[0]
+        sources = conn.execute("select count(*) from origin").fetchone()[0]
         LOGGER.info(
             "restored database verified: integrity ok, %d sources, %d items",
             sources,

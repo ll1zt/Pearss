@@ -24,9 +24,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from adapters.correlation import current as current_correlation_id
-from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     RATE_WINDOW_MINUTES,
+    SourceView,
     append_unit,
     backlog_for_source,
     completion_rate_per_min,
@@ -45,6 +45,7 @@ from adapters.repository import (
     list_sources,
     parse_chain,
     timestamp,
+    update_source_policy,
 )
 from adapters.repository import (
     delete_source as repository_delete_source,
@@ -333,7 +334,7 @@ def _shared_client(request: Request) -> httpx.Client:
     return client
 
 
-def _source_payload(row: SourceRow) -> dict[str, Any]:
+def _source_payload(row: SourceView) -> dict[str, Any]:
     """Render a source row.
 
     `url` is echoed as given and `canonical_url` as stored, so an operator can
@@ -802,7 +803,7 @@ def add_sources_batch(
                 source_type=source_type,
                 canonical_url=canonical,
             )
-            existed = session.get(SourceRow, source_id) is not None
+            existed = get_source(session, source_id) is not None
             row = create_source(
                 session,
                 source_type=source_type,
@@ -1155,7 +1156,7 @@ def fetch_source_item(
     return JSONResponse(status_code=200, content=payload)
 
 
-def _require_source(session: Session, source_id: str) -> SourceRow:
+def _require_source(session: Session, source_id: str) -> SourceView:
     row = get_source(session, source_id)
     if row is None:
         raise api_error(
@@ -1251,11 +1252,14 @@ def update_source(
                         "translation, summary, fulltext, tts_audio."
                     ),
                 ) from exc
-        for column, value in changes.items():
-            setattr(row, column, value)
-        row.updated_at = timestamp(_now())
+        # The write lands on the subscription: every patchable field is policy.
+        updated = update_source_policy(
+            session, source_id=source_id, changes=changes, at=timestamp(_now())
+        )
         session.commit()
-        payload = _source_payload(row)
+        # None only when the subscription vanished; `_require_source` read it in
+        # this same transaction, so the composition is the row just validated.
+        payload = _source_payload(updated if updated is not None else row)
 
     payload["correlation_id"] = current_correlation_id()
     remember(
@@ -1418,7 +1422,7 @@ def list_source_enrichments(
         _require_source(session, source_id)
         query = _select(ItemEnrichment).where(
             ItemEnrichment.item_id.in_(
-                _select(_ItemRow.id).where(_ItemRow.source_id == source_id)
+                _select(_ItemRow.id).where(_ItemRow.origin_id == source_id)
             )
         )
         if status is not None:
