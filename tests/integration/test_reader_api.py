@@ -17,7 +17,7 @@ import sqlalchemy as sa
 from fastapi import FastAPI
 
 from app.middleware import CorrelationAndAuditMiddleware
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 from .conftest import (
     READER_PASSWORD as TEST_PASSWORD,
@@ -1019,21 +1019,16 @@ async def test_a_folder_stream_returns_only_that_folders_items(
     sidebar. A name no source carries answers empty: the unfiltered list for
     a filter with no matches is a wrong answer that looks like data.
     """
-    from sqlalchemy import text as _text
 
     # The fixture's source stays in the default folder; a second one moves to
     # a folder of its own.
     with app.state.session_factory() as session:
-        session.execute(
-            _text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, folder, created_at, updated_at)"
-                " values ('src-2', 'rss', 'https://elsewhere.example.com/feed',"
-                " 'https://elsewhere.example.com/feed', '{}', 'active', 'default',"
-                " 'work', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            )
+        seed_source(
+            session,
+            source_id="src-2",
+            url="https://elsewhere.example.com/feed",
+            folder="work",
         )
-        mirror_sources(session)
         session.commit()
 
     token = await login(client)

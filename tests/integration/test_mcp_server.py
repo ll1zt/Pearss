@@ -34,7 +34,7 @@ from tests.integration.conftest import (
     run_work_to_completion,
 )
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_EDGE_TOKEN = "synthetic-mcp-edge-token"
@@ -61,24 +61,18 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
     engine = create_engine_for(url)
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, trust_level, tenant_id, created_at, updated_at)"
-                " values ('src-1', 'rss', :u, :u, '{}', 'active', 'standard',"
-                " 'default', '2026-01-01T00:00:00.000000Z',"
-                " '2026-01-01T00:00:00.000000Z')"
-            ),
-            {"u": FEED_URL},
+        seed_source(
+            conn,
+            source_id="src-1",
+            url=FEED_URL,
         )
-        mirror_sources(conn)
         conn.execute(
             text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at,"
                 " content_ref)"
-                " values ('i-1', 'src-1', 'src-1', 'g-1', 'h-1', 'A searchable title',"
+                " values ('i-1', 'src-1', 'g-1', 'h-1', 'A searchable title',"
                 " 'https://blog.example.com/1',"
                 " '2026-06-01T10:00:00.000000Z', 'ready', 'default',"
                 " '2026-06-01T10:00:00.000000Z',"
@@ -87,11 +81,11 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
         )
         conn.execute(
             text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at,"
                 " content_ref)"
-                " values ('i-long', 'src-1', 'src-1', 'g-long', 'h-long',"
+                " values ('i-long', 'src-1', 'g-long', 'h-long',"
                 " 'Item with a body',"
                 " 'https://blog.example.com/long',"
                 " '2026-06-01T12:00:00.000000Z', 'ready', 'default',"
@@ -101,10 +95,10 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
         )
         conn.execute(
             text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at)"
-                " values ('i-pending', 'src-1', 'src-1', 'g-p', 'h-p',"
+                " values ('i-pending', 'src-1', 'g-p', 'h-p',"
                 " 'Hidden pending item',"
                 " 'https://blog.example.com/pending',"
                 " '2026-06-01T11:00:00.000000Z', 'pending', 'default',"
@@ -978,10 +972,10 @@ async def test_backfill_source_executes_and_reports_queued(
             )
             conn.execute(
                 text(
-                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    "insert into item (id, origin_id, guid, content_hash,"
                     " title, url,"
                     " publish_status, tenant_id, created_at, updated_at)"
-                    " values ('bf-mcp', 'src-1', 'src-1', 'g-bf', 'h-bf',"
+                    " values ('bf-mcp', 'src-1', 'g-bf', 'h-bf',"
                     " 'Backfill me',"
                     " 'https://bf.example/1', 'ready', 'default', :ts, :ts)"
                 ),
@@ -1117,7 +1111,6 @@ def _seed_retry_rows(
                 ItemRow(
                     id=f"{slug}-item",
                     origin_id="src-1",
-                    source_id="src-1",
                     guid=f"{slug}-guid",
                     content_hash=f"{slug}-hash",
                     title="Retry me",
@@ -1262,7 +1255,6 @@ async def test_a_source_items_delete_submits_a_job(
                 ItemRow(
                     id="clear-mcp-item",
                     origin_id=source_id,
-                    source_id=source_id,
                     guid="clear-mcp-guid",
                     content_hash="clear-mcp-hash",
                     title="Bad crawl",

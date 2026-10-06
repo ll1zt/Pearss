@@ -40,7 +40,6 @@ def _seed(session: Session, item_ids: list[str]) -> None:
             ItemRow(
                 id=item_id,
                 origin_id="src-1",
-                source_id="src-1",
                 guid=f"guid-{item_id}",
                 content_hash="hash",
                 title="t",

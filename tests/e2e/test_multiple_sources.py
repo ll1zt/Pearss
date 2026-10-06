@@ -125,11 +125,11 @@ async def test_a_failing_source_does_not_stop_a_healthy_one(
 
     with session_factory() as db:
         items = db.execute(
-            sa.text("select count(*) from item where source_id = :id"),
+            sa.text("select count(*) from item where origin_id = :id"),
             {"id": healthy_id},
         ).scalar_one()
         broken_items = db.execute(
-            sa.text("select count(*) from item where source_id = :id"),
+            sa.text("select count(*) from item where origin_id = :id"),
             {"id": broken_id},
         ).scalar_one()
     assert items >= 1, "the healthy source stored nothing"

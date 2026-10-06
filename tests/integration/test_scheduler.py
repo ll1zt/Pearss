@@ -37,28 +37,20 @@ from core.enums import ErrorClass, JobRunStatus
 from core.job_state import InvalidJobRunTransitionError, JobRunEvent
 from core.models import schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
 
 def add_source(session: Session, *, source_id: str, policy: dict[str, object]) -> None:
-    session.execute(
-        sa.text(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, trust_level, tenant_id, created_at, updated_at)"
-            " values (:id, 'rss', :url, :url, :policy, 'active', 'standard',"
-            " 'default', :now, :now)"
-        ),
-        {
-            "id": source_id,
-            "url": f"https://{source_id}.example.com/feed",
-            "policy": schedule_policy_to_json(schedule_policy_from_json(policy)),
-            "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
-        },
+    seed_source(
+        session,
+        source_id=source_id,
+        url=f"https://{source_id}.example.com/feed",
+        schedule_policy=schedule_policy_to_json(schedule_policy_from_json(policy)),
+        at=NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
     )
-    mirror_sources(session)
     session.commit()
 
 
@@ -69,10 +61,10 @@ def add_items(
         moment = NOW - spacing * (count - index)
         session.execute(
             sa.text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at)"
-                " values (:id, :s, :s, :g, :h, :t, :u, :p, 'ready', 'default', :p, :p)"
+                " values (:id, :s, :g, :h, :t, :u, :p, 'ready', 'default', :p, :p)"
             ),
             {
                 "id": f"{source_id}-i{index}",
@@ -541,17 +533,13 @@ def test_one_broken_source_does_not_end_the_tick(
         add_source(
             session, source_id="good", policy={"type": "fixed", "interval": "30m"}
         )
-        session.execute(
-            sa.text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, trust_level, tenant_id, created_at, updated_at)"
-                " values ('broken', 'rss', 'https://b.example/f',"
-                " 'https://b.example/f',"
-                " 'not json', 'active', 'standard', 'default',"
-                " '2026-06-01T12:00:00.000000Z', '2026-06-01T12:00:00.000000Z')"
-            )
+        seed_source(
+            session,
+            source_id="broken",
+            url="https://b.example/f",
+            schedule_policy="not json",
+            at="2026-06-01T12:00:00.000000Z",
         )
-        mirror_sources(session)
         session.commit()
 
     report = run_tick(session_factory, client=fake_feed, now=NOW)
@@ -716,21 +704,16 @@ def test_agent_sources_are_not_collectable(
         add_source(
             session, source_id="pushed", policy={"type": "fixed", "interval": "30m"}
         )
-        session.execute(
-            sa.text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, trust_level, tenant_id, created_at, updated_at)"
-                " values ('intake', 'agent', 'agent://intake', 'agent://intake',"
-                " :policy, 'active', 'standard', 'default', :now, :now)"
+        seed_source(
+            session,
+            source_id="intake",
+            source_type="agent",
+            url="agent://intake",
+            schedule_policy=schedule_policy_to_json(
+                schedule_policy_from_json({"type": "fixed", "interval": "30m"})
             ),
-            {
-                "policy": schedule_policy_to_json(
-                    schedule_policy_from_json({"type": "fixed", "interval": "30m"})
-                ),
-                "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
-            },
+            at=NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
         )
-        mirror_sources(session)
         session.commit()
         rows = collectable_sources(session, tenant_id="default")
     assert [row[0] for row in rows] == ["pushed"]

@@ -213,7 +213,7 @@ def test_a_revised_item_needs_a_vector_for_its_new_text(
         session.commit()
         assert _status(session, item_id) == "ready"
 
-        source_id = item.source_id
+        source_id = item.origin_id
         normalise_and_store(
             session,
             [

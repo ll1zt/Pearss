@@ -32,7 +32,6 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
-from adapters.db_models import Source as _SourceRow
 from app.main import create_engine_for
 from core.enums import ErrorClass
 from tests.migrated_schema import migrated_database
@@ -123,13 +122,14 @@ def _finish_runs(
         create_source,
         ensure_collect_job,
         finish_job_run,
+        get_source,
     )
     from adapters.timestamps import fixed_width_utc
     from core.job_state import JobRunEvent
 
     moment = datetime.now(UTC)
     with factory() as session:
-        if session.get(_SourceRow, "src-alert") is None:
+        if get_source(session, "src-alert") is None:
             create_source(
                 session,
                 source_type="rss",
@@ -689,7 +689,7 @@ def test_a_source_whose_chain_all_failed_is_reported(
         session.execute(
             sa.text(
                 "update item_enrichment set error_class = :c, detail = :d "
-                "where item_id in (select id from item where source_id = :s)"
+                "where item_id in (select id from item where origin_id = :s)"
             ),
             {
                 "c": "parse",
@@ -735,7 +735,7 @@ def test_the_representative_failure_is_the_newest(
             session.execute(
                 sa.text(
                     "select id from item_enrichment where item_id in "
-                    "(select id from item where source_id = :s) order by id"
+                    "(select id from item where origin_id = :s) order by id"
                 ),
                 {"s": stuck},
             )
@@ -789,7 +789,7 @@ def test_the_alert_attributes_a_stuck_chain(
         session.execute(
             sa.text(
                 "update item_enrichment set error_class = 'parse', detail = :d "
-                "where item_id in (select id from item where source_id = :s)"
+                "where item_id in (select id from item where origin_id = :s)"
             ),
             {
                 "d": (
@@ -834,7 +834,7 @@ def test_three_stuck_sources_are_each_named(
                 sa.text(
                     "update item_enrichment set error_class = 'parse', "
                     "detail = 'provider said no' where item_id in "
-                    "(select id from item where source_id = :s)"
+                    "(select id from item where origin_id = :s)"
                 ),
                 {"s": stuck},
             )
@@ -876,7 +876,7 @@ def test_the_alert_never_carries_item_content(
             sa.text(
                 "update item_enrichment set error_class = 'parse', "
                 "detail = 'provider said no' where item_id in "
-                "(select id from item where source_id = :s)"
+                "(select id from item where origin_id = :s)"
             ),
             {"s": stuck},
         )

@@ -99,7 +99,7 @@ def _count(session_factory: sessionmaker[Session], table: str) -> int:
     `FROM` clause; the allowlist is what keeps that from being string
     construction, and every caller passes a literal defined here.
     """
-    if table not in {"source", "item", "audit_log", "work", "work_unit"}:
+    if table not in {"origin", "item", "audit_log", "work", "work_unit"}:
         raise ValueError(f"unexpected table {table!r}")
     if table == "audit_log":
         # Only the audit table has a writer behind a queue to wait for; a
@@ -198,7 +198,7 @@ async def test_a_wrong_token_cannot_create_a_source(
     check would already have validated the payload. Asserted at the database
     because the status code alone cannot show that nothing was stored.
     """
-    before = _count(session_factory, "source")
+    before = _count(session_factory, "origin")
 
     async with httpx.AsyncClient(base_url=served) as client:
         response = await client.post(
@@ -214,7 +214,7 @@ async def test_a_wrong_token_cannot_create_a_source(
         )
 
     assert response.status_code == 401, response.text
-    assert _count(session_factory, "source") == before, "a refused write stored a row"
+    assert _count(session_factory, "origin") == before, "a refused write stored a row"
     # No audit row either, and that is the documented order rather than an
     # oversight: EarlyAuth sits *outside* CorrelationAndAudit so an
     # unauthenticated request is refused before the audit write. `_should_audit`
@@ -244,7 +244,7 @@ async def test_a_missing_token_is_refused_like_a_wrong_one(
         )
 
     assert response.status_code == 401, response.text
-    assert _count(session_factory, "source") == 0
+    assert _count(session_factory, "origin") == 0
 
 
 async def test_a_wrong_token_cannot_read_either(
@@ -288,7 +288,7 @@ async def test_an_unauthenticated_request_is_refused_before_the_body_is_parsed(
 
     assert response.status_code == 401, response.text
     assert response.status_code != 422, "the body was parsed before authorising"
-    assert _count(session_factory, "source") == 0
+    assert _count(session_factory, "origin") == 0
 
 
 # --------------------------------------------------------------------------
@@ -455,9 +455,9 @@ async def test_the_same_key_with_a_different_body_does_not_create_a_second_sourc
 
     # Whatever the server chose to answer, exactly one source exists and it is
     # the first one. That is the property a client depends on.
-    assert _count(session_factory, "source") == 1
+    assert _count(session_factory, "origin") == 1
     with session_factory() as db:
-        stored = db.execute(sa.text("select id from source")).scalar_one()
+        stored = db.execute(sa.text("select id from origin")).scalar_one()
     assert stored == source_id
     # The mismatch policy is pinned (matching the integration contract in
     # test_sources_api): a key bound to a different request is a 409, not a
@@ -489,7 +489,7 @@ async def test_a_write_without_a_key_is_refused_rather_than_executed(
 
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["error"]["code"] == "idempotency_key_required"
-    assert _count(session_factory, "source") == 0
+    assert _count(session_factory, "origin") == 0
 
 
 # --------------------------------------------------------------------------

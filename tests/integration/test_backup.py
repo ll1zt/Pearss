@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, text
 
 from app.backup import backup, database_path, restore
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,22 +28,13 @@ def test_backup_and_restore_round_trip(tmp_path: Path) -> None:
 
     engine = create_engine(url)
     with engine.begin() as conn:
+        seed_source(conn, source_id="src-1", url="https://x/feed")
         conn.execute(
             text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, trust_level, tenant_id, created_at, updated_at)"
-                " values ('src-1', 'rss', 'https://x/feed', 'https://x/feed', '{}',"
-                " 'active', 'standard', 'default',"
-                " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
-            )
-        )
-        mirror_sources(conn)
-        conn.execute(
-            text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " publish_status, tenant_id, created_at, updated_at)"
-                " values ('item-1', 'src-1', 'src-1', 'g1', 'h1', 'T', 'https://x/1',"
+                " values ('item-1', 'src-1', 'g1', 'h1', 'T', 'https://x/1',"
                 " 'ready', 'default', '2026-01-01T00:00:00.000000Z',"
                 " '2026-01-01T00:00:00.000000Z')"
             )
@@ -61,7 +52,7 @@ def test_backup_and_restore_round_trip(tmp_path: Path) -> None:
 
     restored = create_engine(target_url)
     with restored.connect() as conn:
-        assert conn.execute(text("select count(*) from source")).scalar() == 1
+        assert conn.execute(text("select count(*) from origin")).scalar() == 1
         assert conn.execute(text("select title from item")).scalar() == "T"
     restored.dispose()
 

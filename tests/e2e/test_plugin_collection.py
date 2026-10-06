@@ -153,7 +153,7 @@ def _titles(session_factory: sessionmaker[Session], source_id: str) -> list[str]
         return [
             str(row[0])
             for row in session.execute(
-                sa.text("select title from item where source_id = :id order by rowid"),
+                sa.text("select title from item where origin_id = :id order by rowid"),
                 {"id": source_id},
             ).fetchall()
         ]

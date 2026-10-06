@@ -92,7 +92,6 @@ def _seed_item(
             ItemRow(
                 id=item_id,
                 origin_id=source_id,
-                source_id=source_id,
                 guid=f"guid-{item_id}",
                 content_hash=f"hash-{item_id}",
                 title=f"Item {item_id}",
@@ -547,7 +546,10 @@ async def test_ac207_a_subscribe_work_judges_each_url_alone(
 
     with session_factory() as session:
         rows = session.execute(
-            sa.text("select url, schedule_policy from source order by url")
+            sa.text(
+                "select o.url, s.schedule_policy from origin o"
+                " join subscription s on s.origin_id = o.id order by o.url"
+            )
         ).all()
     # Compared by interval rather than by string: the row keeps whatever form it
     # was stored in, and what this asserts is that the *existing* source was not
@@ -584,7 +586,7 @@ async def test_a_subscribe_work_with_unusable_options_fails_every_target(
     }
     assert all("unusable schedule_policy" in str(unit[2]) for unit in units.values())
     with session_factory() as session:
-        assert session.execute(sa.text("select count(*) from source")).scalar_one() == 0
+        assert session.execute(sa.text("select count(*) from origin")).scalar_one() == 0
 
 
 # --------------------------------------------------------------------------

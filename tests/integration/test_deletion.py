@@ -26,12 +26,12 @@ from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment as EnrichmentRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
-from adapters.db_models import Source as SourceRow
 from adapters.repository import (
     DeletionResult,
     delete_items,
     delete_source,
     delete_source_items,
+    get_source,
 )
 from adapters.timestamps import fixed_width_utc as timestamp
 from app.main import create_session_factory
@@ -147,7 +147,6 @@ def _item(
         ItemRow(
             id=item_id,
             origin_id=source_id,
-            source_id=source_id,
             guid=f"guid-{item_id}",
             content_hash=f"hash-{item_id}",
             title=f"title {item_id}",
@@ -396,7 +395,7 @@ class TestDeleteSourceItems:
             counts = _delete_source_items(session, "src-1", root=storage).counts
 
             assert counts["items"] == 2
-            assert session.get(SourceRow, "src-1") is not None
+            assert get_source(session, "src-1") is not None
             frontier, floor = session.execute(
                 sa.text(
                     "select seen_frontier, floor_cursor from origin where id = 'src-1'"
@@ -468,7 +467,7 @@ class TestDeleteSource:
                 "raw_fetches": 0,
                 "bodies": 1,
             }
-            assert session.get(SourceRow, "src-1") is None
+            assert get_source(session, "src-1") is None
             assert not path.exists()
 
     def test_fetch_records_go_but_their_payload_column_is_untouched(
@@ -496,7 +495,6 @@ class TestDeleteSource:
                 RawFetchRow(
                     id="rf-1",
                     origin_id="src-1",
-                    source_id="src-1",
                     payload_ref=payload,
                     content_hash="h",
                     status="succeeded",

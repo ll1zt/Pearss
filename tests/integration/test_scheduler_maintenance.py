@@ -70,7 +70,7 @@ from core.enums import (
     WorkStatus,
 )
 from core.models import ItemDraft
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -137,17 +137,13 @@ def _scheduler(
 
 def _seed_running_run(session: Session, *, run_id: str, claimed_at: str) -> None:
     """A source with one run left in `running` since `claimed_at`."""
-    session.execute(
-        sa.text(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, trust_level, tenant_id, created_at, updated_at)"
-            " values ('s1', 'rss', 'https://s1.example/feed',"
-            ' \'https://s1.example/feed\', \'{"type":"fixed","interval":"30m"}\','
-            " 'active', 'standard', 'default', :now, :now)"
-        ),
-        {"now": "2026-06-01T00:00:00.000000Z"},
+    seed_source(
+        session,
+        source_id="s1",
+        url="https://s1.example/feed",
+        schedule_policy='{"type":"fixed","interval":"30m"}',
+        at="2026-06-01T00:00:00.000000Z",
     )
-    mirror_sources(session)
     job_id = ensure_collect_job(
         session,
         source_id="s1",

@@ -173,7 +173,6 @@ def test_row_to_item_round_trips_the_author() -> None:
     row = ItemRow(
         id="i" * 64,
         origin_id="s" * 32,
-        source_id="s" * 32,
         guid="g" * 64,
         content_hash="h" * 32,
         title="T",

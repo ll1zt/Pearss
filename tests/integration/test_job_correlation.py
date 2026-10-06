@@ -19,7 +19,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.timestamps import fixed_width_utc as timestamp
@@ -27,7 +26,7 @@ from app import log_setup
 from app.main import create_engine_for
 from app.scheduler import run_tick
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 pytestmark = pytest.mark.integration
 
@@ -90,20 +89,13 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
 
 def _add_source(session: Session, *, source_id: str) -> None:
-    session.execute(
-        sa.text(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, trust_level, tenant_id, created_at, updated_at)"
-            ' values (:id, \'rss\', :url, :url, \'{"type":"fixed","interval":"60s"}\','
-            " 'active', 'standard', 'default', :now, :now)"
-        ),
-        {
-            "id": source_id,
-            "url": f"https://{source_id}.example.com/feed",
-            "now": timestamp(NOW),
-        },
+    seed_source(
+        session,
+        source_id=source_id,
+        url=f"https://{source_id}.example.com/feed",
+        schedule_policy='{"interval_seconds": 60, "type": "fixed"}',
+        at=timestamp(NOW),
     )
-    mirror_sources(session)
     session.commit()
 
 

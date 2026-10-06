@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.http import FetchError
@@ -35,7 +35,7 @@ from core.enums import ErrorClass
 from core.normalize import normalize
 from plugins.collectors.rss import collector as rss
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -49,29 +49,16 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
     engine = create_engine(f"sqlite+pysqlite:///{db_path}")
     with engine.begin() as connection:
-        connection.execute(
-            text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values ('src-1', 'rss', 'https://blog.example.com/feed',"
-                " 'https://blog.example.com/feed', '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            )
-        )
-        mirror_sources(connection)
+        seed_source(connection, source_id="src-1", url="https://blog.example.com/feed")
         # The ingestion target for these tests. Writing through the real
         # endpoint needs an agent source (ADR 0022); src-1 stays an rss source
         # so tests can still cover the types being distinct.
-        connection.execute(
-            text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values ('agent-1', 'agent', 'agent://intake', 'agent://intake',"
-                " '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            )
+        seed_source(
+            connection,
+            source_id="agent-1",
+            source_type="agent",
+            url="agent://intake",
         )
-        mirror_sources(connection)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:

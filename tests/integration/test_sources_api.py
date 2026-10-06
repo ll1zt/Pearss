@@ -687,10 +687,10 @@ async def test_delete_removes_the_source_and_its_items(
         for index in range(2):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    "insert into item (id, origin_id, guid, content_hash,"
                     " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :s, :g, :h, :t, :u, 'published', 'default',"
+                    " values (:id, :s, :g, :h, :t, :u, 'published', 'default',"
                     " '2026-01-01T00:00:00.000000Z',"
                     " '2026-01-01T00:00:00.000000Z')"
                 ),
@@ -724,10 +724,10 @@ async def test_delete_removes_the_source_and_its_items(
 
     with app.state.session_factory() as session:
         sources = session.execute(
-            sa.text("select count(*) from source where id = :i"), {"i": source_id}
+            sa.text("select count(*) from origin where id = :i"), {"i": source_id}
         ).scalar()
         items = session.execute(
-            sa.text("select count(*) from item where source_id = :i"), {"i": source_id}
+            sa.text("select count(*) from item where origin_id = :i"), {"i": source_id}
         ).scalar()
         states = session.execute(
             sa.text(
@@ -834,10 +834,10 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
         )
         session.execute(
             sa.text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " publish_status, tenant_id, created_at, updated_at)"
-                " values ('clear-item', :s, :s, 'clear-guid', 'clear-hash', 'Bad',"
+                " values ('clear-item', :s, 'clear-guid', 'clear-hash', 'Bad',"
                 " 'https://example.com/bad', 'published', 'default',"
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             ),
@@ -872,7 +872,7 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
     with app.state.session_factory() as session:
         assert (
             session.execute(
-                sa.text("select count(*) from item where source_id = :i"),
+                sa.text("select count(*) from item where origin_id = :i"),
                 {"i": source_id},
             ).scalar()
             == 1
@@ -888,7 +888,7 @@ async def test_clearing_a_sources_items_keeps_the_subscription(
             {"i": source_id},
         ).scalar()
         items = session.execute(
-            sa.text("select count(*) from item where source_id = :i"),
+            sa.text("select count(*) from item where origin_id = :i"),
             {"i": source_id},
         ).scalar()
     assert items == 0
@@ -1294,10 +1294,10 @@ async def test_backfill_chain_endpoint_queues_and_audits(
         for index in range(2):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    "insert into item (id, origin_id, guid, content_hash,"
                     " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
                     " '2026-01-01T00:00:00.000000Z',"
                     " '2026-01-01T00:00:00.000000Z')"
                 ),
@@ -1392,7 +1392,6 @@ async def test_enrichment_visibility_and_agent_retry(
             ItemRow(
                 id="vis-item",
                 origin_id=source_id,
-                source_id=source_id,
                 guid="g-vis",
                 content_hash="hash-vis",
                 title="Visible",
@@ -1678,10 +1677,10 @@ async def test_user_backfill_queues_a_watchable_batch_not_the_whole_backlog(
         for index in range(25):
             session.execute(
                 sa.text(
-                    "insert into item (id, source_id, origin_id, guid, content_hash,"
+                    "insert into item (id, origin_id, guid, content_hash,"
                     " title,"
                     " url, publish_status, tenant_id, created_at, updated_at)"
-                    " values (:id, :s, :s, :g, :h, :t, :u, 'ready', 'default',"
+                    " values (:id, :s, :g, :h, :t, :u, 'ready', 'default',"
                     " :ts, :ts)"
                 ),
                 {
@@ -1947,7 +1946,6 @@ async def test_ac198_the_queue_is_a_fold_over_the_rows(
                 ItemRow(
                     id=item_id,
                     origin_id=source_id,
-                    source_id=source_id,
                     guid=f"queue-guid-{index}",
                     content_hash=f"queue-hash-{index}",
                     title=f"Queued {index}",
@@ -2077,7 +2075,6 @@ async def _seed_failed_rows(
                 ItemRow(
                     id=item_id,
                     origin_id=source_id,
-                    source_id=source_id,
                     guid=f"{slug}-guid-{index}",
                     content_hash=f"{slug}-hash-{index}",
                     title=f"Row {index}",
