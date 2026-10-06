@@ -71,7 +71,7 @@ from app.work_submit import handle_payload, submit_command
 from core.enums import ErrorClass, SourceStatus, SourceType, TrustLevel
 from core.folders import DEFAULT_FOLDER, normalize_folder
 from core.models import schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import source_canonical_key
+from core.normalize import origin_canonical_key
 from core.tenancy import SINGLE_TENANT
 from core.work import command_fingerprint, terminal_status, work_counts
 
@@ -174,7 +174,7 @@ class SourceCreate(BaseModel):
         """
         kind = getattr(self.type, "value", self.type)
         try:
-            source_canonical_key(source_type=str(kind), url=self.url)
+            origin_canonical_key(source_type=str(kind), url=self.url)
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
         return self
@@ -617,7 +617,7 @@ def add_source(
         policy_json = schedule_policy_to_json(
             schedule_policy_from_json(body.schedule_policy)
         )
-        canonical = source_canonical_key(source_type=body.type.value, url=body.url)
+        canonical = origin_canonical_key(source_type=body.type.value, url=body.url)
     except ValueError as exc:
         raise api_error(
             status_code=422,
@@ -784,7 +784,7 @@ def add_sources_batch(
                     if requested_type == "auto"
                     else requested_type
                 )
-                canonical = source_canonical_key(source_type=source_type, url=url)
+                canonical = origin_canonical_key(source_type=source_type, url=url)
             except ValueError as exc:
                 # This item alone: the rest of the list still gets created.
                 results.append(

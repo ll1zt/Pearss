@@ -191,7 +191,7 @@ def _insert(session: Session, item: Item) -> None:
     session.add(
         ItemRow(
             id=item.id,
-            source_id=item.source_id,
+            source_id=item.origin_id,
             guid=item.guid,
             content_hash=item.content_hash,
             title=item.title,

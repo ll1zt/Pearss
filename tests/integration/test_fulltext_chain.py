@@ -63,7 +63,7 @@ def _seed_fulltext_world(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="post-1",
                     title="A summary post",
                     canonical_url="https://fulltext.example/post-1",

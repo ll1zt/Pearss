@@ -1825,7 +1825,7 @@ async def test_diagnose_answers_why_the_chain_is_stuck(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="one",
                     title="An item",
                     canonical_url="https://stuck.example/1",
@@ -2464,7 +2464,7 @@ async def test_diagnose_answers_which_model_is_cooling_down(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="cooling",
                     title="Cooling article",
                     canonical_url="https://cooling.example/article",
@@ -2551,7 +2551,7 @@ async def test_diagnose_shows_a_half_broken_model_that_is_not_cooling(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="blip",
                     title="Blip article",
                     canonical_url="https://blip.example/article",

@@ -55,7 +55,7 @@ def row_to_item(row: ItemRow) -> Item:
     """
     return Item(
         id=row.id,
-        source_id=row.source_id,
+        origin_id=row.source_id,
         guid=row.guid,
         content_hash=row.content_hash,
         title=row.title,

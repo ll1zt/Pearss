@@ -167,7 +167,7 @@ async def test_a_walk_covers_a_timestamp_tie_wider_than_one_page(
             session,
             [
                 ItemDraft(
-                    source_id="src-1",
+                    origin_id="src-1",
                     external_id=f"urn:uuid:tied-{n}",
                     title=f"Tied {n}",
                     canonical_url=f"https://blog.example.com/2026/02/tied-{n}",
@@ -178,7 +178,7 @@ async def test_a_walk_covers_a_timestamp_tie_wider_than_one_page(
             ]
             + [
                 ItemDraft(
-                    source_id="src-1",
+                    origin_id="src-1",
                     external_id=f"urn:uuid:undated-{n}",
                     title=f"Undated {n}",
                     canonical_url=f"https://blog.example.com/2026/02/undated-{n}",
@@ -232,7 +232,7 @@ async def test_a_read_item_inside_a_tied_group_reaches_the_read_walk(
             session,
             [
                 ItemDraft(
-                    source_id="src-1",
+                    origin_id="src-1",
                     external_id=f"urn:uuid:read-tie-{n}",
                     title=f"Read Tie {n}",
                     canonical_url=f"https://blog.example.com/2026/03/read-tie-{n}",
@@ -364,7 +364,7 @@ async def test_user_items_inserted_between_pages_are_not_duplicated(
             session,
             [
                 ItemDraft(
-                    source_id="src-1",
+                    origin_id="src-1",
                     external_id="urn:uuid:1a2b3c4d-0004-4000-8000-000000000004",
                     title="Fourth Post Arrived Mid Walk",
                     canonical_url="https://blog.example.com/2026/01/fourth-post",

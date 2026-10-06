@@ -248,11 +248,11 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
 
     noise_dropped = 0
     if kind == "activities":
-        drafts, noise_dropped = _activities(data, raw.source_id)
+        drafts, noise_dropped = _activities(data, raw.origin_id)
     elif kind == "answers":
-        drafts = _entries(data, raw.source_id, _answer_draft)
+        drafts = _entries(data, raw.origin_id, _answer_draft)
     else:
-        drafts = _entries(data, raw.source_id, _article_draft)
+        drafts = _entries(data, raw.origin_id, _article_draft)
 
     if not drafts:
         if kind == "activities" and noise_dropped == len(data):
@@ -301,7 +301,7 @@ def _answer_draft(item: Any, source_id: str) -> ItemDraft | None:
 
     author = _name_of(item.get("author"))
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"answer:{answer_id}",
         title=_text(question.get("title")) or "回答",
         canonical_url=f"https://www.zhihu.com/question/{question_id}/answer/{answer_id}",
@@ -323,7 +323,7 @@ def _article_draft(item: Any, source_id: str) -> ItemDraft | None:
 
     author = _name_of(item.get("author"))
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"article:{article_id}",
         title=_text(item.get("title")) or "文章",
         canonical_url=f"https://zhuanlan.zhihu.com/p/{article_id}",
@@ -388,7 +388,7 @@ def _activities(data: list[Any], source_id: str) -> tuple[list[ItemDraft], int]:
         actor_name = _name_of(item.get("actor")) or ""
         drafts.append(
             ItemDraft(
-                source_id=source_id,
+                origin_id=source_id,
                 external_id=external,
                 title=f"[{_ACTION_TAGS[classifier]}] {mapped.title}",
                 canonical_url=mapped.link,

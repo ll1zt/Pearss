@@ -188,7 +188,7 @@ def fetch(
         url=f"{zsxq_client.BASE}{topics_path}",
         status_code=200,
         body=json.dumps(merged, ensure_ascii=False).encode(),
-        source_id=source_id,
+        origin_id=source_id,
     )
 
 
@@ -265,7 +265,7 @@ def _topic_draft(
         title = explicit
 
     return ItemDraft(
-        source_id=raw.source_id,
+        origin_id=raw.origin_id,
         external_id=f"topic:{topic_id}",
         title=title,
         canonical_url=f"https://wx.zsxq.com/topic/{topic_id}",

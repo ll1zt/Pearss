@@ -76,7 +76,7 @@ def _pending_item(session: Session) -> str:
         session,
         [
             ItemDraft(
-                source_id=source.id,
+                origin_id=source.id,
                 external_id="gated",
                 title="gated",
                 canonical_url="https://example.test/gate/1",
@@ -218,7 +218,7 @@ def test_a_revised_item_needs_a_vector_for_its_new_text(
             session,
             [
                 ItemDraft(
-                    source_id=source_id,
+                    origin_id=source_id,
                     external_id="gated",
                     title="gated",
                     canonical_url="https://example.test/gate/1",

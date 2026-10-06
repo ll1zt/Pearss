@@ -51,7 +51,7 @@ async def test_marking_one_folder_read_preserves_the_other_folders_state(
                 at="2026-01-01T00:00:00.000000Z",
             )
             drafts = rss.parse(
-                RawPayload(url=url, status_code=200, body=body, source_id=source.id)
+                RawPayload(url=url, status_code=200, body=body, origin_id=source.id)
             )
             normalise_and_store(session, drafts, tenant_id="default")
         session.commit()

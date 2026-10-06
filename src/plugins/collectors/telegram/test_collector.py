@@ -43,7 +43,7 @@ def payload(name: str, *, url: str = PREVIEW_URL) -> RawPayload:
         url=url,
         status_code=200,
         body=(FIXTURES / name).read_bytes(),
-        source_id="src-telegram",
+        origin_id="src-telegram",
         raw_fetch_id="raw-1",
     )
 
@@ -205,7 +205,7 @@ def test_redesigned_page_raises_structure_changed() -> None:
 @pytest.mark.unit
 def test_empty_body_raises_parse() -> None:
     with pytest.raises(CollectorError) as excinfo:
-        parse(RawPayload(url=PREVIEW_URL, status_code=200, body=b"", source_id="s"))
+        parse(RawPayload(url=PREVIEW_URL, status_code=200, body=b"", origin_id="s"))
     assert excinfo.value.error_class is ErrorClass.PARSE
 
 
@@ -249,5 +249,5 @@ def test_published_at_is_timezone_aware_utc() -> None:
 @pytest.mark.unit
 def test_drafts_stamp_source_and_raw_fetch() -> None:
     drafts = parse(payload("legacy_ids.html"))
-    assert drafts[0].source_id == "src-telegram"
+    assert drafts[0].origin_id == "src-telegram"
     assert drafts[0].raw_fetch_id == "raw-1"

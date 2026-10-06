@@ -91,7 +91,7 @@ def test_the_backfill_surface_round_trips_over_rpc(child: PluginChild) -> None:
 
     def draft(external_id: str) -> ItemDraft:
         return ItemDraft(
-            source_id="s1",
+            origin_id="s1",
             external_id=external_id,
             title="n",
             canonical_url=f"https://t.me/durov/{external_id.removeprefix('telegram:')}",
@@ -193,7 +193,7 @@ def test_the_child_fetch_branch_forwards_conditional_params_verbatim() -> None:
         ) -> RawPayload:
             seen.append(conditional)
             return RawPayload(
-                url=url, status_code=200, body=b"<rss/>", source_id=source_id
+                url=url, status_code=200, body=b"<rss/>", origin_id=source_id
             )
 
     entry._collector_for = lambda collector_id: _StubCollector()
@@ -260,7 +260,7 @@ def test_telegram_fetch_rewrites_the_url_to_the_preview(child: PluginChild) -> N
             url="https://t.me/s/journey_of_someone",
             status_code=200,
             body=payload.body,
-            source_id="s-tg",
+            origin_id="s-tg",
         )
     )
     assert len(drafts) == 1

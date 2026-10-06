@@ -68,7 +68,7 @@ async def test_user_pending_item_is_processed_after_storage_unlocks(
                 session,
                 [
                     ItemDraft(
-                        source_id=source.id,
+                        origin_id=source.id,
                         external_id="recovery-item",
                         title="Recovery article",
                         canonical_url="https://recovery.example/article",

@@ -142,7 +142,7 @@ def _field_map(item: Item) -> dict[str, Any]:
     return {
         "id": item.id,
         "guid": item.guid,
-        "source_id": item.source_id,
+        "source_id": item.origin_id,
         "title": item.title,
         "url": item.url,
         "author": item.author,

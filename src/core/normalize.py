@@ -161,8 +161,8 @@ def normalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", cleaned).strip()
 
 
-def source_canonical_key(*, source_type: str, url: str | None) -> str:
-    """The dedupe key for a source of the given type.
+def origin_canonical_key(*, source_type: str, url: str | None) -> str:
+    """The dedupe key for an origin of the given type.
 
     rss and web sources key on their canonicalised URL. Agent sources have no
     URL to key on — they are pushed to, not polled — so they get a synthetic
@@ -193,8 +193,8 @@ def source_canonical_key(*, source_type: str, url: str | None) -> str:
     return canonicalize_url(url)
 
 
-def source_display_label(
-    *, title: str | None, url: str | None, canonical_url: str | None, source_id: str
+def origin_display_label(
+    *, title: str | None, url: str | None, canonical_url: str | None, origin_id: str
 ) -> str:
     """A name to show for a source, preferring what the origin calls itself.
 
@@ -217,7 +217,7 @@ def source_display_label(
         derived = _label_from_url(candidate)
         if derived:
             return derived
-    return source_id
+    return origin_id
 
 
 def _label_from_url(url: str | None) -> str | None:
@@ -270,7 +270,7 @@ def content_hash(*, title: str, content: str) -> str:
     return _digest(CONTENT_HASH_SCHEME, normalised_title, normalised_body)
 
 
-def derive_item_id(*, tenant_id: str, source_id: str, external_id: str) -> str:
+def derive_item_id(*, tenant_id: str, origin_id: str, external_id: str) -> str:
     """Stable internal identity for a draft.
 
     Deterministic rather than random, so re-fetching the same entry yields the
@@ -278,10 +278,10 @@ def derive_item_id(*, tenant_id: str, source_id: str, external_id: str) -> str:
     again after a failure without first querying, and a database rebuilt from
     scratch reproduces the same ids.
     """
-    return _digest(IDENTITY_SCHEME, "item", tenant_id, source_id, external_id)
+    return _digest(IDENTITY_SCHEME, "item", tenant_id, origin_id, external_id)
 
 
-def derive_guid(*, tenant_id: str, source_id: str, external_id: str) -> str:
+def derive_guid(*, tenant_id: str, origin_id: str, external_id: str) -> str:
     """Stable public GUID for a draft.
 
     The GUID is frozen once an item is published: NNW caches what it fetched,
@@ -292,7 +292,7 @@ def derive_guid(*, tenant_id: str, source_id: str, external_id: str) -> str:
     Scoped to the source, so the same article carried by two feeds keeps two
     distinct GUIDs; reconciling those is `content_hash`'s job, not the GUID's.
     """
-    return _digest(IDENTITY_SCHEME, "guid", tenant_id, source_id, external_id)
+    return _digest(IDENTITY_SCHEME, "guid", tenant_id, origin_id, external_id)
 
 
 def _digest(*parts: str) -> str:
@@ -361,13 +361,13 @@ def normalize(
     item = Item(
         id=derive_item_id(
             tenant_id=tenant_id,
-            source_id=draft.source_id,
+            origin_id=draft.origin_id,
             external_id=draft.external_id,
         ),
-        source_id=draft.source_id,
+        origin_id=draft.origin_id,
         guid=derive_guid(
             tenant_id=tenant_id,
-            source_id=draft.source_id,
+            origin_id=draft.origin_id,
             external_id=draft.external_id,
         ),
         content_hash=content_hash(title=title, content=draft.content),
@@ -562,7 +562,7 @@ def decide_dedupe(
             action=DedupeAction.INSERT, reason="no content_hash match"
         )
 
-    same_source = [match for match in matches if match.source_id == item.source_id]
+    same_source = [match for match in matches if match.origin_id == item.origin_id]
     if same_source:
         return DedupeDecision(
             action=DedupeAction.SKIP_SAME_SOURCE,

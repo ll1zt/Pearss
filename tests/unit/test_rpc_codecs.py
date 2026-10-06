@@ -25,7 +25,7 @@ def test_a_naive_published_at_stays_naive_across_the_rpc() -> None:
     """
     naive = datetime(2026, 6, 1, 11, 0, 0)
     draft = ItemDraft(
-        source_id="s1",
+        origin_id="s1",
         external_id="x:1",
         title="t",
         canonical_url="https://example.com/1",
@@ -44,7 +44,7 @@ def test_a_naive_published_at_stays_naive_across_the_rpc() -> None:
 def test_an_aware_published_at_keeps_its_instant_across_the_rpc() -> None:
     aware = datetime(2026, 6, 1, 11, 0, 0, tzinfo=UTC)
     draft = ItemDraft(
-        source_id="s1",
+        origin_id="s1",
         external_id="x:2",
         title="t",
         canonical_url="https://example.com/2",

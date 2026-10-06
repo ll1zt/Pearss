@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.normalize import canonicalize_url, source_canonical_key
+from core.normalize import canonicalize_url, origin_canonical_key
 
 
 @pytest.mark.unit
@@ -124,13 +124,13 @@ def test_unusable_urls_are_rejected(url: str) -> None:
     ],
 )
 def test_rss_source_keys_on_the_canonical_url(url: str, expected: str) -> None:
-    assert source_canonical_key(source_type="rss", url=url) == expected
+    assert origin_canonical_key(source_type="rss", url=url) == expected
 
 
 @pytest.mark.unit
 def test_web_source_keys_on_the_canonical_url() -> None:
     assert (
-        source_canonical_key(source_type="web", url="https://a.example/page?fbclid=1")
+        origin_canonical_key(source_type="web", url="https://a.example/page?fbclid=1")
         == "https://a.example/page"
     )
 
@@ -147,7 +147,7 @@ def test_agent_source_gets_a_synthetic_key(supplied: str, expected: str) -> None
     # An agent source is pushed to rather than polled, so it has no URL to key
     # on — but the dedupe key still cannot be NULL, or the uniqueness
     # constraint stops covering the row entirely.
-    assert source_canonical_key(source_type="agent", url=supplied) == expected
+    assert origin_canonical_key(source_type="agent", url=supplied) == expected
 
 
 @pytest.mark.unit
@@ -165,10 +165,10 @@ def test_a_key_is_always_produced_or_the_call_is_refused(
     source_type: str, url: str | None
 ) -> None:
     with pytest.raises(ValueError):
-        source_canonical_key(source_type=source_type, url=url)
+        origin_canonical_key(source_type=source_type, url=url)
 
 
 @pytest.mark.unit
 def test_unknown_source_type_is_refused() -> None:
     with pytest.raises(ValueError):
-        source_canonical_key(source_type="carrier_pigeon", url="https://a.example/f")
+        origin_canonical_key(source_type="carrier_pigeon", url="https://a.example/f")

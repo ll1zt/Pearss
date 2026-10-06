@@ -28,7 +28,7 @@ def item(
 ) -> Item:
     return Item(
         id=item_id,
-        source_id=source_id,
+        origin_id=source_id,
         guid=guid if guid is not None else f"guid-{item_id}",
         content_hash=content_hash,
         title="t",

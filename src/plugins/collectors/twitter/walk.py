@@ -220,7 +220,7 @@ def collect_pages(
                 url=source_url,
                 status_code=200,
                 body=body,
-                source_id=source_id,
+                origin_id=source_id,
             )
         ):
             # The walk decided what is new; a page below the frontier is read

@@ -108,7 +108,7 @@ def _store(session: Session, *, source_id: str, external_id: str, content: str) 
         session,
         [
             ItemDraft(
-                source_id=source_id,
+                origin_id=source_id,
                 external_id=external_id,
                 title=content[:40],
                 canonical_url=f"https://example.test/{external_id}",

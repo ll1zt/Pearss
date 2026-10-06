@@ -166,10 +166,10 @@ def subscribe(
     from core.enums import SourceType
     from core.folders import DEFAULT_FOLDER
     from core.models import schedule_policy_from_json, schedule_policy_to_json
-    from core.normalize import source_canonical_key
+    from core.normalize import origin_canonical_key
 
     try:
-        canonical = source_canonical_key(source_type=SourceType.RSS.value, url=url)
+        canonical = origin_canonical_key(source_type=SourceType.RSS.value, url=url)
     except ValueError as exc:
         raise InvalidSourceUrl(str(exc)) from exc
 
@@ -445,10 +445,10 @@ def load_contents(
     """
     from adapters.repository import (
         mark_published,
+        origin_display_labels,
         read_states_for,
         resolve_reader_ids,
         row_to_item,
-        source_display_labels,
     )
     from app.pipeline import bodies_for
 
@@ -475,7 +475,7 @@ def load_contents(
         # One query for the whole page rather than one per item: a contents
         # request can carry a hundred ids, and a client that cannot show a
         # source name is the bug this is here to fix.
-        titles = source_display_labels(session, [row.source_id for row in rows])
+        titles = origin_display_labels(session, [row.source_id for row in rows])
         mark_published(
             session, [row_to_item(row) for row in rows], at=datetime.now(UTC)
         )

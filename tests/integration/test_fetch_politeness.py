@@ -152,7 +152,7 @@ def _seed_backlog(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id=f"post-{index}",
                     title=f"Post {index}",
                     canonical_url=origin.url(f"/post/{index}"),

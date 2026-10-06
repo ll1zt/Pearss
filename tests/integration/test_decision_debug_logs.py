@@ -50,7 +50,7 @@ def session(tmp_path: Path) -> Iterator[Session]:
 
 def _draft(*, external_id: str, body: str, title: str = "T") -> ItemDraft:
     return ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id=external_id,
         title=title,
         canonical_url=f"https://example.com/{external_id}",

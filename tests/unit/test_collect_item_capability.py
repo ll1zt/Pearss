@@ -30,7 +30,7 @@ pytestmark = pytest.mark.unit
 
 def _draft(url: str) -> ItemDraft:
     return ItemDraft(
-        source_id="s1",
+        origin_id="s1",
         external_id="item:1",
         title="Fetched by address",
         canonical_url=url,

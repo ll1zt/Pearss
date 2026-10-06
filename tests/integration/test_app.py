@@ -274,7 +274,7 @@ async def test_pending_items_never_appear(
             url="https://blog.example.com/feed",
             status_code=200,
             body=(FIXTURES / "valid.xml").read_bytes(),
-            source_id="src-1",
+            origin_id="src-1",
         )
     )
     items = [normalize(draft, tenant_id=TENANT).item for draft in drafts]

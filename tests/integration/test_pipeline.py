@@ -84,7 +84,7 @@ def collect(source_id: str, fixture: str) -> list[ItemDraft]:
         url="https://blog.example.com/feed",
         status_code=200,
         body=(FIXTURES / fixture).read_bytes(),
-        source_id=source_id,
+        origin_id=source_id,
         raw_fetch_id="raw-1",
     )
     return rss.parse(payload)
@@ -142,7 +142,7 @@ def test_same_article_from_two_sources_is_related(session: Session) -> None:
     _seed_source(session, "src-2")
 
     one = ItemDraft(
-        source_id="src-1",
+        origin_id="src-1",
         external_id="e1",
         title="Shared Article",
         canonical_url="https://a.example/1",
@@ -150,7 +150,7 @@ def test_same_article_from_two_sources_is_related(session: Session) -> None:
         content="<p>Same body.</p>",
     )
     two = ItemDraft(
-        source_id="src-2",
+        origin_id="src-2",
         external_id="e2",
         title="Shared Article",
         canonical_url="https://b.example/2",
@@ -493,7 +493,7 @@ def test_visible_items_filters_pending_in_memory() -> None:
     # used when a caller already holds a list.
     pending = Item(
         id="p",
-        source_id="s",
+        origin_id="s",
         guid="gp",
         content_hash="h1",
         title="Pending",
@@ -503,7 +503,7 @@ def test_visible_items_filters_pending_in_memory() -> None:
     )
     ready = Item(
         id="r",
-        source_id="s",
+        origin_id="s",
         guid="gr",
         content_hash="h2",
         title="Ready",
@@ -531,7 +531,7 @@ def test_reworded_article_does_not_collide_on_the_guid(
 
     def draft_with(content: str) -> ItemDraft:
         return ItemDraft(
-            source_id=SOURCE,
+            origin_id=SOURCE,
             external_id="stable-entry-1",
             title="An article",
             canonical_url="https://blog.example.com/stable",
@@ -565,7 +565,7 @@ def test_reworded_published_article_keeps_the_frozen_content(
 
     monkeypatch.setenv("PEARSS_STORAGE_DIR", str(tmp_path / "storage"))
     draft = ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id="published-entry",
         title="Headline",
         canonical_url="https://blog.example.com/p",
@@ -579,7 +579,7 @@ def test_reworded_published_article_keeps_the_frozen_content(
     session.commit()
 
     changed = ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id="published-entry",
         title="Headline",
         canonical_url="https://blog.example.com/p",
@@ -1092,7 +1092,7 @@ def _translation_chain(lang: str = "zh") -> tuple[Any, ...]:
 def _draft(external_id: str, *, content: str, title: str | None = None) -> ItemDraft:
     """A draft whose title doubles as the test's lookup key."""
     return ItemDraft(
-        source_id=SOURCE,
+        origin_id=SOURCE,
         external_id=external_id,
         title=title if title is not None else f"item-{external_id}",
         canonical_url=f"https://blog.example.com/{external_id}",

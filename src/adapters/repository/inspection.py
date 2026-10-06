@@ -102,7 +102,7 @@ def exhausted_enrichment_sources(
         excerpt = str(latest.detail or "")[:DETAIL_EXCERPT_CHARS]
         exhausted.append(
             ExhaustedSource(
-                source_id=source_id,
+                origin_id=source_id,
                 title=str(latest.title or ""),
                 failed_count=len(failures),
                 error_class=latest.error_class,

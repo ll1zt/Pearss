@@ -70,7 +70,7 @@ def _parse(targets: list[Any], *, action: str = _CREATE_ACTION) -> list[Any]:
             url=ACTIVITIES_URL,
             status_code=200,
             body=_payload(targets, action=action),
-            source_id=SOURCE_ID,
+            origin_id=SOURCE_ID,
         )
     )
 
@@ -102,7 +102,7 @@ def _parse_mixed(entries: list[tuple[str, Any]]) -> list[Any]:
             url=ACTIVITIES_URL,
             status_code=200,
             body=json.dumps(body).encode("utf-8"),
-            source_id=SOURCE_ID,
+            origin_id=SOURCE_ID,
         )
     )
 
@@ -123,7 +123,7 @@ def _dropped(targets: list[Any], *, action: str = _CREATE_ACTION) -> None:
                 url=ACTIVITIES_URL,
                 status_code=200,
                 body=_payload(targets, action=action),
-                source_id=SOURCE_ID,
+                origin_id=SOURCE_ID,
             )
         )
     assert excinfo.value.error_class is ErrorClass.STRUCTURE_CHANGED
@@ -615,7 +615,7 @@ def test_user_noise_mixed_with_unusable_shapes_still_reports_structure_changed()
                 url=ACTIVITIES_URL,
                 status_code=200,
                 body=json.dumps(body).encode("utf-8"),
-                source_id=SOURCE_ID,
+                origin_id=SOURCE_ID,
             )
         )
     assert excinfo.value.error_class is ErrorClass.STRUCTURE_CHANGED

@@ -112,7 +112,7 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
             url="https://blog.example.com/feed",
             status_code=200,
             body=(RSS_FIXTURES / "valid.xml").read_bytes(),
-            source_id="src-1",
+            origin_id="src-1",
         )
     )
     with Session(engine) as session:

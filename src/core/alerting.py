@@ -70,7 +70,7 @@ class ExhaustedSource:
     leave the host under ADR 0042 (it is not item content); item bodies are not.
     """
 
-    source_id: str
+    origin_id: str
     title: str = ""
     failed_count: int = 0
     error_class: str | None = None
@@ -165,7 +165,7 @@ def decide_health(
     extra: list[str] = []
     # Sorted by id for a stable message; the per-source detail is rendered by
     # `alert_body` from these values, so the header line names only the count.
-    exhausted = tuple(sorted(exhausted_sources, key=lambda source: source.source_id))
+    exhausted = tuple(sorted(exhausted_sources, key=lambda source: source.origin_id))
     if exhausted:
         extra.append(f"{len(exhausted)} source(s) with a chain that cannot finish")
     if dead_loops:
@@ -320,8 +320,8 @@ def _attribution_lines(sources: Sequence[ExhaustedSource]) -> list[str]:
     """
     lines: list[str] = []
     for source in sources[:MAX_ATTRIBUTED_SOURCES]:
-        title = (source.title.strip() or source.source_id)[:ATTRIBUTED_TITLE_CHARS]
-        short_id = source.source_id[:8]
+        title = (source.title.strip() or source.origin_id)[:ATTRIBUTED_TITLE_CHARS]
+        short_id = source.origin_id[:8]
         tail = (
             f"{source.error_class} ({source.failed_count})"
             if source.error_class

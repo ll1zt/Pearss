@@ -576,7 +576,7 @@ def test_the_ledger_window_prunes_finished_work_and_leaves_live_rows_alone(
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="retention-1",
                     title="Kept across the prune",
                     canonical_url="https://retention.example/post-1",

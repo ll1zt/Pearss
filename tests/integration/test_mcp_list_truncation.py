@@ -94,7 +94,7 @@ def seeded(env: dict[str, str]) -> str:
                 seed,
                 [
                     ItemDraft(
-                        source_id=source.id,
+                        origin_id=source.id,
                         external_id=f"many-{index:03d}",
                         title=f"Item {index:03d}",
                         canonical_url=f"https://many.example/post-{index:03d}",

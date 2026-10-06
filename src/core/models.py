@@ -28,7 +28,7 @@ class ItemDraft:
     covering every source.
     """
 
-    source_id: str
+    origin_id: str
     # Stable identifier assigned by the origin. Absent only when the origin
     # provides none, in which case `derivation_note` must explain how it was
     # synthesised so repeated fetches agree.
@@ -64,7 +64,7 @@ class ItemDraft:
         zone-less values are recorded as evidence, never guessed.)
         """
         return {
-            "source_id": self.source_id,
+            "origin_id": self.origin_id,
             "external_id": self.external_id,
             "title": self.title,
             "canonical_url": self.canonical_url,
@@ -82,7 +82,7 @@ class ItemDraft:
         """Rebuild a draft from `as_rpc_dict` output."""
         published = data.get("published_at")
         return cls(
-            source_id=str(data["source_id"]),
+            origin_id=str(data["origin_id"]),
             external_id=str(data["external_id"]),
             title=str(data["title"]),
             canonical_url=str(data["canonical_url"]),
@@ -144,7 +144,7 @@ class Item:
     """
 
     id: str
-    source_id: str
+    origin_id: str
     guid: str
     content_hash: str
     title: str

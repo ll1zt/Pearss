@@ -72,7 +72,7 @@ from core.enrichment import EnrichmentSpec, EnrichmentStatus
 from core.enums import ErrorClass, SourceType, UnitOutcome
 from core.folders import DEFAULT_FOLDER
 from core.models import schedule_policy_from_json, schedule_policy_to_json
-from core.normalize import DedupeAction, source_canonical_key
+from core.normalize import DedupeAction, origin_canonical_key
 from core.tenancy import SINGLE_TENANT
 from core.work import WorkRecord, terminal_status
 
@@ -487,7 +487,7 @@ class SubscribeExecutor(KindExecutor):
                 if runtime.requested_type == "auto"
                 else runtime.requested_type
             )
-            canonical = source_canonical_key(source_type=source_type, url=target)
+            canonical = origin_canonical_key(source_type=source_type, url=target)
         except ValueError as exc:
             # This URL alone: the rest of the list is still subscribed.
             return UnitResult(

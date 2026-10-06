@@ -280,7 +280,7 @@ class World:
             self.session,
             [
                 ItemDraft(
-                    source_id=self.source_id,
+                    origin_id=self.source_id,
                     external_id="post-1",
                     title="A summary post",
                     canonical_url="https://chain.example/post-1",

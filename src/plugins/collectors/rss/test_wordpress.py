@@ -27,7 +27,7 @@ def _summary_payload() -> RawPayload:
         url=FEED_URL,
         status_code=200,
         body=(FIXTURES / "wp_summary_feed.xml").read_bytes(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
 
 
@@ -36,7 +36,7 @@ def _rest_payload() -> RawPayload:
         url=wordpress.rest_url_for(FEED_URL),
         status_code=200,
         body=(FIXTURES / "wp_rest_posts.json").read_bytes(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
 
 
@@ -56,7 +56,7 @@ def test_a_fulltext_feed_is_not_detected() -> None:
         url=FEED_URL,
         status_code=200,
         body=(FIXTURES / "valid.xml").read_bytes(),
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
     assert wordpress.looks_like_summary_feed(payload) is False
 
@@ -106,7 +106,7 @@ def test_a_non_json_rest_payload_is_a_parse_error() -> None:
         url=wordpress.rest_url_for(FEED_URL),
         status_code=200,
         body=b"<html>not json</html>",
-        source_id=SOURCE_ID,
+        origin_id=SOURCE_ID,
     )
     with pytest.raises(CollectorError) as exc_info:
         wordpress.parse_rest_posts(payload)
@@ -198,7 +198,7 @@ def _one_entry_feed(body: str) -> RawPayload:
         f"<description><![CDATA[{description}]]></description></item>"
         "</channel></rss>"
     ).encode()
-    return RawPayload(url=FEED_URL, status_code=200, body=feed, source_id=SOURCE_ID)
+    return RawPayload(url=FEED_URL, status_code=200, body=feed, origin_id=SOURCE_ID)
 
 
 def _rest_counterpart(content_html: str) -> dict[str, wordpress.WpPost]:

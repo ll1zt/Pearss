@@ -20,8 +20,8 @@ from core.normalize import (
     derive_guid,
     derive_item_id,
     normalize,
+    origin_display_label,
     plain_text,
-    source_display_label,
 )
 
 TENANT = "default"
@@ -31,7 +31,7 @@ SOURCE = "src-1"
 def draft(**overrides: object) -> ItemDraft:
     """A valid draft, customised by keyword."""
     defaults: dict[str, object] = {
-        "source_id": SOURCE,
+        "origin_id": SOURCE,
         "external_id": "entry-1",
         "title": "A real headline",
         "canonical_url": "https://example.com/2026/entry-1",
@@ -85,8 +85,8 @@ def test_identity_is_scoped_to_tenant() -> None:
 
 @pytest.mark.unit
 def test_identity_is_scoped_to_source() -> None:
-    one = normalize(draft(source_id="src-1"), tenant_id=TENANT)
-    other = normalize(draft(source_id="src-2"), tenant_id=TENANT)
+    one = normalize(draft(origin_id="src-1"), tenant_id=TENANT)
+    other = normalize(draft(origin_id="src-2"), tenant_id=TENANT)
     assert one.item.guid != other.item.guid
 
 
@@ -95,8 +95,8 @@ def test_id_and_guid_are_distinct_namespaces() -> None:
     # Same inputs, different derivations: sharing a value would couple the
     # public GUID to internal row identity.
     assert derive_item_id(
-        tenant_id=TENANT, source_id=SOURCE, external_id="x"
-    ) != derive_guid(tenant_id=TENANT, source_id=SOURCE, external_id="x")
+        tenant_id=TENANT, origin_id=SOURCE, external_id="x"
+    ) != derive_guid(tenant_id=TENANT, origin_id=SOURCE, external_id="x")
 
 
 @pytest.mark.unit
@@ -110,12 +110,12 @@ def test_guid_survives_a_database_rebuild() -> None:
 # --------------------------------------------------------------------------
 # Golden identity values
 #
-# The tests above assert *relations*: deterministic, tenant-scoped, source-
+# The tests above assert *relations*: deterministic, tenant-scoped, origin-
 # scoped, distinct namespaces. Every one of them still holds if a field is
 # dropped from the digest input, because dropping a field preserves all four
-# properties at once -- so a mutant that removes `source_id` from
+# properties at once -- so a mutant that removes `origin_id` from
 # `derive_item_id` satisfies the entire relational suite while colliding two
-# different sources' entries onto one row.
+# different origins' entries onto one row.
 #
 # These tests pin the exact digest instead. They are the only assertions that
 # fail when the derivation's *inputs* change rather than its shape.
@@ -129,7 +129,7 @@ def test_guid_survives_a_database_rebuild() -> None:
 @pytest.mark.unit
 def test_the_item_id_digest_is_pinned() -> None:
     assert (
-        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        derive_item_id(tenant_id="default", origin_id="src-1", external_id="entry-42")
         == "7eb676ac40e283e7b68b72c240e4ad74"
     )
 
@@ -137,7 +137,7 @@ def test_the_item_id_digest_is_pinned() -> None:
 @pytest.mark.unit
 def test_the_guid_digest_is_pinned() -> None:
     assert (
-        derive_guid(tenant_id="default", source_id="src-1", external_id="entry-42")
+        derive_guid(tenant_id="default", origin_id="src-1", external_id="entry-42")
         == "dcf8478f6cb2d0eb959f5a9e06aee5c6"
     )
 
@@ -156,15 +156,15 @@ def test_the_content_hash_digest_is_pinned() -> None:
 def test_every_identity_input_is_load_bearing() -> None:
     """Each of the three inputs must change the digest on its own.
 
-    `source_id` is the one this catches: it is absent from the id's *visible*
+    `origin_id` is the one this catches: it is absent from the id's *visible*
     behaviour (nothing else keys on it) and its removal still leaves the
-    relational suite green, but two sources sharing an external_id would then
+    relational suite green, but two origins sharing an external_id would then
     produce one id and one item would silently overwrite the other.
     """
-    base = derive_item_id(tenant_id="t", source_id="s", external_id="e")
-    assert derive_item_id(tenant_id="t2", source_id="s", external_id="e") != base
-    assert derive_item_id(tenant_id="t", source_id="s2", external_id="e") != base
-    assert derive_item_id(tenant_id="t", source_id="s", external_id="e2") != base
+    base = derive_item_id(tenant_id="t", origin_id="s", external_id="e")
+    assert derive_item_id(tenant_id="t2", origin_id="s", external_id="e") != base
+    assert derive_item_id(tenant_id="t", origin_id="s2", external_id="e") != base
+    assert derive_item_id(tenant_id="t", origin_id="s", external_id="e2") != base
 
 
 @pytest.mark.unit
@@ -185,11 +185,11 @@ def test_the_scheme_tag_separates_old_and_new_derivations() -> None:
     ).hexdigest()[:32]
 
     assert (
-        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        derive_item_id(tenant_id="default", origin_id="src-1", external_id="entry-42")
         == hashlib.sha256(payload.encode()).hexdigest()[:32]
     )
     assert (
-        derive_item_id(tenant_id="default", source_id="src-1", external_id="entry-42")
+        derive_item_id(tenant_id="default", origin_id="src-1", external_id="entry-42")
         != if_the_tag_were_dropped
     )
 
@@ -202,16 +202,16 @@ def test_the_digest_never_splits_an_input() -> None:
     one) would make {("ab","c")} and {("a","bc")} hash the same, so two
     genuinely different items could collide.
     """
-    assert derive_item_id(tenant_id="t", source_id="ab", external_id="c") != (
-        derive_item_id(tenant_id="t", source_id="a", external_id="bc")
+    assert derive_item_id(tenant_id="t", origin_id="ab", external_id="c") != (
+        derive_item_id(tenant_id="t", origin_id="a", external_id="bc")
     )
 
 
 @pytest.mark.unit
 def test_content_hash_ignores_source_and_url() -> None:
     # Cross-source dedupe (B2) only works if the hash covers just the article.
-    one = draft(source_id="src-1", canonical_url="https://a.example/1")
-    other = draft(source_id="src-2", canonical_url="https://b.example/2")
+    one = draft(origin_id="src-1", canonical_url="https://a.example/1")
+    other = draft(origin_id="src-2", canonical_url="https://b.example/2")
     assert (
         normalize(one, tenant_id=TENANT).item.content_hash
         == normalize(other, tenant_id=TENANT).item.content_hash
@@ -388,7 +388,7 @@ def test_item_rejects_naive_timestamps() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         Item(
             id="i",
-            source_id="s",
+            origin_id="s",
             guid="g",
             content_hash="h",
             title="t",
@@ -399,18 +399,18 @@ def test_item_rejects_naive_timestamps() -> None:
 
 
 # ---------------------------------------------------------------------------
-# source_display_label
+# origin_display_label
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_display_label_prefers_the_recorded_title() -> None:
     assert (
-        source_display_label(
+        origin_display_label(
             title="Planet Python",
             url="https://planetpython.org/rss20.xml",
             canonical_url="https://planetpython.org/rss20.xml",
-            source_id="a" * 32,
+            origin_id="a" * 32,
         )
         == "Planet Python"
     )
@@ -425,8 +425,8 @@ def test_display_label_uses_the_channel_for_telegram_urls() -> None:
         "https://t.me/@durov",
     ):
         assert (
-            source_display_label(
-                title=None, url=url, canonical_url=url, source_id="b" * 32
+            origin_display_label(
+                title=None, url=url, canonical_url=url, origin_id="b" * 32
             )
             == "durov"
         ), url
@@ -435,11 +435,11 @@ def test_display_label_uses_the_channel_for_telegram_urls() -> None:
 @pytest.mark.unit
 def test_display_label_falls_back_to_the_host_otherwise() -> None:
     assert (
-        source_display_label(
+        origin_display_label(
             title=None,
             url="https://hnrss.org/frontpage",
             canonical_url="https://hnrss.org/frontpage",
-            source_id="c" * 32,
+            origin_id="c" * 32,
         )
         == "hnrss.org"
     )
@@ -448,14 +448,14 @@ def test_display_label_falls_back_to_the_host_otherwise() -> None:
 @pytest.mark.unit
 def test_display_label_last_resort_is_the_id() -> None:
     assert (
-        source_display_label(
-            title=None, url=None, canonical_url=None, source_id="d" * 32
+        origin_display_label(
+            title=None, url=None, canonical_url=None, origin_id="d" * 32
         )
         == "d" * 32
     )
     assert (
-        source_display_label(
-            title="   ", url="", canonical_url=None, source_id="e" * 32
+        origin_display_label(
+            title="   ", url="", canonical_url=None, origin_id="e" * 32
         )
         == "e" * 32
     )

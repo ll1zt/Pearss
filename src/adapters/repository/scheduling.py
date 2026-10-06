@@ -21,7 +21,7 @@ from core.enums import (
     SourceStatus,
     SourceType,
 )
-from core.normalize import source_display_label
+from core.normalize import origin_display_label
 from core.paging import WalkState
 from core.scheduling import observed_gaps
 
@@ -82,12 +82,12 @@ def save_paging_state(
     row.updated_at = timestamp(datetime.now(UTC))
 
 
-def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
+def origin_display_labels(session: Session, source_ids: list[str]) -> dict[str, str]:
     """Display labels for the given sources, keyed by source id.
 
     Batched because a contents request can name a hundred items across several
     sources, and resolving a name per item would turn one page into one hundred
-    queries. Falls back through core.source_display_label so a source never
+    queries. Falls back through core.origin_display_label so a source never
     collected still gets something better than its hex id.
     """
     wanted = [source_id for source_id in set(source_ids) if source_id]
@@ -99,11 +99,11 @@ def source_display_labels(session: Session, source_ids: list[str]) -> dict[str, 
         ).where(SourceRow.id.in_(wanted))
     ).all()
     return {
-        row.id: source_display_label(
+        row.id: origin_display_label(
             title=row.title,
             url=row.url,
             canonical_url=row.canonical_url,
-            source_id=row.id,
+            origin_id=row.id,
         )
         for row in rows
     }

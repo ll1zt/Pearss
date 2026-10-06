@@ -92,7 +92,7 @@ def _seed(factory: sessionmaker[Session]) -> str:
             seed,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id="tokenised-1",
                     title="A post from a private feed",
                     canonical_url=ITEM_URL,

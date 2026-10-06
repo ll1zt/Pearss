@@ -908,7 +908,7 @@ def _seed_pair_with_vectors(session: Session, encoder: Any) -> tuple[str, str]:
             session,
             [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id=external_id,
                     title=text,
                     canonical_url=f"https://example.test/{external_id}",

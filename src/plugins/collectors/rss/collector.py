@@ -111,7 +111,7 @@ def fetch(
         url=merged.url,
         status_code=merged.status_code,
         body=merged.body,
-        source_id=merged.source_id,
+        origin_id=merged.origin_id,
         raw_fetch_id=merged.raw_fetch_id,
         headers=merged.headers,
         correlation_id=merged.correlation_id,
@@ -187,7 +187,7 @@ def parse(raw: RawPayload) -> list[ItemDraft]:
 
         drafts.append(
             ItemDraft(
-                source_id=raw.source_id,
+                origin_id=raw.origin_id,
                 external_id=external_id,
                 title=title,
                 canonical_url=link,
@@ -394,7 +394,7 @@ def _article_draft(url: str, *, source_id: str, client: httpx.Client) -> ItemDra
     meta = page_metadata(html_text)
     canonical = meta.canonical_url or url
     return ItemDraft(
-        source_id=source_id,
+        origin_id=source_id,
         external_id=f"link:{canonical}",
         title=meta.title or canonical,
         canonical_url=canonical,

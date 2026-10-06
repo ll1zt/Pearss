@@ -81,7 +81,7 @@ def seeded(tmp_path: pathlib.Path) -> sessionmaker[Session]:
             )
             drafts = [
                 ItemDraft(
-                    source_id=source.id,
+                    origin_id=source.id,
                     external_id=f"i{index}-{offset}",
                     title=f"Item {index}-{offset}",
                     canonical_url=f"https://plan{index}.example/{offset}",

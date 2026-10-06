@@ -29,7 +29,7 @@ def test_user_feed_body_keeps_valid_text_and_drops_forbidden_chars(
     """Given mixed Unicode, when RSS is parsed, then valid text survives."""
     item = Item(
         id="id-supplementary",
-        source_id="s",
+        origin_id="s",
         guid="supplementary",
         content_hash="h-supplementary",
         title="Supplementary",

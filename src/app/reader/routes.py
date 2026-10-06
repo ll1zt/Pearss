@@ -157,7 +157,7 @@ def user_info(_: str = Depends(authenticate_any)) -> dict[str, str]:
 def subscription_list(
     request: Request, _: str = Depends(authenticate_any)
 ) -> dict[str, list[dict[str, object]]]:
-    from core.normalize import source_display_label
+    from core.normalize import origin_display_label
 
     # The source's real folder. Every source has one (the column is
     # NOT NULL DEFAULT 'default'), so the sidebar always has a group to put the
@@ -166,11 +166,11 @@ def subscription_list(
     subscriptions: list[dict[str, object]] = [
         {
             "id": reader_api.feed_stream_id(row.id),
-            "title": source_display_label(
+            "title": origin_display_label(
                 title=row.title,
                 url=row.url,
                 canonical_url=row.canonical_url,
-                source_id=row.id,
+                origin_id=row.id,
             ),
             "categories": [
                 {

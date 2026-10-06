@@ -89,7 +89,7 @@ def source_config() -> Manifest:
 def parse(raw) -> list[ItemDraft]:
     return [
         ItemDraft(
-            source_id=raw.source_id,
+            origin_id=raw.source_id,
             external_id="one",
             title="From an installed plugin",
             canonical_url="https://example.invalid/one",

@@ -32,7 +32,7 @@ def item(
 ) -> Item:
     return Item(
         id=f"id-{guid}",
-        source_id="s",
+        origin_id="s",
         guid=guid,
         content_hash=f"h-{guid}",
         title=title,
@@ -233,7 +233,7 @@ def test_equal_timestamps_have_a_stable_order() -> None:
 def test_missing_dates_sort_last_without_erroring() -> None:
     undated = Item(
         id="u",
-        source_id="s",
+        origin_id="s",
         guid="u",
         content_hash="h",
         title="Undated",
