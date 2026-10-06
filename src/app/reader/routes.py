@@ -868,7 +868,17 @@ def mark_all_as_read(
 
 
 def _parse_ts(value: str | None) -> datetime | None:
-    """Reader timestamps are seconds, or microseconds when very long."""
+    """Reader timestamps are seconds, or microseconds when the value says so.
+
+    The unit is decided by magnitude, not by the width of the string (issue
+    #350). `10**12` is the split: 1e12 seconds is year 33658, while 1e12
+    microseconds is 2001, so the two plausible ranges do not overlap and the
+    value picks its own unit. Deciding by string length read a 15-digit
+    microsecond value as seconds -- out of `datetime`'s range, so it crashed
+    the endpoint -- and made the rule a guess rather than a property.
+
+    Sub-second precision is dropped: the caller compares whole seconds.
+    """
     if not value or not value.strip():
         return None
     raw = value.strip()
@@ -876,7 +886,7 @@ def _parse_ts(value: str | None) -> datetime | None:
         number = int(raw)
     except ValueError:
         return None
-    if len(raw) >= 16:
+    if number > 10**12:
         number //= 1_000_000
     return datetime.fromtimestamp(number, tz=UTC)
 
