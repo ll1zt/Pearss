@@ -1975,6 +1975,27 @@ def test_the_legacy_source_reads_are_marked_deprecated() -> None:
     assert "\n### Origin\n" in model and "\n### Subscription\n" in model
 
 
+def test_the_chain_ownership_decision_is_recorded_where_readers_look() -> None:
+    """#372's criterion: the ADR exists, and the data model records its ruling.
+
+    #372 is a decision record, so what it delivers is a file plus the one doc a
+    schema reader actually opens. A decision that lives only in an issue comment
+    is a decision the next reader cannot find -- and the next reader is whoever
+    implements the multi-subscription migration.
+    """
+    adr = REPO_ROOT / "docs/adr/0061-chain-ownership-and-per-subscription-visibility.md"
+    assert adr.exists(), "the chain-ownership ADR is missing"
+    text = adr.read_text(encoding="utf-8")
+    # The ruling, not just the file: it has to say what happens to a new item
+    # when its origin has two subscriptions, and where visibility lives.
+    assert "每个订阅各入其链" in text
+    assert "item_subscription_ready" in text
+
+    model = (REPO_ROOT / "docs/domain/data-model.md").read_text(encoding="utf-8")
+    assert "ADR 0061" in model, "the data model does not record the decision"
+    assert "item_subscription_ready" in model
+
+
 def test_scenario_registry_ranges_are_closed() -> None:
     """An open range swallows every later number, including unclaimed ones.
 

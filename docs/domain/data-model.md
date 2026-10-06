@@ -121,7 +121,7 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 | `title` / `url` / `published_at` | 面向消费端的规范化字段 |
 | `author` | 来源给出的署名（RSS `<author>`、知乎显示名、X 的 `名字 (@handle)`）。**空串表示来源本就没署名**，不是匿名。它不参与 `guid`/`content_hash` —— 修正署名不得产生新条目 |
 | `content_ref` | 正文/清洗正文存储引用 |
-| `publish_status` | `pending` / `ready` / `published` |
+| `publish_status` | `pending` / `ready` / `published`。**内容冻结与首次输出的状态**；多订阅之后它**不再是可见性判据**（可见性按 `(item, subscription)` 判定，ADR 0061） |
 | `published_to_feed_at` | 首次对外输出时间 |
 | `tenant_id` | 租户预留 |
 
@@ -174,6 +174,13 @@ Item 行，连带其 `read_state`、`item_enrichment` 与正文文件。两条�
 `summary`；`translation` 明确不可消费以免自我喂养）。`upstream_*` 记录的是**已消费**的
 依赖，而上游解析按 `input_hash` 钉版本，因此条目内容修订后的新行消费新产物，旧行作为
 历史保留。`upstream_*` **不**参与唯一约束：该表的契约是同一内容版本重处理 = 替换该行。
+
+**多订阅下的链与可见性（ADR 0061）**：`pipeline_chain` 是**订阅**策略，因此一个 origin 有多个
+订阅时，新条目**按每个订阅各入其链**；可见性按 `(item, subscription)` 判定，物化在
+`item_subscription_ready(item_id, subscription_id, ready_at)` 上（链完成处写入，读路径按
+`subscription_id` join），并由一条「物化集合 == 从 enrichment 派生的集合」的守卫防止漏写。
+enrichment 的幂等身份里的 `lang` / `input_hash` 已经把两条链的产物分开，所以该表**不含**
+`subscription_id` —— 产物属于哪条链是推导出来的，不是存出来的。
 
 ### Job 与 JobRun
 
