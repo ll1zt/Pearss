@@ -363,16 +363,16 @@ def apply_tag_change(
 def mark_stream_read(
     session_factory: sessionmaker[Session],
     *,
-    source_id: str | None,
+    subscription_id: str | None,
     folder: str | None,
     before: datetime,
 ) -> int:
     """Mark everything in a scope read up to `before`; returns how many changed.
 
-    The scope arrives in domain terms -- one source, one folder, or neither for
-    the whole library. Translating a stream id into this scope is the route's
-    job, so an unsupported stream can be refused there instead of sweeping
-    everything.
+    The scope arrives in domain terms -- one subscription, one folder, or
+    neither for the whole library. Translating a stream id into this scope is
+    the route's job, so an unsupported stream can be refused there instead of
+    sweeping everything.
     """
     from adapters.repository import mark_all_read
 
@@ -381,7 +381,7 @@ def mark_stream_read(
             session,
             tenant_id=SINGLE_TENANT,
             before=before,
-            source_id=source_id,
+            subscription_id=subscription_id,
             folder=folder,
         )
         session.commit()

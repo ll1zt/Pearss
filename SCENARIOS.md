@@ -160,7 +160,7 @@
 | AC-334..335 | #364 origin/subscription 拆表 B：repository 与 core 的读路径切到 origin（`origin_id` 为事实列，`source_id` 降为门面私有镜像；调度读 subscription） | issue #364 | 已合并 | `tests/integration/test_origin_subscription_split.py`、`tests/unit/test_structure_guards.py` |
 | AC-336 | #365 origin/subscription 拆表 C：删除 source 表、`item`/`raw_fetch` 列改名（迁移 **0028**：手写重建两张表，批处理会错映 VIRTUAL 生成列且丢 CHECK；`(origin_id, sort_key, id)` 复合索引已由 0027 提前落下） | issue #365 | 已合并 | `tests/integration/test_migrations.py` |
 | AC-337 | #366 拆表 D：`/v1/sources` 旧读端点收成 `origin ⋈ subscription` 投影并在 OpenAPI 标 deprecated；数据模型里 `Source` 实体拆为 `Origin` + `Subscription` | issue #366 | 已合并 | `tests/unit/test_structure_guards.py` |
-| AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 与订阅列表 | issue #367 | 保留 | |
+| AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 是**订阅** id（解析经 subscription → origin → items；未知频道为空而不是全库），folder 归类读 `subscription.folder`；1:1 阶段对客户端无感 | issue #367 | 已合并 | `tests/integration/test_reader_channel_identity.py` |
 | AC-340 | #368 频道身份切订阅 2/4：RSS 输出与 feed 窗口的频道身份 | issue #368 | 保留 | |
 | AC-341..342 | #369 频道身份切订阅 3/4：MCP 写工具的 target 语义、命名与快照（改名不留别名） | issue #369 | 保留 | |
 | AC-343..344 | #370 频道身份切订阅 4/4：`/v1/subscriptions` 新端点 + NNW 旧 stream id 别名 | issue #370 | 保留 | |

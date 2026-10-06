@@ -23,6 +23,25 @@ from core.tenancy import SINGLE_TENANT
 LOGGER = logging.getLogger(__name__)
 
 
+def origin_of_subscription(
+    session: Session, *, subscription_id: str, tenant_id: str
+) -> str | None:
+    """The origin a channel id names, or None when no subscription carries it.
+
+    A channel is a **subscription** (ADR 0046 D-C): what a client subscribes to
+    is the policy, and the items are its origin's. The two ids coincide in the
+    1:1 stage, so this looks like a no-op today -- it is the resolution that
+    keeps the multi-subscription case correct without inventing a second mapping
+    from stream ids to items.
+    """
+    return session.execute(
+        select(SubscriptionRow.origin_id).where(
+            SubscriptionRow.id == subscription_id,
+            SubscriptionRow.tenant_id == tenant_id,
+        )
+    ).scalar_one_or_none()
+
+
 def visible_ids_for_stream(
     session: Session,
     *,
@@ -76,9 +95,16 @@ def visible_ids_for_stream(
 
     query = select(ItemRow.id, ItemRow.published_at).where(visible_item_rows())
 
-    source_id = reader_api.parse_feed_stream_id(stream_id)
-    if source_id is not None:
-        query = query.where(ItemRow.origin_id == source_id)
+    subscription_id = reader_api.parse_feed_stream_id(stream_id)
+    if subscription_id is not None:
+        origin_id = origin_of_subscription(
+            session, subscription_id=subscription_id, tenant_id=tenant_id
+        )
+        if origin_id is None:
+            # A channel id no subscription carries is an empty channel, not
+            # "everything" -- the same rule the label branch applies below.
+            return []
+        query = query.where(ItemRow.origin_id == origin_id)
     else:
         state = reader_api.state_stream_name(stream_id)
         if state == "reading-list":
@@ -109,13 +135,13 @@ def visible_ids_for_stream(
                 )
             )
         elif (label := reader_api.label_stream_name(stream_id)) is not None:
-            # A folder stream: items of the sources in that folder. A name no
-            # source carries is an empty stream, not "everything" -- serving
-            # the unfiltered list for a filter with no matches is a wrong
-            # answer that looks like data.
+            # A folder stream: items of the origins the subscriptions in that
+            # folder consume. A name no subscription carries is an empty
+            # stream, not "everything" -- serving the unfiltered list for a
+            # filter with no matches is a wrong answer that looks like data.
             query = query.where(
                 ItemRow.origin_id.in_(
-                    select(SubscriptionRow.id).where(
+                    select(SubscriptionRow.origin_id).where(
                         SubscriptionRow.folder == label,
                         SubscriptionRow.tenant_id == tenant_id,
                     )
@@ -395,7 +421,7 @@ def mark_all_read(
     *,
     tenant_id: str,
     before: datetime,
-    source_id: str | None = None,
+    subscription_id: str | None = None,
     folder: str | None = None,
 ) -> int:
     """Mark items published before `before` as read.
@@ -403,12 +429,12 @@ def mark_all_read(
     Only touches items that are unread, so a repeated call is a no-op rather
     than repeatedly rewriting rows and bumping their timestamps.
 
-    `source_id` and `folder` narrow the sweep to one feed or one folder. At
-    most one may be given: a caller that can name both has misparsed the
-    stream, and the safe answer is to refuse rather than intersect.
+    `subscription_id` and `folder` narrow the sweep to one channel or one
+    folder. At most one may be given: a caller that can name both has misparsed
+    the stream, and the safe answer is to refuse rather than intersect.
     """
-    if source_id is not None and folder is not None:
-        raise ValueError("mark_all_read takes a source or a folder, not both")
+    if subscription_id is not None and folder is not None:
+        raise ValueError("mark_all_read takes a subscription or a folder, not both")
     cutoff = timestamp(before)
     existing = select(ReadStateRow.item_id).where(
         ReadStateRow.tenant_id == tenant_id, ReadStateRow.is_read.is_(True)
@@ -422,14 +448,22 @@ def mark_all_read(
         or_(ItemRow.published_at.is_(None), ItemRow.published_at <= cutoff),
         ItemRow.id.not_in(existing),
     )
-    if source_id:
-        candidates = candidates.where(ItemRow.origin_id == source_id)
+    if subscription_id:
+        origin_id = origin_of_subscription(
+            session, subscription_id=subscription_id, tenant_id=tenant_id
+        )
+        if origin_id is None:
+            # An unknown channel marks nothing. Sweeping the library because a
+            # client named a channel we do not have is the wrong answer that
+            # looks like a lot of work.
+            return 0
+        candidates = candidates.where(ItemRow.origin_id == origin_id)
     if folder is not None:
-        # A folder no source carries is an empty scope, not the whole library:
-        # the same rule the folder *read* path applies.
+        # A folder no subscription carries is an empty scope, not the whole
+        # library: the same rule the folder *read* path applies.
         candidates = candidates.where(
             ItemRow.origin_id.in_(
-                select(SubscriptionRow.id).where(
+                select(SubscriptionRow.origin_id).where(
                     SubscriptionRow.folder == folder,
                     SubscriptionRow.tenant_id == tenant_id,
                 )
