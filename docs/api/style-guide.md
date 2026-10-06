@@ -209,6 +209,21 @@ HTTP 状态码：`400` 请求无效、`401` 未认证、`403` 无权限、`404` 
 - 必须破坏兼容性时：新增字段/endpoint → 标记旧字段 deprecated → 文档写替代方案和截止时间 → 观察调用量 → 再在 `/v2` 删除
 - 一项破坏式变更必须附 ADR 和迁移说明
 
+### `/v1/sources*`（已弃用，替代品见下）
+
+ADR 0046 拆表之后，「来源」这一对概念由两张表承载：**事实**是 `origin`，**策略**是
+`subscription`（见 `docs/domain/data-model.md`）。`/v1/sources*` 因此是兼容投影：
+
+- **读端点**（`GET /v1/sources`、`GET /v1/sources/{id}`、`:diagnose`、`:queue`、
+  `/enrichments`）响应形状不变，但 OpenAPI 里标了 `deprecated: true`；它们的数据来自
+  `origin ⋈ subscription`，不是第二个事实源。
+- **写端点**走 subscription/origin 的显式实现；`POST /v1/sources` 是「建 origin + 建
+  subscription」的兼容门面，`PATCH` 只改 subscription 的策略列。
+- **删除触发条件**：等替代端点（`/v1/origins`、`/v1/subscriptions`，issue #370）上线、
+  且 NetNewsWire 的旧 stream id（`feed/<origin_id>`）别名不再被真实客户端使用之后，
+  连同 `tests/contract/openapi.json` 里的 deprecated 项一起删除。在那之前它们必须继续
+  按字段原样作答 —— 客户端缓存的是它们的形状。
+
 ## Reader API 边界
 
 P3 的 Google Reader 兼容端点 `/api/greader.php` 是兼容性接口，不与 `/v1` REST 资源混用：
