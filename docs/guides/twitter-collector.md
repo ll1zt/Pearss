@@ -462,9 +462,9 @@ frontier 只前移、floor 不被预算停止覆盖。全部离线——HTTP 层
   `refresh_query_id()` 与 `structure_changed` 分类是**必需件而非优化**
 - **凭据不可重放恢复**：库丢了能重建条目，`auth_token` 丢了要用户重新导出。
   CookieCloud 的存在正是为了把"重新登录"变成自动动作
-- **`CookieCloud` 的 token 强于它取回的凭据**：`COOKIE_CLOUD_SERVER_PASSWORD`
-  是服务端主密钥，能解密导出任意 uuid、任意域名的 cookie。部署应使用只含
-  阅读器所需站点的专用 uuid
+- **`CookieCloud` 的 token 强于它取回的凭据**：`PEARSS_COOKIECLOUD_ADMIN_TOKEN`
+  能导出任意 uuid、任意域名的 cookie，还能 `DELETE /records/<uuid>`。部署应使用只含
+  阅读器所需站点的专用 uuid（ADR 0060）
 
 改动本目录时值得先跑的检查：
 
