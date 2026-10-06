@@ -42,7 +42,7 @@ pytestmark = pytest.mark.integration
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 AT = timestamp(BASE)
 SCHEDULE = '{"interval_minutes": 60}'
-CHAIN = '[{"plugin_id": "translate", "kind": "translate", "lang": "zh"}]'
+CHAIN = '[{"plugin_id": "translation", "kind": "translation", "lang": "zh"}]'
 
 # The statements are literals rather than interpolated strings: the table and
 # column names are fixed, and writing them out is what keeps a query in a test

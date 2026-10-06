@@ -70,6 +70,8 @@ EXPECTED_TABLES = (
     | {"work", "work_unit"}
     # The origin/subscription split (ADR 0046 D-A/D-B, issues #363/#364).
     | {"origin", "subscription"}
+    # The per-channel gate (ADR 0061, issue #371).
+    | {"item_subscription_ready"}
 )
 
 
