@@ -233,6 +233,99 @@ def test_the_count_does_not_sort(
 
 
 # --------------------------------------------------------------------------
+# Each mechanism is required, not merely present (issue #77 / #356)
+# --------------------------------------------------------------------------
+#
+# The plan assertions above say the query *uses an index*. That leaves the
+# mechanism unpinned: they would still pass if the index were dropped and the
+# planner found another one. These drop it and require the plan to degrade to
+# the shape AC-78/79 forbid, which is what makes the index load-bearing rather
+# than incidental (issue #356, from the #125 audit).
+#
+# The other half of that criterion -- "removing ANALYZE fails the case" -- is
+# *not* reproducible at this scale, measured rather than assumed: with the fixture's
+# 300 rows, deleting `sqlite_stat1` leaves both plans byte-identical
+# (`SCAN item USING INDEX ix_item_sort_key_id` and
+# `SEARCH item USING INDEX ix_item_source_sort_key_id (source_id=?)`), because
+# an `ORDER BY ... LIMIT 50` over a sort-key index is chosen on the ordering
+# alone. Statistics live in the fixture and in migration 0022's ANALYZE, and the
+# scheduler keeps them fresh with `PRAGMA optimize` (issue #77), because at
+# production scale they do move estimates -- but a test asserting it here would
+# be a test that cannot fail, so this one says so instead of pretending.
+
+
+def _plan_of(session: Session, *, source_id: str | None = None) -> list[str]:
+    emitted = _capture(
+        session,
+        lambda: query_items(
+            session,
+            tenant_id="default",
+            filter=ItemFilter(source_id=source_id),
+            descending=True,
+            limit=50,
+        ),
+    )
+    sql, params = next(
+        (sql, params) for sql, params in emitted if "order by" in sql.lower()
+    )
+    return _plan(session.get_bind(), sql, params)
+
+
+def test_the_sort_index_is_load_bearing_for_the_newest_page(
+    seeded: sessionmaker[Session],
+) -> None:
+    """Drop `ix_item_sort_key_id` and the newest page degrades (issue #356).
+
+    #77 asked for the mechanism to be *required*, not merely present.
+    Without it there is no index that orders by the sort key, so the planner
+    scans the table and sorts into a temp b-tree -- exactly the plan AC-78
+    forbids. That is the difference between "the index is used" and "the index
+    is required".
+    """
+    with seeded() as session:
+        _assert_indexed(_plan_of(session), "the newest-first page (baseline)")
+        session.execute(sa.text("DROP INDEX ix_item_sort_key_id"))
+        session.commit()
+        degraded = _plan_of(session)
+
+    joined = " | ".join(degraded)
+    assert "TEMP B-TREE" in joined, degraded
+    assert any(
+        statement.startswith("SCAN item") and "USING INDEX" not in statement
+        for statement in degraded
+    ), degraded
+
+
+def test_the_source_index_is_load_bearing_for_a_sources_page(
+    seeded: sessionmaker[Session],
+) -> None:
+    """Drop `ix_item_source_sort_key_id` and the source page stops seeking (#356).
+
+    With it the plan seeks by source (`SEARCH item USING INDEX
+    ix_item_source_sort_key_id`); without it the planner walks the *whole*
+    sort-key index and filters, which is the O(all rows) shape AC-79 exists to
+    remove. `_assert_indexed` cannot see this -- a scan of another index still
+    "uses an index" -- so the assertion is on the seek itself.
+    """
+    with seeded() as session:
+        source_id = session.execute(
+            sa.text("select source_id from item limit 1")
+        ).scalar_one()
+        baseline = _plan_of(session, source_id=source_id)
+        assert any(statement.startswith("SEARCH item") for statement in baseline), (
+            baseline
+        )
+
+        session.execute(sa.text("DROP INDEX ix_item_source_sort_key_id"))
+        session.commit()
+        degraded = _plan_of(session, source_id=source_id)
+
+    assert not any(statement.startswith("SEARCH item") for statement in degraded), (
+        degraded
+    )
+
+
+# --------------------------------------------------------------------------
 # AC-80: the sort key changed, so the edge case it exists for must still page
 # --------------------------------------------------------------------------
 
