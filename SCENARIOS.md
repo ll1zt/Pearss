@@ -156,6 +156,16 @@
 | AC-322 | #341 CookieCloud 凭据语义补 ADR：新增 `docs/adr/0060-cookiecloud-admin-token-and-the-export-contract.md`（消费端凭据是 `ADMIN_TOKEN`——除导出还能 `DELETE /records/<uuid>`、专用 uuid 由建议升为要求、消费端用 `raw` 自己拼头（`format=header` 会转义 `=` 而坏掉 base64 值）、`secure` 按目标 scheme 取舍、`domain=` 过滤是服务端的职责不重复实现；含四条被否决备选）；ADR 0012 标 superseded（仅其 CookieCloud 凭据一段）；env-reference / runbook / twitter-collector guide / README / twitter 采集器 README 同步新 env 名、新地址与新错误分类 | issue #341 | 已合并 | `docs/adr/0060-cookiecloud-admin-token-and-the-export-contract.md` |
 | AC-323..326 | #348 `reader_api` 流 id 认形（钉住现状）：`state_stream_name` 只认 `user/<id>/state/com.google/<state>` 形态，裸 `com.google/starred` → `None`（不能识别的过滤不得放宽为全集，AC-323）、`user/-/state/com.google/starred` → `starred`（AC-324）；`label_stream_name` 只认字面 `user/-/label/` 前缀，`user/123/label/Work` → `None`（含永不匹配的 `user/%s/label/` 死前缀，AC-325）、`user/-/label/Work` → `Work`（AC-326）；同步把两处 docstring 改成陈述真实行为，并删掉未使用的 `_LABEL_PREFIXES` | issue #348 | 已合并 | `tests/unit/test_reader_stream_ids.py` |
 | AC-327..331 | #350 `mark-all-as-read` 的 `ts` 单位由**数值量级**而非字符串长度决定（`> 10**12` 才按微秒读）：秒值按秒（AC-327）、微秒值按微秒（AC-328）、15/16 位的值按量级读作微秒——旧的按长度规则把 15 位微秒值当秒，越出 `datetime` 范围直接 500（AC-329）、非数字 → `None`（AC-330）、空串/空白/`None` → `None`（AC-331）；端到端另有「微秒 `ts` 对 2026 年条目不算已读」一条（若按秒读则年 5300 万，会全部扫入） | issue #350 | 已合并 | `tests/unit/test_reader_parse_ts.py`、`tests/integration/test_reader_bulk_scope.py` |
+| AC-332..333 | #363 origin/subscription 拆表 A：建表 + 迁移 0026 + 数据对账（一表分家，1:1 阶段 id 不变：`origin.id = subscription.id = 旧 source.id`，因此既有 item id/guid 与 `/v1/sources/{id}` 不变） | issue #363（#200 第 1 步） | 已合并 | `tests/integration/test_migrations.py`、`tests/integration/test_origin_subscription_split.py` |
+| AC-334..335 | #364 origin/subscription 拆表 B：repository 与 core 的读路径切到 origin | issue #364 | 保留 | |
+| AC-336 | #365 origin/subscription 拆表 C：删除 source 表、`item`/`raw_fetch` 列改名（迁移 0027） | issue #365 | 保留 | |
+| AC-337 | #366 拆表 D：`/v1/sources` 收成只读投影并标 deprecated | issue #366 | 保留 | |
+| AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 与订阅列表 | issue #367 | 保留 | |
+| AC-340 | #368 频道身份切订阅 2/4：RSS 输出与 feed 窗口的频道身份 | issue #368 | 保留 | |
+| AC-341..342 | #369 频道身份切订阅 3/4：MCP 写工具的 target 语义、命名与快照（改名不留别名） | issue #369 | 保留 | |
+| AC-343..344 | #370 频道身份切订阅 4/4：`/v1/subscriptions` 新端点 + NNW 旧 stream id 别名 | issue #370 | 保留 | |
+| AC-345..347 | #371 一个 origin 多订阅：解除唯一约束 + 第二订阅写路径 + 按 `(item, subscription)` 判定的可见性（物化行 + 一致性守卫） | issue #371 | 保留 | |
+| AC-216..217 | #373 退订≠销毁：端点与语义拆分 + 销毁审计带理由（旧 `DELETE /v1/sources/{id}` 改退订语义） | issue #373 | 保留 | |
 
 「保留」= 号段已分配但测试尚未合并；实现时按该号段编号，**不要另起号段**。
 

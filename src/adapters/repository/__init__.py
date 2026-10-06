@@ -83,6 +83,11 @@ from adapters.repository.jobs import (
     finish_job_run,
     job_for_source,
 )
+from adapters.repository.origins import (
+    create_origin,
+    get_origin,
+    list_origins,
+)
 from adapters.repository.plugins import (
     list_plugin_rows,
     plugin_status,
@@ -119,6 +124,11 @@ from adapters.repository.sources import (
     derive_source_id,
     get_source,
     list_sources,
+)
+from adapters.repository.subscriptions import (
+    create_subscription,
+    get_subscription,
+    list_subscriptions,
 )
 from adapters.repository.work import (
     append_unit,
@@ -159,7 +169,9 @@ __all__ = [
     "count_matching",
     "counts_for_work",
     "create_job_run",
+    "create_origin",
     "create_source",
+    "create_subscription",
     "create_work",
     "delete_items",
     "delete_source",
@@ -179,7 +191,9 @@ __all__ = [
     "finish_job_run",
     "finish_work",
     "get_item",
+    "get_origin",
     "get_source",
+    "get_subscription",
     "items_for_source",
     "items_missing_chain",
     "items_ready_for_feed",
@@ -189,8 +203,10 @@ __all__ = [
     "last_failure_error_class",
     "list_job_runs",
     "list_jobs",
+    "list_origins",
     "list_plugin_rows",
     "list_sources",
+    "list_subscriptions",
     "live_work_by_fingerprint",
     "mark_all_read",
     "mark_published",
