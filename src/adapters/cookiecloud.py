@@ -59,6 +59,12 @@ LOGGER = logging.getLogger(__name__)
 # or a bomb (issue #85).
 MAX_COOKIE_BYTES = 256 * 1024
 
+# The error body is `{"error":{"code","message"}}` (design/protocol.md §10) and
+# is read only to tell two 403s apart. A proxy in the path may answer with
+# something else entirely, so this read is capped and its failure is tolerated:
+# the status code still classifies every other refusal.
+MAX_ERROR_BYTES = 8 * 1024
+
 # These are environment variable *names*, not values: the secret lives in the
 # environment and never in the repository. S105 matches on an identifier
 # containing "token" and cannot tell the two apart.
@@ -255,16 +261,8 @@ def fetch_cookie_header(
         # is a complete credential, so nothing of it is echoed.
         raise CookieCloudError("CookieCloud server unreachable") from exc
 
-    if response.status_code == 401:
-        raise CookieCloudError("CookieCloud rejected the server password")
-    if response.status_code == 404:
-        raise CookieCloudError("CookieCloud has no record for that uuid")
-    if response.status_code == 409:
-        raise CookieCloudError(
-            "CookieCloud holds no decryptable copy; re-sync from the browser"
-        )
     if response.status_code != 200:
-        raise CookieCloudError(f"CookieCloud returned HTTP {response.status_code}")
+        raise _error_for(response)
 
     try:
         body = read_capped(response, MAX_COOKIE_BYTES, str(response.url))
@@ -276,6 +274,70 @@ def fetch_cookie_header(
     cookies = _parse_cookies(body)
     _cache_put(config.cache_key, cookies, config.cache_seconds)
     return _cookie_header(cookies, secure_ok=secure_ok, now=time.time())
+
+
+def _error_for(response: httpx.Response) -> CookieCloudError:
+    """The refusal, phrased as the action that fixes it.
+
+    The code alone is not enough: 403 covers both "the token is wrong" and "the
+    server has export disabled", which are two different fixes, and sending
+    both readers the same instruction sends half of them the wrong way. So the
+    server's message is *read* to tell them apart -- and never relayed, because
+    it is untrusted input and because this text reaches JobRun and the audit
+    log. For the same reason none of the messages below carries the token or
+    the uuid.
+    """
+    status = response.status_code
+    if status == 401:
+        return CookieCloudError(
+            "CookieCloud rejected the request: no admin token was sent "
+            f"(set {ADMIN_TOKEN_ENV})"
+        )
+    if status == 403:
+        reported = _server_message(response)
+        if "disabled" in reported or "not set" in reported:
+            return CookieCloudError(
+                "CookieCloud has export disabled: the server has no ADMIN_TOKEN "
+                "configured, so /export is off for every caller"
+            )
+        return CookieCloudError(
+            "CookieCloud rejected the admin token; check "
+            f"{ADMIN_TOKEN_ENV} against the server's ADMIN_TOKEN"
+        )
+    if status == 404:
+        return CookieCloudError(
+            "CookieCloud has no record for that uuid; it has not been synced "
+            "from the browser yet"
+        )
+    if status == 409:
+        return CookieCloudError(
+            "CookieCloud holds no decryptable copy; re-sync from the browser"
+        )
+    if status == 429:
+        return CookieCloudError(
+            "CookieCloud is rate limiting this client; retry once the cached "
+            "cookie expires"
+        )
+    return CookieCloudError(f"CookieCloud returned HTTP {status}")
+
+
+def _server_message(response: httpx.Response) -> str:
+    """The server's `error.message`, lowercased, or "" when there is none."""
+    try:
+        body = read_capped(response, MAX_ERROR_BYTES, str(response.url))
+    except FetchError:
+        return ""
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return ""
+    message = error.get("message")
+    return message.lower() if isinstance(message, str) else ""
 
 
 def _parse_cookies(body: bytes) -> tuple[_Cookie, ...]:

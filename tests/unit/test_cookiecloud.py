@@ -9,6 +9,15 @@ AC-316: expired cookies and `secure` cookies aimed at a plaintext target are
 AC-317: an empty array, an all-expired response and a body that is not a JSON
         array all raise rather than yielding an empty header; a deployment that
         only sets the retired master password has not enabled the path.
+AC-318: a refusal is classified by the action that fixes it -- 401 (no admin
+        token configured), 403 (token rejected vs. export disabled on the
+        server: both are 403 `forbidden`, only the server's message tells them
+        apart), 404 (uuid never synced), 409 (re-sync), 429 (rate limited) -- and
+        no message carries the token or the uuid.
+AC-319: a 404 is not cached: "never synced" is a state the operator's next
+        attempt is supposed to change.
+AC-320: a 200 is cached: two calls cost one request, because every export is
+        audited and rate limited on the server.
 
 Every case runs against httpx's MockTransport. The synthetic values below are
 marked as such and exist so a test can assert where they land -- and, more
@@ -445,23 +454,104 @@ def test_an_oversized_response_is_refused_by_size() -> None:
 # --------------------------------------------------------------------------
 
 
+def _server_error(status: int, *, message: str | None = None) -> httpx.Response:
+    """What the server answers when it refuses: `{"error":{code,message}}`."""
+    if message is None:
+        return httpx.Response(status)
+    return httpx.Response(
+        status, json={"error": {"code": "forbidden", "message": message}}
+    )
+
+
 @pytest.mark.parametrize(
-    ("status", "needle"),
+    ("status", "server_message", "needle"),
     [
-        (401, "password"),
-        (404, "uuid"),
-        (409, "re-sync"),
-        (500, "http 500"),
+        (401, None, "admin token"),
+        (403, "the admin token is wrong", "reject"),
+        (403, "admin endpoints are disabled because ADMIN_TOKEN is not set", "disabl"),
+        (404, None, "sync"),
+        (409, None, "re-sync"),
+        (429, None, "rate limit"),
+        (500, None, "http 500"),
     ],
 )
-def test_server_errors_say_what_to_do(status: int, needle: str) -> None:
-    """Each needs a different operator action, so each says which.
+def test_a_refusal_says_which_action_fixes_it(
+    status: int, server_message: str | None, needle: str
+) -> None:
+    """403 has two meanings, and only the server's own message tells them apart.
 
-    A 409 in particular means the server holds only ciphertext it cannot open:
-    the fix is a browser re-sync, not a password change.
+    "token is wrong" is a credential to replace; "export is disabled" is a
+    server-side setting the operator has to add -- sending both readers to the
+    same instruction sends half of them the wrong way. 404 means the uuid was
+    never synced, 409 means re-sync, and 429 means slow down rather than fix.
     """
-    message = fetch_raises(lambda r: httpx.Response(status), config())
+    message = fetch_raises(
+        lambda r: _server_error(status, message=server_message), config()
+    )
     assert needle in message.lower()
+
+
+@pytest.mark.parametrize(
+    ("status", "server_message"),
+    [
+        (401, None),
+        (403, "the admin token is wrong"),
+        (403, "admin endpoints are disabled"),
+        (404, None),
+        (409, None),
+        (429, None),
+    ],
+)
+def test_no_refusal_message_carries_the_token_or_the_uuid(
+    status: int, server_message: str | None
+) -> None:
+    """Both are credentials, and both of these messages reach job_run."""
+    message = fetch_raises(
+        lambda r: _server_error(status, message=server_message), config()
+    )
+    assert FAKE_TOKEN not in message
+    assert FAKE_UUID not in message
+
+
+def test_the_403_body_is_classified_not_relayed() -> None:
+    """The server's message is untrusted input: it is read, never echoed."""
+    message = fetch_raises(
+        lambda r: _server_error(403, message="disabled -- token LEAK-CANARY-42"),
+        config(),
+    )
+    assert "LEAK-CANARY-42" not in message
+    assert "disabl" in message.lower()
+
+
+def test_a_non_json_error_body_still_classifies_by_status() -> None:
+    """A proxy in the path answers HTML; that must not become a crash."""
+    message = fetch_raises(
+        lambda r: httpx.Response(404, text="<html>not found</html>"), config()
+    )
+    assert "sync" in message.lower()
+
+
+def test_a_404_is_not_cached() -> None:
+    """AC-319: "never synced" changes the moment the browser syncs.
+
+    Caching it would pin the failure for a whole TTL, and the operator's next
+    attempt is exactly the thing that should fix it.
+    """
+    calls: list[httpx.Request] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(404)
+        return httpx.Response(200, text=FAKE_BODY)
+
+    with client_with(capture) as client:
+        with pytest.raises(cc.CookieCloudError):
+            cc.fetch_cookie_header(client, config(), secure_ok=True)
+        recovered = cc.fetch_cookie_header(client, config(), secure_ok=True)
+
+    assert recovered == FAKE_COOKIE
+    assert len(calls) == 2, "the 404 must not have been cached"
 
 
 def test_a_transport_failure_does_not_echo_the_url() -> None:
@@ -481,6 +571,7 @@ def test_a_transport_failure_does_not_echo_the_url() -> None:
 
 
 def test_a_fresh_cache_avoids_a_second_request() -> None:
+    """AC-320: every export is audited and rate limited, so do not re-ask."""
     calls: list[httpx.Request] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
