@@ -377,7 +377,7 @@ def _source_payload(row: SourceView) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-@router.get("/sources", operation_id="listSources")
+@router.get("/sources", operation_id="listSources", deprecated=True)
 def read_sources(
     request: Request,
     _: Principal = Depends(read_required),
@@ -412,7 +412,9 @@ def read_sources(
     }
 
 
-@router.get("/sources/{source_id}:diagnose", operation_id="diagnoseSource")
+@router.get(
+    "/sources/{source_id}:diagnose", operation_id="diagnoseSource", deprecated=True
+)
 def diagnose_source(
     request: Request,
     source_id: str,
@@ -534,7 +536,9 @@ def diagnose_source(
     }
 
 
-@router.get("/sources/{source_id}:queue", operation_id="getSourceQueue")
+@router.get(
+    "/sources/{source_id}:queue", operation_id="getSourceQueue", deprecated=True
+)
 def read_source_queue(
     request: Request,
     source_id: str,
@@ -571,7 +575,7 @@ def read_source_queue(
     }
 
 
-@router.get("/sources/{source_id}", operation_id="getSource")
+@router.get("/sources/{source_id}", operation_id="getSource", deprecated=True)
 def read_source(
     request: Request,
     source_id: str,
@@ -1392,7 +1396,11 @@ def backfill_source_chain(
     )
 
 
-@router.get("/sources/{source_id}/enrichments", operation_id="listEnrichments")
+@router.get(
+    "/sources/{source_id}/enrichments",
+    operation_id="listEnrichments",
+    deprecated=True,
+)
 def list_source_enrichments(
     request: Request,
     source_id: str,

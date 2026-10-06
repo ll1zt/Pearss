@@ -12,62 +12,61 @@
 
 ## 核心实体
 
-### Source
+### Origin
 
-一个内容来源：RSS/Atom feed、网页采集器目标，或 agent 主动接入端点（A3，ADR 0022）。
+一个内容来源的**事实**一半：RSS/Atom feed、网页采集器目标，或 agent 主动接入端点
+（A3，ADR 0022）。「怎么消费它」是策略，在 `Subscription` 上 —— 这一分为二是 ADR 0046
+的拆表（阶段 A 建表复制 / B 切读写 / C 删镜像）。
 
 | 字段 | 说明 |
 |---|---|
-| `id` | 稳定来源 ID |
+| `id` | 稳定来源 ID。**它就是旧 `source.id`**：拆表没有重新编号，因此既有 item id、guid 与 `/v1/sources/{id}` 都保持原义 |
 | `type` | `rss` / `web` / `agent` |
-| `url` | RSS 或网页 URL。agent 类型必须携带合成名 `agent://<name>`：它不是抓取目标，而是推送端点，去重键需要这个名字（`source_canonical_key` 对空 url 报错） |
+| `url` | RSS 或网页 URL。agent 类型必须携带合成名 `agent://<name>`：它不是抓取目标，而是推送端点，去重键需要这个名字（`origin_canonical_key` 对空 url 报错） |
 | `canonical_url` | 规范化后的去重 URL。**NOT NULL**：它正是唯一约束比较的列，而 SQL 中 NULL 彼此不等 —— 可空会让这些行完全落在约束之外。agent 源用合成键 `agent://<name>`（见 ADR 0008） |
 | `parser_plugin_id` | web 来源使用的采集器标识；P1 为硬编码准插件 ID |
-| `title` | 来源自报的名字，采集时发现（feed 的 `<title>` / 页面标题）。**可空且不回填**：写入器只在缺失时设置，所以往列里塞一个 URL 派生猜测会**永久挡住真实标题**；未采集源的显示标签在展示层派生（`core.source_display_label`） |
+| `title` | 来源自报的名字，采集时发现（feed 的 `<title>` / 页面标题）。**可空且不回填**：写入器只在缺失时设置，所以往列里塞一个 URL 派生猜测会**永久挡住真实标题**；未采集源的显示标签在展示层派生（`core.origin_display_label`） |
 | `seen_frontier` | 分页型源已摄入的**最新推文 id** —— 抓取区间的**上沿**。翻页到此停止，不再重读历史。单调前进：重走旧历史时报到的更低 id 不得覆盖它 |
 | `floor_cursor` | 抓取区间的**下沿**：该源走过的**最深**位置。首轮按 `PEARSS_X_FIRST_PAGES` 采样，预算耗尽时停在哪，那里就成为 floor；此后每轮只在 frontier 与 floor 之间作业。**它是停止符，不是续采起点** —— 见 §「抓取区间」。**不可从 `item` 重算**：游标是来源给的不透明串 |
-| `folder` | 订阅在阅读器侧边栏中的归类，**一订阅一分类**（FreshRSS 模型：其源码明确 "a feed can only be in one category"，客户端也按此实现）。NOT NULL，默认 `default`；名称校验见 `core/folders`。它同时决定 `user/-/label/<name>` 流的内容 |
-| `schedule_policy` | `{type: fixed/adaptive, ...}`；决定下次抓取策略 |
-| `trust_level` | 来源信任等级；不改变“正文不可信”的默认规则 |
-| `status` | `active` / `paused` / `disabled` |
 | `tenant_id` | 租户预留字段 |
 
-不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 —— 否则该唯一约束对 NULL 行不生效，重复源可以无限并存。
+不变量：同一 `tenant_id` 内，`canonical_url + type` 唯一，且 `canonical_url` 不可为空 ——
+否则该唯一约束对 NULL 行不生效，重复 origin 可以无限并存。
 
-**停用（`paused`/`disabled`）不删除任何 Item**。`DELETE /v1/sources/{id}` 则是真删除：
-源行、它的 Item、正文文件、已读状态、处理器产物与抓取记录一并消失（ADR 0021）。
-要清掉内容但保留订阅（含抓取游标），用 `POST /v1/sources/{id}/items:delete`。
-
+`item.origin_id` 与 `raw_fetch.origin_id` 都是 NOT NULL + `ON DELETE CASCADE` 外键 → `origin.id`：
+删一个 origin 会带走它的条目、抓取记录与订阅。源内分页靠复合索引
+`ix_item_origin_sort_key_id (origin_id, sort_key, id)`，没有它每次排序都落临时 B 树（issue #77）。
 
 **备份分级提醒**：`seen_frontier` / `floor_cursor` 是**运维状态而非派生物**。
-它们不能像 `RawFetch`/`JobRun` 那样靠重放管道重建，因此随 `Source` 一起属于事实源备份范围；
+它们不能像 `RawFetch`/`JobRun` 那样靠重放管道重建，因此随 `Origin` 一起属于事实源备份范围；
 丢了不会报错，但会让下一次采集把已经抓过的区间重走一遍（去重兜住重复入库，
-代价是白费请求）。`folder` 则是普通配置，丢了表现为订阅回到 `default` 分组。
+代价是白费请求）。
 
-### Origin 与 Subscription（ADR 0046 拆表，已完成）
+### Subscription
 
-`Source` 已按 ADR 0046 D-A/D-B/D-C 拆成两半：阶段 A（migration 0026）建表并复制，
-阶段 B（0027）把读写切过去，阶段 C（0028）删掉镜像。
+**怎么消费一个 origin**：调度策略、处理链与阅读器归类。分类在策略这一侧，因为
+「谁在消费、按什么策略消费」正是它与事实分开的原因（一个 origin 两套策略：一个翻译、
+一个不译，见 issue #371）。
 
-- **`origin`** —— 事实：`type` / `url` / `canonical_url` / `title` / `parser_plugin_id` /
-  `seen_frontier` / `floor_cursor`。同一租户内 `canonical_url + type` 唯一，这就是去重
-  身份。
-- **`subscription`** —— 策略：`schedule_policy` / `pipeline_chain` / `target_lang` /
-  `folder` / `status` / `trust_level`。它回答「某个客户端怎么消费这个 origin」。
+| 字段 | 说明 |
+|---|---|
+| `id` | 稳定订阅 ID。1:1 阶段等于 `origin.id`（因此 `/v1/sources/{id}` 与 Reader 流 id 都还指得准）；多订阅之后才分叉 |
+| `origin_id` | 指向 `origin.id`，`ON DELETE CASCADE` |
+| `schedule_policy` | `{type: fixed/adaptive, ...}`；决定下次抓取策略。**下次何时抓从 policy + 历史推导，不落库**（ADR 0009） |
+| `pipeline_chain` / `target_lang` | 处理链与语言产品的目标语言（见 §「处理链」） |
+| `folder` | 订阅在阅读器侧边栏中的归类，**一订阅一分类**（FreshRSS 模型：其源码明确 "a feed can only be in one category"，客户端也按此实现）。NOT NULL，默认 `default`；名称校验见 `core/folders`。它同时决定 `user/-/label/<name>` 流的内容 |
+| `status` | `active` / `paused` / `disabled` |
+| `trust_level` | 来源信任等级；不改变「正文不可信」的默认规则 |
+| `tenant_id` | 租户预留字段 |
 
-阶段 B/C 之后的性质：
+不变量（当前阶段）：同一 `tenant_id` 内 `origin_id` 唯一 —— **一个 origin 一个订阅**。
+多订阅迁移会删掉这条约束（issue #371），那时一个 origin 才能挂两套策略。
 
-- **读路径全部走 `origin` / `subscription`**：调度读订阅的策略、抓取历史写 origin、
-  `item.origin_id` 是事实列。
-- **`source` 表已不存在**（0028 删除）。`item.origin_id` / `raw_fetch.origin_id` 是
-  NOT NULL + `ON DELETE CASCADE` 外键 → `origin`：删一个 origin 会带走它的条目、抓取
-  记录与订阅。`(origin_id, sort_key, id)` 复合索引服务源内分页（不用它会落临时 B 树，
-  issue #77）。
-- **1:1 阶段 id 相同**：`origin.id = subscription.id = 旧 source.id`，因此既有 item id、
-  guid 与 `/v1/sources/{id}` 都保持原义。
-- **「一个 origin 一个订阅」仍是当前约束**（`UNIQUE(tenant_id, origin_id)`）；
-  多订阅迁移会删掉它，那时一个 origin 才能挂两套策略（一个翻译、一个不译）。
-- 运维 SQL 查 `origin` / `subscription`（runbook 已同步）。
+**停用（`paused`/`disabled`）不删除任何 Item**。`DELETE /v1/sources/{id}` 则是真删除：
+origin 行、它的 Item、正文文件、已读状态、处理器产物与抓取记录一并消失（ADR 0021）。
+要清掉内容但保留订阅（含抓取游标），用 `POST /v1/sources/{id}/items:delete`。
+旧 `/v1/sources` 读端点保留为**投影**并已标 deprecated（issue #366），`source` 表本身
+在迁移 0028 已删除。
 
 ### 抓取区间（分页型源）
 
@@ -91,7 +90,7 @@
 | 字段 | 说明 |
 |---|---|
 | `id` | 抓取 ID |
-| `source_id` | 所属来源 |
+| `origin_id` | 所属 origin（`ON DELETE CASCADE`） |
 | `payload_ref` | 原始 HTTP body 的存储引用；失败可为空 |
 | `content_hash` | 原始 payload hash，用于诊断与去重 |
 | `http_status` | HTTP 响应状态，适用时记录 |
@@ -107,7 +106,7 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 
 内部短生命周期对象，不要求直接建表。所有入口（RSS、网页采集、P3 ingest）必须输出它，再进入统一 normalize 流程。
 
-最低字段：`source_id`、`external_id/guid`、`title`、`canonical_url`、`published_at`、`content`、`raw_fetch_id`、`metadata`。
+最低字段：`origin_id`、`external_id/guid`、`title`、`canonical_url`、`published_at`、`content`、`raw_fetch_id`、`metadata`。
 
 ### Item
 
@@ -116,7 +115,7 @@ RawFetch 是可重建诊断数据，保留期应配置化；不属于长期备�
 | 字段 | 说明 |
 |---|---|
 | `id` | 稳定 item ID |
-| `source_id` | 主要来源；多源关系可通过额外关联表表达 |
+| `origin_id` | 所属 origin（`ON DELETE CASCADE`）；多源关系可通过额外关联表表达 |
 | `guid` | 对外 RSS/Reader API 的稳定 ID；首次发布后不可改变 |
 | `content_hash` | 规范化内容哈希，用于跨源重复检测 |
 | `title` / `url` / `published_at` | 面向消费端的规范化字段 |
@@ -180,8 +179,8 @@ Item 行，连带其 `read_state`、`item_enrichment` 与正文文件。两条�
 
 `Job` 是长期声明；`JobRun` 是某次实际执行。
 
-> P1 现状：采集任务与源一一对应（`type='collect'`，`config` 存 source id）。
-> **`schedule` 列故意留空** —— 下次何时抓是从 `source.schedule_policy` 与历史
+> P1 现状：采集任务与源一一对应（`type='collect'`，`config` 存 origin id）。
+> **`schedule` 列故意留空** —— 下次何时抓是从 `subscription.schedule_policy` 与历史
 > **推导**的，不落库，否则会与推导结果成为两个事实源（ADR 0009）。
 
 | 实体 | 关键字段 | 说明 |
@@ -229,7 +228,7 @@ ReadState 是事实源；清理 Item 时它随 Item 一起删除（`ON DELETE CA
 | `manifest_json` | 声明的 identity 与 features（`core/plugins/hooks.py` 的 `Manifest.as_dict()`）；**不含**执行体与入口路径 |
 | `checksum` | canonical JSON 的 sha256。**不是签名**：没有签名机制，字段名容易误读。它记录「status 决策是针对哪个 manifest 内容做出的」 |
 | `status` | `enabled` / `disabled`，运维的启停决定 |
-| `trust` | `builtin` / `third-party`。**纯描述性，不产生行为差异**——与 `source.trust_level` 同构：区分「随 Pearss 来」与「你自己装的」，供运维辨识。真正的隔离由子进程沙箱提供（ADR 0017），不由此字段决定（ADR 0023） |
+| `trust` | `builtin` / `third-party`。**纯描述性，不产生行为差异**——与 `subscription.trust_level` 同构：区分「随 Pearss 来」与「你自己装的」，供运维辨识。真正的隔离由子进程沙箱提供（ADR 0017），不由此字段决定（ADR 0023） |
 | `tenant_id` / `created_at` / `updated_at` | 预留与时间戳 |
 
 ### IdempotencyRecord（P1）
@@ -296,16 +295,14 @@ created_at / finished_at），`work_unit` 是逐目标的结果（outcome / erro
 ## 关系概览
 
 ```text
-Source 1 --- N RawFetch
-Source 1 --- N Item
-Origin 1 --- N Subscription (拆表进行中：阶段 A 为 1 --- 1，多订阅迁移后解除)
-Origin 1 --- N Item (阶段 A：item.origin_id 已回填，读路径尚未切换)
+Origin 1 --- 1 Subscription (当前约束；多订阅迁移后为 1 --- N)
+Origin 1 --- N RawFetch
+Origin 1 --- N Item
 RawFetch 1 --- N ItemDraft (逻辑关系)
 Item   1 --- N ItemEnrichment
 Job    1 --- N JobRun
 Item   1 --- 1 ReadState (每 tenant)
-Job    1 --- 1 Source   (type='collect')
-Source 1 --- N Item
+Job    1 --- 1 Origin   (type='collect')
 FeedOut N --- N Item (由 filter_query 与发布记录隐式关联)
 Plugin 1 --- N ItemEnrichment
 ```
@@ -314,7 +311,7 @@ Plugin 1 --- N ItemEnrichment
 
 | 类型 | 实体 | 处理 |
 |---|---|---|
-| 事实源 | Source、Origin、Subscription、Item、FeedOut、Job、Plugin、ReadState、AuditLog | 定时备份、恢复演练、迁移严格管理（`Origin`/`Subscription` 是 ADR 0046 拆表进行中，阶段 A 与 `Source` 同源同 id） |
+| 事实源 | Origin、Subscription、Item、FeedOut、Job、Plugin、ReadState、AuditLog | 定时备份、恢复演练、迁移严格管理（ADR 0046 拆表已完成：`Source` 已不存在，`Origin` 的 id 就是旧 `source.id`） |
 | 可重建运行记录 | RawFetch、JobRun | 配置保留期；近期保留用于诊断，不进入常规长期备份 |
 | 可重建派生物 | ItemEnrichment、处理器产物 | 从 Item + pipeline 配置重放；可按成本选择保留，不视为唯一事实源 |
 | 运维记录 | Work、WorkUnit（作业账本） | 默认 30 天保留窗口后清理（`PEARSS_WORK_RETENTION_DAYS`，ADR 0046 D-F）；**不进备份**；未结束的作业永不清理 |
