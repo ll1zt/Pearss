@@ -45,6 +45,7 @@ from adapters.repository.enrichment import (
 )
 from adapters.repository.feed import (
     FEED_WINDOW,
+    channel_for_subscription,
     items_ready_for_feed,
     mark_published,
     promote_to_ready,
@@ -162,6 +163,7 @@ __all__ = [
     "backfill_chain",
     "backlog_for_source",
     "chain_for_source",
+    "channel_for_subscription",
     "claim_job_run",
     "claim_next_work",
     "claim_work",

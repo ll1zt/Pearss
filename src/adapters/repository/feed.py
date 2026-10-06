@@ -9,7 +9,10 @@ from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import Origin as OriginRow
+from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository._shared import row_to_item, visible_item_rows
+from adapters.rss_out import FeedMeta
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     ItemEvent,
@@ -18,22 +21,65 @@ from core.enums import (
 from core.item_state import TransitionContext
 from core.item_state import transition as item_transition
 from core.models import Item
+from core.normalize import origin_display_label
 
 FEED_WINDOW: int = 200
 
 
-def items_ready_for_feed(session: Session, *, limit: int = FEED_WINDOW) -> list[Item]:
+def channel_for_subscription(
+    session: Session, *, subscription_id: str, tenant_id: str
+) -> FeedMeta | None:
+    """The channel metadata a subscription's RSS carries, or None if unknown.
+
+    The channel is the **subscription** (ADR 0046 D-C): what a client
+    subscribes to is the policy, so the channel's identity is its id while the
+    name and link describe the origin behind it -- the same display label the
+    Reader's sidebar uses, so the two outputs cannot disagree about what a
+    channel is called.
+    """
+    row = session.execute(
+        select(OriginRow, SubscriptionRow)
+        .join(SubscriptionRow, SubscriptionRow.origin_id == OriginRow.id)
+        .where(
+            SubscriptionRow.id == subscription_id,
+            SubscriptionRow.tenant_id == tenant_id,
+        )
+    ).first()
+    if row is None:
+        return None
+    origin, _subscription = row
+    link = origin.canonical_url or origin.url or ""
+    return FeedMeta(
+        title=origin_display_label(
+            title=origin.title,
+            url=origin.url,
+            canonical_url=origin.canonical_url,
+            origin_id=origin.id,
+        ),
+        link=link,
+    )
+
+
+def items_ready_for_feed(
+    session: Session, *, origin_id: str | None = None, limit: int = FEED_WINDOW
+) -> list[Item]:
     """Items the gate permits, newest first, within the feed window.
 
     Pending is excluded in SQL rather than in Python: the gate is a hard
     invariant, and letting a pending row reach memory at all means a future
     change could accidentally render it.
+
+    `origin_id` scopes the window to one channel's origin. Unscoped, the window
+    is every origin's items -- which is what a single combined feed wants, and
+    never what one subscription's channel should render.
     """
+    query = select(ItemRow).where(visible_item_rows())
+    if origin_id is not None:
+        query = query.where(ItemRow.origin_id == origin_id)
     rows = session.execute(
-        select(ItemRow)
-        .where(visible_item_rows())
-        .order_by(ItemRow.published_at.desc().nullslast(), ItemRow.guid)
-        .limit(max(1, limit))
+        query.order_by(ItemRow.published_at.desc().nullslast(), ItemRow.guid).limit(
+            max(1, limit)
+        )
     ).scalars()
     return [row_to_item(row) for row in rows]
 
