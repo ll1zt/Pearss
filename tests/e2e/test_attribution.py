@@ -79,7 +79,7 @@ async def test_an_added_source_names_the_audit_row_it_created(
     """
     async with open_mcp_session(mcp_url) as session:
         result = await session.call_tool(
-            "add_source",
+            "add_subscription",
             {
                 "url": "https://attribution.example/feed.xml",
                 "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -133,7 +133,7 @@ async def test_the_audit_id_is_per_write_not_shared(
     async with open_mcp_session(mcp_url) as session:
         first = _tool_payload(
             await session.call_tool(
-                "add_source",
+                "add_subscription",
                 {
                     "url": "https://attribution.example/one.xml",
                     "schedule_policy": {"type": "fixed", "interval": "30m"},
@@ -142,7 +142,7 @@ async def test_the_audit_id_is_per_write_not_shared(
         )
         second = _tool_payload(
             await session.call_tool(
-                "add_source",
+                "add_subscription",
                 {
                     "url": "https://attribution.example/two.xml",
                     "schedule_policy": {"type": "fixed", "interval": "30m"},

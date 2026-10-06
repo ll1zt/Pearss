@@ -3,8 +3,8 @@
 Scenario register (normative source: docs/api/mcp-tool-guide.md section 3;
 files the #64 audit-id change touched). This exists because the coverage gate
 flagged six tool bodies that had never been run by any test: `get_item`,
-`list_jobs`, `update_schedule_policy`, `set_source_status`,
-`set_source_folder` and `retry_enrichments`. They appeared in the surface
+`list_jobs`, `update_subscription_policy`, `set_subscription_status`,
+`set_subscription_folder` and `retry_enrichments`. They appeared in the surface
 snapshot (`tools/list`) and in the annotation tests, but no test ever *called*
 them -- so their request plumbing, their error mapping and their result
 shaping were all unverified.
@@ -24,21 +24,21 @@ behind -- rather than that some method was called.
     When agent 调用 list_jobs
     Then 结果含该源的作业, 且 total 与 data 一致
 
-  AC-49 update_schedule_policy 改排程并落库
+  AC-49 update_subscription_policy 改排程并落库
     Given 一个已配置的源
-    When agent 确认后调用 update_schedule_policy
+    When agent 确认后调用 update_subscription_policy
     Then get_source 读回的排程是新策略
     And 结果带本次写入的 audit_id
 
-  AC-50 set_source_status 暂停后恢复
+  AC-50 set_subscription_status 暂停后恢复
     Given 一个 active 的源
-    When agent 确认后调用 set_source_status("paused")
+    When agent 确认后调用 set_subscription_status("paused")
     Then get_source 读回 paused
     And 再确认调用 ("active") 后读回 active
 
-  AC-51 set_source_folder 改分组并落库
+  AC-51 set_subscription_folder 改分组并落库
     Given 一个源
-    When agent 确认后调用 set_source_folder("阅读")
+    When agent 确认后调用 set_subscription_folder("阅读")
     Then get_source 读回该分组
 
   AC-52 retry_enrichments 对无失败行的源成功返回
@@ -311,7 +311,7 @@ async def test_update_schedule_policy_changes_the_stored_policy(
 
     result = await _call(
         mcp_url,
-        "update_schedule_policy",
+        "update_subscription_policy",
         {
             "source_id": source_id,
             "schedule_policy": {"type": "fixed", "interval": "3h"},
@@ -326,13 +326,13 @@ async def test_update_schedule_policy_changes_the_stored_policy(
 
 
 @pytest.mark.asyncio
-async def test_set_source_status_pauses_and_resumes(mcp_url: str) -> None:
+async def test_set_subscription_status_pauses_and_resumes(mcp_url: str) -> None:
     """AC-50: pause, observe, resume -- each state visible through get_source."""
     source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
 
     await _call(
         mcp_url,
-        "set_source_status",
+        "set_subscription_status",
         {"source_id": source_id, "status": "paused"},
     )
     source = await _call(mcp_url, "get_source", {"source_id": source_id})
@@ -340,7 +340,7 @@ async def test_set_source_status_pauses_and_resumes(mcp_url: str) -> None:
 
     await _call(
         mcp_url,
-        "set_source_status",
+        "set_subscription_status",
         {"source_id": source_id, "status": "active"},
     )
     source = await _call(mcp_url, "get_source", {"source_id": source_id})
@@ -348,13 +348,13 @@ async def test_set_source_status_pauses_and_resumes(mcp_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_source_folder_moves_the_source(mcp_url: str) -> None:
+async def test_set_subscription_folder_moves_the_source(mcp_url: str) -> None:
     """AC-51: the folder change is what a later read reports."""
     source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
 
     result = await _call(
         mcp_url,
-        "set_source_folder",
+        "set_subscription_folder",
         {"source_id": source_id, "folder": "阅读"},
     )
     assert result.get("declined") is None and result.get("aborted") is None, result
@@ -504,3 +504,31 @@ async def test_set_item_read_state_reports_a_missing_item(
 
     assert payload["error"] == "item_not_found", payload
     assert _read_state_row(url, "does-not-exist") is None
+
+
+@pytest.mark.asyncio
+async def test_a_write_tool_changes_the_subscription_and_leaves_the_origin(
+    mcp_url: str,
+) -> None:
+    """AC-341: the renamed write tools land on the subscription, not the origin.
+
+    Policy and facts are different tables (ADR 0046 D-C), and the tool names now
+    say which one they act on. Reading the row back is not enough on its own: an
+    API that wrote both tables would answer the same way. So this compares the
+    facts the composed read serves before and after -- the folder is the only
+    thing that may move.
+    """
+    source_id = (await _call(mcp_url, "list_sources", {"limit": 5}))["data"][0]["id"]
+    before = await _call(mcp_url, "get_source", {"source_id": source_id})
+
+    result = await _call(
+        mcp_url,
+        "set_subscription_folder",
+        {"source_id": source_id, "folder": "AC-341"},
+    )
+    assert result.get("declined") is None and result.get("aborted") is None, result
+
+    after = await _call(mcp_url, "get_source", {"source_id": source_id})
+    assert after["folder"] == "AC-341", after
+    for fact in ("id", "type", "url", "canonical_url", "title", "parser_plugin_id"):
+        assert after[fact] == before[fact], (fact, before[fact], after[fact])

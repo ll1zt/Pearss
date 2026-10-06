@@ -64,7 +64,7 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 ### 那么靠什么约束误操作
 
 1. **token 权限**——真正的边界：`PEARSS_MCP_TOKEN`，独立于 Core API token；
-2. **工具描述与 annotations**——破坏性工具（`remove_source` / `delete_items` / `delete_source_items`）在描述里明写不可逆后果，且 `destructiveHint=true`；出网或消耗 provider 预算的写工具 `openWorldHint=true`。注解是 host 决定是否追加自己的确认界面的依据，所以它和描述同属契约（进 snapshot）；
+2. **工具描述与 annotations**——破坏性工具（`remove_subscription` / `delete_items` / `delete_origin_items`）在描述里明写不可逆后果，且 `destructiveHint=true`；出网或消耗 provider 预算的写工具 `openWorldHint=true`。注解是 host 决定是否追加自己的确认界面的依据，所以它和描述同属契约（进 snapshot）；
 3. **幂等**——每次调用新生成 `Idempotency-Key`，重放不重复生效（因此 `idempotentHint=false`：重试是新意图）；
 4. **可审计**——每次写都有 Core API 审计行与 correlation id，事后可追溯。
 
@@ -88,21 +88,21 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 
 | 工具 | 副作用 |
 |---|---|
-| `add_source` | 引入外部内容源；`folder` 可在同一次调用里归类 |
-| `add_sources` | 批量引入外部内容源（ADR 0044）：返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
-| `fetch_source_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；地址必须在本源 host 上 |
-| `update_schedule_policy` | 改变抓取频率，可能压垮对方站点 |
-| `set_source_status` | 暂停/恢复采集，改变采集行为 |
-| `set_source_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
-| `set_source_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
-| `remove_source` | **删除来源及其全部条目**（ADR 0021：不可逆） |
+| `add_subscription` | 引入外部内容源；`folder` 可在同一次调用里归类 |
+| `add_subscriptions` | 批量引入外部内容源（ADR 0044）：返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
+| `fetch_origin_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；地址必须在本源 host 上 |
+| `update_subscription_policy` | 改变抓取频率，可能压垮对方站点 |
+| `set_subscription_status` | 暂停/恢复采集，改变采集行为 |
+| `set_subscription_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
+| `set_subscription_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
+| `remove_subscription` | **删除来源及其全部条目**（ADR 0021：不可逆） |
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文）：返回**作业句柄**，逐 id 结果查 `work_units`（已消失的 id 是 `skipped`） |
-| `delete_source_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
+| `delete_origin_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `set_item_read_state` | 标记条目的**消费状态**（已读/未读、星标/取消）：只写 `read_state` 行，**不碰条目本体**（content_hash / guid / publish_status / content_ref 都不动，已发布内容冻结）；省略的字段保留原值；`/v1/items/{id}/read-state` 与 Reader API 报同一状态（同一领域函数） |
 | `trigger_job` | 立即抓取 = 真实外部请求 |
 | `submit_items` | 向 agent 源推送内容（ADR 0022：写语料库）：返回**作业句柄**，逐条结果查 `work_units` |
 | `retry_enrichments` | 重排队失败的处理器链产物：`enrichment_id` 只重排**一行**（`POST /v1/enrichments/{id}:retry`），`source_id` 重排该源全部失败行 |
-| `backfill_source` | 对历史条目一次性补跑处理器链：返回**作业句柄**（服务端选择「仍缺该链产物的条目」，带 limit 重复调用会前进）；逐条结果查 `work_units` |
+| `backfill_subscription_chain` | 对历史条目一次性补跑处理器链：返回**作业句柄**（服务端选择「仍缺该链产物的条目」，带 limit 重复调用会前进）；逐条结果查 `work_units` |
 | `set_plugin_status` | 启停采集器插件，影响它服务的所有源 |
 
 只读工具（13 个）：`list_sources`、`get_source`、`diagnose_source`、`search_items`、`get_item`、
@@ -110,7 +110,7 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 `get_work`、`work_units`、`get_system_snapshot`。
 
 `get_work` 与 `work_units` 是作业的读侧（ADR 0046）：返回句柄的工具
-（如 `fetch_source_items`）不再内联逐条结果，因为那种响应会随地址数膨胀、
+（如 `fetch_origin_items`）不再内联逐条结果，因为那种响应会随地址数膨胀、
 并在客户端超时时连同结果一起丢掉。
 - `get_work`：状态 + 折叠 counts（`ok` / `skipped` / `rejected` / `failed` / `queued`），
   **不返回** target 列表，所以是常数大小。
@@ -246,7 +246,7 @@ title——**看起来像空壳，但它不是纯浪费**：SDK 只在存在 out
 的同一仓储入口，完整 ADR 0021 语义。`ac=subscribe` 仍不提供——订阅走 `quickadd`。
 
 名称校验在 `core/folders`：trim、长度上限、禁控制字符、**禁 `/`**（名字会变成 stream id，
-斜杠会产生客户端无法往返的路径）。MCP 侧对应 `set_source_folder` 与 `add_source` 的
+斜杠会产生客户端无法往返的路径）。MCP 侧对应 `set_subscription_folder` 与 `add_subscription` 的
 `folder` 参数。
 
 ## 九、传输与挂载

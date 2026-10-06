@@ -132,7 +132,7 @@ async def _call(base: str, arguments: dict[str, Any], *, rid: int) -> dict[str, 
     """Call `add_sources` once and return its payload."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         reply = await _rpc(
-            client, base, {"name": "add_sources", "arguments": arguments}, rid=rid
+            client, base, {"name": "add_subscriptions", "arguments": arguments}, rid=rid
         )
     return _payload(reply)
 
