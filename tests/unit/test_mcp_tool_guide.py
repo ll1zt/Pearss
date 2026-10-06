@@ -627,3 +627,74 @@ def test_every_tool_calls_an_endpoint_that_exists() -> None:
                 f"{tool}'s assembled path {path!r} has no declared endpoint "
                 f"under {prefix!r}"
             )
+
+
+# --------------------------------------------------------------------------
+# `next_actions` are pointers, so they must point at a registered tool
+# --------------------------------------------------------------------------
+#
+# Issue #75 proposed this guard alongside its naming question; the renaming was
+# declined (guide section 7) but the guard is independent of it, and it stayed
+# unimplemented -- four hardcoded lists, only ever spot-checked. Issue #357 is
+# the audit's finding of that gap. It is a mechanical property, so it takes no
+# AC number (the #87 precedent).
+
+
+def _registered_tool_names() -> set[str]:
+    return set(json.loads(SNAPSHOT.read_text(encoding="utf-8")))
+
+
+def _next_action_lists() -> dict[str, list[str]]:
+    """Every literal `next_actions` list in the MCP surface, by source location.
+
+    Read from the AST rather than by regex so a renamed key or a reshaped value
+    is not silently skipped: a scan that matches nothing would pass vacuously,
+    which is the failure mode this file exists to prevent. The scan asserts
+    something was found, and that each element is a plain string literal.
+
+    Only literals are reachable this way. If a future `next_actions` is built at
+    runtime, the `found` assertion below will not notice -- but the dictionaries
+    are built from literals today, and the test says so rather than implying a
+    completeness it does not have.
+    """
+    found: dict[str, list[str]] = {}
+    for path in sorted((REPO_ROOT / "src/app/mcp").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Dict):
+                continue
+            for key, value in zip(node.keys, node.values, strict=True):
+                if not (isinstance(key, ast.Constant) and key.value == "next_actions"):
+                    continue
+                assert isinstance(value, ast.List), (path, node.lineno)
+                names: list[str] = []
+                for element in value.elts:
+                    assert isinstance(element, ast.Constant) and isinstance(
+                        element.value, str
+                    ), (path, node.lineno)
+                    names.append(element.value)
+                found[f"{path.relative_to(REPO_ROOT)}:{node.lineno}"] = names
+    return found
+
+
+def test_every_next_action_names_a_registered_tool() -> None:
+    """A model follows `next_actions` straight back into `tools/call`.
+
+    A stale name is an instruction to call a tool that does not exist, and the
+    failure is silent to us: the model gets `unknown tool` rather than a server
+    error. The four lists are hardcoded, so nothing but this guard connects them
+    to the registry.
+    """
+    actions = _next_action_lists()
+    assert actions, "no `next_actions` literals found -- the AST scan stopped matching"
+
+    registered = _registered_tool_names()
+    unknown = {
+        location: [name for name in names if name not in registered]
+        for location, names in actions.items()
+    }
+    unknown = {location: names for location, names in unknown.items() if names}
+    assert not unknown, (
+        f"next_actions point at tools that are not registered: {unknown}; "
+        f"registered: {sorted(registered)}"
+    )
