@@ -1,17 +1,10 @@
-"""Source persistence: the compatibility façade over origin and subscription.
+"""Source persistence: one row out of two tables.
 
-ADR 0046 D-B. Internally everything now reads `origin` (the facts) and
-`subscription` (the policy); this is the one module that still knows the
-`source` table exists, and it does so for two reasons:
-
-* **Writes.** `create_source` keeps inserting the `source` row, because
-  `item.source_id`'s foreign key still resolves against it and migration 0027
-  has not run yet. The row's columns are frozen at creation and nothing reads
-  them -- which is why there is no mirror to keep in step: a mirror nobody
-  reads is a second fact source with none of the benefits.
-* **Reads at the old shape.** `get_source` / `list_sources` compose a
-  `SourceView` from origin + subscription, so the HTTP payload built from them
-  is unchanged while its data comes from the table that owns it.
+ADR 0046 D-B/D-C. `origin` holds the facts, `subscription` the policy; this
+module is where a caller that still thinks in one "source" gets both. It is the
+compatibility seam, and it is deliberately small: `create_source` writes the two
+rows, `get_source`/`list_sources` compose a `SourceView`, and
+`update_source_policy` writes the patchable half.
 
 `SourceView` is frozen on purpose: a caller that mutated a returned row would
 otherwise believe it had changed something.
@@ -24,17 +17,13 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Origin as OriginRow
-from adapters.db_models import Source as SourceRow
 from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository.origins import create_origin
 from adapters.repository.subscriptions import create_subscription
-from core.enums import (
-    SourceStatus,
-)
 from core.folders import DEFAULT_FOLDER
 
 LOGGER = logging.getLogger(__name__)
@@ -140,12 +129,8 @@ def create_source(
     create answer with the same body instead of a 409: the caller's intent was
     "this source should exist", and after the first request it does.
 
-    The write is a façade over three tables while ADR 0046's split is staged.
-    `source` keeps the foreign key `item.source_id` resolves against, and
-    `origin`/`subscription` are written alongside it so the rows the read paths
-    use already exist. `origin.id` and `subscription.id` are this `source.id`,
-    which is what keeps the three addressable by one key -- and every item id,
-    guid and `/v1/sources/{id}` URL unchanged.
+    Both rows share this id, which is what keeps every item id, guid and
+    `/v1/sources/{id}` URL a client already holds meaningful.
 
     There is no revival branch any more. It existed for soft-deleted rows,
     which answered 201 while never being collected again; deletion now removes
@@ -157,41 +142,18 @@ def create_source(
     source_id = derive_source_id(
         tenant_id=tenant_id, source_type=source_type, canonical_url=canonical_url
     )
-    existing = session.get(SourceRow, source_id)
+    existing = session.get(OriginRow, source_id)
     if existing is not None:
         # DEBUG: "add this feed" is idempotent, and a retrying client asks
         # again by design (issue #296).
         LOGGER.debug("source %s already exists; returning it", source_id)
         view = _compose(session, source_id)
         if view is None:
-            raise LookupError(
-                f"source {source_id!r} has a mirror row but no origin; the "
-                "stage-A backfill did not run against this database"
-            )
+            raise LookupError(f"source {source_id!r} has no origin row")
         return view
 
-    row = SourceRow(
-        id=source_id,
-        type=source_type,
-        url=url,
-        canonical_url=canonical_url,
-        parser_plugin_id=parser_plugin_id,
-        schedule_policy=schedule_policy,
-        pipeline_chain=pipeline_chain,
-        target_lang=target_lang,
-        folder=folder,
-        status=SourceStatus.ACTIVE.value,
-        trust_level=trust_level,
-        tenant_id=tenant_id,
-        created_at=at,
-        updated_at=at,
-    )
-    session.add(row)
-    session.flush()
-
-    # The same write, expressed against the tables the split is moving to. The
-    # origin is created first because the subscription points at it; both are
-    # keyed on this row's id so the three stay one aggregate.
+    # The origin first: the subscription points at it. Both are keyed on the
+    # derived id so the pair stays one aggregate.
     origin = create_origin(
         session,
         origin_id=source_id,
@@ -215,9 +177,7 @@ def create_source(
         trust_level=trust_level,
     )
     LOGGER.debug(
-        "created source %s (%s) with its origin and subscription",
-        source_id,
-        source_type,
+        "created source %s (%s) as origin + subscription", source_id, source_type
     )
     return _view(origin, subscription)
 
@@ -236,8 +196,8 @@ def _compose(session: Session, source_id: str) -> SourceView | None:
     subscription = session.get(SubscriptionRow, source_id)
     if subscription is None:
         raise LookupError(
-            f"origin {source_id!r} has no subscription; stage A's 1:1 invariant "
-            "was broken by a write that did not go through create_source"
+            f"origin {source_id!r} has no subscription; the 1:1 invariant was "
+            "broken by a write that did not go through create_source"
         )
     return _view(origin, subscription)
 
@@ -285,14 +245,3 @@ def update_source_policy(
     subscription.updated_at = at
     session.flush()
     return get_source(session, source_id)
-
-
-def delete_source_mirror(session: Session, *, source_id: str) -> None:
-    """Remove the stage-A mirror row.
-
-    The façade's job for the same reason `create_source` is: the row exists only
-    because `item.source_id`'s foreign key still resolves against it, and
-    knowing when it may go is this module's business. Called after the items
-    are gone -- the foreign key cascades from it.
-    """
-    session.execute(delete(SourceRow).where(SourceRow.id == source_id))

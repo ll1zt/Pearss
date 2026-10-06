@@ -191,12 +191,7 @@ def _insert(session: Session, item: Item) -> None:
     session.add(
         ItemRow(
             id=item.id,
-            # The truth column first, then the stage-A legacy column it
-            # replaces. Both are written equal: 0027 drops `source_id`, so
-            # until then it is a mirror that only the compatibility façade
-            # reads.
             origin_id=item.origin_id,
-            source_id=item.origin_id,
             guid=item.guid,
             content_hash=item.content_hash,
             title=item.title,

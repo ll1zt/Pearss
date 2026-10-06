@@ -19,7 +19,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-import sqlalchemy as sa
 from sqlalchemy.orm import Session, sessionmaker
 
 from adapters.repository import create_source, parse_chain
@@ -29,7 +28,7 @@ from app.scheduler import run_tick
 from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.models import ItemDraft, schedule_policy_from_json, schedule_policy_to_json
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 pytestmark = pytest.mark.integration
 
@@ -38,21 +37,13 @@ SOURCE = "src-1"
 
 
 def _add_source(session: Session, *, source_id: str, policy: dict[str, object]) -> None:
-    session.execute(
-        sa.text(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, trust_level, tenant_id, created_at, updated_at)"
-            " values (:id, 'rss', :url, :url, :policy, 'active', 'standard',"
-            " 'default', :now, :now)"
-        ),
-        {
-            "id": source_id,
-            "url": f"https://{source_id}.example.com/feed",
-            "policy": schedule_policy_to_json(schedule_policy_from_json(policy)),
-            "now": NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
-        },
+    seed_source(
+        session,
+        source_id=source_id,
+        url=f"https://{source_id}.example.com/feed",
+        schedule_policy=schedule_policy_to_json(schedule_policy_from_json(policy)),
+        at=NOW.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
     )
-    mirror_sources(session)
     session.commit()
 
 

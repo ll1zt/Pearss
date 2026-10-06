@@ -1901,27 +1901,18 @@ _SQL_NAMES_SOURCE = re.compile(r"\b(?:from|into|update|join)\s+source\b", re.IGN
 _SQL_KEYWORD = re.compile(r"\b(?:select|insert|delete|where)\b", re.IGNORECASE)
 
 
-def test_no_business_path_reads_the_source_table() -> None:
-    """AC-335: after the split, `source` belongs to the façade alone.
+def test_no_module_reaches_for_the_retired_source_table() -> None:
+    """AC-335: `source` is gone, and no module may reach for it again.
 
-    Issue #364 moved every read and write onto `origin`/`subscription`. What is
-    left of `source` is a compatibility mirror: `item.source_id`'s foreign key
-    resolves against it until migration 0028 drops it, and `create_source`
-    writes it (nothing else reads it, which is why it is frozen at creation).
-    A second module reaching for it would be a second owner of the same facts
-    -- the failure the split exists to remove -- so the scan is mechanical
-    rather than a review step.
+    Issue #364 moved every read and write onto `origin`/`subscription` and
+    migration 0028 dropped the table. The mechanical criterion is that the name
+    no longer appears in `src/` at all: no import of the retired model, no SQL
+    naming it. A guard rather than a review step because the shape of the
+    regression is a copy-paste from an old query, which reads as correct.
     """
-    allowed = {
-        "src/adapters/db_models.py",  # the table's own definition
-        "src/adapters/repository/sources.py",  # the façade
-    }
-    imported_source: list[str] = []
-    table_in_sql: list[str] = []
+    offenders: list[str] = []
     for path in sorted((REPO_ROOT / "src").rglob("*.py")):
         relative = str(path.relative_to(REPO_ROOT))
-        if relative in allowed:
-            continue
         text = path.read_text(encoding="utf-8")
         for node in ast.walk(ast.parse(text)):
             if (
@@ -1929,7 +1920,7 @@ def test_no_business_path_reads_the_source_table() -> None:
                 and node.module == "adapters.db_models"
                 and any(alias.name == "Source" for alias in node.names)
             ):
-                imported_source.append(relative)
+                offenders.append(f"{relative}: imports the retired `Source` model")
                 break
         for node in ast.walk(ast.parse(text)):
             if (
@@ -1938,16 +1929,11 @@ def test_no_business_path_reads_the_source_table() -> None:
                 and _SQL_NAMES_SOURCE.search(node.value)
                 and _SQL_KEYWORD.search(node.value)
             ):
-                table_in_sql.append(f"{relative}: {node.value[:60]!r}")
+                offenders.append(f"{relative}: names the `source` table in SQL")
 
-    assert not imported_source, (
-        "these modules import the `source` table's model, so they still depend "
-        f"on the mirror the split left behind: {sorted(set(imported_source))}. "
-        "Read origin/subscription, or go through the façade."
-    )
-    assert not table_in_sql, (
-        "these modules name the `source` table in SQL, which is the mirror's "
-        f"job and the façade's alone: {table_in_sql}"
+    assert not offenders, (
+        "these modules still reach for the retired `source` table: "
+        f"{offenders}. Read origin/subscription instead."
     )
 
 

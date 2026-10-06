@@ -1,23 +1,23 @@
-"""origin/subscription split stage A: the dual-write façade (issue #363).
+"""The origin/subscription split, seen from the write and read paths.
 
-Scenario register (normative source: the AC-332..333 row of SCENARIOS.md)
+Scenario register (normative source: the AC-332..335 rows of SCENARIOS.md)
 
-  AC-333 one create writes the same row into all three tables
+  AC-333 one create writes origin and subscription with the same id
     Given a migrated database
     When  a source is created through create_source
-    Then  source/origin/subscription each hold exactly one row with the same id,
+    Then  origin and subscription each hold exactly one row with the same id,
           and the fact columns and the policy columns have landed where they belong
     And   calling it again with the same URL writes nothing the second time
 
-Stage A adds tables only: the read paths still use `source` (stage B switches
-them), so what this asserts is the *write* side. Nothing here counts calls --
-it reads the three tables' real rows and compares them column for column. The
-repository read functions added with the tables are driven by real data here,
-so they cannot become helpers with tests and no production caller.
+  AC-334 the item's fact is `origin_id`, and the scheduler reads the subscription
+    Given a source created through the repository
+    When  an item is stored and the policy is changed on the subscription
+    Then  the item carries the origin, and the scheduler reports the new policy
+    And   `source` -- the retired mirror -- is gone
 
-The statements are literals rather than interpolated strings: the table and
-column names are fixed, and writing them out is what keeps a query in a test
-readable as the query it is.
+Nothing here counts calls: it reads the tables' real rows and compares them
+column for column. The repository read functions are driven by real data here,
+so they cannot become helpers with tests and no production caller.
 """
 
 from __future__ import annotations
@@ -44,11 +44,9 @@ AT = timestamp(BASE)
 SCHEDULE = '{"interval_minutes": 60}'
 CHAIN = '[{"plugin_id": "translate", "kind": "translate", "lang": "zh"}]'
 
-SOURCE_FACTS = (
-    "select id, tenant_id, type, url, canonical_url, title, parser_plugin_id,"
-    " seen_frontier, floor_cursor, created_at, updated_at"
-    " from source where id = :id"
-)
+# The statements are literals rather than interpolated strings: the table and
+# column names are fixed, and writing them out is what keeps a query in a test
+# readable as the query it is.
 ORIGIN_FACTS = (
     "select id, tenant_id, type, url, canonical_url, title, parser_plugin_id,"
     " seen_frontier, floor_cursor, created_at, updated_at"
@@ -60,7 +58,6 @@ SUBSCRIPTION_POLICY = (
     " from subscription where id = :id"
 )
 COUNTS = {
-    "source": "select count(*) from source",
     "origin": "select count(*) from origin",
     "subscription": "select count(*) from subscription",
 }
@@ -94,23 +91,26 @@ def _count(session: Session, table: str) -> int:
 
 
 @pytest.mark.integration
-def test_creating_a_source_writes_the_same_row_into_all_three_tables(
+def test_creating_a_source_writes_both_rows_under_one_id(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """AC-333: one create writes three rows, splitting facts from policy."""
+    """AC-333: one create writes two rows, facts to origin, policy to subscription."""
     with session_factory() as session:
         source_id = _create(session)
         session.commit()
 
     with session_factory() as session:
-        fact = session.execute(sa.text(SOURCE_FACTS), {"id": source_id}).one()
         origin = session.execute(sa.text(ORIGIN_FACTS), {"id": source_id}).one()
         policy = session.execute(sa.text(SUBSCRIPTION_POLICY), {"id": source_id}).one()
 
-        # Column for column, not "roughly the same".
-        assert tuple(origin) == tuple(fact)
-        # The subscription shares the id (the 1:1 stage) and points at its own
-        # origin rather than merely repeating the id.
+        assert origin[0] == source_id
+        assert origin[1] == SINGLE_TENANT
+        assert origin[2] == "rss"
+        assert origin[3] == "https://a.example/feed"
+        assert origin[4] == "https://a.example/feed"
+
+        # The subscription shares the id and points at its own origin rather
+        # than merely repeating the id.
         assert policy[0] == source_id
         assert policy[1] == SINGLE_TENANT
         assert policy[2] == source_id
@@ -126,22 +126,19 @@ def test_creating_a_source_writes_the_same_row_into_all_three_tables(
             AT,
         )
 
-        assert _count(session, "source") == 1
         assert _count(session, "origin") == 1
         assert _count(session, "subscription") == 1
 
 
 @pytest.mark.integration
-def test_the_write_path_stores_the_origin_and_mirrors_the_legacy_column(
+def test_the_write_path_stores_the_origin_and_reads_the_subscription(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """AC-334: the item's fact is `origin_id`, and reads follow the subscription.
+    """AC-334: the item carries the origin, and the scheduler follows the subscription.
 
     Three statements, each one a way this could be wrong: the collected item
-    must carry the origin (not only the column 0028 drops), the mirror must
-    still be populated so a rollback to the previous release keeps working, and
-    the scheduler must read policy from the subscription rather than from the
-    frozen mirror row.
+    must carry the origin, the scheduler must report the subscription's policy
+    rather than a stale copy, and the retired `source` table must be gone.
     """
     with session_factory() as session:
         source_id = _create(session)
@@ -164,27 +161,31 @@ def test_the_write_path_stores_the_origin_and_mirrors_the_legacy_column(
     assert just_created == [(source_id, SCHEDULE)]
 
     with session_factory() as session:
-        row = session.execute(sa.text("select origin_id, source_id from item")).one()
-        assert row.origin_id == source_id
-        assert row.source_id == source_id, "the mirror column must stay populated"
+        item_origin = session.execute(
+            sa.text("select origin_id from item")
+        ).scalar_one()
+        assert item_origin == source_id
 
         # Change only the subscription, then ask the scheduler again: the policy
-        # it reports has to follow the subscription, or it is reading the mirror.
+        # it reports has to follow the subscription, or it is reading a copy.
         session.execute(
             sa.text("update subscription set schedule_policy = :policy where id = :id"),
             {"policy": '{"interval_minutes": 5}', "id": source_id},
         )
         session.commit()
         policy_after = collectable_sources(session, tenant_id=SINGLE_TENANT)
-        mirror = session.execute(
-            sa.text("select schedule_policy from source where id = :id"),
-            {"id": source_id},
-        ).scalar_one()
+
+        tables = {
+            str(name)
+            for (name,) in session.execute(
+                sa.text("select name from sqlite_master where type = 'table'")
+            ).fetchall()
+        }
 
     assert policy_after == [(source_id, '{"interval_minutes": 5}')]
-    assert mirror == SCHEDULE, (
-        "the mirror is frozen at creation on purpose: nothing reads it, and a "
-        "second writer would be a second owner of the same fact"
+    assert "source" not in tables, (
+        "the mirror is retired: migration 0028 drops it, and a table that came "
+        "back would be a second place to keep the same facts"
     )
 
 
@@ -192,7 +193,7 @@ def test_the_write_path_stores_the_origin_and_mirrors_the_legacy_column(
 def test_creating_the_same_url_twice_writes_nothing_the_second_time(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """AC-333: a repeated create is idempotent in all three tables, not just one."""
+    """AC-333: a repeated create is idempotent in both tables, not just one."""
     with session_factory() as session:
         first = _create(session)
         session.commit()
@@ -203,7 +204,6 @@ def test_creating_the_same_url_twice_writes_nothing_the_second_time(
 
     assert second == first
     with session_factory() as session:
-        assert _count(session, "source") == 1
         assert _count(session, "origin") == 1
         assert _count(session, "subscription") == 1
 
@@ -212,7 +212,7 @@ def test_creating_the_same_url_twice_writes_nothing_the_second_time(
 def test_the_new_read_paths_answer_for_what_the_create_path_wrote(
     session_factory: sessionmaker[Session],
 ) -> None:
-    """Stage A's read functions return the rows its write path produced."""
+    """The repository read functions return the rows its write path produced."""
     with session_factory() as session:
         first = _create(session, url="https://a.example/feed", folder="Tech")
         second = _create(session, url="https://b.example/feed", folder="News")

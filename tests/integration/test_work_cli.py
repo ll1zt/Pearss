@@ -260,7 +260,6 @@ def test_ac210_retry_failed_re_sends_only_the_failed_targets(
             ItemRow(
                 id="cli-item",
                 origin_id=source_id,
-                source_id=source_id,
                 guid="cli-guid",
                 content_hash="cli-hash",
                 title="Row to retry",
@@ -342,7 +341,6 @@ def test_a_work_with_no_failures_re_sends_nothing(
             ItemRow(
                 id="cli-clean-item",
                 origin_id=source_id,
-                source_id=source_id,
                 guid="cli-clean-guid",
                 content_hash="cli-clean-hash",
                 title="Nothing to retry",

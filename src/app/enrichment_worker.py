@@ -91,7 +91,7 @@ def _open_gate_if_complete(
         session,
         item_id=item_id,
         content_hash=content_hash,
-        chain=chain_for_source(session, source_id=item.source_id),
+        chain=chain_for_source(session, source_id=item.origin_id),
     ):
         return False
     if item.publish_status != PublishStatus.PENDING.value:
@@ -600,7 +600,7 @@ def _resolve_upstream(
     """
     from adapters.repository.enrichment import chain_for_source
 
-    chain = chain_for_source(session, source_id=item.source_id)
+    chain = chain_for_source(session, source_id=item.origin_id)
     for spec in chain:
         if (
             spec.plugin_id == row.plugin_id

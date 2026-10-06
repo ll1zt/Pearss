@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app, create_engine_for
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -228,20 +228,12 @@ async def test_read_token_can_list_but_not_disable(
 def zhihu_source(session_factory: sessionmaker[Session]) -> Iterator[str]:
     source_id = "s-zhihu"
     with session_factory() as session:
-        session.execute(
-            sa.text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, trust_level, tenant_id, created_at, updated_at)"
-                " values (:id, 'web', :u, :u, '{}', 'active', 'standard',"
-                " 'default', '2026-01-01T00:00:00.000000Z',"
-                " '2026-01-01T00:00:00.000000Z')"
-            ),
-            {
-                "id": source_id,
-                "u": "https://www.zhihu.com/people/example",
-            },
+        seed_source(
+            session,
+            source_id=source_id,
+            source_type="web",
+            url="https://www.zhihu.com/people/example",
         )
-        mirror_sources(session)
         session.commit()
     yield source_id
 
@@ -292,7 +284,7 @@ async def test_a_disabled_plugin_collects_nothing(
 
     with session_factory() as session:
         items = session.execute(
-            sa.text("select count(*) from item where source_id = :i"),
+            sa.text("select count(*) from item where origin_id = :i"),
             {"i": zhihu_source},
         ).scalar()
         runs = session.execute(sa.text("select status from job_run")).fetchall()

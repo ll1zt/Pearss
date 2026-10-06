@@ -19,12 +19,12 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from fastapi import FastAPI
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.main import create_app
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -45,28 +45,17 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
     with engine.begin() as connection:
         # An rss source that must NOT accept pushed items, and an agent source
         # that is the only legitimate target.
-        connection.execute(
-            text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values (:id, 'rss', 'https://blog.example.com/feed',"
-                " 'https://blog.example.com/feed', '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            ),
-            {"id": RSS_SOURCE_ID},
+        seed_source(
+            connection,
+            source_id=RSS_SOURCE_ID,
+            url="https://blog.example.com/feed",
         )
-        mirror_sources(connection)
-        connection.execute(
-            text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values (:id, 'agent', 'agent://intake', 'agent://intake',"
-                " '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            ),
-            {"id": AGENT_SOURCE_ID},
+        seed_source(
+            connection,
+            source_id=AGENT_SOURCE_ID,
+            source_type="agent",
+            url="agent://intake",
         )
-        mirror_sources(connection)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -235,7 +224,7 @@ async def test_caller_cannot_choose_the_source(
 
     with session_factory() as session:
         owners = (
-            session.execute(sa.text("select distinct source_id from item"))
+            session.execute(sa.text("select distinct origin_id from item"))
             .scalars()
             .all()
         )
@@ -453,7 +442,7 @@ async def test_resubmitting_the_same_external_id_does_not_duplicate(
 
     with session_factory() as session:
         count = session.execute(
-            sa.text("select count(*) from item where source_id = :sid"),
+            sa.text("select count(*) from item where origin_id = :sid"),
             {"sid": AGENT_SOURCE_ID},
         ).scalar_one()
     assert count == 1

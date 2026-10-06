@@ -57,15 +57,18 @@ FTS_TABLES = {
 }
 
 EXPECTED_TABLES = (
-    P1_TABLES
+    # `source` is not in the head schema any more: migration 0028 dropped it
+    # (ADR 0046 D-C). Subtracted rather than removed from P1_TABLES, because
+    # 0001 really did create it and the test that pins 0001's contents has to
+    # keep saying so.
+    (P1_TABLES - {"source"})
     | READER_TABLES
     | API_TABLES
     | {"plugin", "item_enrichment", STATS_TABLE}
     | FTS_TABLES
     # The work ledger (ADR 0046): a requested batch and its per-target rows.
     | {"work", "work_unit"}
-    # The origin/subscription split (ADR 0046 D-A/D-B, issue #363). Migration
-    # 0026 creates both *alongside* `source`; 0027 is the one that removes it.
+    # The origin/subscription split (ADR 0046 D-A/D-B, issues #363/#364).
     | {"origin", "subscription"}
 )
 
@@ -187,15 +190,25 @@ PROBE_STATEMENTS: dict[tuple[str, str], str] = {
     (
         "raw_fetch",
         "error_class",
-    ): "insert into raw_fetch (id, error_class) values ('probe', ?)",
+    ): (
+        "insert into raw_fetch (id, origin_id, error_class)"
+        " values ('probe', 'probe-origin', ?)"
+    ),
     (
         "item",
         "publish_status",
-    ): "insert into item (id, publish_status) values ('probe', ?)",
+    ): (
+        "insert into item (id, origin_id, publish_status)"
+        " values ('probe', 'probe-origin', ?)"
+    ),
     (
-        "source",
+        "origin",
         "type",
-    ): "insert into source (id, type, canonical_url) values ('probe', ?, 'https://p.example/f')",
+    ): (
+        "insert into origin (id, type, canonical_url, tenant_id, created_at,"
+        " updated_at) values ('probe', ?, 'https://p.example/f', 'default',"
+        " 'now', 'now')"
+    ),
     ("job_run", "status"): "insert into job_run (id, status) values ('probe', ?)",
 }
 
@@ -206,7 +219,7 @@ PROBE_STATEMENTS: dict[tuple[str, str], str] = {
     [
         (("raw_fetch", "error_class"), "not_a_real_class"),
         (("item", "publish_status"), "sort_of_published"),
-        (("source", "type"), "carrier_pigeon"),
+        (("origin", "type"), "carrier_pigeon"),
         (("job_run", "status"), "almost_done"),
     ],
 )
@@ -237,26 +250,23 @@ def test_error_class_taxonomy_is_accepted(alembic_config: Config) -> None:
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(
-            "insert into source (id, type, url, canonical_url, schedule_policy,"
-            " status, tenant_id, created_at, updated_at)"
-            " values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "s1",
-                "rss",
-                "https://a.example/feed",
-                "https://a.example/feed",
-                "{}",
-                "active",
-                "default",
-                "now",
-                "now",
-            ),
+            "insert into origin (id, type, url, canonical_url, tenant_id,"
+            " created_at, updated_at)"
+            " values (?, ?, ?, ?, 'default', 'now', 'now')",
+            ("s1", "rss", "https://a.example/feed", "https://a.example/feed"),
+        )
+        connection.execute(
+            "insert into subscription (id, tenant_id, origin_id,"
+            " schedule_policy, folder, status, trust_level, created_at,"
+            " updated_at)"
+            " values ('s1', 'default', 's1', '{}', 'default', 'active',"
+            " 'standard', 'now', 'now')"
         )
         for index, error_class in enumerate(
             ["network", "parse", "structure_changed", "blocked", "auth"]
         ):
             connection.execute(
-                "insert into raw_fetch (id, source_id, status, error_class,"
+                "insert into raw_fetch (id, origin_id, status, error_class,"
                 " fetched_at, correlation_id) values (?, ?, ?, ?, ?, ?)",
                 (f"f{index}", "s1", "failed", error_class, "now", f"c{index}"),
             )
@@ -282,10 +292,10 @@ def test_canonical_url_cannot_be_null(alembic_config: Config) -> None:
     try:
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
-                "insert into source (id, type, url, canonical_url,"
-                " schedule_policy, status, tenant_id, created_at, updated_at)"
+                "insert into origin (id, type, url, canonical_url, tenant_id,"
+                " created_at, updated_at)"
                 " values ('null-key', 'rss', 'https://n.example/f', NULL,"
-                " '{}', 'active', 'default', 'now', 'now')"
+                " 'default', 'now', 'now')"
             )
     finally:
         connection.close()
@@ -298,9 +308,9 @@ def test_duplicate_canonical_url_is_rejected(alembic_config: Config) -> None:
     db_path = Path(url.removeprefix("sqlite+pysqlite:///"))
 
     insert = (
-        "insert into source (id, type, url, canonical_url, schedule_policy,"
-        " status, tenant_id, created_at, updated_at)"
-        " values (?, 'rss', ?, ?, '{}', 'active', 'default', 'now', 'now')"
+        "insert into origin (id, type, url, canonical_url, tenant_id,"
+        " created_at, updated_at)"
+        " values (?, 'rss', ?, ?, 'default', 'now', 'now')"
     )
     connection = sqlite3.connect(db_path)
     try:
@@ -349,7 +359,7 @@ def test_migration_0004_backfills_without_deleting(tmp_path: Path) -> None:
     connection = sqlite3.connect(db_path)
     try:
         rows = dict(
-            connection.execute("select id, canonical_url from source").fetchall()
+            connection.execute("select id, canonical_url from origin").fetchall()
         )
     finally:
         connection.close()
@@ -774,7 +784,115 @@ def test_timestamp_width_migration_is_idempotent(tmp_path: Path) -> None:
     command.upgrade(config, "head")
 
     connection = sqlite3.connect(db_path)
-    value = connection.execute("select created_at from source").fetchone()[0]
+    value = connection.execute("select created_at from origin").fetchone()[0]
     connection.close()
 
     assert value == "2026-01-01T00:00:00.000000Z"
+
+
+@pytest.mark.integration
+def test_the_split_finishes_by_dropping_the_source_table(tmp_path: Path) -> None:
+    """AC-336: after 0028 only origin/subscription hold facts, both ways round.
+
+    Seeded at 0025 -- the pre-split shape production actually had -- and then
+    migrated to head, so the rebuild is checked against the rows a real release
+    would carry. The downgrade is checked against the same rows: the mirror has
+    to come back reconciled with what is true now, not with a frozen copy.
+    """
+    db_path = tmp_path / "drop-source.db"
+    config = _split_test_config(db_path)
+
+    command.upgrade(config, "0025")
+    connection = sqlite3.connect(db_path)
+    try:
+        _seed_a_populated_database(connection)
+    finally:
+        connection.close()
+
+    command.upgrade(config, "head")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        tables = {
+            str(name)
+            for (name,) in connection.execute(
+                "select name from sqlite_master where type = 'table'"
+            )
+        }
+        assert "source" not in tables, sorted(tables)
+        assert {"origin", "subscription"} <= tables
+
+        item_columns = {
+            str(row[1]): row for row in connection.execute("pragma table_info(item)")
+        }
+        raw_fetch_columns = {
+            str(row[1]): row
+            for row in connection.execute("pragma table_info(raw_fetch)")
+        }
+        for table, columns in (
+            ("item", item_columns),
+            ("raw_fetch", raw_fetch_columns),
+        ):
+            assert columns["origin_id"][3] == 1, f"{table}.origin_id is still nullable"
+            assert "source_id" not in columns, f"{table}.source_id survived"
+
+        item_keys = list(connection.execute("pragma foreign_key_list(item)"))
+        raw_fetch_keys = list(connection.execute("pragma foreign_key_list(raw_fetch)"))
+        for table, keys in (("item", item_keys), ("raw_fetch", raw_fetch_keys)):
+            assert ("origin", "origin_id") in {(key[2], key[3]) for key in keys}, (
+                f"{table} has no foreign key into origin: {keys}"
+            )
+
+        # The rows themselves: the rebuild copies rather than re-derives.
+        assert connection.execute(
+            "select id, guid, content_hash from item order by id"
+        ).fetchall() == [
+            ("i-1", "guid-1", "hash-1"),
+            ("i-2", "guid-2", "hash-2"),
+        ]
+        assert connection.execute(
+            "select id, canonical_url from origin order by id"
+        ).fetchall() == [
+            ("s-feed", "https://a.example/feed"),
+            ("s-tweets", "https://x.example/u"),
+        ]
+    finally:
+        connection.close()
+
+    command.downgrade(config, "0027")
+
+    connection = sqlite3.connect(db_path)
+    try:
+        assert connection.execute(
+            "select id, type, url, canonical_url, schedule_policy, folder, status"
+            " from source order by id"
+        ).fetchall() == [
+            (
+                "s-feed",
+                "rss",
+                "https://a.example/feed",
+                "https://a.example/feed",
+                '{"interval_minutes": 60}',
+                "Tech",
+                "active",
+            ),
+            (
+                "s-tweets",
+                "web",
+                "https://x.example/u",
+                "https://x.example/u",
+                '{"interval_minutes": 15}',
+                "default",
+                "paused",
+            ),
+        ]
+        # Both columns are back and agree, which is what the previous release
+        # reads.
+        assert connection.execute(
+            "select origin_id, source_id from item order by id"
+        ).fetchall() == [("s-feed", "s-feed"), ("s-tweets", "s-tweets")]
+        assert connection.execute(
+            "select origin_id, source_id from raw_fetch order by id"
+        ).fetchall() == [("s-feed", "s-feed"), ("s-tweets", "s-tweets")]
+    finally:
+        connection.close()

@@ -14,13 +14,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.pipeline import fetch_one, normalise_and_store
 from core.models import ItemDraft
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 pytestmark = pytest.mark.integration
 
@@ -34,16 +34,11 @@ def session(tmp_path: Path) -> Iterator[Session]:
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'decision-debug.db'}")
     try:
         with Session(engine) as opened:
-            opened.execute(
-                text(
-                    "insert into source (id, type, url, canonical_url, schedule_policy,"
-                    " status, tenant_id, created_at, updated_at)"
-                    " values (:id, 'rss', :url, :url, '{}', 'active', 'default',"
-                    " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-                ),
-                {"id": SOURCE, "url": "https://example.com/src-1/feed"},
+            seed_source(
+                opened,
+                source_id=SOURCE,
+                url="https://example.com/src-1/feed",
             )
-            mirror_sources(opened)
             opened.commit()
             yield opened
     finally:

@@ -77,7 +77,7 @@ def _seed_fulltext_world(
         )
         session.commit()
         item_id = session.scalar(
-            sa.text("select id from item where source_id = :sid"), {"sid": source.id}
+            sa.text("select id from item where origin_id = :sid"), {"sid": source.id}
         )
     assert item_id is not None
     return str(item_id)
@@ -186,7 +186,6 @@ def test_user_existing_items_get_fulltext_queued_by_backfill(tmp_path: Path) -> 
                 ItemRow(
                     id="late-item",
                     origin_id="src-late",
-                    source_id="src-late",
                     guid="g-late",
                     content_hash="hash-late",
                     title="Published as a summary",

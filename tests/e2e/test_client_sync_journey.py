@@ -732,7 +732,7 @@ async def test_j9_unsubscribing_from_the_app_deletes_for_real_and_replays_cleanl
             assert shown.status_code == 404, shown.status_code
         with session_factory() as db:
             items = db.execute(
-                sa.text("select count(*) from item where source_id = :s"),
+                sa.text("select count(*) from item where origin_id = :s"),
                 {"s": source_id},
             ).scalar_one()
             assert items == 0, items

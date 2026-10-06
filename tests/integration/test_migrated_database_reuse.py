@@ -28,7 +28,7 @@ import sqlalchemy as sa
 
 from tests.integration.conftest import TENANT
 from tests.migrated_schema import build, migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 pytestmark = pytest.mark.integration
 
@@ -126,21 +126,17 @@ def test_every_database_is_a_real_migration_and_the_copies_are_independent(
     engine_second = sa.create_engine(url_second)
     try:
         with engine_first.begin() as connection:
-            connection.execute(
-                sa.text(
-                    "insert into source (id, type, url, canonical_url,"
-                    " schedule_policy, status, tenant_id, created_at, updated_at)"
-                    " values ('src-1', 'rss', 'https://example.invalid/feed',"
-                    " 'https://example.invalid/feed', '{}', 'active', :tenant,"
-                    " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-                ),
-                {"tenant": TENANT},
+            seed_source(
+                connection,
+                source_id="src-1",
+                url="https://example.invalid/feed",
+                tenant_id=TENANT,
+                at="2026-01-01T00:00:00Z",
             )
-            mirror_sources(connection)
 
         with engine_second.connect() as connection:
             assert (
-                connection.execute(sa.text("select count(*) from source")).scalar() == 0
+                connection.execute(sa.text("select count(*) from origin")).scalar() == 0
             )
     finally:
         engine_first.dispose()

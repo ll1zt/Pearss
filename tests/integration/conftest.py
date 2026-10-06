@@ -26,7 +26,6 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-import sqlalchemy as sa
 from fastapi import FastAPI
 from sqlalchemy.orm import Session, sessionmaker
 from uvicorn.config import Config as UvicornConfig
@@ -37,7 +36,7 @@ from app.main import create_app, create_engine_for
 from app.pipeline import normalise_and_store
 from plugins.collectors.rss import collector as rss
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RSS_FIXTURES = REPO_ROOT / "src/plugins/collectors/rss/fixtures"
@@ -97,16 +96,7 @@ def reader_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Fast
 
     engine = create_engine_for(url)
     with engine.begin() as conn:
-        conn.execute(
-            sa.text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values ('src-1', 'rss', 'https://blog.example.com/feed',"
-                " 'https://blog.example.com/feed', '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
-            )
-        )
-        mirror_sources(conn)
+        seed_source(conn, source_id="src-1", url="https://blog.example.com/feed")
 
     factory = sessionmaker(engine, expire_on_commit=False)
     drafts = rss.parse(

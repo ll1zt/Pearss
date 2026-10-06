@@ -293,7 +293,7 @@ class World:
         )
         self.session.commit()
         item_id = self.session.scalar(
-            sa.text("select id from item where source_id = :s"), {"s": self.source_id}
+            sa.text("select id from item where origin_id = :s"), {"s": self.source_id}
         )
         assert item_id is not None, "the item must have been stored"
         return str(item_id)

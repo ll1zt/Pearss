@@ -158,7 +158,7 @@
 | AC-327..331 | #350 `mark-all-as-read` 的 `ts` 单位由**数值量级**而非字符串长度决定（`> 10**12` 才按微秒读）：秒值按秒（AC-327）、微秒值按微秒（AC-328）、15/16 位的值按量级读作微秒——旧的按长度规则把 15 位微秒值当秒，越出 `datetime` 范围直接 500（AC-329）、非数字 → `None`（AC-330）、空串/空白/`None` → `None`（AC-331）；端到端另有「微秒 `ts` 对 2026 年条目不算已读」一条（若按秒读则年 5300 万，会全部扫入） | issue #350 | 已合并 | `tests/unit/test_reader_parse_ts.py`、`tests/integration/test_reader_bulk_scope.py` |
 | AC-332..333 | #363 origin/subscription 拆表 A：建表 + 迁移 0026 + 数据对账（一表分家，1:1 阶段 id 不变：`origin.id = subscription.id = 旧 source.id`，因此既有 item id/guid 与 `/v1/sources/{id}` 不变） | issue #363（#200 第 1 步） | 已合并 | `tests/integration/test_migrations.py`、`tests/integration/test_origin_subscription_split.py` |
 | AC-334..335 | #364 origin/subscription 拆表 B：repository 与 core 的读路径切到 origin（`origin_id` 为事实列，`source_id` 降为门面私有镜像；调度读 subscription） | issue #364 | 已合并 | `tests/integration/test_origin_subscription_split.py`、`tests/unit/test_structure_guards.py` |
-| AC-336 | #365 origin/subscription 拆表 C：删除 source 表、`item`/`raw_fetch` 列改名（迁移 **0028**；`(origin_id, sort_key, id)` 复合索引已由 0027 提前落下） | issue #365 | 保留 | |
+| AC-336 | #365 origin/subscription 拆表 C：删除 source 表、`item`/`raw_fetch` 列改名（迁移 **0028**：手写重建两张表，批处理会错映 VIRTUAL 生成列且丢 CHECK；`(origin_id, sort_key, id)` 复合索引已由 0027 提前落下） | issue #365 | 已合并 | `tests/integration/test_migrations.py` |
 | AC-337 | #366 拆表 D：`/v1/sources` 收成只读投影并标 deprecated | issue #366 | 保留 | |
 | AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 与订阅列表 | issue #367 | 保留 | |
 | AC-340 | #368 频道身份切订阅 2/4：RSS 输出与 feed 窗口的频道身份 | issue #368 | 保留 | |

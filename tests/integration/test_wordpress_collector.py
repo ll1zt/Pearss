@@ -87,7 +87,7 @@ def test_summary_feed_stores_full_text(
 
     with session_factory() as session:
         rows = session.execute(
-            sa.text("select title, content_ref from item where source_id = 's1'")
+            sa.text("select title, content_ref from item where origin_id = 's1'")
         ).fetchall()
     # The query has no ORDER BY, so the order is the planner's business: it
     # asserted insertion order until a source-scoped index made the planner

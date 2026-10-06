@@ -138,7 +138,7 @@ async def test_subscribe_collect_consume_replay(
     # row is written after the response, so wait for it before counting.
     CorrelationAndAuditMiddleware.drain_audit()
     with session_factory() as db:
-        count = db.execute(text("select count(*) from source")).scalar_one()
+        count = db.execute(text("select count(*) from origin")).scalar_one()
         assert count == 1, count
         audits = db.execute(
             text("select count(*) from audit_log where operation = :op"),

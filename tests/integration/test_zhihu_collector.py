@@ -141,7 +141,7 @@ def test_activities_flow_names_the_source_and_opens_the_gate(
             sa.text("select title from origin where id = 's2'")
         ).scalar()
         statuses = session.execute(
-            sa.text("select publish_status from item where source_id = 's2'")
+            sa.text("select publish_status from item where origin_id = 's2'")
         ).fetchall()
     assert title == "示例用户的知乎动态"
     assert [row[0] for row in statuses] == ["ready", "ready", "ready"]
@@ -304,6 +304,6 @@ def test_an_unknown_target_type_loses_only_itself(
 
     with session_factory() as session:
         stored = session.execute(
-            sa.text("select count(*) from item where source_id = 's6'")
+            sa.text("select count(*) from item where origin_id = 's6'")
         ).scalar()
     assert stored == 3

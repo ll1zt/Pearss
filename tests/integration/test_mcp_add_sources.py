@@ -70,7 +70,7 @@ def _subscribed_urls(database_url: str) -> set[str]:
         with engine.connect() as conn:
             return {
                 str(url)
-                for (url,) in conn.execute(sa.text("select url from source")).fetchall()
+                for (url,) in conn.execute(sa.text("select url from origin")).fetchall()
             }
     finally:
         engine.dispose()

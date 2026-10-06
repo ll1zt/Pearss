@@ -22,7 +22,7 @@ from adapters.db_models import Item
 from app.main import create_app, create_engine_for
 from app.pipeline import normalise_and_store
 from tests.migrated_schema import migrated_database
-from tests.source_seed import mirror_sources
+from tests.source_seed import seed_source
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WRITE_TOKEN = "test-write-token"
@@ -37,11 +37,11 @@ def seed(session: Session, count: int, *, source_id: str = "src-1") -> list[str]
         guid = f"guid-{index:04d}"
         session.execute(
             sa.text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at,"
                 " content_ref)"
-                " values (:id, :s, :s, :g, :h, :t, :u, :p, 'ready', 'default',"
+                " values (:id, :s, :g, :h, :t, :u, :p, 'ready', 'default',"
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z', :ref)"
             ),
             {
@@ -67,16 +67,11 @@ def session_factory(tmp_path: Path) -> Iterator[sessionmaker[Session]]:
 
     engine = create_engine_for(url)
     with engine.begin() as conn:
-        conn.execute(
-            sa.text(
-                "insert into source (id, type, url, canonical_url, schedule_policy,"
-                " status, tenant_id, created_at, updated_at)"
-                " values ('src-1', 'rss', :u, :u, '{}', 'active', 'default',"
-                " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
-            ),
-            {"u": FEED_URL},
+        seed_source(
+            conn,
+            source_id="src-1",
+            url=FEED_URL,
         )
-        mirror_sources(conn)
     try:
         yield sessionmaker(engine, expire_on_commit=False)
     finally:
@@ -345,10 +340,10 @@ async def test_inserting_mid_paging_does_not_shift_the_window(
     with app.state.session_factory() as session:
         session.execute(
             sa.text(
-                "insert into item (id, source_id, origin_id, guid, content_hash,"
+                "insert into item (id, origin_id, guid, content_hash,"
                 " title, url,"
                 " published_at, publish_status, tenant_id, created_at, updated_at)"
-                " values ('late', 'src-1', 'src-1', 'g-late', 'h-late', 'Late arrival',"
+                " values ('late', 'src-1', 'g-late', 'h-late', 'Late arrival',"
                 " 'https://blog.example.com/late',"
                 " '2026-06-01T00:00:00.000000Z', 'ready', 'default',"
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"

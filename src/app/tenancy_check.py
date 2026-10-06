@@ -37,7 +37,6 @@ TENANT_TABLES = (
     "origin",
     "plugin",
     "read_state",
-    "source",
     "subscription",
     "work",
 )

@@ -743,7 +743,7 @@ def test_a_chained_source_holds_the_gate_until_processing_completes(
     assert ingested
 
     statuses = session.execute(
-        text("select publish_status from item where source_id = :s"), {"s": SOURCE}
+        text("select publish_status from item where origin_id = :s"), {"s": SOURCE}
     ).fetchall()
     assert all(row[0] == "pending" for row in statuses), (
         "a chained item must not open the gate at store time"
@@ -752,7 +752,7 @@ def test_a_chained_source_holds_the_gate_until_processing_completes(
     rows = session.execute(
         text(
             "select status, kind, lang from item_enrichment"
-            " where item_id = (select id from item where source_id = :s limit 1)"
+            " where item_id = (select id from item where origin_id = :s limit 1)"
         ),
         {"s": SOURCE},
     ).fetchall()
@@ -874,7 +874,7 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
     assert "provider rejected the key" in rows[2]
 
     statuses = session.execute(
-        text("select publish_status from item where source_id = :s"), {"s": SOURCE}
+        text("select publish_status from item where origin_id = :s"), {"s": SOURCE}
     ).fetchall()
     assert all(row[0] == "pending" for row in statuses), (
         "a failed required enrichment must keep the gate shut"
@@ -908,7 +908,6 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
         ItemRow(
             id="retry-item",
             origin_id="src-retry",
-            source_id="src-retry",
             guid="g-retry",
             content_hash="hash-retry",
             title="Retry me",
@@ -1001,10 +1000,10 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     # auth failures skip retries entirely: a fresh row fails in one sweep.
     session.execute(
         text(
-            "insert into item (id, source_id, origin_id, guid, content_hash, title,"
+            "insert into item (id, origin_id, guid, content_hash, title,"
             " url,"
             " publish_status, tenant_id, created_at, updated_at)"
-            " values ('auth-item', 'src-retry', 'src-retry', 'g-auth', 'hash-auth',"
+            " values ('auth-item', 'src-retry', 'g-auth', 'hash-auth',"
             " 'A',"
             " 'https://retry.example/2', 'pending', 'default',"
             " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"

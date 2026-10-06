@@ -122,7 +122,6 @@ from adapters.repository.scheduling import (
 from adapters.repository.sources import (
     SourceView,
     create_source,
-    delete_source_mirror,
     derive_source_id,
     get_source,
     list_sources,
@@ -180,7 +179,6 @@ __all__ = [
     "delete_items",
     "delete_source",
     "delete_source_items",
-    "delete_source_mirror",
     "derive_source_id",
     "dumps",
     "enqueue_chain",
