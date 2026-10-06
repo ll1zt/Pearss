@@ -19,6 +19,8 @@ from adapters.repository._shared import (
     dumps,
     row_to_item,
     timestamp,
+    visible_item_rows_for,
+    visible_item_rows_for_folder,
 )
 from adapters.repository.deletion import (
     DeletionResult,
@@ -48,6 +50,8 @@ from adapters.repository.feed import (
     channel_for_subscription,
     items_ready_for_feed,
     mark_published,
+    mark_ready_for_chainless_subscriptions,
+    mark_subscription_ready,
     promote_to_ready,
 )
 from adapters.repository.idempotency import (
@@ -100,9 +104,9 @@ from adapters.repository.reader import (
     AmbiguousChannelError,
     apply_read_state,
     mark_all_read,
-    origin_of_channel,
     read_states_for,
     reader_credential,
+    resolve_channel,
     resolve_reader_ids,
     upsert_read_state,
     upsert_reader_credential,
@@ -132,8 +136,11 @@ from adapters.repository.sources import (
 )
 from adapters.repository.subscriptions import (
     create_subscription,
+    create_subscription_for_origin,
+    derive_subscription_id,
     get_subscription,
     list_subscriptions,
+    subscriptions_for_origin,
 )
 from adapters.repository.work import (
     append_unit,
@@ -180,11 +187,13 @@ __all__ = [
     "create_origin",
     "create_source",
     "create_subscription",
+    "create_subscription_for_origin",
     "create_work",
     "delete_items",
     "delete_source",
     "delete_source_items",
     "derive_source_id",
+    "derive_subscription_id",
     "dumps",
     "enqueue_chain",
     "enrichment_status",
@@ -218,8 +227,9 @@ __all__ = [
     "live_work_by_fingerprint",
     "mark_all_read",
     "mark_published",
+    "mark_ready_for_chainless_subscriptions",
+    "mark_subscription_ready",
     "origin_display_labels",
-    "origin_of_channel",
     "paging_state",
     "parse_chain",
     "plugin_status",
@@ -232,6 +242,7 @@ __all__ = [
     "reap_orphaned_runs",
     "record_raw_fetch",
     "requeue_enrichment",
+    "resolve_channel",
     "resolve_reader_ids",
     "row_to_item",
     "save_paging_state",
@@ -240,6 +251,7 @@ __all__ = [
     "statuses_for_item",
     "store_idempotent",
     "store_item",
+    "subscriptions_for_origin",
     "system_snapshot",
     "timestamp",
     "units_for_work",
@@ -250,5 +262,7 @@ __all__ = [
     "upsert_read_state",
     "upsert_reader_credential",
     "visible_ids_for_stream",
+    "visible_item_rows_for",
+    "visible_item_rows_for_folder",
     "work_by_id",
 ]

@@ -320,9 +320,12 @@ async def test_stream_item_ids(client: httpx.AsyncClient) -> None:
 async def test_pending_items_are_invisible_to_the_reader_api(
     app: FastAPI, client: httpx.AsyncClient
 ) -> None:
-    # Acceptance criterion 7 from docs/integrations/netnewswire.md.
+    # Acceptance criterion 7 from docs/integrations/netnewswire.md. The gate
+    # is the readiness rows (ADR 0061), so closing it means removing them --
+    # flipping `publish_status` alone no longer hides anything.
     with app.state.session_factory() as session:
         session.execute(sa.text("update item set publish_status = 'pending'"))
+        session.execute(sa.text("delete from item_subscription_ready"))
         session.commit()
 
     assert await fetch_ids(client, await login(client)) == []

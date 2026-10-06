@@ -134,10 +134,11 @@ class Origin(Base):
 class Subscription(Base):
     """How one client consumes an origin: the policy.
 
-    `UNIQUE(tenant_id, origin_id)` is the 1:1 stage's rule -- "one subscription
-    per origin" -- which is true today and stops being true when a second
-    subscription becomes meaningful (issue #371). The migration that removes it
-    is what changes this module's meaning, not a flag in it.
+    An origin may carry several: ADR 0061 removed the 1:1 rule, so two
+    subscriptions can hold different chains, folders and languages over the same
+    facts -- which is what "one origin, two policies" means. The pair
+    (item, subscription) is what readiness is recorded against
+    (`ItemSubscriptionReady`).
     """
 
     __tablename__ = "subscription"
@@ -190,8 +191,41 @@ class Subscription(Base):
             "trust_level",
             ("standard", "trusted", "restricted"),
         ),
-        # Stage A only; the multi-subscription migration removes it.
-        sa.UniqueConstraint("tenant_id", "origin_id", name="uq_subscription_origin"),
+    )
+
+
+class ItemSubscriptionReady(Base):
+    """The gate, per channel: this subscription's chain completed for this item.
+
+    ADR 0061. The chain is subscription policy and the item is an origin fact,
+    so "is this item ready?" has no item-level answer once an origin carries two
+    subscriptions: it is a property of the pair. The old item-level
+    `publish_status` could not express that, and a global gate would have shown
+    one channel an item its own chain had not processed.
+
+    Materialised rather than derived at read time, because the reads are the hot
+    path (every feed page, every Reader stream): the row is written where the
+    chain completes and read by a join. The risk a materialised answer carries --
+    a forgotten write means silently invisible items -- is closed by a guard that
+    compares the table against what the enrichments imply.
+    """
+
+    __tablename__ = "item_subscription_ready"
+
+    item_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("item.id", ondelete="CASCADE"), primary_key=True
+    )
+    subscription_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("subscription.id", ondelete="CASCADE"), primary_key=True
+    )
+    ready_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
+
+    __table_args__ = (
+        # Every scoped read is "this subscription's ready items"; the primary
+        # key leads with item_id and so cannot serve that as a seek.
+        sa.Index(
+            "ix_item_subscription_ready_subscription_id", "subscription_id", "item_id"
+        ),
     )
 
 

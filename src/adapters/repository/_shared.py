@@ -10,7 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import select
+
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import ItemSubscriptionReady as ReadyRow
+from adapters.db_models import Subscription as SubscriptionRow
 
 # The fixed-width format has one definition (adapters.timestamps); this
 # module re-exports it under the historical `timestamp` name.
@@ -83,7 +87,17 @@ def dumps(value: object) -> str:
 
 
 def visible_item_rows() -> Any:
-    """The publish gate as a SQL predicate: not pending.
+    """The gate, cross-library: ready under at least one subscription.
+
+    ADR 0061: readiness is `(item, subscription)` -- a channel shows an item
+    when *that* subscription's chain has completed for it. This is the
+    "visible somewhere" form, which is what a search, a reading-list or a
+    starred stream means. A read that names a channel uses
+    `visible_item_rows_for` instead, because that one must not show an item
+    another channel happens to have finished.
+
+    The predicate was `publish_status != 'pending'`; that column keeps its own
+    transitions (content frozen / first publish) and is no longer read here.
 
     This exists because the gate is an invariant enforced at five read sites
     (`feed`, `items_query` twice, `reader` twice) and one write site
@@ -97,4 +111,36 @@ def visible_item_rows() -> Any:
     ADR 0022 names, but it cannot be used here for that reason; this is the
     persistence-layer form of it.
     """
-    return ItemRow.publish_status != PublishStatus.PENDING.value
+    # EXISTS, not IN: a correlated semi-join can be evaluated *while* the
+    # planner walks `ix_item_sort_key_id`, so the page keeps its ordering
+    # instead of being driven by the subquery and sorted into a temp b-tree
+    # (measured: IN gave `SEARCH item USING INDEX sqlite_autoindex_item_1` plus
+    # `USE TEMP B-TREE FOR ORDER BY`; the whole point of issue #77 is that this
+    # page is a seek).
+    return select(ReadyRow.item_id).where(ReadyRow.item_id == ItemRow.id).exists()
+
+
+def visible_item_rows_for(subscription_id: str) -> Any:
+    """The gate for one channel: this subscription's chain completed."""
+    return (
+        select(ReadyRow.item_id)
+        .where(
+            ReadyRow.item_id == ItemRow.id,
+            ReadyRow.subscription_id == subscription_id,
+        )
+        .exists()
+    )
+
+
+def visible_item_rows_for_folder(*, folder: str, tenant_id: str) -> Any:
+    """The gate for a folder stream: ready under a subscription in that folder."""
+    return (
+        select(ReadyRow.item_id)
+        .join(SubscriptionRow, SubscriptionRow.id == ReadyRow.subscription_id)
+        .where(
+            ReadyRow.item_id == ItemRow.id,
+            SubscriptionRow.folder == folder,
+            SubscriptionRow.tenant_id == tenant_id,
+        )
+        .exists()
+    )

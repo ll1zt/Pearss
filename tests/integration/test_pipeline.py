@@ -96,8 +96,28 @@ def store_all(session: Session, items: list[Item]) -> None:
 
 
 def promote_all_to_ready(session: Session) -> None:
-    """Advance every item through the gate, as a completed chain would."""
+    """Advance every item through the gate, as a completed chain would.
+
+    ADR 0061: the status is the content's; visibility is the ready row. Opening
+    the gate means both, so the helper writes both -- a helper that flipped only
+    the status would leave every item ready-by-status and invisible-by-gate.
+    """
+    from adapters.repository import mark_subscription_ready
+
+    pairs = session.execute(
+        text(
+            "select i.id, s.id from item i"
+            " join subscription s on s.origin_id = i.origin_id"
+        )
+    ).all()
     session.execute(text("update item set publish_status = 'ready'"))
+    for item_id, subscription_id in pairs:
+        mark_subscription_ready(
+            session,
+            item_id=str(item_id),
+            subscription_id=str(subscription_id),
+            at="2026-01-01T00:00:00.000000Z",
+        )
     session.commit()
 
 

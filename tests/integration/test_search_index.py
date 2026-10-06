@@ -114,6 +114,27 @@ def _store(
     return ingested[0].result.item.id
 
 
+def _promote(session: Session, *, item_id: str, source_id: str) -> None:
+    """Open the gate the way a completed chain does: status *and* readiness.
+
+    ADR 0061: visibility is the ready row, so flipping `publish_status` alone
+    would leave a test asserting about a column nothing reads any more.
+    """
+    from adapters.repository import mark_subscription_ready
+
+    session.execute(
+        sa.text("update item set publish_status = 'ready' where id = :id"),
+        {"id": item_id},
+    )
+    mark_subscription_ready(
+        session,
+        item_id=item_id,
+        subscription_id=source_id,
+        at="2026-01-01T00:00:00.000000Z",
+    )
+    session.commit()
+
+
 def _found(session: Session, query: str) -> set[str]:
     return set(matching_item_ids(session, query=query, limit=20))
 
@@ -171,11 +192,7 @@ def test_a_pending_item_is_not_searchable_until_it_is_published(
         assert status == "pending", status
         assert item_id not in _found(session, "机密草稿")
 
-        session.execute(
-            sa.text("update item set publish_status = 'ready' where id = :id"),
-            {"id": item_id},
-        )
-        session.commit()
+        _promote(session, item_id=item_id, source_id=source_id)
         assert item_id in _found(session, "机密草稿"), (
             "promoting the item did not make its body searchable, so the gate "
             "is being applied when the index is written rather than when it is read"
@@ -220,11 +237,7 @@ def test_changing_an_items_body_replaces_its_indexed_text(
         )
         assert again == item_id, "the second store did not update the same item"
 
-        session.execute(
-            sa.text("update item set publish_status = 'ready' where id = :id"),
-            {"id": item_id},
-        )
-        session.commit()
+        _promote(session, item_id=item_id, source_id=source_id)
 
         assert item_id in _found(session, "新版本"), "the new body was not indexed"
         assert item_id not in _found(session, "旧版本"), (
