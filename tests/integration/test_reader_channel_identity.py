@@ -135,3 +135,60 @@ def test_the_folder_stream_follows_the_subscription_folder(
             session, stream_id="user/-/label/NoSuchFolder", tenant_id=SINGLE_TENANT
         )
         assert empty == [], "a folder no subscription carries is an empty stream"
+
+
+@pytest.mark.integration
+def test_the_pre_split_channel_id_still_resolves(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """AC-344: `feed/<origin id>` resolves while the origin has one subscription.
+
+    Built with an origin id that differs from the subscription id, which is the
+    state a client that cached a channel id before the split is actually in --
+    and the only state in which the alias does any work.
+    """
+    with session_factory() as session:
+        seed_source(
+            session,
+            source_id="sub-1",
+            origin_id="orig-1",
+            url="https://a.example/feed",
+        )
+        item_id = _store(session, origin_id="orig-1", external_id="one")
+
+    with session_factory() as session:
+        by_subscription = visible_ids_for_stream(
+            session,
+            stream_id=reader_api.feed_stream_id("sub-1"),
+            tenant_id=SINGLE_TENANT,
+        )
+        by_origin = visible_ids_for_stream(
+            session,
+            stream_id=reader_api.feed_stream_id("orig-1"),
+            tenant_id=SINGLE_TENANT,
+        )
+    assert by_subscription == [item_id]
+    assert by_origin == [item_id], "the pre-split channel id stopped resolving"
+
+    # An origin with no subscription behind it is not a channel: empty, and
+    # marking it read changes nothing.
+    with session_factory() as session:
+        session.execute(sa.text("delete from subscription where id = 'sub-1'"))
+        session.commit()
+        assert (
+            visible_ids_for_stream(
+                session,
+                stream_id=reader_api.feed_stream_id("orig-1"),
+                tenant_id=SINGLE_TENANT,
+            )
+            == []
+        )
+        assert (
+            mark_all_read(
+                session,
+                tenant_id=SINGLE_TENANT,
+                before=datetime(2030, 1, 1, tzinfo=UTC),
+                subscription_id="orig-1",
+            )
+            == 0
+        )

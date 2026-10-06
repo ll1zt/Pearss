@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import Origin as OriginRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Subscription as SubscriptionRow
@@ -23,23 +24,57 @@ from core.tenancy import SINGLE_TENANT
 LOGGER = logging.getLogger(__name__)
 
 
-def origin_of_subscription(
-    session: Session, *, subscription_id: str, tenant_id: str
+class AmbiguousChannelError(Exception):
+    """A legacy channel id names an origin with more than one subscription.
+
+    Raised rather than resolved arbitrarily: the caller asked for one channel,
+    and picking one of several would show it a different channel's items under
+    the id it named -- the wrong answer that looks like data.
+    """
+
+
+def origin_of_channel(
+    session: Session, *, channel_id: str, tenant_id: str
 ) -> str | None:
-    """The origin a channel id names, or None when no subscription carries it.
+    """The origin a Reader channel id names, resolving the pre-split alias.
 
     A channel is a **subscription** (ADR 0046 D-C): what a client subscribes to
-    is the policy, and the items are its origin's. The two ids coincide in the
-    1:1 stage, so this looks like a no-op today -- it is the resolution that
-    keeps the multi-subscription case correct without inventing a second mapping
-    from stream ids to items.
+    is the policy, and the items are its origin's. A client that cached
+    `feed/<id>` before the split may still be sending an *origin* id, so an id
+    with no subscription behind it is tried as an origin -- but only while that
+    origin has exactly one subscription. With none it is not a channel (None);
+    with several there is no single answer, and guessing is the failure this
+    function exists to prevent (`AmbiguousChannelError`).
     """
-    return session.execute(
+    subscription = session.execute(
         select(SubscriptionRow.origin_id).where(
-            SubscriptionRow.id == subscription_id,
+            SubscriptionRow.id == channel_id,
             SubscriptionRow.tenant_id == tenant_id,
         )
     ).scalar_one_or_none()
+    if subscription is not None:
+        return subscription
+
+    origin = session.execute(
+        select(OriginRow.id).where(
+            OriginRow.id == channel_id, OriginRow.tenant_id == tenant_id
+        )
+    ).scalar_one_or_none()
+    if origin is None:
+        return None
+    subscriptions = session.execute(
+        select(func.count())
+        .select_from(SubscriptionRow)
+        .where(SubscriptionRow.origin_id == origin)
+    ).scalar_one()
+    if subscriptions == 0:
+        return None
+    if subscriptions > 1:
+        raise AmbiguousChannelError(
+            f"channel {channel_id!r} names an origin with {subscriptions} "
+            "subscriptions; name the subscription instead"
+        )
+    return origin
 
 
 def visible_ids_for_stream(
@@ -97,8 +132,8 @@ def visible_ids_for_stream(
 
     subscription_id = reader_api.parse_feed_stream_id(stream_id)
     if subscription_id is not None:
-        origin_id = origin_of_subscription(
-            session, subscription_id=subscription_id, tenant_id=tenant_id
+        origin_id = origin_of_channel(
+            session, channel_id=subscription_id, tenant_id=tenant_id
         )
         if origin_id is None:
             # A channel id no subscription carries is an empty channel, not
@@ -449,8 +484,8 @@ def mark_all_read(
         ItemRow.id.not_in(existing),
     )
     if subscription_id:
-        origin_id = origin_of_subscription(
-            session, subscription_id=subscription_id, tenant_id=tenant_id
+        origin_id = origin_of_channel(
+            session, channel_id=subscription_id, tenant_id=tenant_id
         )
         if origin_id is None:
             # An unknown channel marks nothing. Sweeping the library because a

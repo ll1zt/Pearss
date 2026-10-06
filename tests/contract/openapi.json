@@ -4185,6 +4185,125 @@
         ]
       }
     },
+    "/v1/subscriptions": {
+      "get": {
+        "description": "List subscriptions, oldest page first by creation order.\n\nThe same offset paging as the deprecated `/v1/sources`, and for the same\nreason: channels are bounded (an operator's subscriptions, tens not\nmillions), and new ones append at the end of this ordering, so a row\narriving mid-walk shifts nothing already read. One page plus an opaque\ncursor means the response does not grow with the deployment.",
+        "operationId": "listSubscriptions",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Listsubscriptions",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Subscriptions",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/subscriptions/{subscription_id}": {
+      "get": {
+        "description": "One subscription, with its origin's facts beside its policy.",
+        "operationId": "getSubscription",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subscription_id",
+            "required": true,
+            "schema": {
+              "title": "Subscription Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Getsubscription",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Read Subscription",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
     "/v1/system/snapshot": {
       "get": {
         "description": "Compact system state, sized to be pasted into a conversation.\n\nReports the decay signals architecture section 7.7 names — error\ndistribution, the pending backlog, recent success rate — rather than a\nwall of counters, because the point is noticing that something is going\nwrong, not counting rows.",

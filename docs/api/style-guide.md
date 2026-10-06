@@ -219,7 +219,8 @@ ADR 0046 拆表之后，「来源」这一对概念由两张表承载：**事实
   `origin ⋈ subscription`，不是第二个事实源。
 - **写端点**走 subscription/origin 的显式实现；`POST /v1/sources` 是「建 origin + 建
   subscription」的兼容门面，`PATCH` 只改 subscription 的策略列。
-- **删除触发条件**：等替代端点（`/v1/origins`、`/v1/subscriptions`，issue #370）上线、
+- **替代端点已部分上线**：`/v1/subscriptions` 的读端点（issue #370）已在服务订阅身份；
+  **删除触发条件**：等 `/v1/origins`、`/v1/subscriptions` 的写端点与退订端点（issue #373）齐备、
   且 NetNewsWire 的旧 stream id（`feed/<origin_id>`）别名不再被真实客户端使用之后，
   连同 `tests/contract/openapi.json` 里的 deprecated 项一起删除。在那之前它们必须继续
   按字段原样作答 —— 客户端缓存的是它们的形状。

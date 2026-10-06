@@ -49,8 +49,10 @@ from app.middleware import CorrelationAndAuditMiddleware
 from app.plugins_routes import router as plugins_router
 from app.reader import ReaderAuth, configure_reader_credentials
 from app.reader import router as reader_router
+from app.reader.operations import AmbiguousChannel
 from app.scheduler import Scheduler, scheduler_enabled
 from app.sources_routes import router as sources_router
+from app.subscriptions_routes import router as subscriptions_router
 from app.system_routes import router as system_router
 from app.tenancy_check import report_other_tenants
 from app.work_routes import router as work_router
@@ -352,11 +354,36 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     app.include_router(reader_router)
     warn_if_unconfigured()
     app.include_router(sources_router)
+    app.include_router(subscriptions_router)
     app.include_router(ingest_router)
     app.include_router(items_router)
     app.include_router(system_router)
     app.include_router(plugins_router)
     app.include_router(work_router)
+
+    @app.exception_handler(AmbiguousChannel)
+    def on_ambiguous_channel(request: Request, exc: AmbiguousChannel) -> JSONResponse:
+        """A legacy channel id that names an origin with several subscriptions.
+
+        Refused rather than guessed (issue #370, AC-344): the split made a
+        channel a subscription, so an origin id stops being a channel id the
+        moment that origin has more than one -- and answering with one of them
+        would show the client a different channel's items under the id it named.
+        """
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "ambiguous_channel",
+                    "message": str(exc),
+                    "error_class": None,
+                    "suggestion": (
+                        "Name the subscription id; subscription/list gives the "
+                        "current ones."
+                    ),
+                }
+            },
+        )
 
     @app.exception_handler(RequestValidationError)
     def on_validation(request: Request, exc: RequestValidationError) -> JSONResponse:

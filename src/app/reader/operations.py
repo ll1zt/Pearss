@@ -35,6 +35,15 @@ class InvalidSourceUrl(ValueError):
     """The URL cannot be used as an rss source (bad shape, scheme or host)."""
 
 
+class AmbiguousChannel(ValueError):
+    """A legacy channel id names an origin with more than one subscription.
+
+    The Reader API's own name for the repository's `AmbiguousChannelError`, so
+    the routes can refuse it with a 400 instead of leaking an adapter type
+    through the compat surface (issue #370, AC-344).
+    """
+
+
 class StreamBoundary(NamedTuple):
     """The keyset boundary a continuation cursor carries.
 
@@ -375,15 +384,19 @@ def mark_stream_read(
     sweeping everything.
     """
     from adapters.repository import mark_all_read
+    from adapters.repository.reader import AmbiguousChannelError
 
     with session_factory() as session:
-        changed = mark_all_read(
-            session,
-            tenant_id=SINGLE_TENANT,
-            before=before,
-            subscription_id=subscription_id,
-            folder=folder,
-        )
+        try:
+            changed = mark_all_read(
+                session,
+                tenant_id=SINGLE_TENANT,
+                before=before,
+                subscription_id=subscription_id,
+                folder=folder,
+            )
+        except AmbiguousChannelError as exc:
+            raise AmbiguousChannel(str(exc)) from exc
         session.commit()
     return int(changed)
 
@@ -416,22 +429,26 @@ def select_stream_ids(
     a fixed-width UTC timestamp by the route.
     """
     from adapters.repository import visible_ids_for_stream
+    from adapters.repository.reader import AmbiguousChannelError
 
     with session_factory() as session:
-        rows = visible_ids_for_stream(
-            session,
-            stream_id=stream_id,
-            tenant_id=SINGLE_TENANT,
-            limit=limit + 1,
-            offset=offset,
-            after_published_at=boundary.published_at if boundary else None,
-            after_item_id=boundary.item_id if boundary else None,
-            after_published_null=boundary.published_null if boundary else False,
-            include_states=include_states,
-            exclude_states=exclude_states,
-            published_after=published_after,
-            with_ordering=True,
-        )
+        try:
+            rows = visible_ids_for_stream(
+                session,
+                stream_id=stream_id,
+                tenant_id=SINGLE_TENANT,
+                limit=limit + 1,
+                offset=offset,
+                after_published_at=boundary.published_at if boundary else None,
+                after_item_id=boundary.item_id if boundary else None,
+                after_published_null=boundary.published_null if boundary else False,
+                include_states=include_states,
+                exclude_states=exclude_states,
+                published_after=published_after,
+                with_ordering=True,
+            )
+        except AmbiguousChannelError as exc:
+            raise AmbiguousChannel(str(exc)) from exc
         ordered = cast("list[tuple[str, str | None]]", rows)
     return ordered[:limit], len(ordered) > limit
 

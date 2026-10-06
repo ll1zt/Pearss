@@ -163,7 +163,7 @@
 | AC-338..339 | #367 频道身份切订阅 1/4：Reader 的 stream id 是**订阅** id（解析经 subscription → origin → items；未知频道为空而不是全库），folder 归类读 `subscription.folder`；1:1 阶段对客户端无感 | issue #367 | 已合并 | `tests/integration/test_reader_channel_identity.py` |
 | AC-340 | #368 频道身份切订阅 2/4：RSS 频道 = **订阅**（名字/链接来自其 origin 的展示名与 canonical URL，与 Reader 侧边栏同一套标签规则）；feed 窗口按该订阅的 origin 定域，闸门语义不变 | issue #368 | 已合并 | `tests/integration/test_feed_channel_identity.py` |
 | AC-341..342 | #369 频道身份切订阅 3/4：MCP 写工具改名到拆表后的词汇（`add_subscription`/`add_subscriptions`/`remove_subscription`/`set_subscription_status`/`set_subscription_folder`/`set_subscription_pipeline_chain`/`update_subscription_policy`/`fetch_origin_items`/`delete_origin_items`/`backfill_subscription_chain`），**不留别名**；改名后每个工具仍落在 OpenAPI 声明的 `/v1` 端点上，`next_actions` 与常驻上下文预算（17602/18000）守卫仍绿 | issue #369 | 已合并 | `tests/integration/test_mcp_tool_coverage.py`、`tests/unit/test_mcp_tool_guide.py` |
-| AC-343..344 | #370 频道身份切订阅 4/4：`/v1/subscriptions` 新端点 + NNW 旧 stream id 别名 | issue #370 | 保留 | |
+| AC-343..344 | #370 频道身份切订阅 4/4：`/v1/subscriptions` 读端点（`origin`/`policy` 两半分开展示，一页 + 不透明 cursor，未知 id → 404 `subscription_not_found`）+ 旧 `feed/<origin id>` 别名（1:1 时解析到该订阅；origin 无订阅 → 空频道；**多订阅 → `400 ambiguous_channel` 而非任选其一**，该分支由 #371 解除唯一约束后覆盖） | issue #370 | 已合并 | `tests/integration/test_subscriptions_api.py`、`tests/integration/test_reader_channel_identity.py` |
 | AC-345..347 | #371 一个 origin 多订阅：解除唯一约束 + 第二订阅写路径 + 按 `(item, subscription)` 判定的可见性（物化行 + 一致性守卫） | issue #371 | 保留 | |
 | AC-216..217 | #373 退订≠销毁：端点与语义拆分 + 销毁审计带理由（旧 `DELETE /v1/sources/{id}` 改退订语义） | issue #373 | 保留 | |
 
