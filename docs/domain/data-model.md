@@ -44,6 +44,27 @@
 丢了不会报错，但会让下一次采集把已经抓过的区间重走一遍（去重兜住重复入库，
 代价是白费请求）。`folder` 则是普通配置，丢了表现为订阅回到 `default` 分组。
 
+### Origin 与 Subscription（ADR 0046 拆表，进行中）
+
+`Source` 正在按 ADR 0046 D-A/D-B 拆成两半。**阶段 A** 已落地（migration 0026）：
+
+- **`origin`** —— 事实：`type` / `url` / `canonical_url` / `title` / `parser_plugin_id` /
+  `seen_frontier` / `floor_cursor`。同一租户内 `canonical_url + type` 唯一，这就是去重
+  身份。
+- **`subscription`** —— 策略：`schedule_policy` / `pipeline_chain` / `target_lang` /
+  `folder` / `status` / `trust_level`。它回答「某个客户端怎么消费这个 origin」。
+
+阶段 A 的性质，也是它可独立合并、独立回滚的原因：
+
+- **读写仍走 `source`**：`source` 一行同时承载两半，读路径一行未改；写入侧由
+  `create_source` 双写三张表，所以新行的 `origin`/`subscription` 也已存在。
+- **1:1 阶段 id 相同**：`origin.id = subscription.id = 旧 source.id`，因此既有 item id、
+  guid 与 `/v1/sources/{id}` 都保持原义。
+- **「一个 origin 一个订阅」只是本阶段的约束**（`UNIQUE(tenant_id, origin_id)`）；
+  多订阅迁移会删掉它，那时一个 origin 才能挂两套策略（一个翻译、一个不译）。
+- `item.origin_id` / `raw_fetch.origin_id` 已加列并回填，**但尚无任何读路径使用**；
+  后续迁移把它们置为 NOT NULL、加外键，并退役 `source_id`。
+
 ### 抓取区间（分页型源）
 
 `seen_frontier``seen_frontier` 与 `floor_cursor` 共同界定「要抓什么」：
@@ -273,6 +294,8 @@ created_at / finished_at），`work_unit` 是逐目标的结果（outcome / erro
 ```text
 Source 1 --- N RawFetch
 Source 1 --- N Item
+Origin 1 --- N Subscription (拆表进行中：阶段 A 为 1 --- 1，多订阅迁移后解除)
+Origin 1 --- N Item (阶段 A：item.origin_id 已回填，读路径尚未切换)
 RawFetch 1 --- N ItemDraft (逻辑关系)
 Item   1 --- N ItemEnrichment
 Job    1 --- N JobRun
@@ -287,7 +310,7 @@ Plugin 1 --- N ItemEnrichment
 
 | 类型 | 实体 | 处理 |
 |---|---|---|
-| 事实源 | Source、Item、FeedOut、Job、Plugin、ReadState、AuditLog | 定时备份、恢复演练、迁移严格管理 |
+| 事实源 | Source、Origin、Subscription、Item、FeedOut、Job、Plugin、ReadState、AuditLog | 定时备份、恢复演练、迁移严格管理（`Origin`/`Subscription` 是 ADR 0046 拆表进行中，阶段 A 与 `Source` 同源同 id） |
 | 可重建运行记录 | RawFetch、JobRun | 配置保留期；近期保留用于诊断，不进入常规长期备份 |
 | 可重建派生物 | ItemEnrichment、处理器产物 | 从 Item + pipeline 配置重放；可按成本选择保留，不视为唯一事实源 |
 | 运维记录 | Work、WorkUnit（作业账本） | 默认 30 天保留窗口后清理（`PEARSS_WORK_RETENTION_DAYS`，ADR 0046 D-F）；**不进备份**；未结束的作业永不清理 |
