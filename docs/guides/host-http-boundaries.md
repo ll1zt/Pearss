@@ -3,7 +3,9 @@
 Status: partial. This document records what the host enforces on
 reverse-proxied plugin HTTP today, what it does not, and why. It exists so
 the gap is a recorded decision surface, not an assumption (problem review
-A05; SSRF policy in ADR 0016; sandbox trust model in ADR 0023).
+A05; SSRF policy in ADR 0016; sandbox trust model in ADR 0023). One residual
+is not an open gap but an *accepted risk with a trigger*: decoded peak memory
+(issue #358), recorded in its own section below.
 
 ## What is enforced host-side today
 
@@ -33,13 +35,53 @@ As of this change it:
    Exactly-at-limit bodies pass through intact. This caps accepted cumulative
    decoded body bytes, not transient per-chunk allocation: HTTPX can allocate
    a large decoded chunk before the helper checks its length, and final
-   joining/base64 serialization also require additional bounded copies.
+   joining/base64 serialization also require additional bounded copies. That
+   residual is an accepted risk with a recorded trigger -- see the section
+   below.
 
 The child retains redirect authority: it performs method rewriting (303),
 credential-header handling, and its own hop limit, exactly as the in-process
 path does. Regression: `tests/integration/test_host_http_boundaries.py`
 (real loopback origin; asserts the forbidden destination receives no
 request).
+
+## Decoded peak memory: declined, with a trigger (issue #358)
+
+`read_capped` bounds the *cumulative decoded* body, which is what decides
+whether a response is accepted. It does not bound a single transient
+allocation: HTTPX decodes each raw network chunk in one `decode()` call, and
+for a high-ratio payload (a "decompression bomb") that call can materialize a
+large buffer before the helper ever sees its length. The final `b"".join(...)`
+and base64 serialization copy the body again, though those copies are at least
+bounded by the 5 MiB accepted total.
+
+**Decision: accepted risk, not a defect left open.** Bounding the transient
+allocation means replacing HTTPX's decoder with our own -- a
+`decompressobj().decompress(data, max_length)` per chunk, or an `iter_raw()`
+feed with a bounded raw chunk size -- and then keeping that correct for gzip,
+deflate, brotli and zstd (`Response.iter_bytes` reaches for
+`self._get_content_decoder()`, a private API, and its `chunk_size` bounds only
+the *output* chunking, not the `decoded` buffer the call already produced).
+That is a real cost against a threat this deployment does not carry: every
+origin is a feed the operator subscribed to, and the same cap already bounds
+the accepted result. It becomes worth paying when sources stop being
+operator-chosen, which is the trigger below.
+
+**Re-evaluate when any of these holds** (ADR 0041's convention -- a reviewable
+condition, not "after a while"):
+
+1. A source can be added without the operator choosing it (multi-user, or an
+   import path that takes an arbitrary URL), so the response is no longer
+   operator-vetted input.
+2. A response is measured whose decompressed size exceeds the accepted cap by
+   more than an order of magnitude -- the amplification observed, not assumed.
+3. The process runs under a memory limit tight enough that a single decoded
+   chunk can exhaust it (for example a container with a low `memory.max`).
+
+Until then the guard is the cumulative cap, and it is tested on real sockets: a
+compressed body that decompresses past 5 MiB is refused, and an unfinished
+stream is refused without waiting for EOF
+(`tests/integration/test_host_http_boundaries.py`)
 
 ## Total elapsed deadline (A09)
 
