@@ -53,12 +53,19 @@ WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 # a guessed token looks in the data, and that is worth keeping. But only when
 # there was a guess: the auth layers mark requests that offered no credential
 # at all (CREDENTIALLESS_AUTH_FAILURE below) -- a probe, not a guess (issue
-# #18). That traffic is exactly what the rate limiter refuses to count (issue
-# #8), and the tunnel's only public surface (the Reader API) receives it in
-# bulk. Auditing every probe filled the fact-source table unboundedly from an
-# unthrottled path. Only the auth layer itself can tell "no credential" from
-# "a wrong credential": a form POST without T is wire-identical to one with a
-# bad T as far as headers go.
+# #18). The tunnel's only public surface (the Reader API) receives such probes
+# in bulk, and auditing every one of them filled the fact-source table
+# unboundedly from an unthrottled path. Only the auth layer itself can tell
+# "no credential" from "a wrong credential": a form POST without T is
+# wire-identical to one with a bad T as far as headers go.
+#
+# The rate limiter's exemption is *not* this same set, and it cannot be. The
+# limiter sits outside the auth layer and sees only headers, so it counts every
+# form POST -- an empty T included -- and exempts only requests that presented
+# neither an Authorization header nor a form body (issue #349). The audit mark
+# and the rate-limit exemption are two different predicates, each as precise as
+# the layer that owns its evidence: the auth layer has the parsed form, the
+# limiter does not.
 AUTH_FAILURE_STATUSES = frozenset({401, 403})
 
 # Scope key the auth layers set when they refused a request that presented no

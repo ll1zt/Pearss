@@ -375,12 +375,21 @@ class AuthFailureRateLimitMiddleware:
         to burn the brute-force budget, banning a source that never tried a
         credential.
 
-        Two shapes carry a credential: an Authorization header (Core API,
-        /mcp, Reader bearer paths) and a form POST -- Reader's ClientLogin
-        presents Email/Passwd in the body, not a header, so a header-only
-        check would silently disarm the public face's main brute-force
-        defense. A JSON POST with no header (an unauthenticated MCP call)
-        offers nothing to check and stays uncounted.
+        Two shapes count as carrying a credential: an Authorization header
+        (Core API, /mcp, Reader bearer paths) and any form POST -- Reader's
+        ClientLogin presents Email/Passwd in the body, not a header, so a
+        header-only check would silently disarm the public face's main
+        brute-force defense. A JSON POST with no header (an unauthenticated
+        MCP call) offers nothing to check and stays uncounted.
+
+        This is a header-level approximation, deliberately (issue #349): the
+        limiter runs outside the auth layer and never sees the parsed form, so
+        a form POST with an empty T is counted like one with a bad T. A
+        request that truly offered no credential is distinguished one layer
+        in, where the body is visible -- the auth layer marks it
+        `CREDENTIALLESS_AUTH_FAILURE` for the audit decision. That mark, not
+        this predicate, is what "never tried a credential" means; the two are
+        not interchangeable.
         """
         headers = scope.get("headers") or []
         content_type = b""
