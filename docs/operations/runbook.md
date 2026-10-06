@@ -156,12 +156,12 @@ enrichment 会等待取消后的真实 sweep 完成；scheduler 仍不保证取�
 插件表同步及 worker 启动也纳入同一清理范围；这些启动步骤失败时会执行既有的顺序清理。
 更早的构造/MCP 进入失败、各资源独立清理和后台健康信号仍由 A07/C10 跟踪。
 
-**到期时间不落库**，每轮从 `source.schedule_policy` + `job_run`/`item` 历史推导（ADR 0009）。
+**到期时间不落库**，每轮从 `subscription.schedule_policy` + `job_run`/`item` 历史推导（ADR 0009）。
 所以「为什么没抓」要按推导的输入去查，而不是找一张 next_run 表：
 
 | 症状 | 查什么 | 说明 |
 |---|---|---|
-| 某源一直不抓 | `select status from source` | 只有 `active` 会被抓；paused/disabled 是运维的显式决定 |
+| 某源一直不抓 | `select status, id from subscription` | 只有 `active` 会被抓；paused/disabled 是运维的显式决定 |
 | 失败后间隔变长 | `job_run` 最近状态 | 连续失败按 2^n 退避，上限 24h；**这是预期行为**，不是卡住 |
 | adaptive 抓得太稀 | `item.published_at` 间隔 | 更新节奏按**条目发布时间**算，不是按抓取时间 |
 | 重启后大批 `timed_out` | 启动日志 | 上次进程被杀时留下的 `running` 行被回收，属正常清理 |
@@ -173,14 +173,14 @@ enrichment 会等待取消后的真实 sweep 完成；scheduler 仍不保证取�
 ## X（Twitter）源：登录型采集
 
 X 源是**登录型**（ADR 0012），需要会话 cookie，且是**分页型**采集：抓取范围由
-`source` 上的两个游标界定 —— `seen_frontier`（上沿，已入库的最新推文 id）与
+`origin` 上的两个游标界定 —— `seen_frontier`（上沿，已入库的最新推文 id）与
 `floor_cursor`（下沿，该源走过的最深位置）。语义见 data-model 的「抓取区间」。
 
 | 症状 | 查什么 | 说明 |
 |---|---|---|
 | `error_class=auth` | `PEARSS_X_*` 或 CookieCloud 配置 | 凭据缺失/失效**不会**匿名重试（ADR 0012）—— 若看到 `auth` 但确信配好了，查 CookieCloud 是否返回了 `auth_token`/`ct0` |
 | 首轮抓回上千条 | `PEARSS_X_FIRST_PAGES`（默认 3） | 它定义该源的历史深度。想让新源只取最近内容，调小再订阅；对已有源改它**无效** —— floor 已由首轮定格 |
-| 每轮请求数远超预期 | `source.floor_cursor` 是否为 NULL | floor 为空说明区间只有上沿，walk 会一直翻到 origin 底部或 200 页护栏。让首轮正常跑完即可建立 floor |
+| 每轮请求数远超预期 | `origin.floor_cursor` 是否为 NULL | floor 为空说明区间只有上沿，walk 会一直翻到 origin 底部或 200 页护栏。让首轮正常跑完即可建立 floor |
 | 日志出现 `timeline gap` | 无处置动作 | 断档是**记录**而非待办：它位于区间内部，追它等于开出第二个爬取方向。frontier 持续推进才是下一步抓什么的依据 |
 | CookieCloud 连不上 | 服务日志 `CookieCloud unavailable` | 静态 `PEARSS_X_*` 优先；若两者都无 → `auth`。服务端不可达与“没配置”是**不同处置** |
 | CookieCloud 返回 401 | 服务日志 | 请求没带 admin token：`PEARSS_COOKIECLOUD_ADMIN_TOKEN` 为空（URL/UUID 有值才走得到这一步）。只设旧 `PEARSS_COOKIECLOUD_TOKEN` 会走「未配置 → 跳过」而不是 401 |

@@ -46,7 +46,8 @@
 
 ### Origin 与 Subscription（ADR 0046 拆表，进行中）
 
-`Source` 正在按 ADR 0046 D-A/D-B 拆成两半。**阶段 A** 已落地（migration 0026）：
+`Source` 正在按 ADR 0046 D-A/D-B 拆成两半。**阶段 A**（migration 0026）建表并复制，
+**阶段 B**（migration 0027）把读写切了过去：
 
 - **`origin`** —— 事实：`type` / `url` / `canonical_url` / `title` / `parser_plugin_id` /
   `seen_frontier` / `floor_cursor`。同一租户内 `canonical_url + type` 唯一，这就是去重
@@ -54,16 +55,22 @@
 - **`subscription`** —— 策略：`schedule_policy` / `pipeline_chain` / `target_lang` /
   `folder` / `status` / `trust_level`。它回答「某个客户端怎么消费这个 origin」。
 
-阶段 A 的性质，也是它可独立合并、独立回滚的原因：
+阶段 B 之后的性质：
 
-- **读写仍走 `source`**：`source` 一行同时承载两半，读路径一行未改；写入侧由
-  `create_source` 双写三张表，所以新行的 `origin`/`subscription` 也已存在。
+- **读路径全部走 `origin` / `subscription`**：调度读订阅的策略、抓取历史写 origin、
+  `item.origin_id` 是事实列；`(origin_id, sort_key, id)` 复合索引由 0027 落下（源内分页
+  必须用它，否则每次排序都落临时 B 树，issue #77）。
+- **`source` 降为门面私有的镜像**：只有 `adapters/repository/sources.py` 会碰它。
+  `create_source` 写这一行，是因为 `item.source_id` 的外键还指着它；**没有任何读路径
+  读它**，所以它的策略列**在创建时就冻结**，不随后续修改更新。
+- `item.source_id` / `raw_fetch.source_id` 同属镜像：写入路径两列同写，读路径只认
+  `origin_id`；迁移 0028 删列。
 - **1:1 阶段 id 相同**：`origin.id = subscription.id = 旧 source.id`，因此既有 item id、
   guid 与 `/v1/sources/{id}` 都保持原义。
 - **「一个 origin 一个订阅」只是本阶段的约束**（`UNIQUE(tenant_id, origin_id)`）；
   多订阅迁移会删掉它，那时一个 origin 才能挂两套策略（一个翻译、一个不译）。
-- `item.origin_id` / `raw_fetch.origin_id` 已加列并回填，**但尚无任何读路径使用**；
-  后续迁移把它们置为 NOT NULL、加外键，并退役 `source_id`。
+- 运维 SQL 请查 `origin` / `subscription`（runbook 已同步）：`source` 的列对操作者
+  已经不再权威。
 
 ### 抓取区间（分页型源）
 
