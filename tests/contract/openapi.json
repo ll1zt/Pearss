@@ -3117,6 +3117,7 @@
     },
     "/v1/sources": {
       "get": {
+        "deprecated": true,
         "description": "List sources, oldest page first by creation order.\n\nOffset paging, unlike the items endpoint's keyset cursor. Sources are\nbounded (an operator's subscriptions, tens not millions) and new ones are\nappended at the end of this ordering, so a row arriving mid-walk shifts\nnothing already read -- the failure offset paging is famous for needs\ninsertion *ahead* of the cursor, which is what items do and sources do not.\nThe cursor is opaque to clients either way, so switching to keyset later\nwould not be a breaking change.",
         "operationId": "listSources",
         "parameters": [
@@ -3307,6 +3308,7 @@
         ]
       },
       "get": {
+        "deprecated": true,
         "operationId": "getSource",
         "parameters": [
           {
@@ -3426,6 +3428,7 @@
     },
     "/v1/sources/{source_id}/enrichments": {
       "get": {
+        "deprecated": true,
         "description": "Processor-chain rows for one source: the agent's visibility into\nwhat the chain is doing and why an item is being held.\n\nBounded like every other list route. This one had no bound at all, which\nwas survivable only while the MCP wrapper cut every list to 20; once the\nwrapper stopped overruling the requested page (issue #65), an unbounded\n`data` here would have been the one way a result set could still grow\nwithout anyone asking. `total` counts every match, so a short page is\nannounced rather than implied.",
         "operationId": "listEnrichments",
         "parameters": [
@@ -3678,6 +3681,7 @@
     },
     "/v1/sources/{source_id}:diagnose": {
       "get": {
+        "deprecated": true,
         "description": "Everything one question needs: why is this source not updating?\n\nDeclared *before* `GET /sources/{source_id}` on purpose: that route's path\nparameter matches `:diagnose` too, and Starlette takes the first route that\nmatches, so the other order answers 404 with `source_id` set to\n\"abc:diagnose\". The POST verbs elsewhere in this module do not have the\nproblem because no GET route can shadow them.\n\nAn aggregate endpoint rather than six calls, which is ADR 0036's rule for a\nquestion that is always asked the same way: the source's own state, its job\nand recent runs with their error classes, how much is stuck behind its\nprocessing chain, and whether the collection loop is alive at all. The order\nthose calls go in is knowledge the caller should not have to have, and\nstopping after two of them produces a confident answer built from half the\nevidence.\n\n`model_health` is the processing chain's own dimension (issue #231): which\nmodel the next row would ask, which are cooling down and for how long, and\nwhat each of those failed with. A read-only projection of the worker's\nin-memory registry (ADR 0048, ADR 0051) -- a table for it would be a second\nfact source beside the provider's own behaviour.\n\nIts `window` cell is the other half of the same question (issue #269): a\nmodel that fails part of every row is below the demotion gate, so it never\ncools and never appears under `models` -- while the journal fills with\nfallbacks. The window counts the recent rows per model (attempts, failures,\nfallbacks, rate, last class), so \"the chain keeps switching away from this\nmodel\" is answerable from the diagnostic surface instead of by reading logs.\n\n`get_source` remains the full single row; this is the diagnostic view.",
         "operationId": "diagnoseSource",
         "parameters": [
@@ -3945,6 +3949,7 @@
     },
     "/v1/sources/{source_id}:queue": {
       "get": {
+        "deprecated": true,
         "description": "What this source's chain is doing, in one constant-size answer.\n\nThe counts are a fold over the chain rows -- the same rows\n`/v1/sources/{id}/enrichments` renders -- so the two cannot disagree; the\nrate is derived from the completion timestamps in a window, never stored\n(ADR 0009's rule about `next_run_time`, applied to a statistic). Together\nthey answer \"how much is waiting, and is it draining?\", which used to cost\none call per source: a measured backlog check across 82 sources was 82\nrequests, and none of them said how fast anything was moving.\n\n`oldest_queued_at` is what counts cannot say: a queue of one that has been\nwaiting an hour is a different problem from a queue of one that just\narrived.",
         "operationId": "getSourceQueue",
         "parameters": [

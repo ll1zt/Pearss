@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import itertools
+import json
 import os
 import re
 import shlex
@@ -1935,6 +1936,43 @@ def test_no_module_reaches_for_the_retired_source_table() -> None:
         "these modules still reach for the retired `source` table: "
         f"{offenders}. Read origin/subscription instead."
     )
+
+
+def test_the_legacy_source_reads_are_marked_deprecated() -> None:
+    """AC-337: `/v1/sources*` reads are a deprecated projection, not a second entity.
+
+    The read endpoints answer with the shape they always did, so no client
+    breaks -- but the document a client reads has to say they are on their way
+    out, and the data model has to stop describing a `Source` entity that
+    migration 0028 deleted. Both halves are the criterion: a deprecated flag on
+    an endpoint whose model still names the entity is a rename, not a split.
+    """
+    document = json.loads(
+        (REPO_ROOT / "tests/contract/openapi.json").read_text(encoding="utf-8")
+    )
+    legacy_reads = (
+        "/v1/sources",
+        "/v1/sources/{source_id}",
+        "/v1/sources/{source_id}:diagnose",
+        "/v1/sources/{source_id}:queue",
+        "/v1/sources/{source_id}/enrichments",
+    )
+    missing = [
+        path
+        for path in legacy_reads
+        if document["paths"][path].get("get", {}).get("deprecated") is not True
+    ]
+    assert not missing, (
+        "these legacy read endpoints are not marked deprecated in the OpenAPI "
+        f"snapshot: {missing}. Regenerate with OPENAPI_SNAPSHOT_UPDATE=1 just contract."
+    )
+
+    model = (REPO_ROOT / "docs/domain/data-model.md").read_text(encoding="utf-8")
+    assert "\n### Source\n" not in model, (
+        "the data model still describes a `Source` entity; the split left "
+        "`Origin` and `Subscription`"
+    )
+    assert "\n### Origin\n" in model and "\n### Subscription\n" in model
 
 
 def test_scenario_registry_ranges_are_closed() -> None:
