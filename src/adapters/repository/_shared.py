@@ -52,14 +52,7 @@ def row_to_item(row: ItemRow) -> Item:
 
     Stored timestamps are parsed back to aware datetimes so the domain object
     satisfies the same invariants as a freshly normalised one.
-
-    `origin_id` is nullable in the schema until 0027 makes it NOT NULL, so this
-    is where a row written around the write path shows up as an error rather
-    than as an `Item` whose origin is None: every path that stores an item sets
-    it (items._insert writes the legacy column and this one together).
     """
-    if row.origin_id is None:  # unreachable: the write path always sets it
-        raise ValueError(f"item {row.id!r} has no origin_id")
     return Item(
         id=row.id,
         origin_id=row.origin_id,

@@ -515,10 +515,7 @@ def _raw_fetch_row(
 
     row = RawFetchRow(
         id=f"rawfetch-{secrets.token_hex(8)}",
-        # Both columns: `origin_id` is the fact and the column the conditional
-        # loop reads, `source_id` the stage-A mirror 0028 drops.
         origin_id=source_id,
-        source_id=source_id,
         status=status,
         http_status=payload.status_code if payload else None,
         # A 304 re-affirms the validators it was sent with; RawPayload.etag

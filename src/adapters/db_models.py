@@ -79,109 +79,17 @@ def enum_check(name: str, column: str, values: tuple[str, ...]) -> sa.CheckConst
     return sa.CheckConstraint(f"{column} IN ({literal})", name=name)
 
 
-class Source(Base):
-    """A content source. Fact source: backed up."""
-
-    __tablename__ = "source"
-
-    id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
-    type: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.String(ENUM_LENGTHS["source_type"]), nullable=False
-    )
-    url: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
-    # NOT NULL because this is the dedupe key. A nullable column in a unique
-    # constraint is not covered by it — SQL treats NULLs as distinct — so a
-    # row without one could duplicate any other, silently.
-    canonical_url: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
-    # The name the origin gives itself, discovered at collection time. Nullable
-    # because a source created before its first fetch legitimately has none; the
-    # Reader API falls back to the id rather than showing a blank sidebar.
-    title: sa.orm.Mapped[str | None] = sa.orm.mapped_column(sa.Text, nullable=True)
-    # Retained in P1 even though the plugin registry arrives in P2, so a web
-    # source can record which collector parsed it from the start.
-    parser_plugin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.String(128), nullable=True
-    )
-    # Paging state for sources whose origin is walked a page at a time. RSS has
-    # no such concept, so both are unused by the other collectors.
-    # Not derivable from `item`: a cursor is an opaque string from the origin,
-    # and a gap position is not recoverable from stored rows.
-    #
-    # `seen_frontier` is the newest ingested tweet id; `floor_cursor` is the
-    # oldest cursor any walk reached, the interval's lower end. Together they
-    # bound what a walk may fetch. (`resume_rounds` was removed in 0016: the
-    # interval model has no backlog to age out.)
-    seen_frontier: sa.orm.Mapped[int | None] = sa.orm.mapped_column(
-        sa.BigInteger, nullable=True
-    )
-    floor_cursor: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.Text, nullable=True
-    )
-    # Per-source scheduling: fixed interval or adaptive bounds, plus the
-    # consecutive-failure count that drives backoff.
-    schedule_policy: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
-    # Processing chain the source's items must complete before the gate opens.
-    # JSON list of {plugin_id, kind, lang, required}; NULL means no chain (P1
-    # behaviour: items go ready straight after normalisation).
-    pipeline_chain: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.Text, nullable=True
-    )
-    # Target language for language products (translation); default for the
-    # chain's language specs that omit their own.
-    target_lang: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.String(16), nullable=True
-    )
-    # The subscription's sidebar folder, one per source (FreshRSS constrains a
-    # feed to a single category and clients are built to that). NOT NULL with
-    # the default name rather than nullable: an unclassified subscription still
-    # sits in a folder the client can show, and two spellings of "none" would
-    # make every reader of this column handle both.
-    folder: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.Text, nullable=False, server_default=SINGLE_TENANT
-    )
-    status: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.String(ENUM_LENGTHS["source_status"]), nullable=False
-    )
-    # Recorded intent about the source. Never makes fetched content trusted —
-    # see core.enums.TrustLevel for why that distinction is load-bearing.
-    trust_level: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.String(ENUM_LENGTHS["trust_level"]), nullable=False
-    )
-    # Single-user today; carried from the outset because retrofitting tenancy
-    # into tables that lack it is far more painful than carrying a column.
-    tenant_id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), nullable=False)
-    created_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
-    updated_at: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
-
-    __table_args__ = (
-        enum_check("sourcetype", "type", ("rss", "web", "agent")),
-        enum_check(
-            "sourcestatus",
-            "status",
-            ("active", "paused", "disabled"),
-        ),
-        enum_check(
-            "trustlevel",
-            "trust_level",
-            ("standard", "trusted", "restricted"),
-        ),
-        # One source per canonical URL and type within a tenant.
-        sa.UniqueConstraint("tenant_id", "canonical_url", "type", name="uq_source_url"),
-    )
-
-
 class Origin(Base):
-    """Where content comes from: the fact half of the split (ADR 0046 D-A).
+    """Where content comes from: the facts (ADR 0046 D-A/D-B).
 
-    Stage A: `Source` still carries both halves and every read path uses it, so
-    this table is written alongside `source` and read only by the repository
-    functions added with it. The 1:1 stage gives it the `Source`'s own id,
-    which is what keeps every existing item id, guid and `/v1/sources/{id}` URL
-    meaningful while the split is staged.
+    The fact half of the split. `schedule_policy`, `pipeline_chain` and
+    `folder` say how a client *consumes* this origin and live on
+    `Subscription` -- two clients consuming one origin is the case the split
+    exists for.
 
-    Fact, not policy. `schedule_policy`, `pipeline_chain` and `folder` say how
-    a client consumes this origin, and they live on `Subscription` -- two
-    clients consuming one origin is the case the split exists for.
+    Migration 0028 gave it the retired `source` row's own id
+    (`origin.id = subscription.id`), which is what keeps every existing item
+    id, guid and `/v1/sources/{id}` URL meaningful.
     """
 
     __tablename__ = "origin"
@@ -224,16 +132,12 @@ class Origin(Base):
 
 
 class Subscription(Base):
-    """How one client consumes an origin: the policy half of the split.
+    """How one client consumes an origin: the policy.
 
-    Written alongside its `source` in stage A and read by the repository
-    functions added with it, so the rows the later stages read already exist
-    for sources created from the moment this lands.
-
-    `UNIQUE(tenant_id, origin_id)` is stage A only: it states "one subscription
-    per origin", which is true today and stops being true when a second
-    subscription becomes meaningful -- that migration drops it, and the test
-    that pins it here is what makes the removal deliberate rather than silent.
+    `UNIQUE(tenant_id, origin_id)` is the 1:1 stage's rule -- "one subscription
+    per origin" -- which is true today and stops being true when a second
+    subscription becomes meaningful (issue #371). The migration that removes it
+    is what changes this module's meaning, not a flag in it.
     """
 
     __tablename__ = "subscription"
@@ -297,14 +201,8 @@ class RawFetch(Base):
     __tablename__ = "raw_fetch"
 
     id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
-    source_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False
-    )
-    # Stage A of the split: nullable, backfilled from `source_id` by migration
-    # 0026, and not read by anything yet. Migration 0027 is what makes it NOT
-    # NULL, adds the foreign key and retires `source_id`.
-    origin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.String(64), nullable=True
+    origin_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("origin.id", ondelete="CASCADE"), nullable=False
     )
     # Reference into file storage; the payload itself never enters the DB.
     payload_ref: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
@@ -337,11 +235,8 @@ class RawFetch(Base):
             ("network", "parse", "structure_changed", "blocked", "auth"),
         ),
         # The conditional-request state for the next fetch is the most recent
-        # row for a source; raw_fetch only grows, so this needs an index.
-        sa.Index("ix_raw_fetch_source_id_fetched_at", "source_id", "fetched_at"),
-        # Stage A only: the column 0027 keeps, under the name the reads will
-        # use. Its composite replacement arrives with that migration.
-        sa.Index("ix_raw_fetch_origin_id", "origin_id"),
+        # row for an origin; raw_fetch only grows, so this needs an index.
+        sa.Index("ix_raw_fetch_origin_id_fetched_at", "origin_id", "fetched_at"),
     )
 
 
@@ -351,15 +246,8 @@ class Item(Base):
     __tablename__ = "item"
 
     id: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.String(64), primary_key=True)
-    source_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
-        sa.ForeignKey("source.id", ondelete="CASCADE"), nullable=False
-    )
-    # Stage A of the split: nullable, backfilled from `source_id` by migration
-    # 0026, and not read by anything yet. Migration 0027 is what makes it NOT
-    # NULL, adds the foreign key, retires `source_id` and replaces the index
-    # below with `(origin_id, sort_key, id)`.
-    origin_id: sa.orm.Mapped[str | None] = sa.orm.mapped_column(
-        sa.String(64), nullable=True
+    origin_id: sa.orm.Mapped[str] = sa.orm.mapped_column(
+        sa.ForeignKey("origin.id", ondelete="CASCADE"), nullable=False
     )
     # Stable across the item's life; frozen once published.
     guid: sa.orm.Mapped[str] = sa.orm.mapped_column(sa.Text, nullable=False)
@@ -425,10 +313,10 @@ class Item(Base):
         # so that index was never chosen -- the plan was a full scan plus a
         # temp B-tree (issue #77).
         sa.Index("ix_item_sort_key_id", "sort_key", "id"),
-        sa.Index("ix_item_source_sort_key_id", "source_id", "sort_key", "id"),
-        # Stage B's page: migration 0027 moved the composite off `source_id`
-        # onto the column the reads filter on, because a single-column index
-        # there sorted every page into a temporary b-tree (issue #77).
+        # The source-scoped page. Migration 0027 moved this composite off
+        # `source_id` onto the column the reads filter on, because a
+        # single-column index there sorted every page into a temporary b-tree
+        # (issue #77).
         sa.Index("ix_item_origin_sort_key_id", "origin_id", "sort_key", "id"),
     )
 

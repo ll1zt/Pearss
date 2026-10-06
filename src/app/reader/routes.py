@@ -620,7 +620,7 @@ def _render_item(
         "summary": {"direction": "ltr", "content": body},
         "content": {"direction": "ltr", "content": body},
         "origin": {
-            "streamId": reader_api.feed_stream_id(row.source_id),
+            "streamId": reader_api.feed_stream_id(row.origin_id),
             "title": source_title,
             "htmlUrl": row.url,
         },

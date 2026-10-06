@@ -482,7 +482,7 @@ def load_contents(
         # One query for the whole page rather than one per item: a contents
         # request can carry a hundred ids, and a client that cannot show a
         # source name is the bug this is here to fix.
-        titles = origin_display_labels(session, [row.source_id for row in rows])
+        titles = origin_display_labels(session, [row.origin_id for row in rows])
         mark_published(
             session, [row_to_item(row) for row in rows], at=datetime.now(UTC)
         )
@@ -506,7 +506,7 @@ def load_contents(
                 is_read=bool(state and state.is_read),
                 is_starred=bool(state and state.is_starred),
                 body=body,
-                source_title=titles.get(row.source_id),
+                source_title=titles.get(row.origin_id),
             )
         )
     return items

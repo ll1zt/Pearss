@@ -40,7 +40,6 @@ from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.repository._shared import row_to_item
 from adapters.repository.search_index import deindex_items
-from adapters.repository.sources import delete_source_mirror
 from core.models import Item
 
 LOGGER = logging.getLogger(__name__)
@@ -313,12 +312,9 @@ def delete_source(
     session.execute(delete(RawFetchRow).where(RawFetchRow.origin_id == source_id))
     session.flush()
 
-    # Both rows. `origin` is the fact table; `source` is the stage-A mirror,
-    # and its row is what `item.source_id`'s foreign key still resolves
-    # against -- the items themselves were removed above. Migration 0028 drops
-    # it, and until then the façade owns every touch of it.
+    # The origin row goes last, and it is the parent of everything above:
+    # `item`, `raw_fetch` and `subscription` all cascade from it.
     session.execute(delete(OriginRow).where(OriginRow.id == source_id))
-    delete_source_mirror(session, source_id=source_id)
 
     return DeletionResult(
         counts={
