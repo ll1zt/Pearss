@@ -19,7 +19,7 @@ API_PATH = "/api/v4/members/example/answers?limit=10"
 COOKIECLOUD_ENV = (
     "PEARSS_COOKIECLOUD_URL",
     "PEARSS_COOKIECLOUD_UUID",
-    "PEARSS_COOKIECLOUD_TOKEN",
+    "PEARSS_COOKIECLOUD_ADMIN_TOKEN",
 )
 
 
@@ -187,12 +187,14 @@ def _cookiecloud_source(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configure a CookieCloud source whose network layer is stubbed out."""
     monkeypatch.setenv("PEARSS_COOKIECLOUD_URL", "http://127.0.0.1:4000")
     monkeypatch.setenv("PEARSS_COOKIECLOUD_UUID", "uuid")
-    monkeypatch.setenv("PEARSS_COOKIECLOUD_TOKEN", "token")
+    monkeypatch.setenv("PEARSS_COOKIECLOUD_ADMIN_TOKEN", "token")
 
     def fake_config(domain: str) -> object:
         return f"config:{domain}"
 
-    def fake_fetch(http_client: httpx.Client, config: object, *, force: bool) -> str:
+    def fake_fetch(
+        http_client: httpx.Client, config: object, *, secure_ok: bool, force: bool
+    ) -> str:
         return "d_c0=fresh" if force else "d_c0=stale"
 
     monkeypatch.setattr(cookiecloud, "config_from_env", fake_config)

@@ -132,7 +132,11 @@ def _from_cookie_cloud(
     own_client = client is None
     active = client if client is not None else httpx.Client()
     try:
-        header = cookiecloud.fetch_cookie_header(active, config, force=force)
+        # https only: a `secure` cookie is part of this session, not something
+        # to drop the way a plaintext target would require.
+        header = cookiecloud.fetch_cookie_header(
+            active, config, secure_ok=True, force=force
+        )
     except cookiecloud.CookieCloudError as exc:
         LOGGER.info("CookieCloud unavailable for X session: %s", exc)
         return None
@@ -165,7 +169,7 @@ def _missing_credentials_message(*, auth: str, ct0: str) -> str:
     return (
         f"{AUTH_TOKEN_ENV} and {CT0_ENV} are both required, or set "
         f"{cookiecloud.BASE_URL_ENV}/{cookiecloud.UUID_ENV}/"
-        f"{cookiecloud.TOKEN_ENV}"
+        f"{cookiecloud.ADMIN_TOKEN_ENV}"
         + (f" (missing: {', '.join(missing)})" if missing else "")
     )
 

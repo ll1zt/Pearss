@@ -83,7 +83,11 @@ def resolve_cookie(client: httpx.Client, *, force: bool = False) -> str:
             "Zhihu's web API requires a logged-in cookie containing d_c0"
         )
     try:
-        header = cookiecloud.fetch_cookie_header(client, config, force=force)
+        # https only: a `secure` cookie is part of this session, not something
+        # to drop the way a plaintext target would require.
+        header = cookiecloud.fetch_cookie_header(
+            client, config, secure_ok=True, force=force
+        )
     except cookiecloud.CookieCloudError as exc:
         raise CredentialError(
             f"CookieCloud did not yield a Zhihu cookie: {exc}"

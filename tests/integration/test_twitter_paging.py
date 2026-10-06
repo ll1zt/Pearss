@@ -442,7 +442,7 @@ def test_a_rejected_session_is_refreshed_and_the_page_retried(
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv(cc.BASE_URL_ENV, "http://127.0.0.1:4000")
     monkeypatch.setenv(cc.UUID_ENV, "synthetic-uuid")
-    monkeypatch.setenv(cc.TOKEN_ENV, "synthetic-master-password")
+    monkeypatch.setenv(cc.ADMIN_TOKEN_ENV, "synthetic-admin-token")
     cc.invalidate()
 
     state = {"x_calls": 0, "cc_calls": 0}
@@ -450,12 +450,20 @@ def test_a_rejected_session_is_refreshed_and_the_page_retried(
     def route(request: httpx.Request) -> httpx.Response:
         from adapters.cookiecloud import parse_cookie_header
 
-        if request.url.path.startswith("/get/"):
+        if request.url.path.startswith("/export/"):
             # The browser re-synced between the two lookups: the first hands
             # out the session X is about to reject, the second the fresh one.
             state["cc_calls"] += 1
             issued = "stale" if state["cc_calls"] == 1 else "fresh"
-            return httpx.Response(200, text=f"auth_token=a; ct0={issued}")
+            return httpx.Response(
+                200,
+                text=json.dumps(
+                    [
+                        {"name": "auth_token", "value": "a"},
+                        {"name": "ct0", "value": issued},
+                    ]
+                ),
+            )
 
         state["x_calls"] += 1
         sent = parse_cookie_header(request.headers.get("cookie", ""))

@@ -1,31 +1,46 @@
-"""CookieCloud client: fetch a site's cookies from a self-hosted sync server.
+r"""CookieCloud client: fetch a site's cookies from a self-hosted sync server.
 
-[cookie_cloud_server](https://github.com/ll1zt/cookie_cloud_server) relays
-browser cookie backups. Its admin export endpoint returns a ready-made
-`Cookie:` header for one domain:
+[CookieCloud](https://github.com/easychen/CookieCloud) -- this deployment runs the
+repository's Go server; the Elixir one is its frozen predecessor -- relays
+browser cookie backups. Its admin export endpoint returns the decrypted cookies
+for one domain as JSON:
 
-    GET /get/<uuid>?format=header&domain=x.com
-    Authorization: Bearer <COOKIE_CLOUD_SERVER_PASSWORD>
+    GET /export/<uuid>?format=raw&domain=x.com
+    Authorization: Bearer <ADMIN_TOKEN>
 
 This lets a login-type collector (ADR 0012) pick up a refreshed session instead
 of pinning a value in the environment that goes stale at the next login.
 
-**What the token actually grants.** `COOKIE_CLOUD_SERVER_PASSWORD` is the
-server's master secret: it decrypts and exports *any* uuid's *any* domain. The
-`domain=` filter narrows what this call returns, not what the token can ask
-for. Anyone holding it can take your banking and mail cookies too, so it is a
-wider credential than the single session it fetches, and the deployment should
-be scoped accordingly -- a dedicated uuid containing only the sites a reader
-needs is better than pointing at a full browser profile.
+**Why `raw` and not `format=header`.** The server escapes the text formats so a
+cookie cannot inject a field into whatever reads the export: `;` and `=` become
+`\;` and `\=`. Cookie values are frequently base64 and end in `=`, so a header
+taken from that format is a corrupt value. `raw` is the programmatic format, and
+building the header here is also what lets this module drop expired cookies and
+`secure` cookies aimed at a plaintext target.
+
+**What the token grants.** `ADMIN_TOKEN` guards the whole admin surface, not
+only this call: whoever holds it can export *any* uuid's *any* domain and can
+`DELETE /records/<uuid>`. The `domain=` filter narrows what this call returns,
+not what the token can ask for. Scope the deployment accordingly -- a dedicated
+uuid holding only the sites a reader needs is better than pointing at a full
+browser profile.
 
 Consequences taken here: the token is read from the environment only, never
 stored, never logged, and never included in an error detail; and a plaintext
-http URL that is not loopback logs one warning, because the master secret
-crosses the network on every call.
+http URL that is not loopback logs one warning, because the admin token crosses
+the network on every call.
+
+Three traps worth keeping in view:
+
+1. Do not switch this back to `format=header` -- see above.
+2. `GET /get/<uuid>` is not a fallback. It only returns ciphertext, and a uuid
+   written by a v2 client has no legacy record at all, so it answers 404.
+3. The token can delete records. Use a dedicated uuid.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -49,7 +64,7 @@ MAX_COOKIE_BYTES = 256 * 1024
 # containing "token" and cannot tell the two apart.
 BASE_URL_ENV = "PEARSS_COOKIECLOUD_URL"
 UUID_ENV = "PEARSS_COOKIECLOUD_UUID"
-TOKEN_ENV = "PEARSS_COOKIECLOUD_TOKEN"  # noqa: S105
+ADMIN_TOKEN_ENV = "PEARSS_COOKIECLOUD_ADMIN_TOKEN"  # noqa: S105
 CACHE_TTL_ENV = "PEARSS_COOKIECLOUD_CACHE_SECONDS"
 
 # Short enough that a re-login on the desktop reaches the collector without a
@@ -58,13 +73,10 @@ DEFAULT_CACHE_SECONDS: Final = 300.0
 
 _LOOPBACK_HOSTS: Final = frozenset({"127.0.0.1", "::1", "localhost"})
 
-# Guarded by _CACHE_LOCK. A module-level cache rather than instance state so a
-# caller can construct a cheap provider per collection and still hit it -- the
-# alternative was threading a singleton through the app, which buys nothing
-# here because the cache key already includes everything that identifies the
-# deployment (base, uuid, domain).
-_CACHE: dict[tuple[str, str, str], tuple[str, float]] = {}
-_CACHE_LOCK = threading.Lock()
+# Characters a `Cookie:` header cannot carry. A value containing `;` would
+# inject another pair into the header, and CR/LF would inject a header line;
+# no valid cookie value contains any of them (RFC 6265 cookie-octet).
+_UNSAFE_IN_HEADER: Final = frozenset(";\r\n")
 
 
 class CookieCloudError(Exception):
@@ -75,13 +87,25 @@ class CookieCloudError(Exception):
     """
 
 
+@dataclass(frozen=True, slots=True)
+class _Cookie:
+    """One cookie as `format=raw` renders it, reduced to what a header needs."""
+
+    name: str
+    value: str
+    path: str
+    secure: bool
+    # Epoch seconds, or None for a session cookie (it expires with the browser).
+    expires_at: float | None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Config:
     """Where to ask, and for which domain."""
 
     base_url: str
     uuid: str
-    token: str
+    admin_token: str
     # No default. Which domain to export belongs to the site being collected,
     # so every caller states it; a shared default would hand one collector
     # another's cookies without saying so.
@@ -93,15 +117,29 @@ class Config:
         return (self.base_url, self.uuid, self.domain)
 
 
+# Guarded by _CACHE_LOCK. The parsed cookies are cached rather than the finished
+# header: the header depends on the caller's transport (`secure_ok`) and on the
+# clock, so caching it would let one caller's policy leak into another's and
+# would freeze expiry at fetch time.
+#
+# A module-level cache rather than instance state so a caller can construct a
+# cheap provider per collection and still hit it -- the alternative was threading
+# a singleton through the app, which buys nothing here because the cache key
+# already includes everything that identifies the deployment (base, uuid,
+# domain).
+_CACHE: dict[tuple[str, str, str], tuple[tuple[_Cookie, ...], float]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
 def _deployment() -> tuple[str, str, str] | None:
-    """`(base, uuid, token)` when a server is configured, else None.
+    """`(base, uuid, admin_token)` when a server is configured, else None.
 
     Split out so `enabled()` can ask "is there a server" without naming a
     domain -- that question is asked before any particular collector is chosen.
     """
     base = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
     uuid = os.environ.get(UUID_ENV, "").strip()
-    token = os.environ.get(TOKEN_ENV, "").strip()
+    token = os.environ.get(ADMIN_TOKEN_ENV, "").strip()
     if not (base and uuid and token):
         return None
     return base, uuid, token
@@ -138,7 +176,7 @@ def config_from_env(*, domain: str) -> Config | None:
     return Config(
         base_url=base,
         uuid=uuid,
-        token=token,
+        admin_token=token,
         domain=wanted,
         cache_seconds=max(0.0, ttl),
     )
@@ -148,7 +186,7 @@ def missing_config_keys() -> list[str]:
     """Which of the three required settings are absent, for a clear message."""
     return [
         key
-        for key in (BASE_URL_ENV, UUID_ENV, TOKEN_ENV)
+        for key in (BASE_URL_ENV, UUID_ENV, ADMIN_TOKEN_ENV)
         if not os.environ.get(key, "").strip()
     ]
 
@@ -162,8 +200,9 @@ def _warn_if_plaintext(config: Config) -> None:
     if host in _LOOPBACK_HOSTS:
         return
     LOGGER.warning(
-        "CookieCloud master password would be sent over plaintext http to %s; "
-        "that password exports every synced domain, not just %s",
+        "CookieCloud admin token would be sent over plaintext http to %s; "
+        "that token exports every synced domain and can delete any uuid's "
+        "records, not just %s",
         f"{host}:{parts.port or 80}",
         config.domain,
     )
@@ -173,9 +212,17 @@ def fetch_cookie_header(
     client: httpx.Client,
     config: Config,
     *,
+    secure_ok: bool,
     force: bool = False,
 ) -> str:
     """The `Cookie:` header value for `config.domain`.
+
+    `secure_ok` says whether the request this header will be attached to
+    travels over https. A browser does not send a `secure` cookie over http, so
+    neither does this: pass False for a plaintext target and those cookies are
+    dropped rather than leaked onto the wire. It is required rather than
+    defaulted because the caller is the only one that knows the target's scheme,
+    and defaulting to True would silently send `secure` cookies in cleartext.
 
     Raises CookieCloudError on any failure. Returns the cached value when one
     is fresh, unless `force` -- which is what a caller does after the origin
@@ -185,27 +232,27 @@ def fetch_cookie_header(
     if not force:
         cached = _cache_get(config.cache_key)
         if cached is not None:
-            return cached
+            return _cookie_header(cached, secure_ok=secure_ok, now=time.time())
 
     _warn_if_plaintext(config)
     # The uuid goes in a path segment, so it must be percent-encoded: httpx
     # does not escape a "/" inside an already-assembled URL, and an unencoded
     # slash would address a different record (or 404) rather than failing.
-    url = f"{config.base_url}/get/{quote(config.uuid, safe='')}"
+    url = f"{config.base_url}/export/{quote(config.uuid, safe='')}"
     try:
         response = client.get(
             url,
-            params={"format": "header", "domain": config.domain},
+            params={"format": "raw", "domain": config.domain},
             headers={
-                "authorization": f"Bearer {config.token}",
-                "accept": "text/plain, application/json, */*",
+                "authorization": f"Bearer {config.admin_token}",
+                "accept": "application/json",
             },
             timeout=httpx.Timeout(15.0, read=30.0),
         )
     except httpx.HTTPError as exc:
         # The exception repr can contain the URL, which contains the uuid.
-        # Not the token -- that is a header -- but the uuid plus a master
-        # password is a complete credential, so nothing of it is echoed.
+        # Not the token -- that is a header -- but the uuid plus an admin token
+        # is a complete credential, so nothing of it is echoed.
         raise CookieCloudError("CookieCloud server unreachable") from exc
 
     if response.status_code == 401:
@@ -225,37 +272,102 @@ def fetch_cookie_header(
         # The module's own error type, so callers keep one thing to catch; the
         # message says it was the size, because that is a different fix.
         raise CookieCloudError(str(exc)) from exc
-    cookie = _normalise(body.decode("utf-8", errors="replace"))
-    _cache_put(config.cache_key, cookie, config.cache_seconds)
-    return cookie
+
+    cookies = _parse_cookies(body)
+    _cache_put(config.cache_key, cookies, config.cache_seconds)
+    return _cookie_header(cookies, secure_ok=secure_ok, now=time.time())
 
 
-def _normalise(body: str) -> str:
-    """Accept a bare header or the JSON wrappers some deployments return."""
-    trimmed = body.strip()
-    if not trimmed:
-        raise CookieCloudError("CookieCloud returned an empty cookie")
+def _parse_cookies(body: bytes) -> tuple[_Cookie, ...]:
+    """The `format=raw` body as cookies, or CookieCloudError.
 
-    if trimmed.startswith("{"):
-        import json
+    `raw` is a flat JSON array; the server has already merged the per-domain
+    shards and applied deletions, so nothing here dedupes or decrypts.
+    Elements that are not shaped like a cookie are skipped: the server owns the
+    element kind, and one odd entry must not poison the whole header. An empty
+    result is an error rather than an empty header, because an empty header
+    reads downstream as "the site has no session" -- a different fix.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        raise CookieCloudError("CookieCloud returned undecodable JSON") from exc
+    if not isinstance(payload, list):
+        raise CookieCloudError("CookieCloud did not return a list of cookies")
 
-        try:
-            payload = json.loads(trimmed)
-        except json.JSONDecodeError as exc:
-            raise CookieCloudError("CookieCloud returned undecodable JSON") from exc
-        for key in ("cookie", "header", "cookies"):
-            value = payload.get(key) if isinstance(payload, dict) else None
-            if isinstance(value, str) and value.strip():
-                trimmed = value.strip()
-                break
-        else:
-            raise CookieCloudError("CookieCloud JSON carried no cookie field")
+    parsed = tuple(
+        cookie for cookie in (_as_cookie(element) for element in payload) if cookie
+    )
+    if not parsed:
+        raise CookieCloudError("CookieCloud returned no cookies for that domain")
+    return parsed
 
-    if "=" not in trimmed:
+
+def _as_cookie(element: object) -> _Cookie | None:
+    """One `raw` element as a cookie, or None when it is not one."""
+    if not isinstance(element, dict):
+        return None
+    name = element.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+
+    value = element.get("value")
+    path = element.get("path")
+    expiry = element.get("expirationDate")
+    return _Cookie(
+        name=name,
+        value=value if isinstance(value, str) else "",
+        path=path if isinstance(path, str) and path else "/",
+        secure=element.get("secure") is True,
+        # A bool is an int in Python; `true` here would be a JSON type error,
+        # not an expiry, so it is treated as "no expiry" like a missing field.
+        expires_at=(
+            float(expiry)
+            if isinstance(expiry, int | float) and not isinstance(expiry, bool)
+            else None
+        ),
+    )
+
+
+def _cookie_header(cookies: tuple[_Cookie, ...], *, secure_ok: bool, now: float) -> str:
+    """Join the cookies that may travel, one value per name.
+
+    Order is the server's (it sorts by domain, then name); re-sorting here would
+    be a second ordering rule to keep in sync, and the origin sees this order.
+
+    A name that appears more than once keeps its narrowest path, which is the
+    scope a browser would send for the site's own pages, and the later entry on
+    equal paths -- matching `parse_cookie_header`.
+    """
+    live = [
+        cookie
+        for cookie in cookies
+        if (cookie.expires_at is None or cookie.expires_at > now)
+        and (secure_ok or not cookie.secure)
+        and _header_safe(cookie)
+    ]
+    if not live:
         raise CookieCloudError(
-            "CookieCloud returned something that is not a cookie header"
+            "every cookie CookieCloud holds for that domain is expired, or "
+            "secure-only for a plaintext target"
         )
-    return trimmed
+
+    best: dict[str, _Cookie] = {}
+    for cookie in live:
+        current = best.get(cookie.name)
+        if current is None or len(cookie.path) >= len(current.path):
+            best[cookie.name] = cookie
+    return "; ".join(f"{cookie.name}={cookie.value}" for cookie in best.values())
+
+
+def _header_safe(cookie: _Cookie) -> bool:
+    """Whether this cookie can be written into a header without breaking it."""
+    return not (
+        _UNSAFE_IN_HEADER.intersection(cookie.name)
+        or _UNSAFE_IN_HEADER.intersection(cookie.value)
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in cookie.name)
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in cookie.value)
+    )
 
 
 def parse_cookie_header(header: str) -> dict[str, str]:
@@ -281,7 +393,7 @@ def invalidate(config: Config | None = None) -> None:
             _CACHE.pop(config.cache_key, None)
 
 
-def _cache_get(key: tuple[str, str, str]) -> str | None:
+def _cache_get(key: tuple[str, str, str]) -> tuple[_Cookie, ...] | None:
     with _CACHE_LOCK:
         entry = _CACHE.get(key)
         if entry is None:
@@ -293,7 +405,9 @@ def _cache_get(key: tuple[str, str, str]) -> str | None:
         return value
 
 
-def _cache_put(key: tuple[str, str, str], value: str, ttl_seconds: float) -> None:
+def _cache_put(
+    key: tuple[str, str, str], value: tuple[_Cookie, ...], ttl_seconds: float
+) -> None:
     with _CACHE_LOCK:
         _CACHE[key] = (value, time.monotonic() + ttl_seconds)
 
@@ -308,8 +422,8 @@ def enabled() -> bool:
 
 
 __all__ = [
+    "ADMIN_TOKEN_ENV",
     "BASE_URL_ENV",
-    "TOKEN_ENV",
     "UUID_ENV",
     "Config",
     "CookieCloudError",
