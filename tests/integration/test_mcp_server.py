@@ -278,6 +278,8 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         "list_plugins",
         "set_plugin_status",
         "add_subscription",
+        # The second-policy write path (issue #279): one origin, two chains.
+        "add_subscription_to_origin",
         # The batch primitive (ADR 0044, issue #159): one confirmation covers a
         # list of URLs, because the single tool means one dialog per source.
         "add_subscriptions",
@@ -625,9 +627,10 @@ async def test_no_write_tool_has_a_confirmation_parameter(mcp_url: str) -> None:
         for name, tool in tools.items()
         if tool.annotations is not None and tool.annotations.read_only_hint is False
     }
-    # 17 with purge_origin (issue #373): the destructive counterpart of
-    # remove_subscription, and the only tool that deletes content.
-    assert len(writes) == 17, sorted(writes)
+    # 18: purge_origin (issue #373) is the destructive counterpart of
+    # remove_subscription, and add_subscription_to_origin (issue #279) is the
+    # second-policy write path HTTP got in #371.
+    assert len(writes) == 18, sorted(writes)
 
     offenders: list[str] = []
     for name in sorted(writes):
@@ -1352,3 +1355,60 @@ async def test_a_source_items_delete_submits_a_job(
 # --------------------------------------------------------------------------
 # AC-243..245: the edit path -- choose a field, give it a value, confirm
 # --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_second_subscription_can_be_added_to_an_existing_origin(
+    mcp_url: str,
+) -> None:
+    """Issue #279: two policies over one origin, from the agent's side.
+
+    HTTP got this path in #371. Without a tool the agent could not express
+    "same feed, second policy", which in an agent-first system is a gap rather
+    than a missing convenience -- and the alternative it had (a second source
+    row for the same feed) is the thing the split removed.
+    """
+    created = await _call(
+        mcp_url,
+        "add_subscription",
+        {
+            "url": "https://twopolicy.example/feed.xml",
+            "schedule_policy": {"type": "fixed", "interval": "30m"},
+        },
+    )
+    origin_id = created["id"]
+
+    added = await _call(
+        mcp_url,
+        "add_subscription_to_origin",
+        {
+            "origin_id": origin_id,
+            "schedule_policy": {"type": "fixed", "interval": "1h"},
+            "folder": "Translations",
+            "pipeline_chain": [
+                {"plugin_id": "translate", "kind": "translation", "lang": "zh"}
+            ],
+            "target_lang": "zh",
+        },
+    )
+    assert added.get("declined") is None and added.get("aborted") is None, added
+    assert added["origin"]["id"] == origin_id, "the same origin, not a new one"
+    assert added["policy"]["folder"] == "Translations"
+    assert added["policy"]["target_lang"] == "zh"
+    assert added["id"] != origin_id, "a second channel needs its own identity"
+
+    # Idempotent per (origin, folder): asking again is the same subscription.
+    again = await _call(
+        mcp_url,
+        "add_subscription_to_origin",
+        {
+            "origin_id": origin_id,
+            "schedule_policy": {"type": "fixed", "interval": "1h"},
+            "folder": "Translations",
+            "pipeline_chain": [
+                {"plugin_id": "translate", "kind": "translation", "lang": "zh"}
+            ],
+            "target_lang": "zh",
+        },
+    )
+    assert again["id"] == added["id"], again

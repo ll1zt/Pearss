@@ -139,6 +139,40 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
 
     @server.tool(
+        annotations=write_annotations(destructive=False, open_world=False),
+        description=(
+            "Add a second subscription to an origin that already exists: the "
+            "same facts under another policy -- a different folder, chain or "
+            "language -- so one feed can be read untranslated in one place and "
+            "translated in another. The origin id comes from list_sources. "
+            "Idempotent per (origin, folder), and nothing new is collected: "
+            "the origin is already subscribed. Items are not duplicated."
+        ),
+    )
+    async def add_subscription_to_origin(
+        origin_id: str,
+        schedule_policy: dict[str, Any],
+        folder: str = "",
+        pipeline_chain: list[dict[str, Any]] | None = None,
+        target_lang: str = "",
+    ) -> dict[str, Any]:
+        return await _write(
+            core,
+            method="POST",
+            path=f"/v1/origins/{origin_id}/subscriptions",
+            body={
+                "schedule_policy": schedule_policy,
+                "pipeline_chain": pipeline_chain,
+                "target_lang": target_lang or None,
+                # Empty means "the API's default folder", as in
+                # add_subscription: omitting the key keeps the API in charge.
+                **({"folder": folder} if folder else {}),
+            },
+            ok=(200, 201),
+            extra=lambda _status: {"audit": "recorded by the Core API"},
+        )
+
+    @server.tool(
         annotations=write_annotations(destructive=False, open_world=True),
         description=(
             "Add several subscriptions in one call. They make real outbound "
