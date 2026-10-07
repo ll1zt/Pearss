@@ -4,11 +4,13 @@ ADR 0046 D-C: a channel is a subscription. These endpoints serve the two halves
 apart -- the origin's facts and the subscription's policy -- where
 `/v1/sources` (deprecated, issue #366) served them as one row.
 
-Read-only for now, and deliberately: creating and changing a subscription is
-still `POST`/`PATCH /v1/sources`, which write the same two tables through the
-same façade. The write surface moves here with the unsubscribe/purge split
-(issue #373), because "what does DELETE mean" is the decision that split makes;
-adding the verb first would mean documenting the old answer under a new name.
+Creating and changing a subscription is still `POST`/`PATCH /v1/sources`, which
+write the same two tables through the same façade. The *destructive* verb is the
+one that moved here first, because "what does DELETE mean" was the decision that
+needed making (issue #373, ADR 0063): `DELETE /v1/subscriptions/{id}:unsubscribe`
+stops collecting and keeps the content, and `DELETE /v1/origins/{id}:purge`
+(see `origins_routes`) removes content for a stated reason. The old
+`DELETE /v1/sources/{id}` keeps its URL and changes its meaning to unsubscribe.
 """
 
 from __future__ import annotations
@@ -29,6 +31,9 @@ from adapters.repository import (
     list_sources,
     parse_chain,
     timestamp,
+)
+from adapters.repository import (
+    unsubscribe as repository_unsubscribe,
 )
 from app.api_conventions import (
     _now,
@@ -259,3 +264,52 @@ def add_subscription(
         body=payload,
     )
     return JSONResponse(status_code=201, content=payload)
+
+
+@router.delete(
+    "/subscriptions/{subscription_id}:unsubscribe",
+    operation_id="unsubscribeSubscription",
+    status_code=200,
+)
+def unsubscribe_subscription(
+    request: Request,
+    subscription_id: str,
+    principal: Principal = Depends(write_required),
+    key: str = Depends(idempotency_key),
+) -> JSONResponse:
+    """Stop collecting a subscription, keeping everything it collected.
+
+    The counterpart of `:purge`, and what a client that wants to stop reading a
+    feed means: no row is removed, no body file is unlinked, and no reason is
+    asked for -- there is nothing to justify. Re-subscribing the same source
+    finds this subscription again and re-activates it, so the items it already
+    had are visible again under the same ids.
+
+    Idempotent, including by `Idempotency-Key`: a replay returns the first
+    answer, and a fresh call on something already stopped answers
+    `subscriptions: 0` rather than inventing a second effect.
+    """
+    endpoint = f"DELETE /v1/subscriptions/{subscription_id}:unsubscribe"
+    factory = request.app.state.session_factory
+    replayed = replay_or_none(factory, actor=principal.name, endpoint=endpoint, key=key)
+    if replayed is not None:
+        return replayed
+
+    with factory() as session:
+        result = repository_unsubscribe(session, subscription_id)
+        session.commit()
+
+    payload: dict[str, Any] = {
+        "subscription_id": result.subscription_id,
+        "subscriptions": 1 if result.unsubscribed else 0,
+        "correlation_id": current_correlation_id(),
+    }
+    remember(
+        factory,
+        actor=principal.name,
+        endpoint=endpoint,
+        key=key,
+        status_code=200,
+        body=payload,
+    )
+    return JSONResponse(status_code=200, content=payload)

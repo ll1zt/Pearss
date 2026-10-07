@@ -109,8 +109,10 @@ FreshRSS API。
 | `/reader/api/0/disable-tag` | POST | 删除分组，组内源回 `default`（Read You） |
 
 后三个端点只有 Read You 使用（NNW 的 FreshRSS 账号是只读的）。`subscription/edit`
-支持 `t=` 改名与 `ac=unsubscribe` 删除（2026-09-16，ADR 0024 修订）：删除是
-ADR 0021 的真删且重放幂等，与 `DELETE /v1/sources` 同一入口。完整决策见 ADR 0024。
+支持 `t=` 改名与 `ac=unsubscribe` **退订**（2026-09-16 实现，2026-10-07 改语义，ADR 0063）：
+`ac=unsubscribe` 现在只**停用**订阅（频道从侧栏消失、内容保留），与
+`DELETE /v1/subscriptions/{id}:unsubscribe` 同一入口、重放幂等；销毁内容需要显式的
+`DELETE /v1/origins/{id}:purge?reason=...`。完整决策见 ADR 0024 与 ADR 0063。
 
 ### 认证（关键约束）
 

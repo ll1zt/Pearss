@@ -87,11 +87,14 @@ class ContentItem:
 
 @dataclass(frozen=True, slots=True)
 class UnsubscribedSource:
-    """What one `unsubscribe` removed, for the operator-facing log line."""
+    """What one `unsubscribe` stopped, for the operator-facing log line.
+
+    No item or file counts: unsubscribing removes neither (ADR 0063). A count
+    here would be the first place a reader looked to conclude that it did.
+    """
 
     source_id: str
-    items: int
-    files: int
+    was_collected: bool
 
 
 # --------------------------------------------------------------------------
@@ -143,11 +146,17 @@ def list_folder_names(session_factory: sessionmaker[Session]) -> list[str]:
     from sqlalchemy import distinct
 
     from adapters.db_models import Subscription as SubscriptionRow
+    from core.enums import SourceStatus
 
     with session_factory() as session:
         rows = (
             session.query(distinct(SubscriptionRow.folder))
-            .filter(SubscriptionRow.tenant_id == SINGLE_TENANT)
+            .filter(
+                SubscriptionRow.tenant_id == SINGLE_TENANT,
+                # A folder that only held unsubscribed channels is empty, and
+                # an empty folder is not a folder (ADR 0063).
+                SubscriptionRow.status != SourceStatus.DISABLED.value,
+            )
             .order_by(SubscriptionRow.folder)
             .all()
         )
@@ -309,30 +318,30 @@ def rename_sources(
 def unsubscribe(
     session_factory: sessionmaker[Session], *, source_ids: list[str]
 ) -> list[UnsubscribedSource]:
-    """Delete the named sources and their history (ADR 0021 semantics).
+    """Stop collecting the named sources, keeping what they collected (ADR 0063).
 
-    The same repository entry point `DELETE /v1/sources` uses, so the delete
-    carries identical consequences -- items, bodies, read state, processor
-    products, fetch records. "Already gone" is not an error: a client resending
-    after a dropped response is asking for the subscription to be gone, and it
-    is. Files are reclaimed after each commit, because an unlink cannot be
-    rolled back while rows can.
+    The Reader's `ac=unsubscribe` used to delete the source with everything it
+    had gathered -- irreversible, and the opposite of what a client pressing
+    "unsubscribe" expects. It now disables the subscription, the same
+    repository entry point the API endpoints use, so there is one answer to
+    "what does unsubscribing do" rather than one per surface.
+
+    "Not collecting any more" is not an error: a client resending after a
+    dropped response is asking for what it already has.
     """
-    from adapters.repository import delete_source as repository_delete_source
+    from adapters.repository import unsubscribe as repository_unsubscribe
 
-    removed: list[UnsubscribedSource] = []
+    stopped: list[UnsubscribedSource] = []
     with session_factory() as session:
         for source_id in source_ids:
-            result = repository_delete_source(session, source_id)
+            result = repository_unsubscribe(session, source_id)
             session.commit()
-            removed.append(
+            stopped.append(
                 UnsubscribedSource(
-                    source_id=source_id,
-                    items=int(result.counts.get("items", 0)),
-                    files=int(result.reclaim.reclaim()),
+                    source_id=source_id, was_collected=result.unsubscribed
                 )
             )
-    return removed
+    return stopped
 
 
 # --------------------------------------------------------------------------

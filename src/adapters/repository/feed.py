@@ -23,6 +23,7 @@ from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     ItemEvent,
     PublishStatus,
+    SourceStatus,
 )
 from core.item_state import TransitionContext
 from core.item_state import transition as item_transition
@@ -49,6 +50,9 @@ def channel_for_subscription(
         .where(
             SubscriptionRow.id == subscription_id,
             SubscriptionRow.tenant_id == tenant_id,
+            # Unsubscribed means the feed stops being published (ADR 0063);
+            # the items stay, and re-subscribing brings the same feed back.
+            SubscriptionRow.status != SourceStatus.DISABLED.value,
         )
     ).first()
     if row is None:

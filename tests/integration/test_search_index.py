@@ -47,8 +47,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from adapters.repository import create_source, timestamp
 from adapters.repository.deletion import (
     delete_items,
-    delete_source,
     delete_source_items,
+    purge_origin,
 )
 from adapters.repository.search_index import (
     deindex_items,
@@ -279,7 +279,7 @@ def test_deleting_an_item_leaves_no_searchable_ghost(
         elif path == "delete_source_items":
             delete_source_items(session, source_id)
         else:
-            delete_source(session, source_id)
+            purge_origin(session, source_id, reason="the test says so")
         session.commit()
 
         assert item_id not in _found(session, "鬼影关键词"), (

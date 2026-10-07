@@ -1,4 +1,8 @@
-"""Deletion: removing items and sources for real (ADR 0021).
+"""Deletion: removing items and origins for real (ADR 0021, ADR 0063).
+
+Unsubscribing is the *other* answer to "stop collecting this", and it lives here
+next to deletion so the two are read together: `unsubscribe` disables the policy
+and touches no content, `purge_origin` removes content and demands a reason.
 
 Deletion here is physical. Rows go, and so does the content-addressed body
 each row pointed at. Two things make that more delicate than a DELETE
@@ -39,8 +43,10 @@ from adapters.db_models import Job as JobRow
 from adapters.db_models import Origin as OriginRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
+from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository._shared import row_to_item
 from adapters.repository.search_index import deindex_items
+from core.enums import SourceStatus
 from core.models import Item
 
 LOGGER = logging.getLogger(__name__)
@@ -268,10 +274,51 @@ def delete_source_items(
     return delete_items(session, [item.id for item in targets], root=root)
 
 
-def delete_source(
-    session: Session, source_id: str, *, root: Path | None = None
+@dataclass(frozen=True, slots=True)
+class UnsubscribeResult:
+    """What an unsubscribe stopped.
+
+    Not a `DeletionResult`: an unsubscribe removes no rows and reclaims no
+    files, and returning the deletion shape would invite a caller to read
+    `bodies` from it and conclude that something was deleted (AC-217).
+    """
+
+    subscription_id: str
+    unsubscribed: bool
+
+
+def unsubscribe(session: Session, source_id: str) -> UnsubscribeResult:
+    """Stop collecting a source without touching what it collected (ADR 0063).
+
+    The subscription is *disabled*, not deleted. Its columns are policy -- the
+    chain, the folder, the schedule -- while the items are origin facts, and
+    the per-channel readiness in `item_subscription_ready` hangs off the
+    subscription through a cascading foreign key. Deleting the row would take
+    the readiness with it, and re-subscribing could not show the same items
+    again (AC-216). Disabling keeps both facts and takes the channel out of
+    every read path.
+
+    Idempotent: unsubscribing something that is not collecting answers
+    `unsubscribed: False` rather than an error, because a client resending
+    after a dropped response is asking for what it already has.
+    """
+    subscription = session.get(SubscriptionRow, source_id)
+    if subscription is None or subscription.status == SourceStatus.DISABLED.value:
+        return UnsubscribeResult(subscription_id=source_id, unsubscribed=False)
+    subscription.status = SourceStatus.DISABLED.value
+    session.flush()
+    return UnsubscribeResult(subscription_id=source_id, unsubscribed=True)
+
+
+def purge_origin(
+    session: Session, source_id: str, *, reason: str, root: Path | None = None
 ) -> DeletionResult:
-    """Delete a source and its contents (ADR 0021).
+    """Delete an origin and its contents for a stated reason (ADR 0021, 0063).
+
+    The one destructive entry point, and the reason is required rather than
+    optional: an irreversible act whose justification is unknown afterwards is
+    indistinguishable from a mistake, and the audit row that carries the reason
+    is written from the request, so a caller cannot skip it.
 
     Items go first, then the fetch records, then the source row. The order is
     the one the schema allows: both reference the source, so removing it first
@@ -289,6 +336,9 @@ def delete_source(
     policy derives its backoff from. `job_run` cascades from `job`, so the
     diagnosis history of a thing that no longer exists goes with it.
     """
+    if not reason.strip():
+        raise ValueError("a purge requires a non-blank reason")
+
     row = session.get(OriginRow, source_id)
     if row is None:
         return DeletionResult(

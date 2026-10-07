@@ -535,14 +535,41 @@
       "type": "object"
     }
   },
-  "remove_subscription": {
+  "purge_origin": {
     "annotations": {
       "destructive_hint": true,
       "idempotent_hint": false,
       "open_world_hint": false,
       "read_only_hint": false
     },
-    "description": "Delete a subscription and everything its origin collected. Permanent: the origin row, its items, stored bodies, read state and translations are removed, and re-subscribing the same feed starts a new origin with no history. Check the size first with search_items (its `total` counts the origin's items). Use delete_origin_items to clear a bad crawl and keep the subscription, or set_subscription_status to disable it instead.",
+    "description": "Destroy an origin and everything it collected, permanently: items, bodies, read state, translations, fetch records and the collect job. Re-subscribing starts over. `reason` is required and stays in the audit record; remove_subscription is the reversible answer.",
+    "input_schema": {
+      "properties": {
+        "origin_id": {
+          "title": "Origin Id",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin_id",
+        "reason"
+      ],
+      "title": "purge_originArguments",
+      "type": "object"
+    }
+  },
+  "remove_subscription": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false,
+      "read_only_hint": false
+    },
+    "description": "Stop collecting a subscription and keep what it collected. Nothing is deleted: the items, bodies and read state stay, the channel leaves the client, and subscribing to the same feed again brings it back under the same item ids. Use purge_origin to destroy content.",
     "input_schema": {
       "properties": {
         "source_id": {

@@ -1,6 +1,6 @@
 # 0021 · 删除就是删除：条目与订阅的物理删除
 
-- 状态：accepted
+- 状态：**部分 superseded by [0063](0063-unsubscribing-is-not-destroying.md)**（`DELETE /v1/sources/{id}` 的语义已改为退订；物理删除移到 `DELETE /v1/origins/{id}:purge`，且需要理由）
 - 日期：2026-09-14
 - 实现：`src/adapters/repository/deletion.py`、`0017_retire_source_deleted.py`、
   `items_routes.py` / `sources_routes.py`、`mcp_server.py`

@@ -32,13 +32,13 @@ from adapters.repository import (
     consecutive_failures,
     create_job_run,
     delete_items,
-    delete_source,
     delete_source_items,
     ensure_collect_job,
     finish_job_run,
     get_source,
     job_for_source,
     last_collect_at,
+    purge_origin,
 )
 from adapters.timestamps import fixed_width_utc as timestamp
 from app.main import create_session_factory
@@ -87,10 +87,18 @@ def _delete_source_items(
     return result
 
 
+REASON = "the test says so"
+
+
 def _delete_source(
-    session: Session, source_id: str, *, root: Path | None = None
+    session: Session,
+    source_id: str,
+    *,
+    root: Path | None = None,
+    reason: str = REASON,
 ) -> DeletionResult:
-    result = delete_source(session, source_id, root=root)
+    """Purge, the way the endpoint does: destroying content states why."""
+    result = purge_origin(session, source_id, reason=reason, root=root)
     session.commit()
     result.reclaim.reclaim()
     return result

@@ -22,6 +22,7 @@ from adapters.repository._shared import (
     visible_item_rows_for_folder,
 )
 from adapters.timestamps import fixed_width_utc as timestamp
+from core.enums import SourceStatus
 from core.reader_state import ReadState as ReadStateDomain
 from core.reader_state import TagChange, merge_state
 from core.tenancy import SINGLE_TENANT
@@ -62,6 +63,10 @@ def resolve_channel(
         select(SubscriptionRow.id, SubscriptionRow.origin_id).where(
             SubscriptionRow.id == channel_id,
             SubscriptionRow.tenant_id == tenant_id,
+            # A disabled subscription is not a channel (ADR 0063): the client
+            # unsubscribed from it, and continuing to serve its stream would put
+            # it back in the sidebar on the next refresh.
+            SubscriptionRow.status != SourceStatus.DISABLED.value,
         )
     ).first()
     if row is not None:
@@ -79,6 +84,7 @@ def resolve_channel(
             select(SubscriptionRow.id).where(
                 SubscriptionRow.origin_id == origin,
                 SubscriptionRow.tenant_id == tenant_id,
+                SubscriptionRow.status != SourceStatus.DISABLED.value,
             )
         ).scalars()
     )

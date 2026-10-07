@@ -732,7 +732,7 @@ def subscription_edit(
     same choice expressed from an app, so it now lands through the same
     guarded write and sticks (ADR 0024, revision).
 
-    `ac=unsubscribe` deletes the source with everything it collected -- the
+    `ac=unsubscribe` stops collecting the source and keeps what it collected -- the
     ADR 0021 semantics, through the same repository entry point
     `DELETE /v1/sources` uses. It was refused outright for a day; the
     refusal was reversed because refusing a client whose UI already showed
@@ -810,10 +810,12 @@ def subscription_edit(
 
 
 def _unsubscribe_feeds(request: Request, s: list[str]) -> PlainTextResponse:
-    """Delete the named sources and their history (ADR 0021 semantics).
+    """Stop collecting the named sources, keeping their content (ADR 0063).
 
-    "Already gone" answers OK rather than an error: a client resending after a
-    dropped response is asking for the subscription to be gone, and it is.
+    "Already unsubscribed" answers OK rather than an error: a client resending
+    after a dropped response is asking for what it already has. Deleting the
+    content is a separate, explicit act with a reason behind it, which is why
+    this endpoint no longer does it.
     """
     feed_ids = [
         value
@@ -827,10 +829,9 @@ def _unsubscribe_feeds(request: Request, s: list[str]) -> PlainTextResponse:
         request.app.state.session_factory, source_ids=feed_ids
     ):
         LOGGER.info(
-            "reader unsubscribe: %s removed (items=%d, files=%d)",
+            "reader unsubscribe: %s %s",
             removed.source_id,
-            removed.items,
-            removed.files,
+            "stopped" if removed.was_collected else "was already stopped",
         )
     return PlainTextResponse("OK")
 

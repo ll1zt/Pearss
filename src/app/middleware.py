@@ -111,6 +111,20 @@ def _actor(scope: ScopeState) -> str:
     return principal_from_scope(scope) or "anonymous"
 
 
+def _attached_args(scope: ScopeState) -> dict[str, Any]:
+    """Extra audit arguments an endpoint attached to this request, if any.
+
+    Starlette keeps `request.state` in `scope["state"]`, so a handler can say
+    why it did something and the middleware can record it without the handler
+    writing its own audit row (which the middleware owns, ADR 0010).
+    """
+    state = scope.get("state")
+    if not isinstance(state, dict):
+        return {}
+    attached = state.get("audit_args")
+    return dict(attached) if isinstance(attached, dict) else {}
+
+
 def _operation(scope: ScopeState) -> str:
     """Name what the request hit, safe to put in a log line and an audit row.
 
@@ -332,7 +346,13 @@ class CorrelationAndAuditMiddleware:
                     args={
                         "headers": redact_headers(
                             headers_from_scope(list(scope.get("headers", [])))
-                        )
+                        ),
+                        # A destructive write can attach the justification it
+                        # was required to carry (issue #373): the endpoint puts
+                        # it in the request state, and the audit row is where it
+                        # has to survive -- a purge whose reason is unknown
+                        # afterwards is indistinguishable from a mistake.
+                        **_attached_args(scope),
                     },
                     correlation_id=correlation_id,
                 )

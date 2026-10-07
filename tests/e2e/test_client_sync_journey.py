@@ -675,16 +675,23 @@ async def test_j8_group_changes_propagate_to_the_other_client(
         assert (await folders(b))[feed_id] == "default"
 
 
-async def test_j9_unsubscribing_from_the_app_deletes_for_real_and_replays_cleanly(
+async def test_j9_unsubscribing_from_the_app_stops_collecting_and_replays_cleanly(
     served: str, origin_url: str, session_factory: sessionmaker[Session]
 ) -> None:
-    """Unsubscribe deletes the source with its history, and a replay stays done.
+    """Unsubscribe stops collecting and keeps the content; a replay stays done.
 
     Given a source with collected items
     When client B unsubscribes it (the App's delete path, `ac=unsubscribe`)
-    Then the subscription vanishes from BOTH clients' lists, the source row
-    and its items are really gone (ADR 0021), and sending the same request
-    again answers OK rather than an error
+    Then the subscription vanishes from BOTH clients' lists, the items are
+    still there (destroying them is a separate, reasoned call -- ADR 0063),
+    and the source itself reports that it is not collecting, and sending the
+    same request again answers OK rather than an error
+
+    The 2026-10-07 answer (ADR 0063) split the verb in two. `ac=unsubscribe`,
+    this endpoint's sibling `DELETE /v1/sources/{id}` and
+    `DELETE /v1/subscriptions/{id}:unsubscribe` all unsubscribe;
+    `DELETE /v1/origins/{id}:purge?reason=...` is the one that destroys content,
+    and it demands the reason because that is the call nobody can undo.
 
     The 2026-09-16 revision of ADR 0024 reverses the original refusal. What
     tipped it was reading the failure chain with fresh eyes: refusing with
@@ -723,19 +730,23 @@ async def test_j9_unsubscribing_from_the_app_deletes_for_real_and_replays_cleanl
                 s["id"] for s in subs.json()["subscriptions"]
             }, client.dialect
 
-        # Really gone: the row and its items, not a tombstone.
+        # Not gone: the row is there and says it is not collecting, and the
+        # items it collected are untouched. This is the half that changed --
+        # the old behaviour deleted both, which is what an app's "unsubscribe"
+        # button least expects.
         async with httpx.AsyncClient(
             base_url=served,
             headers={"Authorization": f"Bearer {API_TOKEN}"},
         ) as api:
             shown = await api.get(f"/v1/sources/{source_id}")
-            assert shown.status_code == 404, shown.status_code
+            assert shown.status_code == 200, shown.text
+            assert shown.json()["status"] == "disabled", shown.json()["status"]
         with session_factory() as db:
             items = db.execute(
                 sa.text("select count(*) from item where origin_id = :s"),
                 {"s": source_id},
             ).scalar_one()
-            assert items == 0, items
+            assert items > 0, "unsubscribing is not deletion"
 
         # A retry (dropped response, resync) is done, not an error.
         again = await http.post(

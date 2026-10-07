@@ -24,6 +24,7 @@ from adapters.db_models import Origin as OriginRow
 from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository.origins import create_origin
 from adapters.repository.subscriptions import create_subscription
+from core.enums import SourceStatus
 from core.folders import DEFAULT_FOLDER
 
 LOGGER = logging.getLogger(__name__)
@@ -115,6 +116,44 @@ def _view(origin: OriginRow, subscription: SubscriptionRow) -> SourceView:
     )
 
 
+def _revive_subscription(
+    session: Session,
+    subscription_id: str,
+    *,
+    at: str,
+    schedule_policy: str,
+    pipeline_chain: str | None,
+    target_lang: str | None,
+    folder: str,
+    trust_level: str,
+) -> None:
+    """Switch a subscription back on if it was unsubscribed (ADR 0063).
+
+    Subscribing to something already subscribed is idempotent and returns the
+    existing row unchanged. Subscribing to something that was *unsubscribed* is
+    a new intent about the same source, and the row that carries it -- along
+    with the readiness rows that make its items visible again -- is still
+    there, so it is re-activated rather than re-created.
+
+    The settings that come with the new request are the ones that take effect:
+    a caller re-subscribing with a 2h interval means 2h, and a subscription
+    that ignored it would silently collect on the old schedule. A subscription
+    that is paused is left alone -- paused is a state the user chose, not one
+    unsubscribe set.
+    """
+    subscription = session.get(SubscriptionRow, subscription_id)
+    if subscription is None or subscription.status != SourceStatus.DISABLED.value:
+        return
+    subscription.status = SourceStatus.ACTIVE.value
+    subscription.schedule_policy = schedule_policy
+    subscription.pipeline_chain = pipeline_chain
+    subscription.target_lang = target_lang
+    subscription.folder = folder
+    subscription.trust_level = trust_level
+    subscription.updated_at = at
+    session.flush()
+
+
 def create_source(
     session: Session,
     *,
@@ -139,12 +178,14 @@ def create_source(
     Both rows share this id, which is what keeps every item id, guid and
     `/v1/sources/{id}` URL a client already holds meaningful.
 
-    There is no revival branch any more. It existed for soft-deleted rows,
-    which answered 201 while never being collected again; deletion now removes
-    the row (ADR 0021), so a re-subscribe finds nothing and inserts fresh. The
-    new source starts with an empty cursor and re-samples history -- which is
-    what deletion means, and the reason `seen_frontier` is worth keeping when
-    the intent was only to clear a bad crawl.
+    There is a revival branch again, and it means something narrower than the
+    one that was removed (ADR 0063). That one revived *soft-deleted* rows,
+    which answered 201 while never being collected again; this one re-activates
+    a subscription that was unsubscribed. Unsubscribing keeps the row -- and
+    with it the per-channel readiness that makes its items visible -- so
+    subscribing again switches it back on instead of inserting a second one.
+    Purging still removes the rows outright, so a subscribe after a purge finds
+    nothing and inserts fresh, with an empty cursor that re-samples history.
     """
     source_id = derive_source_id(
         tenant_id=tenant_id, source_type=source_type, canonical_url=canonical_url
@@ -154,6 +195,16 @@ def create_source(
         # DEBUG: "add this feed" is idempotent, and a retrying client asks
         # again by design (issue #296).
         LOGGER.debug("source %s already exists; returning it", source_id)
+        _revive_subscription(
+            session,
+            source_id,
+            at=at,
+            schedule_policy=schedule_policy,
+            pipeline_chain=pipeline_chain,
+            target_lang=target_lang,
+            folder=folder,
+            trust_level=trust_level,
+        )
         view = _compose(session, source_id)
         if view is None:
             raise LookupError(f"source {source_id!r} has no origin row")

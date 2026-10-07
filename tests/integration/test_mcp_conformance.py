@@ -601,13 +601,17 @@ async def test_read_tools_are_annotated_read_only(mcp_url: str) -> None:
 
 @pytest.mark.asyncio
 async def test_the_deletes_are_annotated_destructive(mcp_url: str) -> None:
-    """The three irreversible tools say so in a field, not only in prose.
+    """The irreversible tools say so in a field, not only in prose.
 
     A host uses `destructive_hint` to add its own confirmation affordance; if
     it were left unset on a delete, the machine-readable contract would say
     "safe" while the description said "permanent".
+
+    `remove_subscription` is not here, and that is the point of ADR 0063: it
+    *sounds* like a removal and removes nothing, so the name is no longer a
+    guide -- `purge_origin` is the one that destroys content.
     """
-    deletes = {"remove_subscription", "delete_items", "delete_origin_items"}
+    deletes = {"purge_origin", "delete_items", "delete_origin_items"}
     async with mcp_session(mcp_url) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
 
@@ -631,6 +635,9 @@ async def test_reversible_writes_are_not_annotated_destructive(mcp_url: str) -> 
         "set_subscription_status",
         "set_subscription_folder",
         "set_plugin_status",
+        # Unsubscribing keeps every row and every body file (ADR 0063): a host
+        # that warned about it would be warning about a bookmark.
+        "remove_subscription",
     }
     async with mcp_session(mcp_url) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}

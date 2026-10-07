@@ -1387,7 +1387,7 @@
     },
     "/api/greader.php/reader/api/0/subscription/edit": {
       "post": {
-        "description": "Move, rename and remove subscriptions -- the app's management writes.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove, `t` a new title. A feed can only be in one category,\nso an `a` wins and the folder is set; an `r` without an `a` moves back to\nthe default. Unknown feeds are skipped rather than 404'd, the same\nleniency edit-tag applies to item ids -- a client works from the ids\nsubscription/list gave it, and one that was withdrawn since should not\nfail the whole edit.\n\n`t=` renames the source. It was refused silently until 2026-09-16, on\nthe reasoning that the next fetch would overwrite the name; reading\n`set_origin_title_if_absent` shows that reasoning was wrong -- the\nconditional write fills an absent title and never replaces a present\none, exactly to protect an operator's rename. A client rename is that\nsame choice expressed from an app, so it now lands through the same\nguarded write and sticks (ADR 0024, revision).\n\n`ac=unsubscribe` deletes the source with everything it collected -- the\nADR 0021 semantics, through the same repository entry point\n`DELETE /v1/sources` uses. It was refused outright for a day; the\nrefusal was reversed because refusing a client whose UI already showed\na confirmation dialog achieved nothing except a permanent retry loop\n(`deleteFeed` failing reads as sync failure). The delete is real and\nirreversible, as it is through `/v1`; a replay answers OK rather than\nan error, matching the \"already gone is done\" rule the /v1 endpoint\nestablished. `ac=subscribe` stays unsupported: subscribing goes through\n`quickadd`, which is what the one client that subscribes actually\ncalls.",
+        "description": "Move, rename and remove subscriptions -- the app's management writes.\n\nFreshRSS's contract: `ac=edit`, `s` names the feeds, `a` a label to add,\n`r` one to remove, `t` a new title. A feed can only be in one category,\nso an `a` wins and the folder is set; an `r` without an `a` moves back to\nthe default. Unknown feeds are skipped rather than 404'd, the same\nleniency edit-tag applies to item ids -- a client works from the ids\nsubscription/list gave it, and one that was withdrawn since should not\nfail the whole edit.\n\n`t=` renames the source. It was refused silently until 2026-09-16, on\nthe reasoning that the next fetch would overwrite the name; reading\n`set_origin_title_if_absent` shows that reasoning was wrong -- the\nconditional write fills an absent title and never replaces a present\none, exactly to protect an operator's rename. A client rename is that\nsame choice expressed from an app, so it now lands through the same\nguarded write and sticks (ADR 0024, revision).\n\n`ac=unsubscribe` stops collecting the source and keeps what it collected -- the\nADR 0021 semantics, through the same repository entry point\n`DELETE /v1/sources` uses. It was refused outright for a day; the\nrefusal was reversed because refusing a client whose UI already showed\na confirmation dialog achieved nothing except a permanent retry loop\n(`deleteFeed` failing reads as sync failure). The delete is real and\nirreversible, as it is through `/v1`; a replay answers OK rather than\nan error, matching the \"already gone is done\" rule the /v1 endpoint\nestablished. `ac=subscribe` stays unsupported: subscribing goes through\n`quickadd`, which is what the one client that subscribes actually\ncalls.",
         "operationId": "subscription_edit_api_greader_php_reader_api_0_subscription_edit_post",
         "requestBody": {
           "content": {
@@ -2814,6 +2814,84 @@
         ]
       }
     },
+    "/v1/origins/{origin_id}:purge": {
+      "delete": {
+        "description": "Delete an origin and everything it collected, for a stated reason.\n\nIrreversible, and the only endpoint that removes content: the items, their\nbodies, their read state and processor products, the fetch records, the\ncollect job and the origin row all go. Unsubscribing is the other answer,\nand the one most callers mean -- it keeps all of this and stops collecting.\n\n`reason` is required. An irreversible act whose justification is unknown\nafterwards cannot be told apart from a mistake, so the request is refused\n(422 `reason_required`) before anything is touched, and the reason is\nrecorded in the audit row of the request that carried it.\n\nAn id that is already gone answers 200 with `sources: 0` rather than 404,\nfor the same reason `DELETE /v1/sources/{id}` always did: a client\nretrying a request whose response was lost cannot tell \"it was here and I\nremoved it\" from \"it was never here\", and after the first call those are\nthe same fact.",
+        "operationId": "purgeOrigin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "origin_id",
+            "required": true,
+            "schema": {
+              "title": "Origin Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reason",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Purge Origin",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
     "/v1/plugins": {
       "get": {
         "description": "Registered collectors, oldest page first, with manifest and status.\n\nOffset paging with an opaque cursor, the same shape `/v1/sources` uses and\nfor the same reason: the set is bounded (tens of plugins, and it changes\nonly on install/uninstall) and the order is stable, so a row cannot shift\nunder a reader mid-walk. `next_cursor` is what makes a short page honest --\na `limit` that truncates without saying so is silent data loss, which is\nthe failure this endpoint's bound exists to avoid (issue #68).",
@@ -3371,7 +3449,8 @@
     },
     "/v1/sources/{source_id}": {
       "delete": {
-        "description": "Delete a source and everything it collected (ADR 0021).\n\nDestructive and not reversible: the source row, its items, their bodies,\ntheir read state and processor products, and the fetch records all go. The\nendpoint used to be a soft delete that left the source as a tombstone with\nits items published; that is no longer what this means, and any caller\nrelying on the old behaviour is relying on something the API does not\npromise.\n\nDeleting an id that is already gone answers 200 with `sources: 0` rather\nthan 404. A client retrying a request whose response was lost cannot tell\n\"it was here and I removed it\" from \"it was never here\", and after the\nfirst call those are the same fact.",
+        "deprecated": true,
+        "description": "Unsubscribe: stop collecting, keep what was collected (ADR 0063).\n\n**This endpoint changed meaning.** It used to delete the source and\neverything it collected, irreversibly. It now does what\n`DELETE /v1/subscriptions/{id}:unsubscribe` does -- disables the\nsubscription and removes nothing -- because that is what a client removing\na feed means, and because destroying content belongs behind an explicit\n`DELETE /v1/origins/{id}:purge?reason=...` that says why.\n\nAn id that is not collecting (already unsubscribed, or never here) answers\n200 with `subscriptions: 0` rather than 404: a client retrying a request\nwhose response was lost cannot tell those apart, and after the first call\nthey are the same fact.",
         "operationId": "deleteSource",
         "parameters": [
           {
@@ -4422,6 +4501,68 @@
           }
         ],
         "summary": "Read Subscription",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/subscriptions/{subscription_id}:unsubscribe": {
+      "delete": {
+        "description": "Stop collecting a subscription, keeping everything it collected.\n\nThe counterpart of `:purge`, and what a client that wants to stop reading a\nfeed means: no row is removed, no body file is unlinked, and no reason is\nasked for -- there is nothing to justify. Re-subscribing the same source\nfinds this subscription again and re-activates it, so the items it already\nhad are visible again under the same ids.\n\nIdempotent, including by `Idempotency-Key`: a replay returns the first\nanswer, and a fresh call on something already stopped answers\n`subscriptions: 0` rather than inventing a second effect.",
+        "operationId": "unsubscribeSubscription",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subscription_id",
+            "required": true,
+            "schema": {
+              "title": "Subscription Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Unsubscribe Subscription",
         "tags": [
           "core-api"
         ]

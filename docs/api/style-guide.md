@@ -55,7 +55,10 @@ DELETE /v1/plugins/{plugin_id}         # 卸载                    ⏸ 第三方
 POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）⏸ 随 loader
 ```
 
-已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`、
+已实现的 `/v1` 面：`GET|POST /v1/sources`、`GET|PATCH|DELETE /v1/sources/{id}`（DELETE 为**退订**，见下）、
+`GET /v1/subscriptions`、`GET /v1/subscriptions/{id}`、
+`DELETE /v1/subscriptions/{id}:unsubscribe`、`POST /v1/origins/{id}/subscriptions`、
+`DELETE /v1/origins/{id}:purge`、
 `POST /v1/sources/{id}:trigger`、`POST /v1/sources/{id}:ingest`、
 `POST /v1/sources/{id}/items:delete`、
 `GET /v1/items`、`GET /v1/items/{id}`、`GET /v1/items/{id}/body`、
@@ -64,9 +67,17 @@ POST /v1/plugins/{plugin_id}:reload    # 子进程重载（杀进程重 spawn）
 `GET /v1/system/snapshot`、`GET /v1/plugins`、`GET /v1/plugins/{id}`、
 `POST /v1/plugins/{id}:enable|:disable`。
 
-**删除语义（ADR 0021）**：`DELETE /v1/sources/{id}` 删除源行及其全部 Item、
-正文、已读状态与产物——**不可逆**；它过去是软删除，语义已变更。
-删除一个不存在的 id 返回 200 与计数 0，**不是 404**：重试与首次执行必须对调用方
+**退订与销毁（ADR 0063，修订 ADR 0021）**：两个动作，两个动词。
+
+- `DELETE /v1/subscriptions/{id}:unsubscribe` —— **退订**：只把订阅置为 `disabled`，
+  不删任何行、不动任何正文文件、不需要理由。幂等（重复调用返回计数 0）。
+  旧 `DELETE /v1/sources/{id}` 保留 URL 但**语义相同**（已标 `deprecated`）；
+  Reader 的 `ac=unsubscribe` 亦同。
+- `DELETE /v1/origins/{id}:purge?reason=...` —— **销毁**：删除 origin 行及其全部 Item、
+  正文、已读状态、产物、抓取记录与 collect job，**不可逆**。`reason` 必填
+  （缺失或全空白 → `422 reason_required`，拒绝发生在任何写入之前），并写入该请求的审计行。
+
+两者对不存在的 id 都返回 200 与计数 0，**不是 404**：重试与首次执行必须对调用方
 不可区分（写操作幂等）。批量删除用 POST + `:delete` 后缀，因为 DELETE 带 body
 在各客户端/代理上支持不一致。
 

@@ -39,6 +39,7 @@ async def _write(
     method: str,
     path: str,
     body: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
     ok: tuple[int, ...] = (200,),
     extra: Callable[[int], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -55,7 +56,7 @@ async def _write(
     outcome).
     """
     status, payload, audit_id = await core.request(
-        method, path, json_body=body, idempotency_key=_fresh_key()
+        method, path, json_body=body, params=params, idempotency_key=_fresh_key()
     )
     if status not in ok:
         return _error_from(payload, status)
@@ -324,16 +325,14 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
         )
 
     @server.tool(
-        annotations=write_annotations(destructive=True, open_world=False),
+        # Not destructive: it removes nothing (ADR 0063). The annotation has to
+        # say so, or a host surfaces an unsubscribe as an irreversible act.
+        annotations=write_annotations(destructive=False, open_world=False),
         description=(
-            "Delete a subscription and everything its origin collected. "
-            "Permanent: the origin row, its items, stored bodies, read state "
-            "and translations are "
-            "removed, and re-subscribing the same feed starts a new origin with "
-            "no history. Check the size first with search_items (its `total` "
-            "counts the origin's items). Use delete_origin_items to clear a bad "
-            "crawl and keep the subscription, or set_subscription_status to disable "
-            "it instead."
+            "Stop collecting a subscription and keep what it collected. Nothing "
+            "is deleted: the items, bodies and read state stay, the channel "
+            "leaves the client, and subscribing to the same feed again brings it "
+            "back under the same item ids. Use purge_origin to destroy content."
         ),
     )
     async def remove_subscription(source_id: str) -> dict[str, Any]:
@@ -341,6 +340,23 @@ def register_writes(server: MCPServer, core: CoreAPIClient) -> None:
             core,
             method="DELETE",
             path=f"/v1/sources/{source_id}",
+        )
+
+    @server.tool(
+        annotations=write_annotations(destructive=True, open_world=False),
+        description=(
+            "Destroy an origin and everything it collected, permanently: items, "
+            "bodies, read state, translations, fetch records and the collect job. "
+            "Re-subscribing starts over. `reason` is required and stays in the "
+            "audit record; remove_subscription is the reversible answer."
+        ),
+    )
+    async def purge_origin(origin_id: str, reason: str) -> dict[str, Any]:
+        return await _write(
+            core,
+            method="DELETE",
+            path=f"/v1/origins/{origin_id}:purge",
+            params={"reason": reason},
         )
 
     @server.tool(
