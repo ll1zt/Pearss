@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -15,7 +15,12 @@ from adapters.db_models import Origin as OriginRow
 from adapters.db_models import ReaderCredential
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.db_models import Subscription as SubscriptionRow
-from adapters.repository._shared import _parse, visible_item_rows
+from adapters.repository._shared import (
+    _parse,
+    visible_item_rows,
+    visible_item_rows_for,
+    visible_item_rows_for_folder,
+)
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.reader_state import ReadState as ReadStateDomain
 from core.reader_state import TagChange, merge_state
@@ -33,10 +38,17 @@ class AmbiguousChannelError(Exception):
     """
 
 
-def origin_of_channel(
+class ChannelScope(NamedTuple):
+    """The pair a channel id resolves to: the subscription, and its origin."""
+
+    subscription_id: str
+    origin_id: str
+
+
+def resolve_channel(
     session: Session, *, channel_id: str, tenant_id: str
-) -> str | None:
-    """The origin a Reader channel id names, resolving the pre-split alias.
+) -> ChannelScope | None:
+    """The channel a Reader id names, resolving the pre-split alias.
 
     A channel is a **subscription** (ADR 0046 D-C): what a client subscribes to
     is the policy, and the items are its origin's. A client that cached
@@ -46,14 +58,14 @@ def origin_of_channel(
     with several there is no single answer, and guessing is the failure this
     function exists to prevent (`AmbiguousChannelError`).
     """
-    subscription = session.execute(
-        select(SubscriptionRow.origin_id).where(
+    row = session.execute(
+        select(SubscriptionRow.id, SubscriptionRow.origin_id).where(
             SubscriptionRow.id == channel_id,
             SubscriptionRow.tenant_id == tenant_id,
         )
-    ).scalar_one_or_none()
-    if subscription is not None:
-        return subscription
+    ).first()
+    if row is not None:
+        return ChannelScope(str(row[0]), str(row[1]))
 
     origin = session.execute(
         select(OriginRow.id).where(
@@ -62,19 +74,22 @@ def origin_of_channel(
     ).scalar_one_or_none()
     if origin is None:
         return None
-    subscriptions = session.execute(
-        select(func.count())
-        .select_from(SubscriptionRow)
-        .where(SubscriptionRow.origin_id == origin)
-    ).scalar_one()
-    if subscriptions == 0:
+    subscriptions = list(
+        session.execute(
+            select(SubscriptionRow.id).where(
+                SubscriptionRow.origin_id == origin,
+                SubscriptionRow.tenant_id == tenant_id,
+            )
+        ).scalars()
+    )
+    if not subscriptions:
         return None
-    if subscriptions > 1:
+    if len(subscriptions) > 1:
         raise AmbiguousChannelError(
-            f"channel {channel_id!r} names an origin with {subscriptions} "
+            f"channel {channel_id!r} names an origin with {len(subscriptions)} "
             "subscriptions; name the subscription instead"
         )
-    return origin
+    return ChannelScope(str(subscriptions[0]), origin)
 
 
 def visible_ids_for_stream(
@@ -132,14 +147,16 @@ def visible_ids_for_stream(
 
     subscription_id = reader_api.parse_feed_stream_id(stream_id)
     if subscription_id is not None:
-        origin_id = origin_of_channel(
+        scope = resolve_channel(
             session, channel_id=subscription_id, tenant_id=tenant_id
         )
-        if origin_id is None:
+        if scope is None:
             # A channel id no subscription carries is an empty channel, not
             # "everything" -- the same rule the label branch applies below.
             return []
-        query = query.where(ItemRow.origin_id == origin_id)
+        # Scoped to *this* channel: an item another subscription of the same
+        # origin has finished is not ready here (ADR 0061).
+        query = query.where(visible_item_rows_for(scope.subscription_id))
     else:
         state = reader_api.state_stream_name(stream_id)
         if state == "reading-list":
@@ -175,12 +192,7 @@ def visible_ids_for_stream(
             # stream, not "everything" -- serving the unfiltered list for a
             # filter with no matches is a wrong answer that looks like data.
             query = query.where(
-                ItemRow.origin_id.in_(
-                    select(SubscriptionRow.origin_id).where(
-                        SubscriptionRow.folder == label,
-                        SubscriptionRow.tenant_id == tenant_id,
-                    )
-                )
+                visible_item_rows_for_folder(folder=label, tenant_id=tenant_id)
             )
         elif state in {"broadcast", "verified"}:
             # Shared/verified streams: we record neither, so there is nothing
@@ -484,25 +496,20 @@ def mark_all_read(
         ItemRow.id.not_in(existing),
     )
     if subscription_id:
-        origin_id = origin_of_channel(
+        scope = resolve_channel(
             session, channel_id=subscription_id, tenant_id=tenant_id
         )
-        if origin_id is None:
+        if scope is None:
             # An unknown channel marks nothing. Sweeping the library because a
             # client named a channel we do not have is the wrong answer that
             # looks like a lot of work.
             return 0
-        candidates = candidates.where(ItemRow.origin_id == origin_id)
+        candidates = candidates.where(visible_item_rows_for(scope.subscription_id))
     if folder is not None:
         # A folder no subscription carries is an empty scope, not the whole
         # library: the same rule the folder *read* path applies.
         candidates = candidates.where(
-            ItemRow.origin_id.in_(
-                select(SubscriptionRow.origin_id).where(
-                    SubscriptionRow.folder == folder,
-                    SubscriptionRow.tenant_id == tenant_id,
-                )
-            )
+            visible_item_rows_for_folder(folder=folder, tenant_id=tenant_id)
         )
 
     ids = list(session.execute(candidates).scalars())

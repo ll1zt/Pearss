@@ -58,11 +58,15 @@ def _store(
         ).scalar_one()
     )
     if pending:
-        # Behind the gate. Set directly rather than through a chain: the gate
-        # is a status, and this test is about the window's scoping, not about
-        # how an item got there.
+        # Behind the gate: no readiness row (ADR 0061). Written directly rather
+        # than by configuring a chain, because this test is about the window's
+        # scoping, not about how an item got behind the gate.
         session.execute(
             sa.text("update item set publish_status = 'pending' where id = :i"),
+            {"i": item_id},
+        )
+        session.execute(
+            sa.text("delete from item_subscription_ready where item_id = :i"),
             {"i": item_id},
         )
     session.commit()
@@ -123,7 +127,7 @@ def test_the_window_is_scoped_to_the_channel_and_the_gate_still_holds(
         _store(session, origin_id="sub-pending", external_id="p-1", pending=True)
 
     with session_factory() as session:
-        scoped = items_ready_for_feed(session, origin_id="sub-a")
+        scoped = items_ready_for_feed(session, subscription_id="sub-a")
         assert [item.id for item in scoped] == [a_item]
         assert b_item not in {item.id for item in scoped}
 

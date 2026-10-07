@@ -29,6 +29,25 @@ WRITE_TOKEN = "test-write-token"
 FEED_URL = "https://blog.example.com/feed"
 
 
+def open_gate(session: Session, *, item_ids: list[str], origin_id: str) -> None:
+    """Record readiness for seeded items, the way the pipeline does.
+
+    ADR 0061: visibility is `(item, subscription)`, so a raw INSERT that sets
+    `publish_status='ready'` leaves the item invisible -- that column is the
+    content's state, not the gate.
+    """
+    for item_id in item_ids:
+        session.execute(
+            sa.text(
+                "insert into item_subscription_ready"
+                " (item_id, subscription_id, ready_at)"
+                " select :id, s.id, :at from subscription s where s.origin_id = :o"
+            ),
+            {"id": item_id, "at": "2026-01-01T00:00:00.000000Z", "o": origin_id},
+        )
+    session.commit()
+
+
 def seed(session: Session, count: int, *, source_id: str = "src-1") -> list[str]:
     """Insert `count` items with distinct publication times. Returns their ids."""
     ids: list[str] = []
@@ -58,6 +77,7 @@ def seed(session: Session, count: int, *, source_id: str = "src-1") -> list[str]
         )
         ids.append(item_id)
     session.commit()
+    open_gate(session, item_ids=ids, origin_id=source_id)
     return ids
 
 
@@ -243,6 +263,14 @@ async def test_pending_items_are_invisible(
                 " where id in (select id from item limit 5)"
             )
         )
+        # ADR 0061: the gate is the readiness rows, so closing it means
+        # removing them -- flipping the status alone hides nothing.
+        session.execute(
+            sa.text(
+                "delete from item_subscription_ready"
+                " where item_id in (select id from item limit 5)"
+            )
+        )
         session.commit()
 
     body = (await client.get("/v1/items", params={"limit": 100})).json()
@@ -258,6 +286,7 @@ async def test_asking_for_pending_explicitly_still_returns_none(
     # The filter can narrow within what the gate allows; it cannot widen it.
     with app.state.session_factory() as session:
         session.execute(sa.text("update item set publish_status='pending'"))
+        session.execute(sa.text("delete from item_subscription_ready"))
         session.commit()
 
     body = (await client.get("/v1/items", params={"publish_status": "pending"})).json()
@@ -274,6 +303,9 @@ async def test_pending_item_details_are_404_not_403(
     with app.state.session_factory() as session:
         session.execute(
             sa.text("update item set publish_status='pending' where id='item-0000'")
+        )
+        session.execute(
+            sa.text("delete from item_subscription_ready where item_id='item-0000'")
         )
         session.commit()
 
@@ -349,6 +381,7 @@ async def test_inserting_mid_paging_does_not_shift_the_window(
                 " '2026-01-01T00:00:00.000000Z', '2026-01-01T00:00:00.000000Z')"
             )
         )
+        open_gate(session, item_ids=["late"], origin_id="src-1")
         session.commit()
 
     cursor = first["next_cursor"]
@@ -740,6 +773,9 @@ async def test_one_items_chain_rows_are_asked_for_directly(
         session.execute(
             sa.text("update item set publish_status = 'pending' where id = 'item-0000'")
         )
+        session.execute(
+            sa.text("delete from item_subscription_ready where item_id = 'item-0000'")
+        )
         session.commit()
 
     response = await client.get("/v1/items/item-0000/enrichments")
@@ -1032,6 +1068,9 @@ async def test_ac197_the_gate_applies_to_the_address_lookup_too(
     with app.state.session_factory() as session:
         session.execute(
             sa.text("update item set publish_status = 'pending' where id = 'item-0003'")
+        )
+        session.execute(
+            sa.text("delete from item_subscription_ready where item_id = 'item-0003'")
         )
         session.commit()
 

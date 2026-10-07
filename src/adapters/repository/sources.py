@@ -53,7 +53,13 @@ class SourceView:
     side effect of moving the storage.
     """
 
+    # The origin's id: the field names keep the `source` spelling because the
+    # HTTP payloads built from this are unchanged (issue #366 renames the
+    # surface, not this). `subscription_id` is the channel's own identity --
+    # equal to `id` while the 1:1 rule holds, different for a second channel
+    # over the same origin (ADR 0061).
     id: str
+    subscription_id: str
     type: str
     url: str | None
     canonical_url: str
@@ -89,6 +95,7 @@ def derive_source_id(*, tenant_id: str, source_type: str, canonical_url: str) ->
 def _view(origin: OriginRow, subscription: SubscriptionRow) -> SourceView:
     return SourceView(
         id=origin.id,
+        subscription_id=subscription.id,
         type=origin.type,
         url=origin.url,
         canonical_url=origin.canonical_url,
@@ -190,16 +197,22 @@ def _compose(session: Session, source_id: str) -> SourceView | None:
     hand-written INSERT, say). Raised rather than reported as a 404, because a
     404 would read as "you named the wrong id" and hide the real breakage.
     """
-    origin = session.get(OriginRow, source_id)
-    if origin is None:
-        return None
     subscription = session.get(SubscriptionRow, source_id)
-    if subscription is None:
-        raise LookupError(
-            f"origin {source_id!r} has no subscription; the 1:1 invariant was "
-            "broken by a write that did not go through create_source"
-        )
-    return _view(origin, subscription)
+    if subscription is not None:
+        # A subscription id resolves through its origin: stage A made the two
+        # equal, and a second channel over the same origin (ADR 0061) does not,
+        # so looking the origin up by the subscription id would find nothing and
+        # report a row that exists as unreadable.
+        origin = session.get(OriginRow, subscription.origin_id)
+        if origin is None:
+            return None
+        return _view(origin, subscription)
+    if session.get(OriginRow, source_id) is None:
+        return None
+    raise LookupError(
+        f"origin {source_id!r} has no subscription; the invariant was broken "
+        "by a write that did not go through create_source"
+    )
 
 
 def get_source(session: Session, source_id: str) -> SourceView | None:

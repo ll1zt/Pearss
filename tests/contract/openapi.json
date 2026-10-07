@@ -763,6 +763,57 @@
         "title": "SourceType",
         "type": "string"
       },
+      "SubscriptionCreate": {
+        "description": "Body for adding a subscription to an existing origin (ADR 0061).\n\nThe origin's facts already exist, so only policy is accepted. Two\nsubscriptions over one origin differ by exactly these fields -- which is\nwhat \"one origin, two chains\" means.",
+        "properties": {
+          "folder": {
+            "default": "default",
+            "maxLength": 256,
+            "title": "Folder",
+            "type": "string"
+          },
+          "pipeline_chain": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Chain"
+          },
+          "schedule_policy": {
+            "additionalProperties": true,
+            "title": "Schedule Policy",
+            "type": "object"
+          },
+          "target_lang": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Lang"
+          },
+          "trust_level": {
+            "$ref": "#/components/schemas/TrustLevel",
+            "default": "standard"
+          }
+        },
+        "required": [
+          "schedule_policy"
+        ],
+        "title": "SubscriptionCreate",
+        "type": "object"
+      },
       "TrustLevel": {
         "description": "Recorded operator intent about a source.\n\nThe hard rule, from docs/domain/data-model.md: this never makes fetched\ncontent trusted. A `trusted` source's body is still untrusted input —\nAGENTS.md is explicit that external pages and RSS bodies must never be\ntreated as instructions, and a per-source flag that silently flipped that\nwould be the most dangerous possible reading of the field.\n\nNothing currently branches on this value. It is stored and surfaced so the\ndistinction exists in the data before any behaviour depends on it; giving\nit effects requires an ADR, because the only behaviour it could plausibly\nchange is a security default.",
         "enum": [
@@ -2686,6 +2737,78 @@
           }
         ],
         "summary": "Read Job Runs",
+        "tags": [
+          "core-api"
+        ]
+      }
+    },
+    "/v1/origins/{origin_id}/subscriptions": {
+      "post": {
+        "description": "Add a subscription to an origin, idempotently.\n\nThe pair (origin, folder) is the identity, so adding the same pair twice\nreturns the subscription that already exists rather than a second one --\nthe same rule `POST /v1/sources` applies to a URL.",
+        "operationId": "addSubscription",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "origin_id",
+            "required": true,
+            "schema": {
+              "title": "Origin Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubscriptionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Add Subscription",
         "tags": [
           "core-api"
         ]

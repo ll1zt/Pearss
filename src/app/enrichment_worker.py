@@ -83,26 +83,41 @@ def _open_gate_if_complete(
         chain_for_source,
         is_source_chain_complete,
     )
+    from adapters.repository.feed import mark_subscription_ready
+    from adapters.repository.subscriptions import subscriptions_for_origin
 
     item = session.get(ItemRow, item_id)
     if item is None:
         return False
-    if not is_source_chain_complete(
-        session,
-        item_id=item_id,
-        content_hash=content_hash,
-        chain=chain_for_source(session, source_id=item.origin_id),
+    now = timestamp(datetime.now(UTC))
+    every_channel_ready = True
+    for subscription in subscriptions_for_origin(
+        session, origin_id=item.origin_id, tenant_id=item.tenant_id
     ):
+        if is_source_chain_complete(
+            session,
+            item_id=item_id,
+            content_hash=content_hash,
+            chain=chain_for_source(session, source_id=subscription.id),
+        ):
+            mark_subscription_ready(
+                session,
+                item_id=item_id,
+                subscription_id=subscription.id,
+                at=now,
+            )
+        else:
+            every_channel_ready = False
+    if not every_channel_ready:
         return False
-    if item.publish_status != PublishStatus.PENDING.value:
-        return True  # already through; nothing to do
-    result = transition(
-        PublishStatus.PENDING,
-        ItemEvent.MARK_READY,
-        TransitionContext(processing_complete=True),
-    )
-    item.publish_status = result.status.value
-    item.updated_at = timestamp(datetime.now(UTC))
+    if item.publish_status == PublishStatus.PENDING.value:
+        result = transition(
+            PublishStatus.PENDING,
+            ItemEvent.MARK_READY,
+            TransitionContext(processing_complete=True),
+        )
+        item.publish_status = result.status.value
+        item.updated_at = now
     return True
 
 

@@ -260,6 +260,18 @@ def test_mark_all_read_gains_read_without_losing_a_star(
             )
         )
         session.commit()
+        # ADR 0061: the gate is the readiness rows, and `mark_all_read` only
+        # touches items the gate admits.
+        from adapters.repository import mark_subscription_ready
+
+        for item_id in ("bulk-1", "bulk-2"):
+            mark_subscription_ready(
+                session,
+                item_id=item_id,
+                subscription_id="src-1",
+                at=NOW,
+            )
+        session.commit()
 
     with session_factory() as session:
         from adapters.repository import mark_all_read

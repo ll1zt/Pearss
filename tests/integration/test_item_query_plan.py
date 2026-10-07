@@ -301,6 +301,10 @@ def test_the_source_index_is_load_bearing_for_a_sources_page(
 ) -> None:
     """Drop `ix_item_origin_sort_key_id` and the source page stops seeking (#356).
 
+    The trailing space in `SEARCH item ` matters: the visibility gate's
+    correlated subquery reports as `SEARCH item_subscription_ready ...`, which a
+    bare prefix match would read as the item table being sought.
+
     With it the plan seeks by origin (`SEARCH item USING INDEX
     ix_item_origin_sort_key_id`); without it the planner walks the *whole*
     sort-key index and filters, which is the O(all rows) shape AC-79 exists to
@@ -312,7 +316,7 @@ def test_the_source_index_is_load_bearing_for_a_sources_page(
             sa.text("select origin_id from item limit 1")
         ).scalar_one()
         baseline = _plan_of(session, source_id=source_id)
-        assert any(statement.startswith("SEARCH item") for statement in baseline), (
+        assert any(statement.startswith("SEARCH item ") for statement in baseline), (
             baseline
         )
 
@@ -320,7 +324,7 @@ def test_the_source_index_is_load_bearing_for_a_sources_page(
         session.commit()
         degraded = _plan_of(session, source_id=source_id)
 
-    assert not any(statement.startswith("SEARCH item") for statement in degraded), (
+    assert not any(statement.startswith("SEARCH item ") for statement in degraded), (
         degraded
     )
 

@@ -35,11 +35,14 @@ from adapters.repository import (
     chain_for_source,
     enqueue_chain,
     last_conditional_state,
+    mark_subscription_ready,
     paging_state,
     promote_to_ready,
     save_paging_state,
     set_origin_title_if_absent,
     store_item,
+    subscriptions_for_origin,
+    timestamp,
 )
 from adapters.repository.search_index import index_item
 from adapters.sanitize import sanitize_html
@@ -188,17 +191,55 @@ def normalise_and_store(
                 title=item.title,
                 body=body_markup,
             )
-            wanted = _specs_needing_work(chain, body=result.body, title=item.title)
-            if wanted:
-                enqueue_chain(
-                    session,
-                    item_id=item.id,
-                    content_hash=item.content_hash,
-                    chain=wanted,
-                    tenant_id=tenant_id,
-                    now=now,
-                )
+            # ADR 0061: every subscription of this origin gets its own chain's
+            # work -- not only the one that happened to collect the item. The
+            # chains are per subscription, so reading them from the rows is the
+            # only version that stays right when a second one is added later.
+            subscriptions = subscriptions_for_origin(
+                session, origin_id=item.origin_id, tenant_id=tenant_id
+            )
+            chains: list[tuple[str | None, tuple[EnrichmentSpec, ...]]]
+            if len(subscriptions) == 1:
+                # One channel: the caller's chain is authoritative. It derives
+                # the same value from the same row, and keeping it means an
+                # explicit `chain=` (a caller override, and what several suites
+                # pass) still decides what is queued.
+                chains = [(subscriptions[0].id, chain)]
+            elif subscriptions:
+                chains = [
+                    (row.id, chain_for_source(session, source_id=row.id))
+                    for row in subscriptions
+                ]
             else:
+                # No subscription rows: a database mid-migration. Do the work
+                # the single-chain pipeline did rather than dropping it, but
+                # record no readiness -- there is no channel to be ready for,
+                # and a ready row would name a subscription that does not
+                # exist.
+                chains = [(None, chain)]
+            wanted = False
+            for subscription_id, subscription_chain in chains:
+                specs = _specs_needing_work(
+                    subscription_chain, body=result.body, title=item.title
+                )
+                if specs:
+                    wanted = True
+                    enqueue_chain(
+                        session,
+                        item_id=item.id,
+                        content_hash=item.content_hash,
+                        chain=specs,
+                        tenant_id=tenant_id,
+                        now=now,
+                    )
+                elif subscription_id is not None:
+                    mark_subscription_ready(
+                        session,
+                        item_id=item.id,
+                        subscription_id=subscription_id,
+                        at=timestamp(now or datetime.now(UTC)),
+                    )
+            if not wanted:
                 promote_to_ready(session, [item])
         results.append(Ingested(result=result, outcome=outcome))
 
