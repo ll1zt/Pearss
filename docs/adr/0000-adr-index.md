@@ -109,6 +109,7 @@ docs/adr/
 | [0053](0053-write-confirmation-shape.md) | 写确认的形状：默认路径 = 1 轮（schema 只有 `confirmed`，执行值只来自服务端派生、客户端回传字段不读）、修改路径 = 两段式（受控单选 `edit` → 该字段新值 → 展示组合请求并回显，`_matches` 不符即 `aborted` 零写入）、每工具显式声明可编辑集（身份/目标不可编辑）；四段 resolver 与 `ElicitationResult` 注解让任一轮取消成为 `declined`；AC-75 判据迁移为「任一入参变化都会改变摘要」；一次改多字段、自由文本字段名、改协议、逐字段展开均被否决 | accepted（**取代 mcp-tool-guide §3 的旧呈现规则**；记录 #250/#251/#252） | 2026-10-03 |
 | [0054](0054-a-dropped-image-marker-keeps-the-image.md) | provider 丢掉的 void 标记按「内容 / 排版」分开：`img` 追加到块尾（已保留的不重复追加），`br`/`wbr`/`hr` 仍按 ADR 0031 §47 丢弃；「整块保留原文」与「按原位插回」被否决 | accepted（**部分取代 ADR 0031 §47**；记录 #265） | 2026-10-04 |
 | [0061](0061-chain-ownership-and-per-subscription-visibility.md) | 一个 origin 多个订阅：按每个订阅各入其链；可见性按 `(item, subscription)` 判定并物化在 `item_subscription_ready`（链完成处写入 + 与 enrichment 派生结果对账的注入式守卫）；读时派生、只按主订阅入链、全局闸门、给 enrichment 加 `subscription_id` 均被否决 | accepted（**修订 ADR 0046 §6 D-A/D-B 的阶段安排**；#371 实现） | 2026-10-07 |
+| [0062](0062-a-collect-job-lives-and-dies-with-its-source.md) | collect job 随源一起删除（`delete_source` 删 `job` 并在回执报 `jobs` 计数，run 靠 CASCADE 一并走）；重订阅不继承旧 run 历史（自适应退避从本生命周期推导）；维护节拍上清扫 `config` 不再对应 origin 的孤儿 job。标记 retired 保留诊断（派生 id 会撞）、只加清理入口（bug 仍在）均被否决 | accepted（#374 实现） | 2026-10-07 |
 
 ## 翻译管线战役（#227..#233）的阅读顺序
 
