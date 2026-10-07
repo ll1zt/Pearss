@@ -11,10 +11,12 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import AuditLog
 from adapters.db_models import Item as ItemRow
+from adapters.db_models import Job as JobRow
 from adapters.db_models import JobRun as JobRunRow
 from adapters.db_models import Origin as OriginRow
 from adapters.db_models import Subscription as SubscriptionRow
 from adapters.repository._shared import _parse
+from adapters.repository.jobs import COLLECT_JOB_TYPE
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import (
     ErrorClass,
@@ -350,3 +352,26 @@ def collectable_sources(session: Session, *, tenant_id: str) -> list[tuple[str, 
         )
     ).all()
     return [(str(row[0]), str(row[1])) for row in rows]
+
+
+def prune_orphaned_collect_jobs(session: Session) -> int:
+    """Delete collect jobs whose source no longer exists (issue #374, ADR 0062).
+
+    `delete_source` now takes a source's job with it, so this is for the rows
+    that predate that rule -- and for the general case that `job.config` is a
+    string with no foreign key behind it, which is exactly why nothing cascaded
+    on its own. Deleted rather than retired: a job is machinery, and a job whose
+    subject is gone cannot be scheduled, listed, or reasoned about; the run
+    history it carries is the diagnosis of a thing that does not exist.
+    """
+    result = cast(
+        "CursorResult[Any]",
+        session.execute(
+            delete(JobRow).where(
+                JobRow.type == COLLECT_JOB_TYPE,
+                JobRow.config.is_not(None),
+                JobRow.config.notin_(select(OriginRow.id)),
+            )
+        ),
+    )
+    return int(result.rowcount or 0)

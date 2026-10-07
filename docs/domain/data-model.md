@@ -189,6 +189,12 @@ enrichment 的幂等身份里的 `lang` / `input_hash` 已经把两条链的产�
 > P1 现状：采集任务与源一一对应（`type='collect'`，`config` 存 origin id）。
 > **`schedule` 列故意留空** —— 下次何时抓是从 `subscription.schedule_policy` 与历史
 > **推导**的，不落库，否则会与推导结果成为两个事实源（ADR 0009）。
+>
+> **`job.config` 没有外键**（历史遗留的字符串列），所以删除源时**没有东西会级联**：
+> `delete_source()` 显式删除该源的 collect job（回执里报 `jobs` 计数），`job_run` 靠
+> `ON DELETE CASCADE` 一并走；维护节拍上另有一趟清扫，删除 `config` 已不对应任何 origin 的
+> 孤儿 job（ADR 0062）。**job 与它的源同生共死**：重订阅同一来源拿到的是全新 job，
+> 自适应退避（从 `job_run` 推导）因此从零开始，而不是继承上一次生命周期的失败计数。
 
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
