@@ -562,6 +562,14 @@ def _execute_row(
             owner_token=owner_token,
             values={
                 "status": EnrichmentStatus.FAILED.value,
+                # The terminal write records the try too (issue #375). It is the
+                # write that *decides* the outcome, and it was the one that did
+                # not count: the row stopped at MAX_ATTEMPTS - 1 while the
+                # journal said "attempt 3/3", and `attempt_count` is the only
+                # record of how many paid provider calls a row has burned --
+                # which is exactly what an operator reads to decide whether a
+                # failure is worth re-sending.
+                "attempt_count": attempts,
                 "error_class": error_class.value,
                 "detail": detail[:500],
                 "updated_at": timestamp(datetime.now(UTC)),

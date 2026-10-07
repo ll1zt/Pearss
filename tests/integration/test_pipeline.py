@@ -11,6 +11,7 @@ already cached the wrong content.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -903,7 +904,7 @@ def test_a_failing_processor_holds_the_gate_and_records_the_class(
 
 @pytest.mark.integration
 def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
-    session: Session, tmp_path: Path
+    session: Session, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """network failures requeue (attempt_count + backoff) up to the limit,
     then the row stops in `failed` for manual/agent re-trigger. auth fails
@@ -1001,12 +1002,13 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     assert observed_delays[1] >= observed_delays[0] * 1.5, observed_delays
 
     # The MAX_ATTEMPTS-th failure exceeds the retries: the row stops failed.
-    report = sweep_queue(
-        session,
-        processors={"translate": NetworkFailure},
-        row_session_factory=row_sessions,
-        concurrency=1,
-    )
+    with caplog.at_level(logging.WARNING, logger="app.enrichment_worker"):
+        report = sweep_queue(
+            session,
+            processors={"translate": NetworkFailure},
+            row_session_factory=row_sessions,
+            concurrency=1,
+        )
     assert report["failed"] == 1, report
     row = session.execute(
         text(
@@ -1016,6 +1018,15 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
     ).first()
     assert row is not None
     assert row[0] == "failed" and row[2] == "network"
+    # Issue #375: the terminal write is the one that *decides* the outcome, and
+    # it was the one that did not record the try -- the row stopped at
+    # MAX_ATTEMPTS - 1 while the journal said "attempt 3/3". Pinned to the
+    # literal, because ">= 2" is exactly what the missing write produced.
+    assert MAX_ATTEMPTS == 3, "the pin below is MAX_ATTEMPTS"
+    assert row[1] == 3, row
+    # ...and the two records have to agree: the count is how an operator reads
+    # "how many paid calls did this row burn".
+    assert f"attempt {row[1]}/{MAX_ATTEMPTS}" in caplog.text, caplog.text
 
     # auth failures skip retries entirely: a fresh row fails in one sweep.
     session.execute(
@@ -1047,7 +1058,10 @@ def test_transient_failures_requeue_with_backoff_then_stop_at_limit(
         )
     ).first()
     assert row is not None
-    assert row[0] == "failed" and row[1] == 0, "auth must not retry"
+    # One try, no retry: the count records *tries*, so an auth failure that
+    # burned a provider call is 1. The old 0 was the same missing write (issue
+    # #375) seen from the other end -- and it read as "never attempted".
+    assert row[0] == "failed" and row[1] == 1, row
 
 
 @pytest.mark.integration
