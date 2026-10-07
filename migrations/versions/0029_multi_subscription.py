@@ -37,10 +37,75 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+_COLUMNS = (
+    "id, tenant_id, origin_id, schedule_policy, pipeline_chain, target_lang,"
+    " folder, status, trust_level, created_at, updated_at"
+)
+
+# Hand-written rather than `batch_alter_table`: SQLite has no ALTER for a UNIQUE
+# constraint, so alembic rebuilds the table, and it renders the rebuild from
+# SQLAlchemy's constraint set -- whose iteration order depends on the process's
+# hash seed. Two interpreters that ran the same migrations then produce
+# different DDL text for `subscription`, which the suite's reuse guard catches
+# (a copied template must be byte-for-byte the migration). Writing the statement
+# out makes the text a fact of this file. Same reason 0028 rebuilds by hand.
+_CREATE_SUBSCRIPTION = (
+    "CREATE TABLE subscription_new ("
+    "id VARCHAR(64) NOT NULL, "
+    "tenant_id VARCHAR(64) NOT NULL, "
+    "origin_id VARCHAR(64) NOT NULL, "
+    "schedule_policy TEXT NOT NULL, "
+    "pipeline_chain TEXT, "
+    "target_lang VARCHAR(16), "
+    "folder TEXT DEFAULT 'default' NOT NULL, "
+    "status VARCHAR(16) NOT NULL, "
+    "trust_level VARCHAR(16) NOT NULL, "
+    "created_at TEXT NOT NULL, "
+    "updated_at TEXT NOT NULL, "
+    "CONSTRAINT pk_subscription PRIMARY KEY (id), "
+    "CONSTRAINT fk_subscription_origin_id_origin FOREIGN KEY(origin_id)"
+    " REFERENCES origin (id) ON DELETE CASCADE, "
+    "CONSTRAINT ck_subscription_sourcestatus CHECK (status IN"
+    " ('active', 'paused', 'disabled')), "
+    "CONSTRAINT ck_subscription_trustlevel CHECK (trust_level IN"
+    " ('standard', 'trusted', 'restricted'))"
+    ")"
+)
+
+# The 1:1 stage's rule, restored on downgrade.
+_CREATE_SUBSCRIPTION_1TO1 = (
+    _CREATE_SUBSCRIPTION[: -len(")")]
+    + ", CONSTRAINT uq_subscription_origin UNIQUE (tenant_id, origin_id))"
+)
+
+_COPY_INTO_NEW = (
+    f"INSERT INTO subscription_new ({_COLUMNS}) SELECT {_COLUMNS} FROM subscription"
+)
+_COPY_BACK = (
+    f"INSERT INTO subscription ({_COLUMNS}) SELECT {_COLUMNS} FROM subscription_old"
+)
+
+
+def _rebuild_subscription(create: str) -> None:
+    """Replace `subscription` with the shape `create` describes, keeping rows.
+
+    The two renames are load-bearing together with the call order in
+    `upgrade`/`downgrade`: SQLite rewrites a foreign key clause that points at a
+    renamed table, so this must run before `item_subscription_ready` exists (or
+    after it is dropped) -- otherwise its `REFERENCES subscription` would follow
+    the old table to `subscription_old` and be left dangling when that is
+    dropped.
+    """
+    op.execute(create)
+    op.execute(_COPY_INTO_NEW)
+    op.execute("ALTER TABLE subscription RENAME TO subscription_old")
+    op.execute("ALTER TABLE subscription_new RENAME TO subscription")
+    op.execute("DROP TABLE subscription_old")
+
+
 def upgrade() -> None:
     """Drop the 1:1 rule and record per-subscription readiness."""
-    with op.batch_alter_table("subscription") as batch_op:
-        batch_op.drop_constraint("uq_subscription_origin", type_="unique")
+    _rebuild_subscription(_CREATE_SUBSCRIPTION)
 
     op.create_table(
         "item_subscription_ready",
@@ -92,7 +157,4 @@ def downgrade() -> None:
         table_name="item_subscription_ready",
     )
     op.drop_table("item_subscription_ready")
-    with op.batch_alter_table("subscription") as batch_op:
-        batch_op.create_unique_constraint(
-            "uq_subscription_origin", ["tenant_id", "origin_id"]
-        )
+    _rebuild_subscription(_CREATE_SUBSCRIPTION_1TO1)
