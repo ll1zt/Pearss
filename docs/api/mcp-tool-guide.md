@@ -64,7 +64,7 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
 ### 那么靠什么约束误操作
 
 1. **token 权限**——真正的边界：`PEARSS_MCP_TOKEN`，独立于 Core API token；
-2. **工具描述与 annotations**——破坏性工具（`remove_subscription` / `delete_items` / `delete_origin_items`）在描述里明写不可逆后果，且 `destructiveHint=true`；出网或消耗 provider 预算的写工具 `openWorldHint=true`。注解是 host 决定是否追加自己的确认界面的依据，所以它和描述同属契约（进 snapshot）；
+2. **工具描述与 annotations**——破坏性工具（`purge_origin` / `delete_items` / `delete_origin_items`）在描述里明写不可逆后果，且 `destructiveHint=true`；出网或消耗 provider 预算的写工具 `openWorldHint=true`。注意注解跟着**语义**走而不是名字：`remove_subscription` 听起来像删除，但它只是退订（ADR 0063），因此 `destructiveHint=false`——把删除藏在一个叫 delete 的动词后面正是这条注解要防的事。注解是 host 决定是否追加自己的确认界面的依据，所以它和描述同属契约（进 snapshot）；
 3. **幂等**——每次调用新生成 `Idempotency-Key`，重放不重复生效（因此 `idempotentHint=false`：重试是新意图）；
 4. **可审计**——每次写都有 Core API 审计行与 correlation id，事后可追溯。
 
@@ -84,18 +84,20 @@ agent → MCP tool → Core API (/v1) → 审计中间件 → repository
   这三条与描述的一致性由 `tests/unit/test_mcp_tool_guide.py` 机械对账（措辞 ⇔ hint）。
 - 入参 schema 里**不得**出现 `confirmed` / `ack` 之类的确认参数：`tests/integration/test_mcp_server.py` 对真实注册表逐个查。
 
-### 写工具（16 个）
+### 写工具（18 个）
 
 | 工具 | 副作用 |
 |---|---|
 | `add_subscription` | 引入外部内容源；`folder` 可在同一次调用里归类 |
+| `add_subscription_to_origin` | 给**已有** origin 加第二个订阅（同一批事实、另一套策略：不同 folder / chain / 语言，issue #279）：按 `(origin, folder)` 幂等，**不重复入库条目**，也不产生新的外部请求（origin 已在采集） |
 | `add_subscriptions` | 批量引入外部内容源（ADR 0044）：返回**作业句柄**；逐 URL 结果查 `work_units`（不可用 URL 单独 `failed`，已订阅的是 `skipped`） |
 | `fetch_origin_items` | 按地址抓取入库：调用方（agent）给一批地址、**部署去抓**。返回**作业句柄**（`work_id` + 折叠 counts，响应大小不随地址数变化；作业在调用返回后继续跑），逐条结果用 `work_units` 读；地址必须在本源 host 上 |
 | `update_subscription_policy` | 改变抓取频率，可能压垮对方站点 |
 | `set_subscription_status` | 暂停/恢复采集，改变采集行为 |
 | `set_subscription_folder` | 改变订阅在客户端侧边栏中的归类（下一次 `subscription/list` 生效） |
 | `set_subscription_pipeline_chain` | 给已有源设/清处理器链：条目在闸门后等待，处理器会发出真实外部请求与花费 provider 预算 |
-| `remove_subscription` | **删除来源及其全部条目**（ADR 0021：不可逆） |
+| `remove_subscription` | **退订**：只把订阅置为 `disabled`，条目/正文/已读状态全部保留，重新订阅同一来源即复活（ADR 0063；旧语义是删除，已改） |
+| `purge_origin` | **销毁**：删除 origin 及其全部条目、正文、已读状态、产物、抓取记录与 collect job（不可逆）。`reason` 必填，写进审计行；这是唯一删除内容的工具 |
 | `delete_items` | 按 id 永久删除条目（含正文、已读状态、译文）：返回**作业句柄**，逐 id 结果查 `work_units`（已消失的 id 是 `skipped`） |
 | `delete_origin_items` | 清空某源的条目但保留订阅与抓取游标（可选 since/until / include_published） |
 | `set_item_read_state` | 标记条目的**消费状态**（已读/未读、星标/取消）：只写 `read_state` 行，**不碰条目本体**（content_hash / guid / publish_status / content_ref 都不动，已发布内容冻结）；省略的字段保留原值；`/v1/items/{id}/read-state` 与 Reader API 报同一状态（同一领域函数） |

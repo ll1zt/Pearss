@@ -58,6 +58,60 @@
       "type": "object"
     }
   },
+  "add_subscription_to_origin": {
+    "annotations": {
+      "destructive_hint": false,
+      "idempotent_hint": false,
+      "open_world_hint": false,
+      "read_only_hint": false
+    },
+    "description": "Add a second subscription to an origin that already exists: the same facts under another policy -- a different folder, chain or language -- so one feed can be read untranslated in one place and translated in another. The origin id comes from list_sources. Idempotent per (origin, folder), and nothing new is collected: the origin is already subscribed. Items are not duplicated.",
+    "input_schema": {
+      "properties": {
+        "folder": {
+          "default": "",
+          "title": "Folder",
+          "type": "string"
+        },
+        "origin_id": {
+          "title": "Origin Id",
+          "type": "string"
+        },
+        "pipeline_chain": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline Chain"
+        },
+        "schedule_policy": {
+          "additionalProperties": true,
+          "title": "Schedule Policy",
+          "type": "object"
+        },
+        "target_lang": {
+          "default": "",
+          "title": "Target Lang",
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin_id",
+        "schedule_policy"
+      ],
+      "title": "add_subscription_to_originArguments",
+      "type": "object"
+    }
+  },
   "add_subscriptions": {
     "annotations": {
       "destructive_hint": false,

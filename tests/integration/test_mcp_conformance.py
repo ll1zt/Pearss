@@ -638,6 +638,8 @@ async def test_reversible_writes_are_not_annotated_destructive(mcp_url: str) -> 
         # Unsubscribing keeps every row and every body file (ADR 0063): a host
         # that warned about it would be warning about a bookmark.
         "remove_subscription",
+        # A second subscription adds a policy, not a deletion (issue #279).
+        "add_subscription_to_origin",
     }
     async with mcp_session(mcp_url) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}

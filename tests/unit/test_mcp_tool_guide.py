@@ -283,7 +283,18 @@ def test_the_search_tool_says_which_parameter_searches_what() -> None:
 # into another always-present surface, so the raise is the honest entry. The
 # surface lands at 17,736 and 18,000 leaves the next tool the same ~260 to argue
 # for in its own diff.
-SURFACE_BUDGET_CHARS = 18_000
+#
+# Raised to 19,000 by issue #279, whose acceptance criterion is that an agent can
+# put a *second* subscription on an existing origin -- HTTP got that path in
+# #371 and MCP did not, which is a gap in an agent-first system rather than a
+# missing convenience. The alternative was to shorten existing descriptions (the
+# largest are `search_items` at 1,393 and the two `add_subscription*` at ~1,150
+# each); that was rejected here because those sentences are what the model reads
+# when choosing a tool, and cutting them to make room for another tool trades one
+# tool being harder to call for another existing at all. As before, the raise is
+# the honest entry: it is a decision in a diff rather than a loss the next reader
+# has to reconstruct.
+SURFACE_BUDGET_CHARS = 19_000
 
 
 def test_the_tool_face_stays_within_its_budget() -> None:
