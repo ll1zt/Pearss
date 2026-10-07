@@ -56,7 +56,7 @@ def _subscription_payload(row: SourceView) -> dict[str, Any]:
     is why the halves are nested rather than flattened back together.
     """
     return {
-        "id": row.id,
+        "id": row.subscription_id,
         "origin": {
             "id": row.id,
             "type": row.type,

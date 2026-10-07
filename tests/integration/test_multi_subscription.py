@@ -40,6 +40,7 @@ from adapters.repository import (
 from adapters.repository.enrichment import chain_for_source, is_source_chain_complete
 from adapters.repository.feed import items_ready_for_feed
 from app.pipeline import normalise_and_store
+from core.enrichment import EnrichmentKind, EnrichmentSpec
 from core.models import ItemDraft
 from core.tenancy import SINGLE_TENANT
 from tests.source_seed import seed_source
@@ -47,7 +48,7 @@ from tests.source_seed import seed_source
 pytestmark = pytest.mark.integration
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
-CHAIN = '[{"plugin_id": "translation", "kind": "translation", "lang": "en"}]'
+CHAIN = '[{"plugin_id": "translate", "kind": "translation", "lang": "en"}]'
 
 
 def _store(session: Session, *, origin_id: str, external_id: str) -> str:
@@ -268,3 +269,66 @@ def test_the_materialised_gate_agrees_with_what_the_enrichments_imply(
             "a missing ready row was not noticed"
         )
         assert chained
+
+
+def test_a_channel_whose_subscription_is_unknown_serves_nothing(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """An id nothing carries is an empty channel, not an error."""
+    with session_factory() as session:
+        seed_source(session, source_id="sub-known", url="https://known.example/feed")
+        item_id = _store(session, origin_id="sub-known", external_id="one")
+        assert [
+            item.id
+            for item in items_ready_for_feed(session, subscription_id="sub-known")
+        ] == [item_id]
+        assert (
+            items_ready_for_feed(session, subscription_id="no-such-subscription") == []
+        )
+
+
+def test_a_database_without_the_subscription_row_queues_work_and_records_no_readiness(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """A database mid-migration has the origin but not yet its subscription.
+
+    The work must not be dropped -- that is what the single-chain pipeline did
+    -- and the gate must not be written: a ready row would name a channel that
+    does not exist, and fail its foreign key.
+    """
+    with session_factory() as session:
+        seed_source(session, source_id="sub-absent", url="https://absent.example/feed")
+        session.execute(sa.text("delete from subscription"))
+        session.commit()
+        normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    origin_id="sub-absent",
+                    external_id="one",
+                    title="An item",
+                    canonical_url="https://example.test/absent-one",
+                    published_at=BASE,
+                    content="<p>body</p>",
+                )
+            ],
+            chain=(
+                EnrichmentSpec(
+                    plugin_id="translate",
+                    kind=EnrichmentKind.TRANSLATION,
+                    lang="en",
+                ),
+            ),
+        )
+        assert (
+            session.execute(
+                sa.text("select count(*) from item_enrichment")
+            ).scalar_one()
+            == 1
+        ), "the chain's work must not be dropped"
+        assert (
+            session.execute(
+                sa.text("select count(*) from item_subscription_ready")
+            ).scalar_one()
+            == 0
+        ), "there is no channel to be ready for"

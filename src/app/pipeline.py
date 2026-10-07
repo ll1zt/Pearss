@@ -210,9 +210,12 @@ def normalise_and_store(
                     for row in subscriptions
                 ]
             else:
-                # No subscription rows: a database mid-migration. Behave as the
-                # single-chain pipeline did rather than dropping the work.
-                chains = [(item.origin_id, chain)]
+                # No subscription rows: a database mid-migration. Do the work
+                # the single-chain pipeline did rather than dropping it, but
+                # record no readiness -- there is no channel to be ready for,
+                # and a ready row would name a subscription that does not
+                # exist.
+                chains = [(None, chain)]
             wanted = False
             for subscription_id, subscription_chain in chains:
                 specs = _specs_needing_work(
@@ -228,7 +231,7 @@ def normalise_and_store(
                         tenant_id=tenant_id,
                         now=now,
                     )
-                else:
+                elif subscription_id is not None:
                     mark_subscription_ready(
                         session,
                         item_id=item.id,
