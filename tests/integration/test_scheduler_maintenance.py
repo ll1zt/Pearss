@@ -56,6 +56,7 @@ from adapters.repository import (
     enqueue_chain,
     ensure_collect_job,
     finish_work,
+    job_for_source,
     timestamp,
     update_source_policy,
 )
@@ -790,3 +791,116 @@ def test_the_ledger_pass_is_throttled_between_calls(
     asyncio.run(scheduler._prune_work_ledger_if_due())
     works_final, _ = _ledger_rows(session_factory)
     assert work_id not in works_final
+
+
+# --------------------------------------------------------------------------
+# Scenario: a tick clears a collect job whose source is gone (issue #374)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_tick_removes_a_collect_job_whose_source_is_gone(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+) -> None:
+    """The rows that predate "the job goes with the source" (ADR 0062).
+
+    `job.config` is a string with no foreign key behind it, so nothing cascades
+    and the only thing that can clear such a row is a sweep. The id is pinned:
+    it is derived from the source id, so it is exactly the id a re-subscription
+    would match on and revive.
+    """
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    with session_factory() as session:
+        seed_source(session, source_id="s1", url="https://s1.example/feed")
+        job_id = ensure_collect_job(
+            session, source_id="s1", tenant_id="default", at=_claimed_ago(days=1)
+        )
+        assert job_id == "job-s1"
+        create_job_run(
+            session,
+            run_id="r1",
+            job_id=job_id,
+            correlation_id="c1",
+            at=_claimed_ago(days=1),
+        )
+        session.commit()
+        # The source disappears behind the façade's back, which is what a row
+        # written before #374 looks like.
+        session.execute(sa.text("delete from subscription"))
+        session.execute(sa.text("delete from origin"))
+        session.commit()
+
+    asyncio.run(scheduler._clear_orphaned_jobs_if_due())
+
+    with session_factory() as session:
+        assert job_for_source(session, "s1") is None
+        assert (
+            session.execute(
+                sa.text("select count(*) from job where id = 'job-s1'")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            session.execute(sa.text("select count(*) from job_run")).scalar_one() == 0
+        ), "the orphan's runs go with it"
+
+
+@pytest.mark.integration
+def test_the_orphan_sweep_leaves_a_live_sources_job_alone(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+) -> None:
+    """The sweep is a delete, so what it does *not* touch is the claim."""
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    with session_factory() as session:
+        seed_source(session, source_id="s1", url="https://s1.example/feed")
+        ensure_collect_job(
+            session, source_id="s1", tenant_id="default", at=_claimed_ago(days=1)
+        )
+        session.commit()
+
+    asyncio.run(scheduler._clear_orphaned_jobs_if_due())
+
+    with session_factory() as session:
+        assert job_for_source(session, "s1") is not None
+
+
+@pytest.mark.integration
+def test_the_orphan_sweep_is_throttled_between_calls(
+    session_factory: sessionmaker[Session],
+    idle_client: httpx.Client,
+) -> None:
+    """Once per maintenance interval, not once per tick.
+
+    Asserted on the job rather than on the timer field: an orphan that appears
+    *after* a pass survives the next call, because that call is inside the
+    interval and must not run the delete.
+    """
+    clock = _Clock()
+    scheduler = _scheduler(session_factory, idle_client, clock)
+    asyncio.run(scheduler._clear_orphaned_jobs_if_due())
+
+    with session_factory() as session:
+        seed_source(session, source_id="s1", url="https://s1.example/feed")
+        ensure_collect_job(
+            session, source_id="s1", tenant_id="default", at=_claimed_ago(days=1)
+        )
+        session.commit()
+        session.execute(sa.text("delete from subscription"))
+        session.execute(sa.text("delete from origin"))
+        session.commit()
+
+    # The clock has not moved, so this call is inside the interval.
+    asyncio.run(scheduler._clear_orphaned_jobs_if_due())
+    with session_factory() as session:
+        assert job_for_source(session, "s1") is not None, (
+            "a second pass inside the interval must not run the delete"
+        )
+
+    clock.advance(PRUNE_INTERVAL_SECONDS + 1)
+    asyncio.run(scheduler._clear_orphaned_jobs_if_due())
+    with session_factory() as session:
+        assert job_for_source(session, "s1") is None

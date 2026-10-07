@@ -49,6 +49,7 @@ from adapters.repository import (
     last_collect_at,
     last_failure_error_class,
     prune_audit_log,
+    prune_orphaned_collect_jobs,
     prune_work_ledger,
     reap_orphaned_runs,
     update_gaps_for_source,
@@ -540,6 +541,7 @@ class Scheduler:
         # reaping orphaned runs - see _reap_orphaned_runs_if_due.
         self._next_prune_at = 0.0
         self._next_work_prune_at = 0.0
+        self._next_orphan_sweep_at = 0.0
         self._next_reap_at = 0.0
         self._next_optimize_at = 0.0
         self._next_index_at = 0.0
@@ -623,6 +625,7 @@ class Scheduler:
                 await self._reap_orphaned_runs_if_due()
                 await self._prune_audit_if_due()
                 await self._prune_work_ledger_if_due()
+                await self._clear_orphaned_jobs_if_due()
                 await self._optimize_if_due()
                 await self._index_if_due()
             except OperationalError:
@@ -810,6 +813,32 @@ class Scheduler:
         if pruned:
             LOGGER.info(
                 "ledger retention pruned %d work(s) older than %dd", pruned, days
+            )
+
+    async def _clear_orphaned_jobs_if_due(self) -> None:
+        """Delete collect jobs whose source is gone (issue #374, ADR 0062).
+
+        `delete_source` takes a source's job with it, so this only finds rows
+        that predate that rule -- or that a hand edit left behind. It exists
+        because `job.config` is a string with no foreign key behind it: nothing
+        can cascade, so something has to sweep. Shares the maintenance interval
+        rather than defining a second schedule.
+        """
+        now = self._monotonic()
+        if now < self._next_orphan_sweep_at:
+            return
+
+        def sweep() -> int:
+            with self._session_factory() as session:
+                removed = prune_orphaned_collect_jobs(session)
+                session.commit()
+            return removed
+
+        removed = await asyncio.to_thread(sweep)
+        self._next_orphan_sweep_at = self._monotonic() + self._prune_every
+        if removed:
+            LOGGER.warning(
+                "removed %d collect job(s) whose source no longer exists", removed
             )
 
     async def _optimize_if_due(self) -> None:

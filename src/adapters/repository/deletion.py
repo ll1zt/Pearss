@@ -35,6 +35,7 @@ from sqlalchemy.orm import Session
 from adapters import filestore
 from adapters.db_models import Item as ItemRow
 from adapters.db_models import ItemEnrichment as EnrichmentRow
+from adapters.db_models import Job as JobRow
 from adapters.db_models import Origin as OriginRow
 from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
@@ -279,11 +280,25 @@ def delete_source(
 
     The source's `raw_fetch` rows go with it. They are diagnostic records whose
     subject no longer exists, so nothing can read them as anything.
+
+    Its collect job goes too (issue #374, ADR 0062). The job is the durable
+    declaration that this source is collected; with the source gone the
+    declaration is about nothing, and `ensure_collect_job` matches on
+    `job.config` -- so a re-subscription of the same source would revive the row
+    and inherit the previous lifecycle's run history, which is what the adaptive
+    policy derives its backoff from. `job_run` cascades from `job`, so the
+    diagnosis history of a thing that no longer exists goes with it.
     """
     row = session.get(OriginRow, source_id)
     if row is None:
         return DeletionResult(
-            counts={"sources": 0, "items": 0, "raw_fetches": 0, "bodies": 0},
+            counts={
+                "sources": 0,
+                "items": 0,
+                "raw_fetches": 0,
+                "bodies": 0,
+                "jobs": 0,
+            },
             reclaim=ReclaimPlan(root=root),
         )
 
@@ -295,6 +310,11 @@ def delete_source(
         ],
         root=root,
     )
+
+    jobs = session.execute(
+        select(func.count()).select_from(JobRow).where(JobRow.config == source_id)
+    ).scalar_one()
+    session.execute(delete(JobRow).where(JobRow.config == source_id))
 
     raw_fetches = session.execute(
         select(func.count())
@@ -322,6 +342,7 @@ def delete_source(
             "items": inner.counts["items"],
             "raw_fetches": int(raw_fetches),
             "bodies": inner.counts["bodies"],
+            "jobs": int(jobs),
         },
         # The item bodies are the only files involved, so the plan is the one
         # the inner call built. Threaded through rather than rebuilt, so the

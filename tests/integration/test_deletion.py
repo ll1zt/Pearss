@@ -28,13 +28,22 @@ from adapters.db_models import RawFetch as RawFetchRow
 from adapters.db_models import ReadState as ReadStateRow
 from adapters.repository import (
     DeletionResult,
+    claim_job_run,
+    consecutive_failures,
+    create_job_run,
     delete_items,
     delete_source,
     delete_source_items,
+    ensure_collect_job,
+    finish_job_run,
     get_source,
+    job_for_source,
+    last_collect_at,
 )
 from adapters.timestamps import fixed_width_utc as timestamp
 from app.main import create_session_factory
+from core.enums import ErrorClass
+from core.job_state import JobRunEvent
 from tests.migrated_schema import migrated_database
 from tests.source_seed import seed_source
 
@@ -466,6 +475,10 @@ class TestDeleteSource:
                 "items": 1,
                 "raw_fetches": 0,
                 "bodies": 1,
+                # The source had no collect job in this fixture (the scheduler
+                # creates it on the first tick), and the receipt still reports
+                # the count -- issue #374.
+                "jobs": 0,
             }
             assert get_source(session, "src-1") is None
             assert not path.exists()
@@ -730,3 +743,89 @@ class TestTransactionBoundary:
 
             assert result.reclaim.reclaim() == 1
             assert result.reclaim.reclaim() == 0, "already gone; not an error"
+
+
+class TestDeletingASourceTakesItsCollectJobWithIt:
+    """Issue #374: the job is the declaration that a source is collected.
+
+    It has no foreign key to `origin` -- it cannot, since `job.config` is a
+    string that predates the split -- so nothing cascaded and nothing noticed.
+    `list_jobs` kept returning a job whose source was gone, and because
+    `ensure_collect_job` matches on `config`, re-subscribing the same source
+    revived that row: the new subscription started life carrying the previous
+    one's failures and backoff, which the adaptive policy derives from exactly
+    this history.
+    """
+
+    def test_the_job_row_and_its_runs_go_with_the_source(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        with session_factory() as session:
+            seed_source(session, source_id="src-1", url="https://example.test/feed")
+            job_id = ensure_collect_job(
+                session, source_id="src-1", tenant_id="default", at=NOW
+            )
+            # Pinned: the id is derived from the source id, so it is the same id
+            # a re-subscription would ask for.
+            assert job_id == "job-src-1"
+            create_job_run(
+                session, run_id="run-1", job_id=job_id, correlation_id="c", at=NOW
+            )
+            session.commit()
+
+        with session_factory() as session:
+            result = _delete_source(session, "src-1")
+        assert result.counts["jobs"] == 1
+
+        with session_factory() as session:
+            assert job_for_source(session, "src-1") is None
+            assert (
+                session.execute(
+                    sa.text("select count(*) from job where id = 'job-src-1'")
+                ).scalar_one()
+                == 0
+            )
+            assert (
+                session.execute(sa.text("select count(*) from job_run")).scalar_one()
+                == 0
+            ), "the runs cascade from the job"
+
+    def test_resubscribing_the_same_source_does_not_inherit_the_old_history(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        """The bug's real symptom: a new subscription with an old backoff."""
+        with session_factory() as session:
+            seed_source(session, source_id="src-1", url="https://example.test/feed")
+            job_id = ensure_collect_job(
+                session, source_id="src-1", tenant_id="default", at=NOW
+            )
+            session.commit()
+            for index in range(3):
+                run_id = f"run-{index}"
+                create_job_run(
+                    session, run_id=run_id, job_id=job_id, correlation_id="c", at=NOW
+                )
+                assert claim_job_run(session, run_id=run_id, at=NOW) is True
+                finish_job_run(
+                    session,
+                    run_id=run_id,
+                    event=JobRunEvent.FAIL,
+                    error_class=ErrorClass.NETWORK,
+                    correlation_id="c",
+                    at=NOW,
+                )
+                session.commit()
+            assert consecutive_failures(session, job_id="job-src-1") == 3
+
+        with session_factory() as session:
+            _delete_source(session, "src-1")
+
+        with session_factory() as session:
+            seed_source(session, source_id="src-1", url="https://example.test/feed")
+            job_id = ensure_collect_job(
+                session, source_id="src-1", tenant_id="default", at=NOW
+            )
+            session.commit()
+            assert job_id == "job-src-1"
+            assert consecutive_failures(session, job_id=job_id) == 0
+            assert last_collect_at(session, job_id=job_id) is None
