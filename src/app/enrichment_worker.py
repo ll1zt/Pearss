@@ -21,7 +21,7 @@ import os
 import secrets
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
@@ -56,6 +56,19 @@ DEFAULT_CALL_TIMEOUT: Final = 360.0
 # How many rows one sweep processes in parallel. Each worker runs in its own
 # thread with its own session; SQLite handles short writes from a few threads
 # fine, and the provider call (the slow part) holds no lock.
+# How many candidates one sweep may look at while filling its claim slots
+# (issue #376). The per-row work is a dict lookup in the pacer, but each *page*
+# is a query, so an unbounded scan would make a fully-paced queue cost one sweep
+# O(queue). Sized well above a round's claims: the incident had 40 blocked rows
+# in front of the 762 that were waiting behind them.
+_MAX_CANDIDATES_PER_SWEEP = 512
+
+# How many candidates one *page* asks for. A page is a query, so asking for one
+# row at a time would trade a scan of the queue for a scan of the network of
+# SQLite calls; 32 keeps a full-budget scan to sixteen queries while staying far
+# below the point where a sweep reads rows it cannot act on.
+_CANDIDATE_PAGE_SIZE = 32
+
 DEFAULT_CONCURRENCY: Final = 3
 # Retry policy for transient classes (network, blocked/rate-limit): the row
 # goes back to queued with attempt_count incremented, retried on the next
@@ -187,9 +200,15 @@ def sweep_queue(
     fetch_pacer = pacer()
     fetch_pacer.begin_sweep()
 
-    claimable = _claimable_rows(session, now=now, limit=max(1, concurrency))
+    wanted = max(1, concurrency)
     claimed: list[tuple[str, str, str, str]] = []
-    for row_id, item_id, plugin_id, item_url in claimable:
+    # Candidates are pulled lazily, not taken as one window of `wanted` rows
+    # (issue #376): a paced row is skipped without being replaced, so a window
+    # that wide lets the head of the queue -- ordered by `created_at` -- spend
+    # the whole round while claimable rows behind it are never looked at.
+    for row_id, item_id, plugin_id, item_url in _candidate_window(
+        session, now=now, wanted=wanted
+    ):
         if plugin_id not in processors:
             # Defense in depth: chains naming unregistered processors are
             # refused at config time now, but a processor removed after a
@@ -247,6 +266,10 @@ def sweep_queue(
         claimed_flag = cast("CursorResult[Any]", session.execute(claim)).rowcount
         if claimed_flag:
             claimed.append((row_id, item_id, owner, host))
+            if len(claimed) >= wanted:
+                # The round has its claims: stop pulling candidates rather than
+                # scanning the budget out.
+                break
     session.commit()
     if not claimed:
         return report
@@ -299,19 +322,54 @@ def _expired_lease(now: datetime) -> Any:
     )
 
 
+def _candidate_window(
+    session: Session, *, now: datetime, wanted: int
+) -> Iterator[tuple[str, str, str, str | None]]:
+    """Claimable candidates in queue order, paged, until the budget runs out.
+
+    A generator so the scan stops the moment the round has its claims: the
+    budget only bounds the case where nothing is claimable (every host cooling
+    down), where one sweep must not walk the whole queue.
+    """
+    cursor: tuple[str, str] | None = None
+    scanned = 0
+    while scanned < _MAX_CANDIDATES_PER_SWEEP:
+        page = _claimable_rows(
+            session, now=now, limit=max(wanted, _CANDIDATE_PAGE_SIZE), after=cursor
+        )
+        if not page:
+            return
+        cursor = (page[-1][4], page[-1][0])
+        for row in page:
+            scanned += 1
+            yield row[0], row[1], row[2], row[3]
+            if scanned >= _MAX_CANDIDATES_PER_SWEEP:
+                return
+
+
 def _claimable_rows(
-    session: Session, *, now: datetime, limit: int
-) -> list[tuple[str, str, str, str | None]]:
-    """(id, item_id, plugin_id, item_url) of queued rows plus `running` rows
-    past the reclaim budget. Core columns only - the outer sweep never holds
-    ORM instances of rows that row sessions will write. The item URL rides
-    along because fetch pacing is per host, and the host is the item's."""
-    rows = session.execute(
+    session: Session, *, now: datetime, limit: int, after: tuple[str, str] | None = None
+) -> list[tuple[str, str, str, str | None, str]]:
+    """(id, item_id, plugin_id, item_url, created_at) of queued rows plus
+    `running` rows past the reclaim budget. Core columns only - the outer sweep
+    never holds ORM instances of rows that row sessions will write. The item URL
+    rides along because fetch pacing is per host, and the host is the item's;
+    `created_at` is the queue order, and it comes back so the next page can be
+    asked for by key rather than by offset."""
+    rows = session.execute(_candidate_query(now=now, limit=limit, after=after)).all()
+    return [(row[0], row[1], row[2], row[3], row[4]) for row in rows]
+
+
+def _candidate_query(
+    *, now: datetime, limit: int, after: tuple[str, str] | None
+) -> Any:
+    query = (
         select(
             ItemEnrichment.id,
             ItemEnrichment.item_id,
             ItemEnrichment.plugin_id,
             ItemRow.url,
+            ItemEnrichment.created_at,
         )
         .join(ItemRow, ItemRow.id == ItemEnrichment.item_id)
         .where(
@@ -328,10 +386,23 @@ def _claimable_rows(
                 _expired_lease(now),
             )
         )
-        .order_by(ItemEnrichment.created_at)
+        # `id` breaks ties so the order is total: keyset paging over a
+        # non-total order can repeat or skip a row whose neighbour shares its
+        # `created_at`.
+        .order_by(ItemEnrichment.created_at, ItemEnrichment.id)
         .limit(limit)
-    ).all()
-    return [(row[0], row[1], row[2], row[3]) for row in rows]
+    )
+    if after is not None:
+        query = query.where(
+            or_(
+                ItemEnrichment.created_at > after[0],
+                and_(
+                    ItemEnrichment.created_at == after[0],
+                    ItemEnrichment.id > after[1],
+                ),
+            )
+        )
+    return query
 
 
 def _execute_row(
@@ -705,6 +776,12 @@ def _fence_holds(session: Session, *, row_id: str, owner_token: str) -> bool:
 class EnrichmentWorker:
     """The tick loop, modelled on Scheduler: task in, report callback out."""
 
+    # Declared here as well as assigned in `__init__`: with the annotation only
+    # inside `__init__`, a caller reading the property that returns it sees the
+    # narrowed `None` from the assignment rather than `float | None`.
+    _last_sweep_ended_at: float | None = None
+    _last_interval_seconds: float | None = None
+
     def __init__(
         self,
         session_factory: sessionmaker[Session],
@@ -733,6 +810,12 @@ class EnrichmentWorker:
         self._watch = LoopWatch(name="enrichment-worker", watch=watch or always_alive)
         self._cancel_event = threading.Event()
         self._inflight: asyncio.Task[dict[str, int]] | None = None
+        # The loop's own period, measured rather than assumed (issue #376):
+        # `sweep_once` logs how long the sweep took, and the incident's ~130s
+        # rounds against a configured 60s were spent *outside* it, where nothing
+        # was reporting.
+        self._last_sweep_ended_at: float | None = None
+        self._last_interval_seconds: float | None = None
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -760,6 +843,14 @@ class EnrichmentWorker:
             LOGGER.exception("enrichment task failed")
         self._task = None
         LOGGER.info("enrichment worker stopped")
+
+    @property
+    def last_interval_seconds(self) -> float | None:
+        """Seconds between the end of the previous sweep and the last one.
+
+        `None` before the second sweep: one round has no gap to report.
+        """
+        return self._last_interval_seconds
 
     def liveness(self) -> tuple[bool, str]:
         """Whether the background loop is alive, and a name for diagnostics.
@@ -811,6 +902,25 @@ class EnrichmentWorker:
     async def sweep_once(self) -> dict[str, int]:
         async with self._lock:
             started = time.monotonic()
+            gap: float | None = (
+                None
+                if self._last_sweep_ended_at is None
+                else started - self._last_sweep_ended_at
+            )
+            self._last_interval_seconds = gap
+            if gap is not None and gap > self._sweep_seconds + max(
+                5.0, self._sweep_seconds * 0.1
+            ):
+                # Not a slow sweep: the sweep reports its own duration. This is
+                # the event loop not running at all, which in production means
+                # something else in the process held it.
+                LOGGER.warning(
+                    "enrichment worker was idle for %.0fs between sweeps"
+                    " (configured %.0fs): the event loop was starved by"
+                    " something else in this process",
+                    gap,
+                    self._sweep_seconds,
+                )
             self._cancel_event.clear()
             self._inflight = asyncio.create_task(
                 asyncio.to_thread(self._sweep, self._session_factory)
@@ -828,14 +938,17 @@ class EnrichmentWorker:
                 raise
             finally:
                 self._inflight = None
+                self._last_sweep_ended_at = time.monotonic()
             if report["ran"]:
                 LOGGER.info(
-                    "enrichment sweep: %d ran (%d ok, %d failed, %d skipped) in %.1fs",
+                    "enrichment sweep: %d ran (%d ok, %d failed, %d skipped) in"
+                    " %.1fs; %.0fs since the previous sweep",
                     report["ran"],
                     report["succeeded"],
                     report["failed"],
                     report["skipped"],
                     time.monotonic() - started,
+                    gap if gap is not None else 0.0,
                 )
             return report
 
