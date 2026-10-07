@@ -290,9 +290,11 @@ async def test_all_planned_tools_are_registered(mcp_url: str) -> None:
         # the source.
         "set_subscription_pipeline_chain",
         "remove_subscription",
-        # Deletion (ADR 0021): remove_source stops flagging and starts
-        # deleting; these two clear items while keeping the subscription,
-        # or name exact items.
+        # Deletion: `remove_subscription` unsubscribes and keeps the content
+        # (ADR 0063), `purge_origin` is the one that destroys it and demands a
+        # reason, and these two clear items while keeping the subscription, or
+        # name exact items.
+        "purge_origin",
         "delete_items",
         "delete_origin_items",
         # Consumption state (ADR 0046 D-E, issue #218): the /v1 atom is
@@ -623,7 +625,9 @@ async def test_no_write_tool_has_a_confirmation_parameter(mcp_url: str) -> None:
         for name, tool in tools.items()
         if tool.annotations is not None and tool.annotations.read_only_hint is False
     }
-    assert len(writes) == 16, sorted(writes)
+    # 17 with purge_origin (issue #373): the destructive counterpart of
+    # remove_subscription, and the only tool that deletes content.
+    assert len(writes) == 17, sorted(writes)
 
     offenders: list[str] = []
     for name in sorted(writes):
@@ -1027,11 +1031,15 @@ async def test_backfill_source_executes_and_reports_queued(
 
 
 @pytest.mark.asyncio
-async def test_delete_source_removes_its_items(mcp_url: str) -> None:
-    """The tool now deletes; the counts in its answer are the evidence.
+async def test_removing_a_subscription_keeps_its_items_and_purging_needs_a_reason(
+    mcp_url: str,
+) -> None:
+    """Two tools, two meanings, and the reason gate between them (ADR 0063).
 
-    This is the behaviour change ADR 0021 describes: remove_source used to
-    answer with a `deleted` status and leave the items published.
+    `remove_subscription` used to delete the source and everything it
+    collected. It unsubscribes now, and destroying content moved to
+    `purge_origin` -- which the API refuses without a reason, so the refusal
+    has to survive the tool layer rather than being a description nobody reads.
     """
     created = await _call(
         mcp_url,
@@ -1045,8 +1053,28 @@ async def test_delete_source_removes_its_items(mcp_url: str) -> None:
 
     result = await _call(mcp_url, "remove_subscription", {"source_id": source_id})
     assert result.get("declined") is None and result.get("aborted") is None, result
-    assert result["sources"] == 1
+    assert result["subscriptions"] == 1
 
+    # The source is still there, and says it is not collecting.
+    listed = await _call(mcp_url, "list_sources", {"limit": 50})
+    rows = {row["id"]: row for row in listed["data"]}
+    assert rows[source_id]["status"] == "disabled"
+
+    # A blank reason is refused, and the refusal names the code the API used.
+    refused = await _call(
+        mcp_url, "purge_origin", {"origin_id": source_id, "reason": "   "}
+    )
+    assert refused.get("error") == "reason_required", refused
+    assert source_id in {
+        row["id"]
+        for row in (await _call(mcp_url, "list_sources", {"limit": 50}))["data"]
+    }, "a refused purge must not have deleted anything"
+
+    purged = await _call(
+        mcp_url, "purge_origin", {"origin_id": source_id, "reason": "the test is done"}
+    )
+    assert purged.get("declined") is None and purged.get("aborted") is None, purged
+    assert purged["sources"] == 1
     listed = await _call(mcp_url, "list_sources", {"limit": 50})
     assert source_id not in [row["id"] for row in listed["data"]]
 

@@ -530,3 +530,95 @@ async def test_an_address_off_the_source_host_writes_nothing(
     # and one unit for the address (ADR 0046), while the item store stays empty.
     assert _count(session_factory, "work") == 1
     assert _count(session_factory, "work_unit") == 1
+
+
+async def test_a_purge_without_a_reason_is_refused_and_deletes_nothing(
+    served: str, session_factory: sessionmaker[Session]
+) -> None:
+    """Given a subscription with an item, purging needs a reason.
+
+    Both the missing reason and a blank one are refused with the API's own
+    code, and neither touches the content: a refusal that still wrote is the
+    defect this file exists to catch. The third call is the control -- with a
+    reason it does delete -- so the two above are about the reason rather than
+    about an endpoint that never worked.
+    """
+    from app.pipeline import normalise_and_store
+    from core.models import ItemDraft
+
+    source_id = _seed_source(session_factory)
+    with session_factory() as session:
+        stored = normalise_and_store(
+            session,
+            [
+                ItemDraft(
+                    origin_id=source_id,
+                    external_id="purge-me",
+                    title="Keep me",
+                    canonical_url="https://pending.example/purge-me",
+                    published_at=None,
+                    content="<p>A body that only a purge may remove.</p>",
+                )
+            ],
+        )[0]
+        session.commit()
+        item_id = stored.result.item.id
+    before = _count(session_factory, "item")
+
+    async with httpx.AsyncClient(base_url=served) as client:
+        missing = await client.delete(
+            f"/v1/origins/{source_id}:purge",
+            headers={
+                "Authorization": f"Bearer {API_TOKEN}",
+                "Idempotency-Key": "e2e-purge-without",
+            },
+        )
+        blank = await client.delete(
+            f"/v1/origins/{source_id}:purge",
+            params={"reason": "   "},
+            headers={
+                "Authorization": f"Bearer {API_TOKEN}",
+                "Idempotency-Key": "e2e-purge-blank",
+            },
+        )
+    assert missing.status_code == 422, missing.text
+    assert missing.json()["detail"]["error"]["code"] == "reason_required"
+    assert blank.status_code == 422, blank.text
+    assert blank.json()["detail"]["error"]["code"] == "reason_required"
+    # Checked *before* the control call below, which is what makes this
+    # assertion about the refusals rather than about the order they ran in.
+    assert _count(session_factory, "item") == before, "a refused purge deleted content"
+
+    async with httpx.AsyncClient(base_url=served) as client:
+        purged = await client.delete(
+            f"/v1/origins/{source_id}:purge",
+            params={"reason": "the e2e test says so"},
+            headers={
+                "Authorization": f"Bearer {API_TOKEN}",
+                "Idempotency-Key": "e2e-purge-with",
+            },
+        )
+
+    assert purged.status_code == 200, purged.text
+    assert purged.json()["reason"] == "the e2e test says so"
+    assert purged.json()["items"] == 1
+    with session_factory() as session:
+        assert (
+            session.execute(
+                sa.text("select count(*) from item where id = :id"), {"id": item_id}
+            ).scalar_one()
+            == 0
+        ), "the control call has to actually delete, or the refusals prove nothing"
+
+    # The reason survives in the audit row, which is the point of requiring it.
+    CorrelationAndAuditMiddleware.drain_audit()
+    with session_factory() as session:
+        row = session.execute(
+            sa.text(
+                "select args_redacted from audit_log"
+                " where operation like '%purge%' and outcome = 'succeeded'"
+                " order by occurred_at desc"
+            )
+        ).first()
+    assert row is not None, "a destructive write has to be audited"
+    assert "the e2e test says so" in row[0], row

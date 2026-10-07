@@ -657,24 +657,28 @@ async def test_status_transitions(writer: httpx.AsyncClient) -> None:
     )
     assert refused.status_code == 409
 
+    # The legacy verb now unsubscribes (ADR 0063): it stops collecting and
+    # keeps the row, so the count it reports is the subscription it stopped.
     deleted = await writer.delete(
         f"/v1/sources/{source_id}", headers={"Idempotency-Key": "del"}
     )
     assert deleted.status_code == 200
-    assert deleted.json()["sources"] == 1, "removal deletes the row"
+    assert deleted.json()["subscriptions"] == 1, "unsubscribing stops collecting"
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_delete_removes_the_source_and_its_items(
+async def test_unsubscribing_keeps_the_source_its_items_and_their_read_state(
     app: FastAPI, writer: httpx.AsyncClient
 ) -> None:
-    """Deletion is physical: the source, its items and their read state go.
+    """The legacy DELETE stops collecting; it deletes nothing (ADR 0063).
 
-    This replaces a test that asserted the opposite -- that items survive
-    their source's removal. Deletion now removes them (ADR 0021), and the
-    items are seeded here for the same reason as before: a cascade with
-    nothing to cascade to would pass on an empty set.
+    This is the inverse of the test that used to live here, and deliberately so:
+    that one asserted the source, its items and their read state were *gone*,
+    which is what this endpoint used to mean. Destroying content now needs
+    `DELETE /v1/origins/{id}:purge?reason=...`, so the rows are seeded for the
+    same reason as before -- a survival claim with nothing to survive would
+    pass on an empty set.
     """
     created = await writer.post(
         "/v1/sources",
@@ -719,8 +723,8 @@ async def test_delete_removes_the_source_and_its_items(
     )
     assert response.status_code == 200
     counts = response.json()
-    assert counts["sources"] == 1
-    assert counts["items"] == 2
+    assert counts["subscriptions"] == 1
+    assert "items" not in counts, "an unsubscribe removes no items at all"
 
     with app.state.session_factory() as session:
         sources = session.execute(
@@ -735,9 +739,13 @@ async def test_delete_removes_the_source_and_its_items(
                 " ('hard-item-0', 'hard-item-1')"
             )
         ).scalar()
-    assert sources == 0, "the source row is gone, not merely marked"
-    assert items == 0, "its items go with it"
-    assert states == 0, "and so does their read state"
+        status = session.execute(
+            sa.text("select status from subscription where id = :i"), {"i": source_id}
+        ).scalar_one()
+    assert sources == 1, "the source row stays; only its policy changes"
+    assert items == 2, "its items stay"
+    assert states == 1, "and so does their read state"
+    assert status == "disabled", "what changed is that it is not collected"
 
 
 @pytest.mark.integration
@@ -745,10 +753,10 @@ async def test_delete_removes_the_source_and_its_items(
 async def test_deleting_a_source_twice_is_not_an_error(
     writer: httpx.AsyncClient,
 ) -> None:
-    """Idempotence: a retry must not turn a success into a 404.
+    """Idempotence: a retry must not turn a success into an error.
 
-    A client whose response was lost cannot tell "I already deleted it" from
-    "it was never there", and after the first call those are the same fact.
+    A client whose response was lost cannot tell "I already unsubscribed it"
+    from "it was never there", and after the first call those are the same fact.
     """
     created = await writer.post(
         "/v1/sources",
@@ -765,23 +773,23 @@ async def test_deleting_a_source_twice_is_not_an_error(
     )
     assert first.status_code == 200
     assert second.status_code == 200
-    assert first.json()["sources"] == 1
-    assert second.json()["sources"] == 0
+    assert first.json()["subscriptions"] == 1
+    assert second.json()["subscriptions"] == 0
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_readding_a_deleted_source_creates_a_fresh_one(
+async def test_readding_after_unsubscribing_revives_the_same_source(
     writer: httpx.AsyncClient,
 ) -> None:
-    """Re-subscribing after deletion starts over, cursor included.
+    """Subscribing again switches the row back on; it does not start over.
 
-    Replaces a test that pinned reactivation of a tombstone. Deletion removes
-    the row, so there is nothing to revive: the new source has the same
-    identity (it is derived from the canonical URL) but no history depth, and
-    its next collection re-samples from the first page. That is the cost of
-    deleting rather than the cost of a bug -- a caller who only wants the
-    items gone should clear them and keep the source.
+    Replaces a test that pinned the opposite. Unsubscribing keeps the row and
+    the paging cursor with it (ADR 0063), so re-subscribing is the same source
+    continuing where it left off rather than a fresh one re-sampling history --
+    which is what makes "stop reading this for a while" a safe thing to do. A
+    purge is the one that removes the rows, and then a subscribe does insert
+    fresh, with the cursor gone.
     """
     created = await writer.post(
         "/v1/sources",
@@ -792,7 +800,7 @@ async def test_readding_a_deleted_source_creates_a_fresh_one(
     deleted = await writer.delete(
         f"/v1/sources/{source_id}", headers={"Idempotency-Key": "readd-del"}
     )
-    assert deleted.json()["sources"] == 1
+    assert deleted.json()["subscriptions"] == 1
 
     readded = await writer.post(
         "/v1/sources",

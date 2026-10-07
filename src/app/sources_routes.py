@@ -48,7 +48,7 @@ from adapters.repository import (
     update_source_policy,
 )
 from adapters.repository import (
-    delete_source as repository_delete_source,
+    unsubscribe as repository_unsubscribe,
 )
 
 # The API-wide conventions live in app.api_conventions; they are re-exported
@@ -1519,26 +1519,26 @@ def retry_source_enrichments(
     )
 
 
-@router.delete("/sources/{source_id}", operation_id="deleteSource")
+@router.delete("/sources/{source_id}", operation_id="deleteSource", deprecated=True)
 def delete_source(
     request: Request,
     source_id: str,
     principal: Principal = Depends(write_required),
     key: str = Depends(idempotency_key),
 ) -> JSONResponse:
-    """Delete a source and everything it collected (ADR 0021).
+    """Unsubscribe: stop collecting, keep what was collected (ADR 0063).
 
-    Destructive and not reversible: the source row, its items, their bodies,
-    their read state and processor products, and the fetch records all go. The
-    endpoint used to be a soft delete that left the source as a tombstone with
-    its items published; that is no longer what this means, and any caller
-    relying on the old behaviour is relying on something the API does not
-    promise.
+    **This endpoint changed meaning.** It used to delete the source and
+    everything it collected, irreversibly. It now does what
+    `DELETE /v1/subscriptions/{id}:unsubscribe` does -- disables the
+    subscription and removes nothing -- because that is what a client removing
+    a feed means, and because destroying content belongs behind an explicit
+    `DELETE /v1/origins/{id}:purge?reason=...` that says why.
 
-    Deleting an id that is already gone answers 200 with `sources: 0` rather
-    than 404. A client retrying a request whose response was lost cannot tell
-    "it was here and I removed it" from "it was never here", and after the
-    first call those are the same fact.
+    An id that is not collecting (already unsubscribed, or never here) answers
+    200 with `subscriptions: 0` rather than 404: a client retrying a request
+    whose response was lost cannot tell those apart, and after the first call
+    they are the same fact.
     """
     endpoint = f"DELETE /v1/sources/{source_id}"
     factory = request.app.state.session_factory
@@ -1547,16 +1547,12 @@ def delete_source(
         return replayed
 
     with factory() as session:
-        result = repository_delete_source(session, source_id)
+        result = repository_unsubscribe(session, source_id)
         session.commit()
-
-    # Files after the commit: an unlink cannot be rolled back, and rows can.
-    removed = result.reclaim.reclaim()
 
     payload: dict[str, Any] = {
         "source_id": source_id,
-        **result.counts,
-        "files_removed": removed,
+        "subscriptions": 1 if result.unsubscribed else 0,
         "correlation_id": current_correlation_id(),
     }
     remember(

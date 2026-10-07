@@ -46,6 +46,7 @@ from app.mcp_guard import (
 )
 from app.mcp_server import build_mcp_app
 from app.middleware import CorrelationAndAuditMiddleware
+from app.origins_routes import router as origins_router
 from app.plugins_routes import router as plugins_router
 from app.reader import ReaderAuth, configure_reader_credentials
 from app.reader import router as reader_router
@@ -355,6 +356,7 @@ def create_app(session_factory: sessionmaker[Session] | None = None) -> FastAPI:
     warn_if_unconfigured()
     app.include_router(sources_router)
     app.include_router(subscriptions_router)
+    app.include_router(origins_router)
     app.include_router(ingest_router)
     app.include_router(items_router)
     app.include_router(system_router)
