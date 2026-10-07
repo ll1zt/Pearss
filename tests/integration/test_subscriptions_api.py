@@ -128,7 +128,7 @@ async def _create_source(writer: httpx.AsyncClient, *, key: str) -> str:
         },
     )
     assert created.status_code == 201, created.text
-    return created.json()["id"]
+    return str(created.json()["id"])
 
 
 @pytest.mark.integration

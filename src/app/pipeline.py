@@ -198,6 +198,7 @@ def normalise_and_store(
             subscriptions = subscriptions_for_origin(
                 session, origin_id=item.origin_id, tenant_id=tenant_id
             )
+            chains: list[tuple[str | None, tuple[EnrichmentSpec, ...]]]
             if len(subscriptions) == 1:
                 # One channel: the caller's chain is authoritative. It derives
                 # the same value from the same row, and keeping it means an
