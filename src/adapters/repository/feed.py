@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -113,6 +113,21 @@ def mark_ready_for_chainless_subscriptions(
             at=at,
         )
     return marked
+
+
+def close_gate(session: Session, *, item_id: str) -> int:
+    """Make an item invisible again (ADR 0061).
+
+    A revised body invalidates whatever the channels were showing, so every
+    ready row for the item goes. Re-opening is the pipeline's job and it is
+    per channel: a subscription with work to do enqueues it, a chainless one is
+    put straight back. That is the old `publish_status = pending` contract
+    translated, and it is deliberately unconditional -- the caller's own chain
+    argument is authoritative for a single channel, so the store cannot know
+    from the rows alone which channels will need to re-run.
+    """
+    result = session.execute(delete(ReadyRow).where(ReadyRow.item_id == item_id))
+    return cast("CursorResult[Any]", result).rowcount
 
 
 def items_ready_for_feed(

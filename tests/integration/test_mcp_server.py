@@ -105,6 +105,18 @@ def mcp_env(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
                 " '2026-06-01T11:00:00.000000Z', '2026-06-01T11:00:00.000000Z')"
             )
         )
+        # ADR 0061: the gate is the readiness rows, so the two items that are
+        # meant to be visible need one each; the third is meant to be hidden.
+        for item_id in ("i-1", "i-long"):
+            conn.execute(
+                text(
+                    "insert into item_subscription_ready"
+                    " (item_id, subscription_id, ready_at)"
+                    " select :id, s.id, '2026-06-01T10:00:00.000000Z'"
+                    " from subscription s where s.origin_id = 'src-1'"
+                ),
+                {"id": item_id},
+            )
     engine.dispose()
     return {
         "PEARSS_DATABASE_URL": url,
@@ -981,6 +993,14 @@ async def test_backfill_source_executes_and_reports_queued(
                 ),
                 {"ts": "2026-01-01T00:00:00.000000Z"},
             )
+            conn.execute(
+                text(
+                    "insert into item_subscription_ready"
+                    " (item_id, subscription_id, ready_at)"
+                    " select 'bf-mcp', s.id, '2026-01-01T00:00:00.000000Z'"
+                    " from subscription s where s.origin_id = 'src-1'"
+                )
+            )
     finally:
         engine.dispose()
 
@@ -1266,6 +1286,17 @@ async def test_a_source_items_delete_submits_a_job(
                     created_at="2026-01-01T00:00:00.000000Z",
                     updated_at="2026-01-01T00:00:00.000000Z",
                 )
+            )
+            # ADR 0061: visible means a ready row, not just the status.
+            session.flush()
+            session.execute(
+                text(
+                    "insert into item_subscription_ready"
+                    " (item_id, subscription_id, ready_at)"
+                    " select 'clear-mcp-item', s.id, '2026-01-01T00:00:00.000000Z'"
+                    " from subscription s where s.origin_id = :o"
+                ),
+                {"o": source_id},
             )
             session.commit()
     finally:

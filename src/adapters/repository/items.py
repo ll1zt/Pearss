@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from adapters.db_models import Item as ItemRow
 from adapters.repository._shared import StoreOutcome, _optional_timestamp, row_to_item
+from adapters.repository.feed import close_gate
 from adapters.timestamps import fixed_width_utc as timestamp
 from core.enums import PublishStatus
 from core.models import Item
@@ -183,7 +184,12 @@ def _update_pending(session: Session, candidate: Item, *, matched_id: str) -> bo
         )
         .returning(ItemRow.id)
     )
-    return result.scalar_one_or_none() is not None
+    updated_id = result.scalar_one_or_none()
+    if updated_id is not None:
+        # ADR 0061: hiding revised content is closing the gate, not just
+        # flipping the status -- the status no longer decides visibility.
+        close_gate(session, item_id=matched_id)
+    return updated_id is not None
 
 
 def _insert(session: Session, item: Item) -> None:
