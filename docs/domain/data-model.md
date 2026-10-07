@@ -62,8 +62,16 @@
 不变量（当前阶段）：同一 `tenant_id` 内 `origin_id` 唯一 —— **一个 origin 一个订阅**。
 多订阅迁移会删掉这条约束（issue #371），那时一个 origin 才能挂两套策略。
 
-**停用（`paused`/`disabled`）不删除任何 Item**。`DELETE /v1/sources/{id}` 则是真删除：
-origin 行、它的 Item、正文文件、已读状态、处理器产物与抓取记录一并消失（ADR 0021）。
+**停用（`paused`/`disabled`）不删除任何 Item**。`disabled` 就是**退订**：
+`DELETE /v1/subscriptions/{id}:unsubscribe`（以及保留 URL 但改了语义的
+`DELETE /v1/sources/{id}`、Reader 的 `ac=unsubscribe`）把它置为 `disabled`，
+频道随之从 Reader 侧栏、folder 列表、RSS 输出与频道解析中消失，**条目与正文原样保留**；
+重新订阅同一来源会**复活同一行**（id 由 `(origin, folder)` 派生，因此不变），
+同一批 item id 再次可见（ADR 0063，AC-216）。
+
+**销毁内容只有一个入口**：`DELETE /v1/origins/{id}:purge?reason=...`。
+`reason` 必填（缺失或全空白 → 422，且拒绝发生在任何写入之前），并写进该请求的审计行；
+它删除 origin 行、它的 Item、正文文件、已读状态、处理器产物、抓取记录与 collect job（ADR 0021 + 0063）。
 要清掉内容但保留订阅（含抓取游标），用 `POST /v1/sources/{id}/items:delete`。
 旧 `/v1/sources` 读端点保留为**投影**并已标 deprecated（issue #366），`source` 表本身
 在迁移 0028 已删除。
