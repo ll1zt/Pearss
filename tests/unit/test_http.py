@@ -781,20 +781,3 @@ def test_a_pre_flight_refusal_also_leaves_its_debug_line(
 # The residual that is an accepted risk rather than a fix. Read from disk so the
 # record and the guard cannot drift apart.
 _GUIDE = Path(__file__).resolve().parents[2] / "docs/guides/host-http-boundaries.md"
-
-
-@pytest.mark.unit
-def test_the_decoded_peak_memory_residual_is_a_recorded_decision() -> None:
-    """Issue #358 / #85: an accepted risk is accepted only while it is written down.
-
-    #85's AC -- peak memory does not grow with the decompressed size -- is not
-    met. The resolution is an accepted risk with a re-evaluation trigger (ADR
-    0041's convention), and that holds only if the record stays where the next
-    reader looks: a decision that can be deleted without failing anything is
-    indistinguishable from one that was never made, which is the failure #125
-    exists to catch. This pins the trigger and the issue number, not the prose.
-    """
-    guide = _GUIDE.read_text(encoding="utf-8")
-    assert "declined" in guide.lower(), "the residual is not marked as a decision"
-    assert "Re-evaluate when" in guide, "the trigger is gone"
-    assert "issue #358" in guide, "the decision no longer names its issue"

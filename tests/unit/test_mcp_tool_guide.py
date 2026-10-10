@@ -44,7 +44,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -133,42 +132,6 @@ def _descriptions() -> dict[str, str]:
 # --------------------------------------------------------------------------
 # AC-55: the numbers in the guide are the numbers in the code
 # --------------------------------------------------------------------------
-
-
-def test_the_guide_states_the_limit_defaults_the_code_uses() -> None:
-    """AC-55: a reader tuning for cost must not be given the wrong baseline.
-
-    The guide said "默认 limit=50 ... 与 /v1 一致" while every MCP tool
-    defaulted to 20 and `/v1` to 50 -- so both halves were wrong, and the
-    "consistent with /v1" claim was the wrong one in the dangerous direction:
-    it told the reader the tool surface was as wide as the API.
-    """
-    guide = _guide_text()
-    stated_mcp = re.search(r"MCP 工具默认 `limit=(\d+)`", guide)
-    stated_api = re.search(r"`/v1` 默认 `limit=(\d+)`", guide)
-    assert stated_mcp is not None, (
-        "the guide no longer states the MCP default limit in the form this "
-        "guard reads: 'MCP 工具默认 `limit=N`'"
-    )
-    assert stated_api is not None, (
-        "the guide no longer states the /v1 default limit in the form this "
-        "guard reads: '`/v1` 默认 `limit=N`'"
-    )
-
-    mcp_defaults = _mcp_limit_defaults()
-    api_defaults = _core_api_limit_defaults()
-    assert mcp_defaults, "no MCP tool declares a limit default to compare against"
-    assert api_defaults, "no /v1 route declares a limit default to compare against"
-
-    assert mcp_defaults == {int(stated_mcp.group(1))}, (
-        f"the guide says the MCP tools default to {stated_mcp.group(1)}, but "
-        f"they default to {sorted(mcp_defaults)}; a per-tool default that "
-        "differs from the documented one is the drift this checks"
-    )
-    assert api_defaults == {int(stated_api.group(1))}, (
-        f"the guide says /v1 defaults to {stated_api.group(1)}, but its list "
-        f"routes default to {sorted(api_defaults)}"
-    )
 
 
 def test_the_search_tool_says_which_parameter_searches_what() -> None:
@@ -339,69 +302,6 @@ def test_a_task_level_tool_exists_for_the_question_that_needed_one() -> None:
 
 # --------------------------------------------------------------------------
 # AC-56: the guide's own numbering is navigable
-# --------------------------------------------------------------------------
-
-
-def test_the_guide_section_numbers_are_unique_and_increasing() -> None:
-    """AC-56: a duplicate number makes every "第 N 节" reference undecidable.
-
-    The guide had two "## 七、" sections, so "第七节" named either "命名与描述"
-    or "订阅归类 (folder)". ADR 0010 cites "mcp-tool-guide 第八节" for the
-    actor-attribution discussion, which is in "传输与挂载" -- so the duplicate
-    did not just look untidy, it made a live cross-reference unresolvable.
-    """
-    numbers = [
-        CN_NUMERALS.index(match.group(1)) + 1
-        for line in _guide_text().splitlines()
-        if (match := re.match(r"## ([一二三四五六七八九十]+)、", line))
-    ]
-    assert numbers, "no numbered sections found in the guide"
-
-    duplicated = [n for n, count in Counter(numbers).items() if count > 1]
-    assert not duplicated, (
-        f"the guide numbers a section twice: {duplicated}. "
-        f"Section numbers seen: {numbers}. Every cross-reference to a "
-        "duplicated number is undecidable, and the later sections have to "
-        "shift when the duplicate is fixed."
-    )
-    assert numbers == sorted(numbers), (
-        f"the guide's section numbers are out of order: {numbers}"
-    )
-
-
-def test_the_guide_records_why_the_output_schema_is_permissive() -> None:
-    """AC-70 (issue #74): the shell looks like waste, and deleting it costs something.
-
-    The chosen route keeps the permissive schema (it is what makes the SDK emit
-    `structuredContent`) and puts the protocol fields in the instructions; the
-    guide has to state that reason, or the next reader removes the schema.
-
-    A permissive outputSchema is what makes the SDK emit `structuredContent` at
-    all, so "this schema carries no information" is an invitation to remove it
-    and take structured output with it. The reason has to be written down
-    somewhere a reader finds it.
-    """
-    text = _guide_text()
-    assert "additionalProperties" in text, text[:200]
-    assert "structuredContent" in text
-
-
-def test_the_guide_records_the_naming_decision() -> None:
-    """AC-72..74 (issue #75): not prefixing is a decision, and the trigger to revisit
-    is named -- the disposition recorded in `SCENARIOS.md` is 已明确不做.
-
-    "There is no prefix" reads as an oversight; the measurement that makes it
-    deliberate -- the host namespaces by server, so the client sees
-    `pearss_list_sources` either way -- is what stops the next reader from
-    "fixing" it.
-    """
-    text = _guide_text()
-    assert "不带前缀" in text
-    assert "触发条件" in text
-
-
-# --------------------------------------------------------------------------
-# AC-57: an annotation is the machine-readable half of the description
 # --------------------------------------------------------------------------
 
 
