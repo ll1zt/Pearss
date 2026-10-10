@@ -2,6 +2,7 @@
 name = "pearss"
 version = "0.1.0"
 description = "Single-user, agent-first RSS+ system"
+license = "Apache-2.0"
 readme = "README.md"
 # Python 3.13 is the floor and the CI target. The Nix flake pins the same
 # series, so the interpreter here and the one in `nix develop` agree.

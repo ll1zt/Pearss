@@ -155,7 +155,7 @@ pearss.overrideAttrs (prev: {
 
   meta = {
     description = "Single-user, agent-first RSS+ system";
-    license = lib.licenses.mit;
+    license = lib.licenses.asl20;
     mainProgram = "pearss";
     platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };

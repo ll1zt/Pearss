@@ -2,6 +2,12 @@
 
 单用户优先、Agent-First 的 RSS+ 系统：采集 RSS/网页内容，规范化与存储后向 NetNewsWire 提供 RSS 信息流；AI agent 在用户指令下通过 MCP 管理采集、调度、诊断和配置。
 
+> **状态：已归档（archived）。** 本项目已停止维护，代码与文档按「原样」公开，
+> 不提供支持或后续更新。许可为 [Apache-2.0](LICENSE)，第三方归属见 [`NOTICE`](NOTICE)。
+>
+> **Status: archived.** No longer maintained; published as-is for reference.
+> Licensed under [Apache-2.0](LICENSE); see [`NOTICE`](NOTICE).
+
 > 架构总纲见根目录 `architecture-spec.md`。本文只解决“如何开始开发与验证”。
 
 ## 当前范围
@@ -443,6 +449,8 @@ https://wx.zsxq.com/dweb2/index/group/<group_id>?scope=digests         # 精华�
 | `docs/integrations/netnewswire.md` | NetNewsWire 集成与缓存约束 |
 | `docs/adr/` | 架构决策记录（0000 为索引） |
 | `deploy/pearss.service` | systemd 用户服务单元 |
+| `LICENSE` | Apache License 2.0 |
+| `NOTICE` | 第三方代码归属 |
 
 ## 贡献原则
 
@@ -450,3 +458,7 @@ https://wx.zsxq.com/dweb2/index/group/<group_id>?scope=digests         # 精华�
 - 新增或修改行为时，优先添加可验证的测试和 fixture
 - 领域规则放在 `src/core/`；框架、网络、数据库、MCP 放在 `src/adapters/`
 - 破坏 API、MCP 工具或数据语义的改动必须写 ADR，并明确迁移路径
+
+## 许可
+
+本项目以 [Apache License 2.0](LICENSE) 发布。第三方代码归属见 [`NOTICE`](NOTICE)。
