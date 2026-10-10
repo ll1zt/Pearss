@@ -304,7 +304,8 @@ def _resolve_answer(answers: dict[str, set[str]]) -> Callable[[str], set[str]]:
 
 
 # The operator's internal services live on the tailnet, and /etc/hosts pins
-# them to both stacks: the CGNAT v4 address and the Tailscale ULA v6 address.
+# them to both stacks: a CGNAT v4 address and the Tailscale ULA v6 address.
+# Both are documentation-range examples inside the two exempt ranges.
 _TAILNET_SERVICE_ANSWERS = {
     "svc.tailnet.example": {
         "100.64.0.10",

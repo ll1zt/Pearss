@@ -1,8 +1,8 @@
 r"""CookieCloud client: fetch a site's cookies from a self-hosted sync server.
 
-[CookieCloud](https://github.com/easychen/CookieCloud) -- this deployment runs the
-repository's Go server; the Elixir one is its frozen predecessor -- relays
-browser cookie backups. Its admin export endpoint returns the decrypted cookies
+[CookieCloud](https://github.com/easychen/CookieCloud) -- this deployment runs a
+Go server implementation of the API; the Elixir one is its frozen predecessor --
+relays browser cookie backups. Its admin export endpoint returns the decrypted cookies
 for one domain as JSON:
 
     GET /export/<uuid>?format=raw&domain=x.com
