@@ -47,6 +47,8 @@ secrets/
 # project deliverable.
 FUTHER_MAY_TODO.md
 TODO.md
+# Agent runtime state (goal ledger, checkpoints) — never a project deliverable.
+.pi/
 
 # --- Editors and OS ---
 .idea/
