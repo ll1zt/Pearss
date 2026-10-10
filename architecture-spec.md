@@ -295,6 +295,7 @@ repo/
   AGENTS.md              # agent 操作约定与完成标准
   README.md              # 如何开始开发与验证
   architecture-spec.md   # 本文件
+  docs/architecture-flows.md  # 代码实际运行流程（启动/主流程/横切/恢复）
   flake.nix              # Nix 开发环境（pkgs.mkShell，含 crawler profile）
   flake.lock             # 锁定 nixpkgs 与 Flake 输入
   .envrc                 # use flake，由 direnv 自动激活（见 ADR 0002）

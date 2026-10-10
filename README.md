@@ -430,6 +430,7 @@ https://wx.zsxq.com/dweb2/index/group/<group_id>?scope=digests         # 精华�
 | 文档 | 内容 |
 |---|---|
 | `architecture-spec.md` | 总体需求、架构、路线图、选型与决策 |
+| `docs/architecture-flows.md` | 代码实际运行流程：启动装配、四条主流程、横切关注点、失败恢复 |
 | `AGENTS.md` | 编码 agent 的项目规则与完成标准 |
 | `docs/api/style-guide.md` | REST/OpenAPI 设计与演进规范 |
 | `docs/api/mcp-tool-guide.md` | MCP Tool/Resource 语义与安全规范 |
