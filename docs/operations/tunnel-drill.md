@@ -4,7 +4,8 @@
 > 每条都给出可执行命令与预期结果；**预期值是判据，不是描述**。
 >
 > 前置：`services.pearss` + `nix/tunnel.nix` 已 switch 生效。
-> 在 pearss-host 上执行，标注 `[公网]` 的从外部网络执行。
+> 在部署主机上执行（下文 `pearss-host` / `pearss.example.ts.net` 均为占位符，
+> 替换为你自己的主机名与 tailnet 域名），标注 `[公网]` 的从外部网络执行。
 
 ## 0. ACL 前置检查
 

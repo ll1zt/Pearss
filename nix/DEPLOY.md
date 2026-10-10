@@ -4,8 +4,9 @@
 # document says what they must contain and why, so the reasoning travels with
 # the module instead of being rediscovered on the next host.
 #
-#   deployment target: pearss-host (Lenovo Legion Y700, Droidspaces container)
-#   hostname:          pearss.example.ts.net
+#   deployment target: an aarch64 Android tablet running a Droidspaces NixOS
+#                      container (example host name `pearss-host`)
+#   hostname:          pearss.example.ts.net   # placeholder — use your own
 
 ## 1. Add the flake input
 

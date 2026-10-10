@@ -82,7 +82,7 @@ cp .env.example .env && chmod 600 .env   # 然后填 PEARSS_API_TOKEN 等
 
 ```bash
 just run                      # 仅本机 127.0.0.1:8000
-just run 100.64.0.1 8000  # 绑到某个地址，例如 Tailscale
+just run 100.64.0.1 8000    # 绑到某个地址，例如 Tailscale
 ```
 
 ### 最小验收

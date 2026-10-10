@@ -3,7 +3,7 @@
 - 状态：accepted
 - 日期：2026-09-13
 - 关联：ADR 0016（公网暴露）、ADR 0017（P2 插件冻结）、ADR 0009（推导式调度）
-- 部署目标：`pearss-host`（Lenovo Legion Y700 平板上的 Droidspaces NixOS 容器，aarch64）
+- 部署目标：一台 aarch64 Android 平板上的 Droidspaces NixOS 容器（示例主机名 `pearss-host`）
 
 ## 背景
 

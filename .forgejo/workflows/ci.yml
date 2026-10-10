@@ -46,7 +46,7 @@ jobs:
     env:
       # The instance, named once. It used to be written into two clone URLs,
       # which is how a host rename took CI down (bf8e3ba).
-      CI_REPOSITORY: https://git.example.com:3000/lllzt/Pearss.git
+      CI_REPOSITORY: https://git.example.com/lllzt/Pearss.git
       # Job level, not step level. The first `uv run` of a job is in the
       # model-fetch step, and it syncs the whole environment; while this lived
       # on the gate step alone, the model step talked to pypi.org directly.

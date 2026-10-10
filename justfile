@@ -200,8 +200,8 @@ revision message:
 # Start the API server on 127.0.0.1 by default: this is a single-user
 # service, so it should not be reachable from the network without an explicit
 # decision to expose it. Pass a different host to expose it, e.g.
-#   just run 100.64.0.1   # a Tailscale address
-#   just run 192.168.1.10    # the LAN address
+#   just run 100.64.0.1       # a Tailscale address
+#   just run 192.168.1.10     # the LAN address
 #
 # A gitignored .env is sourced first when present. The app itself only ever
 # reads os.environ, deliberately: keeping the loading here means there is one

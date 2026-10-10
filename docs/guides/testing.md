@@ -298,7 +298,7 @@ nix develop --command just ci
 
 ### CI 与本地测试共用同一台主机
 
-runner 跑在 `ci-runner` 上，`.forgejo/workflows/ci.yml` 用 `runs-on: nixos-server`，
+runner 跑在一台自托管主机上，`.forgejo/workflows/ci.yml` 用 `runs-on: nixos-server`，
 job 以 **host 模式**执行——不是容器，与开发者的 shell、`nix.buildMachines` 构建、
 同机其他仓库的 CI 竞争同一批 CPU 与内存。
 

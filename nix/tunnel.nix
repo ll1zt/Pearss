@@ -27,7 +27,8 @@
 {
   # --------------------------------------------------------------------- serve
   # The whole application, reachable only from the tailnet. TLS terminates at
-  # Tailscale with a certificate for pearss.example.ts.net.
+  # Tailscale with a certificate for the deployment's hostname.
+  # Replace `pearss.example.ts.net` below with your own tailnet name.
   systemd.services.tailscale-serve-pearss = {
     description = "Expose Pearss on the tailnet (serve :8443)";
     after = [ "tailscaled.service" "pearss.service" ];
@@ -76,6 +77,7 @@
         }
       ];
       # A Host the funnel sets; nginx answers it and nothing else.
+      # Replace with the deployment's own hostname.
       serverName = "pearss.example.ts.net";
 
       locations."/api/greader.php" = {
